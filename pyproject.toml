@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fargo2radmc3d"
+version = "0.1.0"
+description = "RADMC-3D post-processor for FARGO-3D / Dusty FARGO-ADSG outputs"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}        # or the repo’s actual license
+authors = [{name = ""}]
+
+dependencies = [
+  "numpy>=1.22",
+  "scipy>=1.8",
+  "astropy>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/joshcalcino/fargo2radmc3d"
+
+[project.scripts]
+fargo2radmc3d = "fargo2radmc3d.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fargo2radmc3d*"]
+
+[tool.setuptools.package-data]
+fargo2radmc3d = ["data/*", "templates/*"]
+
