@@ -5,7 +5,8 @@ from typing import Tuple
 import numpy as np
 
 from .mesh import Mesh
-
+from diskbridge import units
+from .units import Quantity
 
 @dataclass
 class Field:
@@ -18,8 +19,10 @@ class Field:
     - axis_order: tuple of axis names in data order (e.g., ('r','phi') or ('theta','r','phi'))
     """
 
-    data: np.ndarray
+    data: Quantity
     mesh: Mesh
-    unit: str
     quantity: str
     axis_order: Tuple[str, ...]
+
+    def __post_init__(self):
+        self.unit = units(self.data.unit)

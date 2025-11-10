@@ -6,6 +6,7 @@ import numpy as np
 
 from ..mesh import Mesh
 from ..field import Field
+from .._units import Quantity 
 from diskbridge import units  
 
 
@@ -13,7 +14,28 @@ from diskbridge import units
 # helpers
 # -----------------
 
-def _set_units(file_units: str):
+G_phys = Quantity(6.674e-11, "m^3 / (kg s^2)")
+
+# Derived code units
+T0 = (units("au")**3 / (G_phys * units("solar_mass")))**0.5
+V0 = units("au") / T0
+rho0 = units("solar_mass") / units("au")**3
+Sigma0 = units("solar_mass") / units("au")**2
+nu0 = units("au")**2 / T0
+Omega0 = 1 / T0
+
+# Define custom units in Pint
+units.define(f"code_length = {R0_phys.to('m').magnitude} * meter")
+units.define(f"code_mass = {Mstar_phys.to('kg').magnitude} * kilogram")
+units.define(f"code_time = {T0.to('s').magnitude} * second")
+units.define(f"code_velocity = {V0.to('m/s').magnitude} * meter / second")
+units.define(f"code_density = {rho0.to('kg/m^3').magnitude} * kg / meter ** 3")
+units.define(f"code_surface_density = {Sigma0.to('kg/m^2').magnitude} * kg / meter ** 2")
+units.define(f"code_viscosity = {nu0.to('m^2/s').magnitude} * meter ** 2 / second")
+units.define(f"code_omega = {Omega0.to('1/s').magnitude} / second")
+
+
+def _get_units(file_units: str):
     if file_units.lower() == "cgs":
         unit_length = units("cm")
         unit_time = units("s")
@@ -29,10 +51,21 @@ def _set_units(file_units: str):
         unit_surface_density = units("kg/m^2")
         unit_density = units("kg/m^3")
     else:
-        u_v = "code_velocity"
-        u_sigma = "code_surface_density"
-    return u_v, u_sigma
-
+        unit_length = units("code_length")
+        unit_time = units("code_time")
+        unit_mass = units("code_mass")
+        unit_velocity = units("code_velocity")
+        unit_surface_density = units("code_surface_density")
+        unit_density = units("code_density")
+    unit_dict = {
+        "unit_length": unit_length,
+        "unit_time": unit_time,
+        "unit_mass": unit_mass,
+        "unit_velocity": unit_velocity,
+        "unit_surface_density": unit_surface_density,
+        "unit_density": unit_density,
+    }
+    return unit_dict
 
 def _read_variables_par(path: Path) -> Dict[str, Any]:
     p = path / "variables.par" if path.is_dir() else path
@@ -101,6 +134,9 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     - mesh: Mesh instance (minimal for 2D)
     - gas_fields: dict[str, Field]
     """
+
+    unit_dict = _get_units(file_units)
+
     directory = Path(directory)
     if not directory.is_dir():
         raise NotADirectoryError(f"{directory} is not a directory")
@@ -123,13 +159,13 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         nrad, nsec = dims
 
     # Radial edges
-    redge = _read_used_rad(directory)
+    redge = _read_used_rad(directory)*unit_dict['unit_length']
     if redge is None:
         # For simplicity, require used_rad.dat in our examples; inference could be added later
         raise FileNotFoundError("used_rad.dat not found; cannot build radial edges")
 
     # Azimuth edges
-    pedge = _build_pedge(nsec)
+    pedge = _build_pedge(nsec) * units('radians')
 
     # Build mesh (2D cylindrical for now)
     if not is_3d:
@@ -143,7 +179,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     # Load fields present on disk for the snapshot
     gas_fields: Dict[str, Field] = {}
 
-    def _read_field(filename: str, quantity: str, unit: str) -> Optional[Field]:
+    def _read_field(filename: str, quantity: str) -> Optional[Field]:
         p = directory / filename
         if not p.exists():
             return None
@@ -151,49 +187,38 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         return Field(
             data=arr,
             mesh=mesh,
-            unit=unit,
             quantity=quantity,
             axis_order=("r", "phi"),
         )
 
-    # Choose unit strings using the units registry (to keep parseable names)
-    norm_units = (file_units or "code").lower()
-    if norm_units == "cgs":
-        u_v = "cm/s"  # units("cm/s") is valid
-        u_sigma = "g/cm^2"
-    elif norm_units == "kms":
-        u_v = "km/s"  # units("km/s") is valid
-        # In KMS mode, density remains in cgs mass/area
-        u_sigma = "g/cm^2"
-    else:
-        # code units: leave as code_* tags that the unit system can map externally
-        u_v = "code_velocity"
-        u_sigma = "code_surface_density"
-
     # FARGO 2D canonical names
-    f_density = _read_field(f"gasdens{file_n}.dat", "density", unit=u_sigma)
+    f_density = _read_field(f"gasdens{file_n}.dat", "density")
     if f_density is not None:
-        gas_fields["density"] = f_density
+        gas_fields["density"] = f_density*unit_dict['unit_surface_density']
 
-    f_vr = _read_field(f"gasvx{file_n}.dat", "vr", unit=u_v)
+    f_vr = _read_field(f"gasvx{file_n}.dat", "vr")
     if f_vr is not None:
-        gas_fields["vr"] = f_vr
+        gas_fields["vr"] = f_vr*unit_dict['unit_velocity']
 
-    f_vphi = _read_field(f"gasvy{file_n}.dat", "vphi", unit=u_v)
+    f_vphi = _read_field(f"gasvy{file_n}.dat", "vphi")
     if f_vphi is not None:
-        gas_fields["vphi"] = f_vphi
+        gas_fields["vphi"] = f_vphi*unit_dict['unit_velocity']
 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}
-    disk_parameters["alphavisocity"] = variables.get("ALPHA")
-    disk_parameters["honr"] = variables.get("ASPECTRATIO")
-    disk_parameters["flaringindex"] = variables.get("FLARINGINDEX")
+    disk_parameters["alphavisocity"] = variables.get("ALPHA") * units('dimensionless')
+    disk_parameters["honr"] = variables.get("ASPECTRATIO") * units('dimensionless')
+    disk_parameters["flaringindex"] = variables.get("FLARINGINDEX") * units('dimensionless')
+    disk_parameters["sigma0"] = variables.get("SIGMA0") * unit_dict['unit_surface_density']
+    disk_parameters["sigmaslope"] = variables.get("SIGMASLOPE") * units('dimensionless')
+    disk_parameters["gamma"] = variables.get("GAMMA") * units('dimensionless')
+    disk_parameters["cs"] = variables.get("CS") * unit_dict['unit_velocity']
 
     norm_units = (file_units or "code").lower()
     if norm_units in ("cgs", "kms"):
-        disk_parameters["r0"] = 5.2
+        disk_parameters["r0"] = 5.2 * units('au')
     else:
-        disk_parameters["r0"] = 1.0
+        disk_parameters["r0"] = 1.0 * units('code_length')
 
     return {
         "coord_system": coord_system,

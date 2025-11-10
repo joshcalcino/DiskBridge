@@ -106,3 +106,4 @@ def _dimensionality_comparison(dim1, dim2):
     _dim1 = {key: float(val) for key, val in dim1.items()}
     _dim2 = {key: float(val) for key, val in dim2.items()}
     return _dim1 == _dim2
+

@@ -1,12 +1,24 @@
-[units.defaults]
+[units.cgs]
+length = "cm"
+mass = "g"
+time = "s"
+velocity = "cm/s"
+temperature = "kelvin"
+surface_density = "g/cm^2"
+density = "g/cm^3"
+
+[units.kms]
 length = "m"
 mass = "kg"
 time = "s"
 velocity = "m/s"
 temperature = "kelvin"
+surface_density = "kg/m^2"
+density = "kg/m^3"
+
 
 [units.definitions]
-solar_mass = "1.9891e30 kg"
+solar_mass = "1.988461e30 kg"
 solar_radius = "6.959500e8 m"
 earth_mass = "5.979e24 kg"
 earth_radius = "6.371315e6 m"
@@ -22,7 +34,6 @@ density = "mass: 1, length: -3"
 temperature = "temperature: 1"
 
 [units.defaults]
-
 acceleration = "m / s ** 2"
 angle = "radian"
 angular_momentum = "kg * m ** 2 / s"
