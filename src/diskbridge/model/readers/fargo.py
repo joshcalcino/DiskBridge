@@ -120,6 +120,76 @@ def _build_pedge(nsec: int) -> np.ndarray:
     return np.linspace(0.0, 2.0 * np.pi, nsec + 1)
 
 
+def _read_summary(directory: Path, file_n: int) -> Tuple[Dict[str, Optional[bool]], Dict[str, float]]:
+    candidates = [directory / f"summary{file_n}.dat", directory / "summary.dat"]
+    p = None
+    for c in candidates:
+        if c.exists():
+            p = c
+            break
+    if p is None:
+        out_flags: Dict[str, Optional[bool]] = {
+            "NFLUIDS": None,
+            "ISOTHERMAL": None,
+            "CYLINDRICAL": None,
+            "VISCOSITY": None,
+        }
+        return out_flags, {}
+
+    text = p.read_text(errors="ignore")
+    lines = [ln.rstrip() for ln in text.splitlines()]
+
+    in_comp = False
+    flags_found: Dict[str, bool] = {}
+    for ln in lines:
+        if "COMPILATION OPTION SECTION" in ln:
+            in_comp = True
+            continue
+        if in_comp:
+            if not ln or ln.startswith("=") or ln.startswith("Ghost layer") or "SECTION:" in ln:
+                in_comp = False
+                continue
+            parts = ln.split()
+            for tok in parts:
+                if tok.startswith("-D"):
+                    name_val = tok[2:]
+                    name = name_val.split("=")[0]
+                    if name:
+                        flags_found[name] = True
+
+    out_flags_bool: Dict[str, Optional[bool]] = {
+        "NFLUIDS": True if flags_found.get("NFLUIDS") else False,
+        "ISOTHERMAL": True if flags_found.get("ISOTHERMAL") else False,
+        "CYLINDRICAL": True if flags_found.get("CYLINDRICAL") else False,
+        "VISCOSITY": True if flags_found.get("VISCOSITY") else False,
+    }
+    for k in flags_found.keys():
+        if k not in out_flags_bool:
+            out_flags_bool[k] = True
+
+    in_mac = False
+    macros: Dict[str, float] = {}
+    for ln in lines:
+        if "PREPROCESSOR MACROS SECTION" in ln:
+            in_mac = True
+            continue
+        if in_mac:
+            if not ln or ln.startswith("=") or "SECTION:" in ln:
+                in_mac = False
+                continue
+            if "=" in ln:
+                left, _, right = ln.partition("=")
+                name = left.strip()
+                last = ln.split("=")[-1].strip()
+                try:
+                    val = float(last)
+                    macros[name] = val
+                except ValueError:
+                    pass
+
+    return out_flags_bool, macros
+
+
 # -----------------
 # main entry
 # -----------------
@@ -142,38 +212,53 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         raise NotADirectoryError(f"{directory} is not a directory")
 
     variables = _read_variables_par(directory)
+    compile_options, macros = _read_summary(directory, file_n)
 
     # Auto-detect dimensionality
     nz = int(variables.get("NZ", 1))
     is_3d = nz and nz > 1
 
-    # Dimensions
-    dims = _read_dims(directory)
-    if dims is None:
-        # Fall back to variables (FARGO uses NY=radial, NX=azimuthal)
-        nrad = int(variables.get("NY", 0))
-        nsec = int(variables.get("NX", 0))
-        if nrad <= 0 or nsec <= 0:
-            raise RuntimeError("Could not determine grid dimensions from dims.dat or variables.par")
-    else:
-        nrad, nsec = dims
-
-    # Radial edges
-    redge = _read_used_rad(directory)*unit_dict['unit_length']
-    if redge is None:
-        # For simplicity, require used_rad.dat in our examples; inference could be added later
-        raise FileNotFoundError("used_rad.dat not found; cannot build radial edges")
-
-    # Azimuth edges
-    pedge = _build_pedge(nsec) * units('radians')
-
-    # Build mesh (2D cylindrical for now)
+    # Dimensions and edges
     if not is_3d:
+        dims = _read_dims(directory)
+        if dims is None:
+            # Fall back to variables (FARGO uses NY=radial, NX=azimuthal)
+            nrad = int(variables.get("NY", 0))
+            nsec = int(variables.get("NX", 0))
+            if nrad <= 0 or nsec <= 0:
+                raise RuntimeError("Could not determine grid dimensions from dims.dat or variables.par")
+        else:
+            nrad, nsec = dims
+
+        # Radial edges
+        redge = _read_used_rad(directory) * unit_dict['unit_length']
+        if redge is None:
+            raise FileNotFoundError("used_rad.dat not found; cannot build radial edges")
+
+        # Azimuth edges
+        pedge = _build_pedge(nsec) * units('radians')
+
         mesh = Mesh(coord_system="cylindrical", redge=redge, pedge=pedge)
         coord_system = "cylindrical"
+        ncol = 1
     else:
-        # Placeholder for 3D: would also set tedge from domain_z.dat
-        mesh = Mesh(coord_system="spherical", redge=redge, pedge=pedge)
+        # For 3D, read edges directly from domain files (FARGO3D):
+        # domain_x -> azimuth (phi), domain_y -> radius (r), domain_z -> polar angle (theta)
+        px = directory / "domain_x.dat"
+        py = directory / "domain_y.dat"
+        pz = directory / "domain_z.dat"
+        if not (px.exists() and py.exists() and pz.exists()):
+            raise FileNotFoundError("domain_{x,y,z}.dat required for 3D snapshot")
+        pedge = np.loadtxt(px) * units('radians')
+        redge = np.loadtxt(py) * unit_dict['unit_length']
+        tedge = np.loadtxt(pz) * units('radians')
+
+        # Cell counts
+        nsec = int(pedge.size - 1)
+        nrad = int(redge.size - 1)
+        ncol = int(tedge.size - 1)
+
+        mesh = Mesh(coord_system="spherical", redge=redge, pedge=pedge, tedge=tedge)
         coord_system = "spherical"
 
     # Load fields present on disk for the snapshot
@@ -183,18 +268,27 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         p = directory / filename
         if not p.exists():
             return None
-        arr = np.fromfile(p, dtype="float64").reshape(nrad, nsec)
+        arr = np.fromfile(p, dtype="float64")
+        if is_3d:
+            arr = arr.reshape(nrad, nsec, ncol)
+            axes = ("r", "phi", "theta")
+        else:
+            arr = arr.reshape(nrad, nsec)
+            axes = ("r", "phi")
         return Field(
             data=arr,
             mesh=mesh,
             quantity=quantity,
-            axis_order=("r", "phi"),
+            axis_order=axes,
         )
 
     # FARGO 2D canonical names
     f_density = _read_field(f"gasdens{file_n}.dat", "density")
     if f_density is not None:
-        gas_fields["density"] = f_density*unit_dict['unit_surface_density']
+        if is_3d:
+            gas_fields["density"] = f_density * unit_dict['unit_density']
+        else:
+            gas_fields["density"] = f_density * unit_dict['unit_surface_density']
 
     f_vr = _read_field(f"gasvx{file_n}.dat", "vr")
     if f_vr is not None:
@@ -203,6 +297,11 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     f_vphi = _read_field(f"gasvy{file_n}.dat", "vphi")
     if f_vphi is not None:
         gas_fields["vphi"] = f_vphi*unit_dict['unit_velocity']
+
+    if is_3d:
+        f_vtheta = _read_field(f"gasvz{file_n}.dat", "vtheta")
+        if f_vtheta is not None:
+            gas_fields["vtheta"] = f_vtheta * unit_dict['unit_velocity']
 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}
@@ -223,6 +322,8 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     return {
         "coord_system": coord_system,
         "variables": variables,
+        "compile_options": compile_options,
+        "macros": macros,
         "disk_parameters": disk_parameters,
         "mesh": mesh,
         "gas_fields": gas_fields,

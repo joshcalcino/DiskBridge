@@ -29,6 +29,8 @@ class GasDiskParameters:
 class Model:
     coord_system: Optional[str] = None
     variables: Dict[str, Any] = dcfield(default_factory=dict)
+    compile_options: Dict[str, Optional[bool]] = dcfield(default_factory=dict)
+    macros: Dict[str, float] = dcfield(default_factory=dict)
     disk_parameters: Dict[str, Any] = dcfield(default_factory=dict)
     mesh: Optional[Mesh] = None
     file_units: str = "code" # 'kms', 'cgs', or 'code'
@@ -87,6 +89,8 @@ class Model:
         # Populate instance
         self.coord_system = snap["coord_system"]
         self.variables = snap["variables"]
+        self.compile_options = snap.get("compile_options", {})
+        self.macros = snap.get("macros", {})
         self.disk_parameters = snap["disk_parameters"]
         self.mesh = snap["mesh"]
         self.file_units = file_units
