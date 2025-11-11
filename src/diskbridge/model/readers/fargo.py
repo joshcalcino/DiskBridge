@@ -8,6 +8,7 @@ from ..mesh import Mesh
 from ..field import Field
 from .._units import Quantity 
 from diskbridge import units  
+from diskbridge._logging import logger
 
 
 # -----------------
@@ -70,7 +71,8 @@ def _get_units(file_units: str):
 def _read_variables_par(path: Path) -> Dict[str, Any]:
     p = path / "variables.par" if path.is_dir() else path
     if not p.exists():
-        raise FileNotFoundError(f"variables.par not found at {p}")
+        logger.warning(f"variables.par not found at {p}; proceeding with empty variables")
+        return {}
     out: Dict[str, Any] = {}
     with p.open("r") as f:
         for line in f:
@@ -104,7 +106,7 @@ def _read_dims(path: Path) -> Optional[Tuple[int, int]]:
             nsec = int(flat[-1])
             return nrad, nsec
     except Exception:
-        pass
+        logger.info(f"Could not read dims from {p}; will try fallbacks")
     return None
 
 
@@ -113,6 +115,7 @@ def _read_used_rad(path: Path) -> Optional[np.ndarray]:
     try:
         return np.loadtxt(p)
     except Exception:
+        logger.info(f"Could not read radial edges from {p}; will try fallbacks")
         return None
 
 
@@ -215,8 +218,14 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     compile_options, macros = _read_summary(directory, file_n)
 
     # Auto-detect dimensionality
-    nz = int(variables.get("NZ", 1))
-    is_3d = nz and nz > 1
+    nz = int(variables.get("NZ", 0) or 0)
+    is_3d = (nz > 1)
+    if not is_3d:
+        # Detect 3D via presence of domain_z.dat
+        if (directory / "domain_z.dat").exists():
+            is_3d = True
+            # If NZ missing, infer from edges later
+            logger.info("Detected 3D run from domain_z.dat; NZ missing in variables.par")
 
     # Dimensions and edges
     if not is_3d:
@@ -233,7 +242,17 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         # Radial edges
         redge = _read_used_rad(directory) * unit_dict['unit_length']
         if redge is None:
-            raise FileNotFoundError("used_rad.dat not found; cannot build radial edges")
+            # Try to build from variables
+            try:
+                rmin = float(variables.get("RMIN"))
+                rmax = float(variables.get("RMAX"))
+                if rmax <= rmin:
+                    raise ValueError
+                redge = np.linspace(rmin, rmax, nrad + 1) * unit_dict['unit_length']
+                logger.warning("used_rad.dat missing; built redge from RMIN/RMAX in variables.par")
+            except Exception:
+                logger.error("used_rad.dat missing and could not infer redge from variables.par")
+                raise FileNotFoundError("used_rad.dat not found and no valid RMIN/RMAX; cannot build radial edges")
 
         # Azimuth edges
         pedge = _build_pedge(nsec) * units('radians')
@@ -242,16 +261,72 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         coord_system = "cylindrical"
         ncol = 1
     else:
-        # For 3D, read edges directly from domain files (FARGO3D):
-        # domain_x -> azimuth (phi), domain_y -> radius (r), domain_z -> polar angle (theta)
+        # For 3D, prefer edges from domain files (FARGO3D)
         px = directory / "domain_x.dat"
         py = directory / "domain_y.dat"
         pz = directory / "domain_z.dat"
-        if not (px.exists() and py.exists() and pz.exists()):
-            raise FileNotFoundError("domain_{x,y,z}.dat required for 3D snapshot")
-        pedge = np.loadtxt(px) * units('radians')
-        redge = np.loadtxt(py) * unit_dict['unit_length']
-        tedge = np.loadtxt(pz) * units('radians')
+        pedge = None
+        redge = None
+        tedge = None
+        if px.exists():
+            try:
+                pedge = np.loadtxt(px) * units('radians')
+            except Exception:
+                logger.warning(f"Failed reading {px}; will try building phi edges from NX")
+        else:
+            logger.info(f"{px} not found; will try building phi edges from NX")
+        if py.exists():
+            try:
+                redge = np.loadtxt(py) * unit_dict['unit_length']
+            except Exception:
+                logger.warning(f"Failed reading {py}; will try used_rad.dat or variables")
+        else:
+            logger.info(f"{py} not found; will try used_rad.dat or variables")
+        if pz.exists():
+            try:
+                tedge = np.loadtxt(pz) * units('radians')
+            except Exception:
+                logger.warning(f"Failed reading {pz}; will try building theta edges from NZ")
+        else:
+            logger.info(f"{pz} not found; will try building theta edges from NZ")
+
+        # Fallbacks
+        if redge is None:
+            rr = _read_used_rad(directory)
+            if rr is not None:
+                redge = rr * unit_dict['unit_length']
+                logger.warning("domain_y.dat missing; using used_rad.dat for radial edges")
+        if redge is None:
+            # variables RMIN/RMAX and NY
+            try:
+                nrad = int(variables.get("NY"))
+                rmin = float(variables.get("RMIN"))
+                rmax = float(variables.get("RMAX"))
+                if nrad > 0 and rmax > rmin:
+                    redge = np.linspace(rmin, rmax, nrad + 1) * unit_dict['unit_length']
+                    logger.warning("domain_y.dat missing; built redge from variables.par (RMIN/RMAX/NY)")
+            except Exception:
+                pass
+
+        if pedge is None:
+            try:
+                nsec = int(variables.get("NX"))
+                if nsec > 0:
+                    pedge = _build_pedge(nsec) * units('radians')
+                    logger.warning("domain_x.dat missing; built phi edges from NX")
+            except Exception:
+                pass
+
+        if tedge is None:
+            if nz > 1:
+                ncol = nz
+                tedge = np.linspace(0.0, np.pi, ncol + 1) * units('radians')
+                logger.warning("domain_z.dat missing; built theta edges uniformly from NZ between 0 and pi")
+
+        # Final checks
+        if redge is None or pedge is None or tedge is None:
+            logger.error("Insufficient information to construct 3D mesh (need domain files or valid fallbacks)")
+            raise FileNotFoundError("Cannot construct 3D mesh: missing domain edges and fallbacks")
 
         # Cell counts
         nsec = int(pedge.size - 1)
@@ -267,10 +342,21 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     def _read_field(filename: str, quantity: str) -> Optional[Field]:
         p = directory / filename
         if not p.exists():
+            logger.info(f"Field file missing: {p}")
             return None
         arr = np.fromfile(p, dtype="float64")
         if is_3d:
-            arr = arr.reshape(nrad, nsec, ncol)
+            # Attempt to infer trailing dimension if unknown
+            try:
+                arr = arr.reshape(nrad, nsec, ncol)
+            except Exception:
+                logger.warning(f"Reshape to (nrad,nsec,ncol) failed for {p}; attempting auto-infer of ncol")
+                if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
+                    ncol = arr.size // (nrad * nsec)
+                    arr = arr.reshape(nrad, nsec, ncol)
+                    logger.info(f"Inferred ncol={ncol} from file size for {p}")
+                else:
+                    raise
             axes = ("r", "phi", "theta")
         else:
             arr = arr.reshape(nrad, nsec)

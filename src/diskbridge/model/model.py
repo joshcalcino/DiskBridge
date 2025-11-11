@@ -131,7 +131,7 @@ class SubModel(Model):
         self.mesh = self.base.mesh 
         self.disk = self.base.disk
         
-        # self._lazy: Dict[str, Callable[[], Field]] = {}
+        self._lazy: Dict[str, Callable[[], Field]] = {}
 
         # # Attributes same as Model
         # self.data_source = self.base.data_source

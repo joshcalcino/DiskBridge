@@ -6,7 +6,7 @@ import numpy as np
 
 from .mesh import Mesh
 from diskbridge import units
-from .units import Quantity
+from .._units import Quantity
 
 @dataclass
 class Field:

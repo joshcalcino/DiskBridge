@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fargo2radmc3d"
+name = "diskbridge"
 version = "0.1.0"
 description = "RADMC-3D post-processor for FARGO-3D / Dusty FARGO-ADSG outputs"
 readme = "README.md"
@@ -15,21 +15,22 @@ dependencies = [
   "numpy>=1.22",
   "scipy>=1.8",
   "astropy>=5.0",
+  "pint>=0.21",
 ]
 
 [project.urls]
 Homepage = "https://github.com/joshcalcino/fargo2radmc3d"
 
 [project.scripts]
-fargo2radmc3d = "fargo2radmc3d.cli:main"
+# no console scripts for diskbridge yet
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["fargo2radmc3d*"]
+include = ["diskbridge*"]
 
 [tool.setuptools.package-data]
-fargo2radmc3d = ["data/*", "templates/*"]
+diskbridge = ["data/*", "templates/*"]
 
