@@ -6,10 +6,9 @@ import numpy as np
 
 from ..mesh import Mesh
 from ..field import Field
-from .._units import Quantity 
-from diskbridge import units  
+from diskbridge._units import Quantity 
 from diskbridge._logging import logger
-
+from diskbridge import units  
 
 # -----------------
 # helpers
@@ -17,17 +16,25 @@ from diskbridge._logging import logger
 
 G_phys = Quantity(6.674e-11, "m^3 / (kg s^2)")
 
+au = 1.0*units('au')
+solar_mass = 1.0*units('solar_mass')
+
+au = units('au')
+solar_mass = units('solar_mass')
+
 # Derived code units
-T0 = (units("au")**3 / (G_phys * units("solar_mass")))**0.5
-V0 = units("au") / T0
-rho0 = units("solar_mass") / units("au")**3
-Sigma0 = units("solar_mass") / units("au")**2
-nu0 = units("au")**2 / T0
+T0 = (au**3 / (G_phys * solar_mass))**0.5
+V0 = au / T0
+rho0 = solar_mass / au**3
+Sigma0 = solar_mass / au**2
+nu0 = au**2 / T0
 Omega0 = 1 / T0
 
+
+
 # Define custom units in Pint
-units.define(f"code_length = {R0_phys.to('m').magnitude} * meter")
-units.define(f"code_mass = {Mstar_phys.to('kg').magnitude} * kilogram")
+units.define(f"code_length = {au.to('m').magnitude} * meter")
+units.define(f"code_mass = {solar_mass.to('kg').magnitude} * kilogram")
 units.define(f"code_time = {T0.to('s').magnitude} * second")
 units.define(f"code_velocity = {V0.to('m/s').magnitude} * meter / second")
 units.define(f"code_density = {rho0.to('kg/m^3').magnitude} * kg / meter ** 3")
@@ -44,6 +51,7 @@ def _get_units(file_units: str):
         unit_velocity = units("cm/s")
         unit_surface_density = units("g/cm^2")
         unit_density = units("g/cm^3")
+        unit_viscosity = units("g^2/s")
     elif file_units.lower() == "kms":
         unit_length = units("m")
         unit_time = units("s")
@@ -51,6 +59,7 @@ def _get_units(file_units: str):
         unit_velocity = units("m/s")
         unit_surface_density = units("kg/m^2")
         unit_density = units("kg/m^3")
+        unit_viscosity = units("m^2/s")
     else:
         unit_length = units("code_length")
         unit_time = units("code_time")
@@ -58,6 +67,7 @@ def _get_units(file_units: str):
         unit_velocity = units("code_velocity")
         unit_surface_density = units("code_surface_density")
         unit_density = units("code_density")
+        unit_viscosity = units("code_viscosity")
     unit_dict = {
         "unit_length": unit_length,
         "unit_time": unit_time,
@@ -65,6 +75,7 @@ def _get_units(file_units: str):
         "unit_velocity": unit_velocity,
         "unit_surface_density": unit_surface_density,
         "unit_density": unit_density,
+        "unit_viscosity": unit_viscosity
     }
     return unit_dict
 
@@ -218,14 +229,21 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     compile_options, macros = _read_summary(directory, file_n)
 
     # Auto-detect dimensionality
-    nz = int(variables.get("NZ", 0) or 0)
-    is_3d = (nz > 1)
-    if not is_3d:
-        # Detect 3D via presence of domain_z.dat
+    nz_val = variables.get("NZ", None)
+    if nz_val is not None:
+        try:
+            nz = int(nz_val)
+        except Exception:
+            nz = 0
+        is_3d = nz > 1
+    else:
+        nz = 0
+        # Only fall back to domain_z.dat presence when NZ absent
         if (directory / "domain_z.dat").exists():
             is_3d = True
-            # If NZ missing, infer from edges later
             logger.info("Detected 3D run from domain_z.dat; NZ missing in variables.par")
+        else:
+            is_3d = False
 
     # Dimensions and edges
     if not is_3d:
@@ -352,9 +370,9 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
             except Exception:
                 logger.warning(f"Reshape to (nrad,nsec,ncol) failed for {p}; attempting auto-infer of ncol")
                 if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
-                    ncol = arr.size // (nrad * nsec)
-                    arr = arr.reshape(nrad, nsec, ncol)
-                    logger.info(f"Inferred ncol={ncol} from file size for {p}")
+                    inferred_ncol = arr.size // (nrad * nsec)
+                    arr = arr.reshape(nrad, nsec, inferred_ncol)
+                    logger.info(f"Inferred ncol={inferred_ncol} from file size for {p}")
                 else:
                     raise
             axes = ("r", "phi", "theta")
@@ -374,7 +392,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         if is_3d:
             gas_fields["density"] = f_density * unit_dict['unit_density']
         else:
-            gas_fields["density"] = f_density * unit_dict['unit_surface_density']
+            gas_fields["surface_density"] = f_density * unit_dict['unit_surface_density']
 
     f_vr = _read_field(f"gasvx{file_n}.dat", "vr")
     if f_vr is not None:
@@ -392,6 +410,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}
     disk_parameters["alphavisocity"] = variables.get("ALPHA") * units('dimensionless')
+    disk_parameters["kinematicviscosity"] = variables.get("nv") * units('unit_viscosity')
     disk_parameters["honr"] = variables.get("ASPECTRATIO") * units('dimensionless')
     disk_parameters["flaringindex"] = variables.get("FLARINGINDEX") * units('dimensionless')
     disk_parameters["sigma0"] = variables.get("SIGMA0") * unit_dict['unit_surface_density']

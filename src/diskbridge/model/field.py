@@ -25,4 +25,25 @@ class Field:
     axis_order: Tuple[str, ...]
 
     def __post_init__(self):
-        self.unit = units(self.data.unit)
+        # Fields store Pint Quantities in `data`; units live on the Quantity itself.
+        # For convenience only, expose a .unit reference if available.
+        self.unit = getattr(self.data, "units", None)
+
+    # Support multiplication by scalars or Pint units, returning a new Field
+    def _scaled(self, factor):
+        try:
+            new_data = self.data * factor
+        except Exception:
+            new_data = self.data
+        return Field(
+            data=new_data,
+            mesh=self.mesh,
+            quantity=self.quantity,
+            axis_order=self.axis_order,
+        )
+
+    def __mul__(self, other):
+        return self._scaled(other)
+
+    def __rmul__(self, other):
+        return self._scaled(other)

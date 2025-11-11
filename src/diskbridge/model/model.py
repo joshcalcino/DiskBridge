@@ -38,17 +38,16 @@ class Model:
     n_file: Optional[int] = None
     filename: Optional[str] = None 
 
-    gas: SubModel = dcfield(default_factory=SubModel)
+    gas: "SubModel" = None  # initialized in __post_init__
     disk: GasDiskParameters = dcfield(default_factory=GasDiskParameters)
 
     def __post_init__(self) -> None:
         # Surface disk parameters for example access pattern model.disk.parameters[...]
         if self.disk_parameters:
             self.disk.parameters.update(self.disk_parameters)
+        # Always ensure a SubModel linked to this base exists
         if not isinstance(self.gas, SubModel):
             self.gas = SubModel(self)
-        else:
-            self.gas._model = self
 
     def get_variables(self) -> Dict[str, Any]:
         return dict(self.variables)
@@ -122,39 +121,53 @@ class Model:
 
 class SubModel(Model):
 
-
     def __init__(self, base: Model):
-
-        super().__init__()
-
+        # Do not call super().__init__ with dataclass defaults; this is a view of base
         self.base = base
-        self.mesh = self.base.mesh 
-        self.disk = self.base.disk
-        
+        self.mesh = base.mesh
+        self.disk = base.disk
+        self.coord_system = base.coord_system
+        self.variables = {}
+        self.compile_options = {}
+        self.macros = {}
+        self.disk_parameters = {}
+        self.file_units = base.file_units if hasattr(base, "file_units") else "code"
+        self.directory = None
+        self.n_file = None
+        self.filename = None
+
+        # Internal field storage and lazy builders
+        self._fields: Dict[str, Field] = {}
         self._lazy: Dict[str, Callable[[], Field]] = {}
 
-        # # Attributes same as Model
-        # self.data_source = self.base.data_source
-        # self.file_path = self.base.file_path
-        # self._code_units = self.base._code_units
-        # self._default_units = self.base._default_units
-        # self._properties = self.base._properties
-        # self._array_code_units = self.base._array_code_units
-        # self._array_registry = self.base._array_registry
-        # self._arrays = self.base._arrays
-
-
+    # Registry API
     def register(self, name: str, field: Field) -> None:
-        self[name] = field
+        self._fields[name] = field
 
     def register_lazy(self, name: str, builder: Callable[[], Field]) -> None:
         self._lazy[name] = builder
 
+    # Mapping-like API
     def __getitem__(self, key: str) -> Field:
-        if key in self.keys():
-            return super().__getitem__(key)
+        if key in self._fields:
+            return self._fields[key]
         if key in self._lazy:
             field = self._lazy[key]()
-            self[key] = field
+            self._fields[key] = field
             return field
-        return super().__getitem__(key)
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Field) -> None:
+        self._fields[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._fields or key in self._lazy
+
+    def keys(self):
+        return self._fields.keys()
+
+    def items(self):
+        return self._fields.items()
+
+    def clear(self) -> None:
+        self._fields.clear()

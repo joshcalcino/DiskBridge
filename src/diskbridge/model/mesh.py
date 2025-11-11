@@ -51,6 +51,8 @@ class Mesh:
 
     zmed: Optional[np.ndarray] = None
 
+    ndims: Optinal[np.int] = None
+
     def __post_init__(self) -> None:
         # Compute centers if edges are provided and centers are missing
         if self.redge is not None and self.rmed is None:
@@ -73,6 +75,7 @@ class Mesh:
         if self.pedge is not None and self.pmed is not None:
             if self.pmed.size != self.pedge.size - 1:
                 raise ValueError("pmed must have len(pedge)-1")
+        
 
     @property
     def nrad(self) -> Optional[int]:
