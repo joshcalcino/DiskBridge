@@ -51,7 +51,8 @@ class Mesh:
 
     zmed: Optional[np.ndarray] = None
 
-    ndims: Optinal[np.int] = None
+    # Number of spatial dimensions represented by provided edges
+    ndims: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Compute centers if edges are provided and centers are missing
@@ -76,6 +77,16 @@ class Mesh:
             if self.pmed.size != self.pedge.size - 1:
                 raise ValueError("pmed must have len(pedge)-1")
         
+        # Determine dimensionality from provided edges, if not explicitly set
+        if self.ndims is None:
+            count = 0
+            if self.redge is not None:
+                count += 1
+            if self.pedge is not None:
+                count += 1
+            if self.tedge is not None:
+                count += 1
+            self.ndims = count
 
     @property
     def nrad(self) -> Optional[int]:

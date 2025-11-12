@@ -7,48 +7,41 @@ import numpy as np
 
 from .mesh import Mesh
 from .field import Field
+from diskbridge._logging import logger
 
 
-@dataclass
-class GasDiskParameters:
-    alpha: Optional[float] = None
-    nu: Optional[float] = None
-    aspectratio: Optional[float] = None
-    aspect: Optional[Union[float, str]] = None
-    flaringindex: Optional[float] = None
-    sigma0: Optional[float] = None
-    sigmaslope: Optional[float] = None
-    gamma: Optional[float] = None
-    cs: Optional[float] = None
-    coordinates: Optional[str] = None
-    r0: Optional[float] = None
-    parameters: Dict[str, Any] = dcfield(default_factory=dict)
+def _get_param(model: "Model", key: str, fallback=None, default=None):
+    v = None
+    if isinstance(getattr(model, "variables", None), dict):
+        v = model.variables.get(key)
+    if v is None:
+        v = fallback
+    if v is None:
+        v = default
+    return v
 
 
-@dataclass
 class Model:
-    coord_system: Optional[str] = None
-    variables: Dict[str, Any] = dcfield(default_factory=dict)
-    compile_options: Dict[str, Optional[bool]] = dcfield(default_factory=dict)
-    macros: Dict[str, float] = dcfield(default_factory=dict)
-    disk_parameters: Dict[str, Any] = dcfield(default_factory=dict)
-    mesh: Optional[Mesh] = None
-    file_units: str = "code" # 'kms', 'cgs', or 'code'
-    directory: Optional[str] = None
-    n_file: Optional[int] = None
-    filename: Optional[str] = None 
 
-    gas: "SubModel" = None  # initialized in __post_init__
-    disk: GasDiskParameters = dcfield(default_factory=GasDiskParameters)
+    """
+    Add in documentation
+    """
 
-    def __post_init__(self) -> None:
-        # Surface disk parameters for example access pattern model.disk.parameters[...]
-        if self.disk_parameters:
-            self.disk.parameters.update(self.disk_parameters)
-        # Always ensure a SubModel linked to this base exists
-        if not isinstance(self.gas, SubModel):
-            self.gas = SubModel(self)
-
+    def __init__(self):
+        self.coord_system: Optional[str] = None
+        self.variables: Dict[str, Any] = {}
+        self.compile_options: Dict[str, Optional[bool]] = {}
+        self.macros: Dict[str, float] = {}
+        self.mesh: Optional[Mesh] = None
+        self.file_units: Optional[str] = None # 'kms', 'cgs', or 'code'
+        self.directory: Optional[str] = None
+        self.n_file: Optional[int] = None
+        self.filename: Optional[str] = None 
+        
+        # Initialize properties of the simulation
+        self.gas: SubModel = None
+        self.disk: Disk = None
+        
     def get_variables(self) -> Dict[str, Any]:
         return dict(self.variables)
 
@@ -90,31 +83,22 @@ class Model:
         self.variables = snap["variables"]
         self.compile_options = snap.get("compile_options", {})
         self.macros = snap.get("macros", {})
-        self.disk_parameters = snap["disk_parameters"]
         self.mesh = snap["mesh"]
-        self.file_units = file_units
+        self.file_units = file_units 
         self.directory = str(p)
-        # reflect into disk.parameters
-        self.disk.parameters.clear()
-        self.disk.parameters.update(self.disk_parameters)
-
-        # Overwrite Disk defaults from variables.par
-        self.disk.alpha = self.variables.get("ALPHA")
-        self.disk.nu = self.variables.get("NU")
-        self.disk.aspectratio = self.variables.get("ASPECTRATIO")
-        self.disk.aspect = self.variables.get("ASPECT")
-        self.disk.flaringindex = self.variables.get("FLARINGINDEX")
-        self.disk.sigma0 = self.variables.get("SIGMA0")
-        self.disk.sigmaslope = self.variables.get("SIGMASLOPE")
-        self.disk.gamma = self.variables.get("GAMMA")
-        self.disk.cs = self.variables.get("CS")
-        self.disk.coordinates = self.variables.get("COORDINATES")
+        self.n_file = file_n
+        self.filename = None
+        
+        # Initialize Disk parameters of one is present
+        if "disk_parameters" in snap:
+            self.disk = Disk()
+            self.disk.parameters.clear()
+            self.disk.parameters.update(snap["disk_parameters"])
 
         # Register gas fields
-        self.gas.clear()
         for name, field in snap["gas_fields"].items():
+            self.gas = SubModel(self)
             self.gas_register(name, field)
-
 
         return self
 
@@ -122,7 +106,6 @@ class Model:
 class SubModel(Model):
 
     def __init__(self, base: Model):
-        # Do not call super().__init__ with dataclass defaults; this is a view of base
         self.base = base
         self.mesh = base.mesh
         self.disk = base.disk
@@ -130,8 +113,7 @@ class SubModel(Model):
         self.variables = {}
         self.compile_options = {}
         self.macros = {}
-        self.disk_parameters = {}
-        self.file_units = base.file_units if hasattr(base, "file_units") else "code"
+        self.file_units = base.file_units 
         self.directory = None
         self.n_file = None
         self.filename = None
@@ -139,6 +121,9 @@ class SubModel(Model):
         # Internal field storage and lazy builders
         self._fields: Dict[str, Field] = {}
         self._lazy: Dict[str, Callable[[], Field]] = {}
+
+        # SubModel specific properties
+        self.mask: Optional[Field] = None
 
     # Registry API
     def register(self, name: str, field: Field) -> None:
@@ -149,6 +134,16 @@ class SubModel(Model):
 
     # Mapping-like API
     def __getitem__(self, key: str) -> Field:
+        # Guard: request for volume density requires 3D mesh
+        if key == "density":
+            try:
+                nd = getattr(self.mesh, "ndims", None)
+            except Exception:
+                nd = None
+            if nd is not None and nd != 3:
+                logger.error("'density' is unavailable: simulation is %sd (use 'surface_density')", nd)
+                raise KeyError("density not available: simulation is 2D; use 'surface_density'")
+
         if key in self._fields:
             return self._fields[key]
         if key in self._lazy:
@@ -171,3 +166,92 @@ class SubModel(Model):
 
     def clear(self) -> None:
         self._fields.clear()
+
+    def _get_mask(self):
+        pass 
+
+    def set_mask(self):
+        pass
+
+
+
+class Disk(SubModel):
+
+    def __init__(self):
+        self.parameters: Dict[str, Any] = {}
+
+    def puff_density(
+        self,
+        nz: int = 64,
+        zmax_scale: float = 5.0,
+        surface_density_key: str = "surface_density",
+    ):
+        if self.mesh is None:
+            raise ValueError("mesh is not loaded")
+        if surface_density_key not in self.gas:
+            raise KeyError(f"Missing gas field '{surface_density_key}'")
+
+        Sigma = self.gas[surface_density_key].data  # (nrad, nsec)
+        r = self.mesh.rmed  # (nrad,)
+
+        h0 = _get_param(self, "ASPECTRATIO", fallback=self.disk.aspectratio, default=0.05)
+        fl = _get_param(self, "FLARINGINDEX", fallback=self.disk.flaringindex, default=0.0)
+        r0 = _get_param(self, "R0", fallback=self.disk.r0, default=1.0)
+
+        H = _scale_height(r, h0, fl, r0)  # (nrad,)
+        zmed = _build_z_grid(nz, zmax_scale, H)
+
+        rho3d = _puff_gaussian(Sigma, H, zmed)
+        return rho3d, zmed
+
+    def puff_velocity(
+        self,
+        nz: int = 64,
+        zmed=None,
+        vr_key: str = "vr",
+        vphi_key: str = "vphi",
+    ):
+        if self.mesh is None:
+            raise ValueError("mesh is not loaded")
+        if vr_key not in self.gas or vphi_key not in self.gas:
+            missing = [k for k in (vr_key, vphi_key) if k not in self.gas]
+            raise KeyError(f"Missing gas field(s): {missing}")
+
+        vr2d = self.gas[vr_key].data  # (nrad, nsec)
+        vphi2d = self.gas[vphi_key].data  # (nrad, nsec)
+
+        if zmed is None:
+            # Build a symmetric z grid using a default scale height estimate
+            h0 = _get_param(self, "ASPECTRATIO", fallback=self.disk.aspectratio, default=0.05)
+            fl = _get_param(self, "FLARINGINDEX", fallback=self.disk.flaringindex, default=0.0)
+            r0 = _get_param(self, "R0", fallback=self.disk.r0, default=1.0)
+            H = _scale_height(self.mesh.rmed, h0, fl, r0)
+            zmed = _build_z_grid(nz, 5.0, H)
+
+        nrad = vr2d.shape[0]
+        nsec = vr2d.shape[1]
+
+        vr3d = vr2d.reshape(1, nrad, nsec) * np.ones((len(zmed), 1, 1))
+        vphi3d = vphi2d.reshape(1, nrad, nsec) * np.ones((len(zmed), 1, 1))
+
+        return {"vr3d_cyl": vr3d, "vphi3d_cyl": vphi3d, "zmed": zmed}
+
+
+    def _scale_height(r: np.ndarray, h0: float, flaringindex: float, r0: float) -> np.ndarray:
+        return (h0 * (r / r0) ** flaringindex) * r
+
+
+    def _build_z_grid(nver: int, zmax_scale: float, H: np.ndarray) -> np.ndarray:
+        zmax = float(zmax_scale) * float(np.max(H))
+        return np.linspace(-zmax, zmax, int(nver))
+
+
+    def _puff_gaussian(Sigma: np.ndarray, H: np.ndarray, zmed: np.ndarray) -> np.ndarray:
+        nrad, nsec = Sigma.shape
+        nver = zmed.size
+        H2 = H.reshape(1, nrad, 1)
+        Z = zmed.reshape(nver, 1, 1)
+        norm = 1.0 / (np.sqrt(2.0 * np.pi) * H2)
+        rho = Sigma.reshape(1, nrad, nsec) * norm * np.exp(-0.5 * (Z / H2) ** 2)
+        return rho
+

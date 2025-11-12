@@ -410,7 +410,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}
     disk_parameters["alphavisocity"] = variables.get("ALPHA") * units('dimensionless')
-    disk_parameters["kinematicviscosity"] = variables.get("nv") * units('unit_viscosity')
+    disk_parameters["kinematicviscosity"] = variables.get("NU") * unit_dict['unit_viscosity']
     disk_parameters["honr"] = variables.get("ASPECTRATIO") * units('dimensionless')
     disk_parameters["flaringindex"] = variables.get("FLARINGINDEX") * units('dimensionless')
     disk_parameters["sigma0"] = variables.get("SIGMA0") * unit_dict['unit_surface_density']
