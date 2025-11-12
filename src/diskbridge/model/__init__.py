@@ -3,7 +3,7 @@ from typing import Union
 
 from .mesh import Mesh
 from .field import Field
-from .model import Model
+from .model import Model, puff_up_model
 
 
 def load_model(
@@ -15,4 +15,4 @@ def load_model(
     return Model().load_model(path=path, reader=reader, file_n=file_n, file_units=file_units)
 
 
-__all__ = ["Mesh", "Field", "Model", "load_model"]
+__all__ = ["Mesh", "Field", "Model", "load_model", "puff_up_model"]

@@ -99,3 +99,42 @@ class Mesh:
     @property
     def nsec(self) -> Optional[int]:
         return None if self.pedge is None else int(self.pedge.size - 1)
+
+    # --- helpers for building 3D meshes from 2D inputs ---
+    def with_vertical(self, zmed: np.ndarray, coord_system: CoordSystem = "cylindrical") -> "Mesh":
+        """Return a new 3D mesh sharing r,phi, adding a vertical axis zmed.
+
+        coord_system should typically be 'cylindrical' for (z,r,phi) workflows.
+        """
+        return Mesh(
+            coord_system=coord_system,
+            redge=self.redge,
+            pedge=self.pedge,
+            rmed=self.rmed,
+            pmed=self.pmed,
+            zmed=zmed,
+            ndims=3,
+        )
+
+    def to_spherical_uniform(self, ncol: int) -> "Mesh":
+        tedge = np.linspace(0.0, np.pi, int(ncol) + 1)
+        return Mesh(coord_system="spherical", redge=self.redge, pedge=self.pedge, tedge=tedge, ndims=3)
+
+    def to_spherical_by_scale_height(self, ncol: int, aspect_ratio: float, zmax_over_H: float = 5.0, full_disk: bool = True) -> "Mesh":
+        ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
+        thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
+        thmax = np.pi/2.0
+        if full_disk:
+            upper = np.linspace(thmin, thmax, int(ncol)//2 + 1)
+            lower = np.pi - upper[1:int(ncol)//2 + 1]
+            tedge = np.concatenate([lower, upper])
+        else:
+            tedge = np.linspace(thmin, thmax, int(ncol) + 1)
+        return Mesh(coord_system="spherical", redge=self.redge, pedge=self.pedge, tedge=tedge, ndims=3)
+
+    def to_cylindrical_from_spherical(self, nver: int) -> "Mesh":
+        if self.rmed is None or self.tmed is None:
+            raise ValueError("rmed and tmed required to derive cylindrical zmed from spherical mesh")
+        zbuf = -float(np.max(self.rmed)) * np.cos(self.tmed)
+        zmed = np.linspace(np.min(zbuf), np.max(zbuf), int(nver))
+        return Mesh(coord_system="cylindrical", redge=self.redge, pedge=self.pedge, rmed=self.rmed, pmed=self.pmed, zmed=zmed, ndims=3)
