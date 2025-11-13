@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from pathlib import Path
 import numpy as np
 
-from .mesh import Mesh
+from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
 
@@ -67,8 +67,8 @@ class Model:
         file_n: int = 0,
         file_units: str = "code",
     ) -> "Model":
-        """Load a hydro snapshot and populate this Model, then return self.
-
+        """
+        Load a hydro snapshot and populate this Model, then return self.
         """
         p = Path(path)
         if reader.lower() == "fargo":
@@ -108,7 +108,6 @@ class Model:
         self,
         n: int,
         coordinates: str = "cylindrical",
-        spherical_by_scale_height: bool = False,
         zmax_over_H: float = 5.0,
         full_disk: bool = True,
     ) -> "Model":
@@ -126,7 +125,7 @@ class Model:
         if coordinates == "cylindrical":
             zmed = _build_z_grid(n, 5.0, H)
             rho3d = _puff_gaussian(Sigma, H, zmed)
-            new_mesh = self.mesh.with_vertical(zmed, coord_system="cylindrical")
+            new_mesh = self.mesh.with_vertical(zmed)
 
             # velocities
             vr3d = None
@@ -176,10 +175,8 @@ class Model:
                 vphi2d = self.gas["vphi"].data
                 vphi3d_cyl = vphi2d.reshape(1, vphi2d.shape[0], vphi2d.shape[1]) * np.ones((len(zmed), 1, 1))
 
-            if spherical_by_scale_height:
-                new_mesh = self.mesh.to_spherical_by_scale_height(n, aspect_ratio=h0, zmax_over_H=zmax_over_H, full_disk=full_disk)
-            else:
-                new_mesh = self.mesh.to_spherical_uniform(n)
+            new_mesh = self.mesh.to_spherical_by_scale_height(n, aspect_ratio=h0, zmax_over_H=zmax_over_H, full_disk=full_disk)
+
             # Interpolate cylindrical -> spherical on centers
             rho3d_sph = _interp_cyl_to_sph(rho3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed)
             vr3d_sph = _interp_cyl_to_sph(vr3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed) if vr3d_cyl is not None else None
@@ -443,16 +440,20 @@ def puff_up_model(
     model: "Model",
     n: int,
     coordinates: str = "cylindrical",
-    spherical_by_scale_height: bool = False,
     zmax_over_H: float = 5.0,
     full_disk: bool = True,
 ) -> "Model":
+
     new = Model()
-    new.coord_system = model.coord_system
+    new.coord_system = model.mesh.coord_system
     new.variables = dict(model.variables)
     new.compile_options = dict(model.compile_options)
     new.macros = dict(model.macros)
-    new.mesh = Mesh(coord_system=model.mesh.coord_system, redge=model.mesh.redge, pedge=model.mesh.pedge, tedge=model.mesh.tedge, rmed=model.mesh.rmed, tmed=model.mesh.tmed, pmed=model.mesh.pmed, zmed=model.mesh.zmed, ndims=model.mesh.ndims)
+    new.mesh = Mesh(coord_system=model.mesh.coord_system, 
+                    axes={"r": Axis(edges=model.mesh.redge), 
+                          "phi": Axis(edges=model.mesh.pedge), 
+                          "z": Axis(edges=model.mesh.zmed)})
+    
     new.file_units = model.file_units
     new.directory = model.directory
     new.n_file = model.n_file
@@ -475,7 +476,6 @@ def puff_up_model(
     return new.puff_up_model(
         n,
         coordinates=coordinates,
-        spherical_by_scale_height=spherical_by_scale_height,
         zmax_over_H=zmax_over_H,
         full_disk=full_disk,
     )

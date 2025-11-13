@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
-from ..mesh import Mesh
+from ..mesh import Mesh, Axis
 from ..field import Field
 from diskbridge._units import Quantity 
 from diskbridge._logging import logger
@@ -30,8 +30,6 @@ Sigma0 = solar_mass / au**2
 nu0 = au**2 / T0
 Omega0 = 1 / T0
 
-
-
 # Define custom units in Pint
 units.define(f"code_length = {au.to('m').magnitude} * meter")
 units.define(f"code_mass = {solar_mass.to('kg').magnitude} * kilogram")
@@ -44,6 +42,9 @@ units.define(f"code_omega = {Omega0.to('1/s').magnitude} / second")
 
 
 def _get_units(file_units: str):
+    """
+    Build the units dictionary based on the file units
+    """
     if file_units.lower() == "cgs":
         unit_length = units("cm")
         unit_time = units("s")
@@ -68,6 +69,7 @@ def _get_units(file_units: str):
         unit_surface_density = units("code_surface_density")
         unit_density = units("code_density")
         unit_viscosity = units("code_viscosity")
+    
     unit_dict = {
         "unit_length": unit_length,
         "unit_time": unit_time,
@@ -275,7 +277,8 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         # Azimuth edges
         pedge = _build_pedge(nsec) * units('radians')
 
-        mesh = Mesh(coord_system="cylindrical", redge=redge, pedge=pedge)
+        mesh = Mesh.cylindrical(r=Axis(edges=redge*unit_dict['unit_length']), 
+                                phi=Axis(edges=pedge*units('radians')))
         coord_system = "cylindrical"
         ncol = 1
     else:
@@ -351,7 +354,9 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         nrad = int(redge.size - 1)
         ncol = int(tedge.size - 1)
 
-        mesh = Mesh(coord_system="spherical", redge=redge, pedge=pedge, tedge=tedge)
+        mesh = Mesh.spherical(r=Axis(edges=redge*unit_dict['unit_length']), 
+                              phi=Axis(edges=pedge*units('radians')), 
+                              theta=Axis(edges=tedge*units('radians')))
         coord_system = "spherical"
 
     # Load fields present on disk for the snapshot
