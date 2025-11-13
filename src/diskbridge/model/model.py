@@ -163,7 +163,7 @@ class Model:
                 self.gas_register(k, f)
             return self
 
-        elif coords == "spherical":
+        elif coordinates == "spherical":
             zmed = _build_z_grid(max(3, int(0.5*n)), 5.0, H)
             rho3d_cyl = _puff_gaussian(Sigma, H, zmed)
             # velocities to cylindrical first
