@@ -220,18 +220,15 @@ class Mesh:
         self,
         ncol: int,
         aspect_ratio: float,
-        zmax_over_H: float = 5.0,
-        full_disk: bool = True,
+        zmax_over_H: float = 5.0
     ) -> "Mesh":
         ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
         thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
         thmax = np.pi/2.0
-        if full_disk:
-            upper = np.linspace(thmin, thmax, int(ncol)//2 + 1)
-            lower = np.pi - upper[1:int(ncol)//2 + 1]
-            tedge = np.concatenate([lower, upper]) * units.radian
-        else:
-            tedge = np.linspace(thmin, thmax, int(ncol) + 1) * units.radian
+
+        upper = np.linspace(thmin, thmax, int(ncol)//2 + 1)
+        lower = np.pi - upper[1:int(ncol)//2 + 1]
+        tedge = np.concatenate([lower, upper]) * units.radian
 
         r_ax = self.axes.get("r", Axis())
         p_ax = self.axes.get("phi", Axis())

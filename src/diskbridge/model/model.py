@@ -10,17 +10,6 @@ from .field import Field
 from diskbridge._logging import logger
 
 
-def _get_param(model: "Model", key: str, fallback=None, default=None):
-    v = None
-    if isinstance(getattr(model, "variables", None), dict):
-        v = model.variables.get(key)
-    if v is None:
-        v = fallback
-    if v is None:
-        v = default
-    return v
-
-
 class Model:
 
     """
@@ -91,12 +80,10 @@ class Model:
         
         # Initialize submodels
         self.gas = SubModel(self)
-        self.disk = Disk(self)
 
         # Initialize Disk parameters if present
         if "disk_parameters" in snap:
-            self.disk.parameters.clear()
-            self.disk.parameters.update(snap["disk_parameters"])
+            self.disk = Disk(self, snap["disk_parameters"])
 
         # Register gas fields
         for name, field in snap["gas_fields"].items():
@@ -108,22 +95,21 @@ class Model:
         self,
         n: int,
         coordinates: str = "cylindrical",
-        zmax_over_H: float = 5.0,
-        full_disk: bool = True,
+        zmax_over_H: float = 5.0
     ) -> "Model":
         # Build 3D mesh and fields and mutate this model
 
         Sigma = self.gas["surface_density"].data
         r = self.mesh.rmed
 
-        h0 = _get_param(self, "ASPECTRATIO", fallback=getattr(getattr(self, "disk", None), "parameters", {}).get("honr"), default=0.05)
-        fl = _get_param(self, "FLARINGINDEX", fallback=getattr(getattr(self, "disk", None), "parameters", {}).get("flaringindex"), default=0.0)
-        r0 = _get_param(self, "R0", fallback=getattr(getattr(self, "disk", None), "parameters", {}).get("r0"), default=1.0)
+        h0 = self.disk.parameters["aspectratio"]
+        fl = self.disk.parameters["flaringindex"]
+        r0 = self.disk.parameters["r0"]
 
         H = _scale_height(r, h0, fl, r0)
 
         if coordinates == "cylindrical":
-            zmed = _build_z_grid(n, 5.0, H)
+            zmed = _build_z_grid(n, zmax_over_H, H)
             rho3d = _puff_gaussian(Sigma, H, zmed)
             new_mesh = self.mesh.with_vertical(zmed)
 
@@ -175,7 +161,7 @@ class Model:
                 vphi2d = self.gas["vphi"].data
                 vphi3d_cyl = vphi2d.reshape(1, vphi2d.shape[0], vphi2d.shape[1]) * np.ones((len(zmed), 1, 1))
 
-            new_mesh = self.mesh.to_spherical_by_scale_height(n, aspect_ratio=h0, zmax_over_H=zmax_over_H, full_disk=full_disk)
+            new_mesh = self.mesh.to_spherical_by_scale_height(n, aspect_ratio=h0, zmax_over_H=zmax_over_H)
 
             # Interpolate cylindrical -> spherical on centers
             rho3d_sph = _interp_cyl_to_sph(rho3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed)
@@ -278,30 +264,38 @@ class SubModel(Model):
 
 class Disk(SubModel):
 
-    def __init__(self, base: Model):
+    _required_parameters = [
+        "aspectratio",
+        "flaringindex",
+        "r0"
+    ]
+
+    def __init__(self, base: Model, parameters: Dict[str, Any]):
         super().__init__(base)
-        self.parameters: Dict[str, Any] = {}
+        for key in self._required_parameters:
+            if key not in parameters:
+                raise ValueError(f"Missing required parameter in Disk class: {key}")
+        self.parameters: Dict[str, Any] = parameters
 
     def puff_density(
         self,
         nz: int = 64,
-        zmax_scale: float = 5.0,
-        surface_density_key: str = "surface_density",
+        zmax_scale: float = 5.0
     ):
         # Validate mesh and required 2D field
         if self.base.mesh is None:
             raise ValueError("mesh is not loaded")
-        if surface_density_key not in self.base.gas:
-            raise KeyError(f"Missing gas field '{surface_density_key}'")
+        if "surface_density" not in self.base.gas:
+            raise KeyError("Missing gas field 'surface_density'")
 
         # Input data with units (Quantities)
-        Sigma = self.base.gas[surface_density_key].data  # (nrad, nsec)
+        Sigma = self.base.gas["surface_density"].data  # (nrad, nsec)
         r = self.base.mesh.rmed  # (nrad,)
 
-        # Disk geometry parameters (dimensionless except r0 has length)
-        h0 = _get_param(self, "ASPECTRATIO", fallback=self.parameters.get("honr"), default=0.05)
-        fl = _get_param(self, "FLARINGINDEX", fallback=self.parameters.get("flaringindex"), default=0.0)
-        r0 = _get_param(self, "R0", fallback=self.parameters.get("r0"), default=1.0)
+        # Disk geometry parameters 
+        h0 = self.parameters["aspectratio"]
+        fl = self.parameters["flaringindex"]
+        r0 = self.parameters["r0"]
 
         # Build vertical grid and puff Gaussian with unit-aware math
         H = _scale_height(r, h0, fl, r0)  # (nrad,)
@@ -358,9 +352,9 @@ class Disk(SubModel):
 
         if zmed is None:
             # Build a symmetric z grid using a default scale height estimate
-            h0 = _get_param(self, "ASPECTRATIO", fallback=self.parameters.get("honr"), default=0.05)
-            fl = _get_param(self, "FLARINGINDEX", fallback=self.parameters.get("flaringindex"), default=0.0)
-            r0 = _get_param(self, "R0", fallback=self.parameters.get("r0"), default=1.0)
+            h0 = self.parameters.get("aspectratio")
+            fl = self.parameters.get("flaringindex")
+            r0 = self.parameters.get("r0")
             H = _scale_height(self.base.mesh.rmed, h0, fl, r0)
             zmed = _build_z_grid(nz, 5.0, H)
 
@@ -440,8 +434,7 @@ def puff_up_model(
     model: "Model",
     n: int,
     coordinates: str = "cylindrical",
-    zmax_over_H: float = 5.0,
-    full_disk: bool = True,
+    zmax_over_H: float = 5.0
 ) -> "Model":
 
     new = Model()
@@ -467,16 +460,14 @@ def puff_up_model(
     except Exception:
         pass
     try:
-        if hasattr(model, "disk") and model.disk is not None and hasattr(model.disk, "parameters"):
-            new.disk = Disk(new)
-            new.disk.parameters = dict(model.disk.parameters)
+        if hasattr(model, "disk") and model.disk is not None:
+            new.disk = Disk(new, model.disk.parameters)
     except Exception:
         pass
     # perform in-place puff on the new model
     return new.puff_up_model(
         n,
         coordinates=coordinates,
-        zmax_over_H=zmax_over_H,
-        full_disk=full_disk,
+        zmax_over_H=zmax_over_H
     )
 
