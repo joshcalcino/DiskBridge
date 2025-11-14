@@ -1,35 +1,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Dict, Any
 import numpy as np
 
-from .mesh import Mesh
-from diskbridge import units
 from .._units import Quantity
+from dataclasses import field
 
-@dataclass
+
+@dataclass(frozen=True)
 class Field:
     """
     A physical quantity sampled on a Mesh.
 
-    - data: ndarray whose shape/order matches axis_order
-    - unit: string (interpreted by the units backend at higher levels)
     - quantity: semantic tag (e.g., 'gas_density', 'temperature')
+    - data: Pint Quantity
     - axis_order: tuple of axis names in data order (e.g., ('r','phi') or ('theta','r','phi'))
     """
 
-    data: Quantity
-    mesh: Mesh
     quantity: str
+    data: Quantity
     axis_order: Tuple[str, ...]
+    attrs: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        # Fields store Pint Quantities in `data`; units live on the Quantity itself.
-        # For convenience only, expose a .unit reference if available.
-        self.unit = getattr(self.data, "units", None)
+    @property
+    def units(self):
+        return getattr(self.data, "units")   
 
-    # Support multiplication by scalars or Pint units, returning a new Field
+    # lightweight conveniences (read-only)
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(np.asarray(self.data.magnitude).shape)
+
+    @property
+    def ndim(self) -> int:
+        return np.asarray(self.data.magnitude).ndim
+
+    def __repr__(self) -> str:
+        return (f"Field('{self.quantity}', units='{self.units}', "
+                f"axis_order={self.axis_order}, shape={self.shape}, "
+                f"ndim={self.ndim})")
+
     def _scaled(self, factor):
         try:
             new_data = self.data * factor
@@ -37,11 +48,10 @@ class Field:
             new_data = self.data
         return Field(
             data=new_data,
-            mesh=self.mesh,
             quantity=self.quantity,
             axis_order=self.axis_order,
         )
-
+        
     def __mul__(self, other):
         return self._scaled(other)
 

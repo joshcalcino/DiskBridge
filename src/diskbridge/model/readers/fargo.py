@@ -277,8 +277,8 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         # Azimuth edges
         pedge = _build_pedge(nsec) * units('radians')
 
-        mesh = Mesh.cylindrical(r=Axis(edges=redge*unit_dict['unit_length']), 
-                                phi=Axis(edges=pedge*units('radians')))
+        mesh = Mesh.cylindrical(r=Axis(edges=redge), 
+                                phi=Axis(edges=pedge))
         coord_system = "cylindrical"
         ncol = 1
     else:
@@ -354,15 +354,15 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         nrad = int(redge.size - 1)
         ncol = int(tedge.size - 1)
 
-        mesh = Mesh.spherical(r=Axis(edges=redge*unit_dict['unit_length']), 
-                              phi=Axis(edges=pedge*units('radians')), 
-                              theta=Axis(edges=tedge*units('radians')))
+        mesh = Mesh.spherical(r=Axis(edges=redge), 
+                              phi=Axis(edges=pedge), 
+                              theta=Axis(edges=tedge))
         coord_system = "spherical"
 
     # Load fields present on disk for the snapshot
     gas_fields: Dict[str, Field] = {}
 
-    def _read_field(filename: str, quantity: str) -> Optional[Field]:
+    def _read_field(filename: str, quantity: str, units: Quantity) -> Optional[Field]:
         p = directory / filename
         if not p.exists():
             logger.info(f"Field file missing: {p}")
@@ -384,33 +384,35 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         else:
             arr = arr.reshape(nrad, nsec)
             axes = ("r", "phi")
+        arr = arr * units
         return Field(
             data=arr,
-            mesh=mesh,
             quantity=quantity,
             axis_order=axes,
         )
 
     # FARGO 2D canonical names
-    f_density = _read_field(f"gasdens{file_n}.dat", "density")
-    if f_density is not None:
-        if is_3d:
-            gas_fields["density"] = f_density * unit_dict['unit_density']
-        else:
-            gas_fields["surface_density"] = f_density * unit_dict['unit_surface_density']
+    if is_3d:
+        gas_fields["density"] = _read_field(f"gasdens{file_n}.dat", 
+                                            "density", 
+                                            units=unit_dict['unit_density'])
+    else:
+        gas_fields["surface_density"] = _read_field(f"gasdens{file_n}.dat", 
+                                                    "surface_density", 
+                                                    units=unit_dict['unit_surface_density'])
 
-    f_vr = _read_field(f"gasvx{file_n}.dat", "vr")
-    if f_vr is not None:
-        gas_fields["vr"] = f_vr*unit_dict['unit_velocity']
+    gas_fields["vr"] = _read_field(f"gasvx{file_n}.dat", 
+                                   "vr", 
+                                   units=unit_dict['unit_velocity'])
 
-    f_vphi = _read_field(f"gasvy{file_n}.dat", "vphi")
-    if f_vphi is not None:
-        gas_fields["vphi"] = f_vphi*unit_dict['unit_velocity']
+    gas_fields["vphi"] = _read_field(f"gasvy{file_n}.dat", 
+                                     "vphi", 
+                                     units=unit_dict['unit_velocity'])
 
     if is_3d:
-        f_vtheta = _read_field(f"gasvz{file_n}.dat", "vtheta")
-        if f_vtheta is not None:
-            gas_fields["vtheta"] = f_vtheta * unit_dict['unit_velocity']
+        gas_fields["vtheta"] = _read_field(f"gasvz{file_n}.dat", 
+                                            "vtheta", 
+                                            units=unit_dict['unit_velocity'])
 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}

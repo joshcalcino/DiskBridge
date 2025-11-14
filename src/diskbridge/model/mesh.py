@@ -46,8 +46,13 @@ def _edges_from_centers(centers: Quantity) -> Quantity:
     return e_mag * centers.units
 
 
+def _is_strictly_increasing(q: Quantity) -> bool:
+    a = np.asarray(q.magnitude, dtype=float)
+    return np.all(a[1:] > a[:-1])
+
+
 # ---------- small containers ----------
-@dataclass
+@dataclass(frozen=True)
 class Axis:
     edges: Optional[Quantity] = None
     centers: Optional[Quantity] = None
@@ -60,7 +65,6 @@ def _allowed_axes(cs: CoordSystem) -> Tuple[str, ...]:
         return ("r", "phi", "z")
     if cs == "cartesian":
         return ("x", "y", "z")
-    raise ValueError(f"Unknown coord_system: {cs}")
 
 
 def _display_order(cs: CoordSystem) -> Tuple[str, ...]:
@@ -71,97 +75,102 @@ def _display_order(cs: CoordSystem) -> Tuple[str, ...]:
         return ("z", "r", "phi")  # common (z, r, phi) workflow
     if cs == "cartesian":
         return ("x", "y", "z")
-    return ()
-
-
-def _attr_alias(cs: CoordSystem) -> Dict[str, Tuple[str, str]]:
-    """
-    Map legacy attribute names (redge, rmed, xedge, ...) -> (axis, kind)
-    kind in {"edges","centers"}.
-    """
-    if cs == "spherical":
-        return {
-            "redge": ("r", "edges"), "rmed": ("r", "centers"),
-            "tedge": ("theta", "edges"), "tmed": ("theta", "centers"),
-            "pedge": ("phi", "edges"), "pmed": ("phi", "centers"),
-        }
-    if cs == "cylindrical":
-        return {
-            "redge": ("r", "edges"), "rmed": ("r", "centers"),
-            "pedge": ("phi", "edges"), "pmed": ("phi", "centers"),
-            "zedge": ("z", "edges"), "zmed": ("z", "centers"),
-        }
-    if cs == "cartesian":
-        return {
-            "xedge": ("x", "edges"), "xmed": ("x", "centers"),
-            "yedge": ("y", "edges"), "ymed": ("y", "centers"),
-            "zedge": ("z", "edges"), "zmed": ("z", "centers"),
-        }
-    return {}
 
 
 # ---------- main Mesh ----------
-@dataclass
+@dataclass(frozen=True, repr=False)
 class Mesh:
-    """
-    Compact, extensible mesh container.
-
-    - Stores coordinates in a single dict: self.axes[axis] = Axis(edges, centers)
-    - axis names depend on coord_system:
-        spherical  -> ("r","theta","phi")
-        cylindrical-> ("r","phi","z")
-        cartesian  -> ("x","y","z")
-    - Backward-compat attribute access via __getattr__:
-        mesh.redge, mesh.rmed, mesh.xedge, mesh.pmed, ...
-    """
-
     coord_system: CoordSystem
     axes: Dict[str, Axis]
+    ndims: int = 0
 
     def __post_init__(self) -> None:
         allowed = set(_allowed_axes(self.coord_system))
-        # prune any unexpected axes in the dict
-        self.axes = {k: v for k, v in self.axes.items() if k in allowed}
+        new_axes: Dict[str, Axis] = {}
 
-        # auto-compute missing edges/centers
-        for axis_name, ax in self.axes.items():
-            if ax.centers is None and ax.edges is not None:
-                if self.coord_system == "spherical" and axis_name == "r":
-                    ax.centers = _spherical_r_centers(ax.edges)
-                else:
-                    ax.centers = _centers_from_edges(ax.edges)
-            elif ax.edges is None and ax.centers is not None:
-                ax.edges = _edges_from_centers(ax.centers)
+        for name, ax in self.axes.items():
+            if name not in allowed:
+                continue
 
-            # validate lengths if both present
-            if ax.edges is not None and ax.centers is not None:
-                if ax.centers.size != ax.edges.size - 1:
+            edges, centers = ax.edges, ax.centers
+
+            if centers is None and edges is not None:
+                centers = (_spherical_r_centers(edges)
+                           if (self.coord_system == "spherical" and name == "r")
+                           else _centers_from_edges(edges))
+            elif edges is None and centers is not None:
+                edges = _edges_from_centers(centers)
+
+            # Validate lengths
+            if edges is not None and centers is not None:
+                if centers.size != edges.size - 1:
                     raise ValueError(
-                        f"{axis_name}: centers must have len(edges)-1 "
-                        f"({ax.centers.size} vs {ax.edges.size - 1})"
+                        f"{name}: centers must have len(edges)-1 "
+                        f"({centers.size} vs {edges.size - 1})"
                     )
 
-        # infer dimensionality
-        self.ndims = sum(
-            1 for a in self.axes.values()
-            if (a.edges is not None) or (a.centers is not None)
+            # # Validate monotonicity of edges
+            # if edges is not None and not _is_strictly_increasing(edges):
+            #     print(edges)
+            #     raise ValueError(f"{name}: edges must be strictly increasing")
+
+            new_axes[name] = Axis(edges=edges, centers=centers)
+
+        object.__setattr__(self, "axes", new_axes)
+        object.__setattr__(
+            self,
+            "ndims",
+            sum(1 for a in new_axes.values() if a.edges is not None or a.centers is not None),
         )
 
-    # ---------- simple API ----------
-    def axes_order(self) -> Tuple[str, ...]:
+    # ---------- canonical, explicit API ----------
+    def axis_names(self) -> Tuple[str, ...]:
         return _display_order(self.coord_system)
 
-    def get_edges(self, axis: str) -> Optional[Quantity]:
-        axis = axis.lower()
-        if axis not in self.axes:
-            raise ValueError(f"axis '{axis}' invalid for coord_system '{self.coord_system}'")
-        return self.axes[axis].edges
+    def axis(self, name: str) -> Axis:
+        k = name.lower()
+        try:
+            return self.axes[k]
+        except KeyError:
+            raise ValueError(f"axis '{name}' invalid for coord_system '{self.coord_system}'")
 
-    def get_centers(self, axis: str) -> Optional[Quantity]:
-        axis = axis.lower()
-        if axis not in self.axes:
-            raise ValueError(f"axis '{axis}' invalid for coord_system '{self.coord_system}'")
-        return self.axes[axis].centers
+    def edges(self, name: str) -> Optional[Quantity]:
+        return self.axis(name).edges
+
+    def centers(self, name: str) -> Optional[Quantity]:
+        return self.axis(name).centers
+
+    def ncell(self, name: str) -> Optional[int]:
+        e = self.edges(name)
+        return None if e is None else int(e.size - 1)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Tuple of cell counts along all defined axes (in display order)."""
+        counts = [self.ncell(a) for a in self.axis_names()]
+        return tuple(c for c in counts if c is not None)
+
+    # Small read-only view for dot-access discovery
+    @property
+    def coords(self):
+        """
+        Docstring
+        """
+        class _CoordView:
+            __slots__ = ("_mesh",)
+            def __init__(self, m: "Mesh"): self._mesh = m
+            def __getattr__(self, key: str) -> Axis:
+                names = set(_allowed_axes(self._mesh.coord_system))
+                if key in names:
+                    return self._mesh.axis(key)
+                raise AttributeError(key)
+            def __dir__(self):
+                return list(_allowed_axes(self._mesh.coord_system))
+        return _CoordView(self)
+
+    def __repr__(self) -> str:
+        cells = ", ".join(f"{a}:{self.ncell(a) or 0}" for a in self.axis_names())
+        return f"Mesh(cs='{self.coord_system}', cells={{" + cells + "}})"
 
     # ---------- convenience constructors ----------
     @classmethod
@@ -171,11 +180,12 @@ class Mesh:
         theta: Optional[Axis] = None,
         phi: Optional[Axis] = None,
     ) -> "Mesh":
+        """
+        Docstring
+        """
         axes = {"r": r}
-        if theta is not None:
-            axes["theta"] = theta
-        if phi is not None:
-            axes["phi"] = phi
+        if theta is not None: axes["theta"] = theta
+        if phi is not None:   axes["phi"] = phi
         return cls("spherical", axes)
 
     @classmethod
@@ -185,11 +195,12 @@ class Mesh:
         phi: Optional[Axis] = None,
         z: Optional[Axis] = None,
     ) -> "Mesh":
+        """
+        Docstring
+        """
         axes = {"r": r}
-        if phi is not None:
-            axes["phi"] = phi
-        if z is not None:
-            axes["z"] = z
+        if phi is not None: axes["phi"] = phi
+        if z is not None:   axes["z"] = z
         return cls("cylindrical", axes)
 
     @classmethod
@@ -199,17 +210,23 @@ class Mesh:
         y: Optional[Axis] = None,
         z: Optional[Axis] = None,
     ) -> "Mesh":
+        """
+        Docstring
+        """
         axes: Dict[str, Axis] = {}
-        if x is not None:
-            axes["x"] = x
-        if y is not None:
-            axes["y"] = y
-        if z is not None:
-            axes["z"] = z
+        if x is not None: axes["x"] = x
+        if y is not None: axes["y"] = y
+        if z is not None: axes["z"] = z
         return cls("cartesian", axes)
 
-    # ---------- helpers akin to your original API ----------
-    def with_vertical(self, z_centers: Quantity) -> "Mesh":
+    # ---------- pure transforms ----------
+    def with_vertical(
+        self,
+        z_centers: Quantity
+    ) -> "Mesh":
+        """
+        Docstring
+        """
         if self.coord_system != "cylindrical":
             raise ValueError("with_vertical is intended for cylindrical workflows")
         new_axes = dict(self.axes)
@@ -222,10 +239,12 @@ class Mesh:
         aspect_ratio: float,
         zmax_over_H: float = 5.0
     ) -> "Mesh":
+        """
+        Docstring
+        """
         ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
         thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
         thmax = np.pi/2.0
-
         upper = np.linspace(thmin, thmax, int(ncol)//2 + 1)
         lower = np.pi - upper[1:int(ncol)//2 + 1]
         tedge = np.concatenate([lower, upper]) * units.radian
@@ -237,91 +256,3 @@ class Mesh:
             theta=Axis(edges=tedge),
             phi=Axis(edges=p_ax.edges, centers=p_ax.centers)
         )
-
-    def to_cylindrical_from_spherical(self, nver: int) -> "Mesh":
-        if self.coord_system != "spherical":
-            raise ValueError("requires a spherical mesh as input")
-        r_c = self.get_centers("r")
-        t_c = self.get_centers("theta")
-        if r_c is None or t_c is None:
-            raise ValueError("r/theta centers required to derive cylindrical z centers")
-        r_mag = np.asarray(r_c.magnitude, dtype=float)
-        t_mag = np.asarray(t_c.to(units.radian).magnitude, dtype=float)
-        zbuf = -np.max(r_mag) * np.cos(t_mag)
-        zmed_mag = np.linspace(np.min(zbuf), np.max(zbuf), int(nver))
-        zmed = zmed_mag * r_c.units
-
-        # keep r,phi from spherical if present
-        r_ax = self.axes.get("r", Axis())
-        p_ax = self.axes.get("phi", Axis())
-        return Mesh.cylindrical(
-            r=Axis(edges=r_ax.edges, centers=r_ax.centers),
-            phi=Axis(edges=p_ax.edges, centers=p_ax.centers),
-            z=Axis(centers=zmed)
-        )
-
-    def __getattr__(self, name: str):
-        # route redge/rmed/… to axes dict dynamically
-        alias = _attr_alias(self.coord_system).get(name)
-        if alias is None:
-            raise AttributeError(name)
-        axis, kind = alias
-        ax = self.axes.get(axis)
-        return None if ax is None else getattr(ax, kind)
-
-    def __setattr__(self, name: str, value):
-        # allow writing legacy names too (e.g., mesh.redge = arr)
-        if name in {"coord_system", "axes", "ndims"}:
-            return super().__setattr__(name, value)
-        alias = None
-        if "coord_system" in self.__dict__:
-            alias = _attr_alias(self.coord_system).get(name)
-        if alias is None:
-            return super().__setattr__(name, value)
-        axis, kind = alias
-        if axis not in self.axes:
-            self.axes[axis] = Axis()
-        setattr(self.axes[axis], kind, value)
-
-    # ---------- derived counts ----------
-    def ncell(self, axis: str) -> Optional[int]:
-        """Return number of cells (len(edges) - 1) along the given axis."""
-        ax = self.axes.get(axis.lower())
-        if ax is None or ax.edges is None:
-            return None
-        return int(ax.edges.size - 1)
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        """Tuple of cell counts along all defined axes (in display order)."""
-        counts = [self.ncell(a) for a in self.axes_order()]
-        return tuple(c for c in counts if c is not None)
-
-
-    @property
-    def nrad(self):  # spherical/cylindrical
-        return self.ncell("r")
-
-    @property
-    def ncol(self):  # theta
-        return self.ncell("theta")
-
-    @property
-    def nsec(self):  # phi
-        return self.ncell("phi")
-
-    @property
-    def nver(self):  # z
-        return self.ncell("z")
-
-    @property
-    def nx(self):
-        return self.ncell("x")
-
-    @property
-    def ny(self):
-        return self.ncell("y")
-
-    @property
-    def nz(self):
-        return self.ncell("z")

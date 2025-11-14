@@ -8,6 +8,8 @@ import numpy as np
 from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
+from diskbridge._units import Quantity
+from .utils import validate_field_against_mesh  # <— add
 
 
 class Model:
@@ -35,6 +37,8 @@ class Model:
         return dict(self.variables)
 
     def gas_register(self, name: str, field: Field) -> None:
+        # validate against the model's single mesh
+        validate_field_against_mesh(field, self.mesh)  # type: ignore[arg-type]
         self.gas.register(name, field)
 
     def gas_register_lazy(self, name: str, builder: Callable[[], Field]) -> None:
@@ -92,102 +96,12 @@ class Model:
         return self
 
     def puff_up_model(
-        self,
-        n: int,
-        coordinates: str = "cylindrical",
+        self, n: int, 
+        coordinates: str = "cylindrical", 
         zmax_over_H: float = 5.0
     ) -> "Model":
-        # Build 3D mesh and fields and mutate this model
-
-        Sigma = self.gas["surface_density"].data
-        r = self.mesh.rmed
-
-        h0 = self.disk.parameters["aspectratio"]
-        fl = self.disk.parameters["flaringindex"]
-        r0 = self.disk.parameters["r0"]
-
-        H = _scale_height(r, h0, fl, r0)
-
-        if coordinates == "cylindrical":
-            zmed = _build_z_grid(n, zmax_over_H, H)
-            rho3d = _puff_gaussian(Sigma, H, zmed)
-            new_mesh = self.mesh.with_vertical(zmed)
-
-            # velocities
-            vr3d = None
-            vphi3d = None
-            vz3d = None
-            if "vr" in self.gas:
-                vr2d = self.gas["vr"].data
-                vr3d = vr2d.reshape(1, vr2d.shape[0], vr2d.shape[1]) * np.ones((len(zmed), 1, 1))
-            if "vphi" in self.gas:
-                vphi2d = self.gas["vphi"].data
-                vphi3d = vphi2d.reshape(1, vphi2d.shape[0], vphi2d.shape[1]) * np.ones((len(zmed), 1, 1))
-            # vertical velocity default 0
-            try:
-                vunit = getattr(self.gas["vr"].data, "units", None) or getattr(self.gas["vphi"].data, "units", None)
-            except Exception:
-                vunit = None
-            zeros = np.zeros((len(zmed), new_mesh.nrad, new_mesh.nsec))
-            vz3d = zeros if vunit is None else zeros * vunit
-
-            # mutate model
-            self.mesh = new_mesh
-            self.coord_system = "cylindrical"
-            new_fields: Dict[str, Field] = {}
-            new_fields["density"] = Field(data=rho3d, mesh=new_mesh, quantity="density", axis_order=("z", "r", "phi"))
-            if vr3d is not None:
-                new_fields["vr"] = Field(data=vr3d, mesh=new_mesh, quantity="vr", axis_order=("z", "r", "phi"))
-            if vphi3d is not None:
-                new_fields["vphi"] = Field(data=vphi3d, mesh=new_mesh, quantity="vphi", axis_order=("z", "r", "phi"))
-            new_fields["vz"] = Field(data=vz3d, mesh=new_mesh, quantity="vz", axis_order=("z", "r", "phi"))
-
-            # replace gas registry
-            self.gas.clear()
-            for k, f in new_fields.items():
-                self.gas_register(k, f)
-            return self
-
-        elif coordinates == "spherical":
-            zmed = _build_z_grid(max(3, int(0.5*n)), 5.0, H)
-            rho3d_cyl = _puff_gaussian(Sigma, H, zmed)
-            # velocities to cylindrical first
-            vr3d_cyl = None
-            vphi3d_cyl = None
-            if "vr" in self.gas:
-                vr2d = self.gas["vr"].data
-                vr3d_cyl = vr2d.reshape(1, vr2d.shape[0], vr2d.shape[1]) * np.ones((len(zmed), 1, 1))
-            if "vphi" in self.gas:
-                vphi2d = self.gas["vphi"].data
-                vphi3d_cyl = vphi2d.reshape(1, vphi2d.shape[0], vphi2d.shape[1]) * np.ones((len(zmed), 1, 1))
-
-            new_mesh = self.mesh.to_spherical_by_scale_height(n, aspect_ratio=h0, zmax_over_H=zmax_over_H)
-
-            # Interpolate cylindrical -> spherical on centers
-            rho3d_sph = _interp_cyl_to_sph(rho3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed)
-            vr3d_sph = _interp_cyl_to_sph(vr3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed) if vr3d_cyl is not None else None
-            vphi3d_sph = _interp_cyl_to_sph(vphi3d_cyl, self.mesh.rmed, zmed, new_mesh.rmed, new_mesh.tmed) if vphi3d_cyl is not None else None
-            # vtheta zeros
-            try:
-                vunit = getattr(self.gas["vr"].data, "units", None) or getattr(self.gas["vphi"].data, "units", None)
-            except Exception:
-                vunit = None
-            zeros = np.zeros((new_mesh.ncol, new_mesh.nrad, new_mesh.nsec))
-            vtheta3d = zeros if vunit is None else zeros * vunit
-
-            self.mesh = new_mesh
-            self.coord_system = "spherical"
-            self.gas.clear()
-            self.gas_register("density", Field(data=rho3d_sph, mesh=new_mesh, quantity="density", axis_order=("theta", "r", "phi")))
-            if vr3d_sph is not None:
-                self.gas_register("vr", Field(data=vr3d_sph, mesh=new_mesh, quantity="vr", axis_order=("theta", "r", "phi")))
-            if vphi3d_sph is not None:
-                self.gas_register("vphi", Field(data=vphi3d_sph, mesh=new_mesh, quantity="vphi", axis_order=("theta", "r", "phi")))
-            self.gas_register("vtheta", Field(data=vtheta3d, mesh=new_mesh, quantity="vtheta", axis_order=("theta", "r", "phi")))
-            return self
-
-        else:
-            raise ValueError("coordinates must be 'cylindrical' or 'spherical'")
+        self.disk.puff_up_disk(n=n, coordinates=coordinates, zmax_over_H=zmax_over_H)
+        return self
 
 
 class SubModel(Model):
@@ -214,6 +128,7 @@ class SubModel(Model):
 
     # Registry API
     def register(self, name: str, field: Field) -> None:
+        validate_field_against_mesh(field, self.mesh)  # type: ignore[arg-type]
         self._fields[name] = field
 
     def register_lazy(self, name: str, builder: Callable[[], Field]) -> None:
@@ -277,97 +192,172 @@ class Disk(SubModel):
                 raise ValueError(f"Missing required parameter in Disk class: {key}")
         self.parameters: Dict[str, Any] = parameters
 
-    def puff_density(
-        self,
-        nz: int = 64,
-        zmax_scale: float = 5.0
-    ):
-        # Validate mesh and required 2D field
-        if self.base.mesh is None:
-            raise ValueError("mesh is not loaded")
+    def _puff_density(self, nz: int = 64, zmax_scale: float = 5.0):
         if "surface_density" not in self.base.gas:
             raise KeyError("Missing gas field 'surface_density'")
 
-        # Input data with units (Quantities)
-        Sigma = self.base.gas["surface_density"].data  # (nrad, nsec)
-        r = self.base.mesh.rmed  # (nrad,)
+        Sigma = self.base.gas["surface_density"].data  # Quantity (nrad, nsec)
+        r     = self.base.mesh.centers("r")            # Quantity (nrad,)   <— changed
 
-        # Disk geometry parameters 
         h0 = self.parameters["aspectratio"]
         fl = self.parameters["flaringindex"]
         r0 = self.parameters["r0"]
 
-        # Build vertical grid and puff Gaussian with unit-aware math
-        H = _scale_height(r, h0, fl, r0)  # (nrad,)
-        zmed = _build_z_grid(nz, zmax_scale, H)  # (nz,)
-        rho3d = _puff_gaussian(Sigma, H, zmed)   # (nz, nrad, nsec)
+        H     = _scale_height(r, h0, fl, r0)             # (nrad,)
+        zmed  = _build_z_grid(nz, zmax_scale, H)         # (nz,)
+        rho3d = _puff_gaussian(Sigma, H, zmed)           # (nz, nrad, nsec) Quantity
 
-        # Promote model to 3D cylindrical: new Mesh shares r,phi; adds z and ndims=3
-        new_mesh = Mesh(
-            coord_system="cylindrical",
-            redge=self.base.mesh.redge,
-            pedge=self.base.mesh.pedge,
-            rmed=self.base.mesh.rmed,
-            pmed=self.base.mesh.pmed,
-            zmed=zmed,
-            ndims=3,
-        )
+        # 3D cylindrical mesh: reuse r/phi, add z centers
+        new_mesh = self.base.mesh.with_vertical(zmed)     # <— pure builder
 
-        # Update base model and all submodels to share the same Mesh
-        self.base.mesh = new_mesh
-        self.mesh = new_mesh
-        if hasattr(self.base, "gas") and self.base.gas is not None:
-            self.base.gas.mesh = new_mesh
-            # Ensure all existing fields reference the new mesh for consistency
-            for _, f in list(self.base.gas.items()):
-                f.mesh = new_mesh
-
-        # Register 3D density field with correct quantity and axis order
+        # Return density (meshless Field) and new mesh
         dens_field = Field(
             data=rho3d,
-            mesh=new_mesh,
             quantity="density",
             axis_order=("z", "r", "phi"),
         )
-        self.base.gas.register("density", dens_field)
+        return dens_field, new_mesh
 
-        # Return for convenience
-        return dens_field
-
-    def puff_velocity(
-        self,
-        nz: int = 64,
-        zmed=None,
-        vr_key: str = "vr",
-        vphi_key: str = "vphi",
-    ):
-        if self.mesh is None:
-            raise ValueError("mesh is not loaded")
-        if vr_key not in self.base.gas or vphi_key not in self.base.gas:
-            missing = [k for k in (vr_key, vphi_key) if k not in self.base.gas]
-            raise KeyError(f"Missing gas field(s): {missing}")
-
-        vr2d = self.base.gas[vr_key].data  # (nrad, nsec)
-        vphi2d = self.base.gas[vphi_key].data  # (nrad, nsec)
+    def _puff_velocity(self, nz: int = 64, zmed=None):
+        vr2d   = self.base.gas['vr'].data   # (nrad, nsec) Quantity
+        vphi2d = self.base.gas['vphi'].data # (nrad, nsec) Quantity
 
         if zmed is None:
-            # Build a symmetric z grid using a default scale height estimate
-            h0 = self.parameters.get("aspectratio")
-            fl = self.parameters.get("flaringindex")
-            r0 = self.parameters.get("r0")
-            H = _scale_height(self.base.mesh.rmed, h0, fl, r0)
+            h0 = self.parameters["aspectratio"]
+            fl = self.parameters["flaringindex"]
+            r0 = self.parameters["r0"]
+            H  = _scale_height(self.base.mesh.centers("r"), h0, fl, r0)
             zmed = _build_z_grid(nz, 5.0, H)
 
         nrad = vr2d.shape[0]
         nsec = vr2d.shape[1]
 
-        vr3d = vr2d.reshape(1, nrad, nsec) * np.ones((len(zmed), 1, 1))
-        vphi3d = vphi2d.reshape(1, nrad, nsec) * np.ones((len(zmed), 1, 1))
+        ones  = np.ones((len(zmed), 1, 1))
+        vr3d   = vr2d.reshape(1, nrad, nsec)  * ones
+        vphi3d = vphi2d.reshape(1, nrad, nsec) * ones
 
         return {"vr3d_cyl": vr3d, "vphi3d_cyl": vphi3d, "zmed": zmed}
+    
+    def puff_up_disk(
+    self,
+    n: int,
+    coordinates: str = "cylindrical",
+    zmax_over_H: float = 5.0,
+) -> "Model":
+        r  = self.base.mesh.centers("r")
+        h0 = self.parameters["aspectratio"]
+        fl = self.parameters["flaringindex"]
+        r0 = self.parameters["r0"]
+
+        if coordinates == "cylindrical":
+            # 1) Build density & get new mesh (pure function)
+            dens_field, new_mesh = self._puff_density(nz=n, zmax_scale=zmax_over_H)
+
+            # 2) Lift velocities; use the z grid from new mesh
+            vel = self._puff_velocity(nz=n, zmed=new_mesh.centers("z"))
+
+            # 3) Update all mesh references in the model
+            self.base.mesh = new_mesh
+            self.mesh = new_mesh
+            if hasattr(self.base, "gas") and self.base.gas is not None:
+                self.base.gas.mesh = new_mesh
+
+            new_fields: Dict[str, Field] = {}
+            new_fields["density"] = dens_field
+
+            if "vr" in self.base.gas:
+                new_fields["vr"] = Field(
+                    quantity="vr",
+                    data=vel["vr3d_cyl"],
+                    axis_order=("z", "r", "phi"),
+                )
+            if "vphi" in self.base.gas:
+                new_fields["vphi"] = Field(
+                    quantity="vphi",
+                    data=vel["vphi3d_cyl"],
+                    axis_order=("z", "r", "phi"),
+                )
+
+            # vz = 0 with velocity units if available
+            vunit = (getattr(self.base.gas["vr"].data, "units", None)
+                    if "vr" in self.base.gas else
+                    getattr(self.base.gas["vphi"].data, "units", None) if "vphi" in self.base.gas else None)
+            nr = int(new_mesh.ncell("r") or 0)
+            nphi = int(new_mesh.ncell("phi") or 0)
+            vz = np.zeros((len(new_mesh.centers("z")), nr, nphi))
+            if vunit is not None:
+                vz = vz * vunit
+            new_fields["vz"] = Field(quantity="vz", data=vz, axis_order=("z", "r", "phi"))
+
+            self.base.gas.clear()
+            for k, f in new_fields.items():
+                self.base.gas_register(k, f)
+            self.coord_system = "cylindrical"
+            return self
+
+        elif coordinates == "spherical":
+            # Puff in cyl at half the target polar resolution for economy
+            nz_cyl = max(3, int(0.5 * n))
+            dens_field_cyl, cyl_mesh = self._puff_density(nz=nz_cyl, zmax_scale=zmax_over_H)
+            vel = self._puff_velocity(nz=nz_cyl, zmed=cyl_mesh.centers("z"))
+            zmed = cyl_mesh.centers("z")
+
+            # Build spherical mesh with n polar cells
+            sph_mesh = cyl_mesh.to_spherical_by_scale_height(
+                ncol=n, aspect_ratio=h0, zmax_over_H=zmax_over_H
+            )
+
+            # Interpolate cyl -> sph on centers
+            r_cyl = cyl_mesh.centers("r")
+            r_sph = sph_mesh.centers("r")
+            t_sph = sph_mesh.centers("theta")
+
+            # Extract units before interpolation and reattach after
+            rho_units = getattr(dens_field_cyl.data, "units", None)
+            vr_units = getattr(vel["vr3d_cyl"], "units", None) if "vr" in self.base.gas else None
+            vphi_units = getattr(vel["vphi3d_cyl"], "units", None) if "vphi" in self.base.gas else None
+
+            rho_sph_raw = _interp_cyl_to_sph(dens_field_cyl.data, r_cyl, zmed, r_sph, t_sph)
+            vr_sph_raw = _interp_cyl_to_sph(vel["vr3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vr" in self.base.gas else None
+            vphi_sph_raw = _interp_cyl_to_sph(vel["vphi3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vphi" in self.base.gas else None
+
+            # Reattach units
+            rho_sph = rho_sph_raw * rho_units if rho_units else rho_sph_raw
+            vr_sph = vr_sph_raw * vr_units if vr_units and vr_sph_raw is not None else None
+            vphi_sph = vphi_sph_raw * vphi_units if vphi_units and vphi_sph_raw is not None else None
+
+            # vtheta = 0 with proper unit
+            vunit = (getattr(self.base.gas["vr"].data, "units", None)
+                    if "vr" in self.base.gas else
+                    getattr(self.base.gas["vphi"].data, "units", None) if "vphi" in self.base.gas else None)
+            ntheta = int(sph_mesh.ncell("theta") or 0)
+            nr = int(sph_mesh.ncell("r") or 0)
+            nphi = int(sph_mesh.ncell("phi") or 0)
+            vtheta = np.zeros((ntheta, nr, nphi))
+            if vunit is not None:
+                vtheta = vtheta * vunit
+
+            # Commit spherical mesh + fields
+            self.base.mesh = sph_mesh
+            self.mesh = sph_mesh
+            if hasattr(self.base, "gas") and self.base.gas is not None:
+                self.base.gas.mesh = sph_mesh
+            self.coord_system = "spherical"
+
+            self.base.gas.clear()
+            self.base.gas_register("density", Field(quantity="density", data=rho_sph, axis_order=("theta","r","phi")))
+            if vr_sph is not None:
+                self.base.gas_register("vr", Field(quantity="vr", data=vr_sph, axis_order=("theta","r","phi")))
+            if vphi_sph is not None:
+                self.base.gas_register("vphi", Field(quantity="vphi", data=vphi_sph, axis_order=("theta","r","phi")))
+            self.base.gas_register("vtheta", Field(quantity="vtheta", data=vtheta, axis_order=("theta","r","phi")))
+            return self
+
+        else:
+            raise ValueError("coordinates must be 'cylindrical' or 'spherical'")
 
 
-def _scale_height(r: np.ndarray, h0: float, flaringindex: float, r0: float) -> np.ndarray:
+def _scale_height(r: Quantity, h0: Quantity, flaringindex: Quantity, r0: Quantity) -> Quantity:
     return (h0 * (r / r0) ** flaringindex) * r
 
 
@@ -434,40 +424,51 @@ def puff_up_model(
     model: "Model",
     n: int,
     coordinates: str = "cylindrical",
-    zmax_over_H: float = 5.0
+    zmax_over_H: float = 5.0,
 ) -> "Model":
 
     new = Model()
-    new.coord_system = model.mesh.coord_system
-    new.variables = dict(model.variables)
+    new.coord_system    = model.mesh.coord_system  # type: ignore[union-attr]
+    new.variables       = dict(model.variables)
     new.compile_options = dict(model.compile_options)
-    new.macros = dict(model.macros)
-    new.mesh = Mesh(coord_system=model.mesh.coord_system, 
-                    axes={"r": Axis(edges=model.mesh.redge), 
-                          "phi": Axis(edges=model.mesh.pedge), 
-                          "z": Axis(edges=model.mesh.zmed)})
-    
-    new.file_units = model.file_units
-    new.directory = model.directory
-    new.n_file = model.n_file
-    new.filename = model.filename
-    new.gas = SubModel(new)
-    # copy gas fields to the new model (share data, update mesh reference)
-    try:
-        for name, f in model.gas.items():
-            new_field = Field(data=f.data, mesh=new.mesh, quantity=f.quantity, axis_order=f.axis_order)
-            new.gas_register(name, new_field)
-    except Exception:
-        pass
-    try:
-        if hasattr(model, "disk") and model.disk is not None:
-            new.disk = Disk(new, model.disk.parameters)
-    except Exception:
-        pass
-    # perform in-place puff on the new model
-    return new.puff_up_model(
-        n,
-        coordinates=coordinates,
-        zmax_over_H=zmax_over_H
-    )
+    new.macros          = dict(model.macros)
 
+    cs = model.mesh.coord_system  # type: ignore[union-attr]
+
+    if cs == "cylindrical":
+        # clone ONLY r/phi; z will be added by the puff step
+        new.mesh = Mesh.cylindrical(
+            r=Axis(edges=model.mesh.edges("r"),   centers=model.mesh.centers("r")),
+            phi=Axis(edges=model.mesh.edges("phi"), centers=model.mesh.centers("phi")),
+        )
+    elif cs == "spherical":
+        # clone r/(theta?)/phi exactly as present
+        new.mesh = Mesh.spherical(
+            r=Axis(edges=model.mesh.edges("r"), centers=model.mesh.centers("r")),
+            theta=(
+                Axis(edges=model.mesh.edges("theta"), centers=model.mesh.centers("theta"))
+                if model.mesh.ncell("theta") else None
+            ),
+            phi=Axis(edges=model.mesh.edges("phi"), centers=model.mesh.centers("phi")),
+        )
+    else:
+        # Explicitly unsupported in your pipeline
+        raise ValueError("Cartesian meshes are not supported for puffing.")
+
+    new.file_units = model.file_units
+    new.directory  = model.directory
+    new.n_file     = model.n_file
+    new.filename   = model.filename
+
+    # submodels
+    new.gas  = SubModel(new)
+    if getattr(model, "disk", None) is not None:
+        new.disk = Disk(new, model.disk.parameters)
+
+    # copy gas fields (mesh-less Fields; share data)
+    for name, f in model.gas.items():
+        new.gas_register(name, Field(data=f.data, quantity=f.quantity, axis_order=f.axis_order))
+
+    # perform the puff on the clone
+    new.disk.puff_up_disk(n, coordinates=coordinates, zmax_over_H=zmax_over_H)
+    return new
