@@ -350,9 +350,23 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
             raise FileNotFoundError("Cannot construct 3D mesh: missing domain edges and fallbacks")
 
         # Cell counts
-        nsec = int(pedge.size - 1)
-        nrad = int(redge.size - 1)
-        ncol = int(tedge.size - 1)
+        # Note: FARGO3D domain files include ghost zones (3 on each side) for radial and vertical directions
+        # The azimuthal direction is periodic and does not have ghost zones
+        nsec_raw = int(pedge.size - 1)
+        nrad_raw = int(redge.size - 1)
+        ncol_raw = int(tedge.size - 1)
+        
+        # Account for 6 ghost zones (3 on each side) in radial and colatitude
+        # No ghost zones in azimuthal (periodic boundary)
+        nsec = nsec_raw
+        nrad = nrad_raw - 6
+        ncol = ncol_raw - 6
+        
+        # Adjust edges to exclude ghost zones
+        # FARGO3D domain files: first 3 are lower ghost, last 3 are upper ghost
+        redge = redge[3:-3]
+        tedge = tedge[3:-3]
+        # pedge does not need adjustment (no ghost zones in azimuthal)
 
         mesh = Mesh.spherical(r=Axis(edges=redge), 
                               phi=Axis(edges=pedge), 
@@ -369,20 +383,30 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
             return None
         arr = np.fromfile(p, dtype="float64")
         if is_3d:
-            # Attempt to infer trailing dimension if unknown
+            # FARGO3D stores 3D data in (ncol, nrad, nsec) order (colatitude, radius, azimuth)
+            # This is the native output format from FARGO3D simulations
             try:
-                arr = arr.reshape(nrad, nsec, ncol)
+                arr = arr.reshape(ncol, nrad, nsec)
             except Exception:
-                logger.warning(f"Reshape to (nrad,nsec,ncol) failed for {p}; attempting auto-infer of ncol")
+                logger.warning(f"Reshape to (ncol,nrad,nsec) failed for {p}; attempting auto-infer of dimensions")
                 if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
                     inferred_ncol = arr.size // (nrad * nsec)
-                    arr = arr.reshape(nrad, nsec, inferred_ncol)
+                    arr = arr.reshape(inferred_ncol, nrad, nsec)
                     logger.info(f"Inferred ncol={inferred_ncol} from file size for {p}")
                 else:
                     raise
+            
+            # Apply azimuthal roll by nsec/2 (FARGO3D convention: origin at x-axis, needs shift to align with standard coordinates)
+            arr = np.roll(arr, shift=int(nsec//2), axis=2)
+            
+            # Transpose to (r, phi, theta) order for consistency with mesh
+            arr = np.transpose(arr, (1, 2, 0))  # (ncol, nrad, nsec) -> (nrad, nsec, ncol)
             axes = ("r", "phi", "theta")
         else:
             arr = arr.reshape(nrad, nsec)
+            # For FARGO3D runs (indicated by presence of variables.par), apply azimuthal roll
+            if (directory / "variables.par").exists():
+                arr = np.roll(arr, shift=int(nsec//2), axis=1)
             axes = ("r", "phi")
         arr = arr * units
         return Field(

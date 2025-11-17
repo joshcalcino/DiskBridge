@@ -250,10 +250,7 @@ class Disk(SubModel):
         r0 = self.parameters["r0"]
 
         if coordinates == "cylindrical":
-            # 1) Build density & get new mesh (pure function)
             dens_field, new_mesh = self._puff_density(nz=n, zmax_scale=zmax_over_H)
-
-            # 2) Lift velocities; use the z grid from new mesh
             vel = self._puff_velocity(nz=n, zmed=new_mesh.centers("z"))
 
             # 3) Update all mesh references in the model
@@ -452,7 +449,6 @@ def puff_up_model(
             phi=Axis(edges=model.mesh.edges("phi"), centers=model.mesh.centers("phi")),
         )
     else:
-        # Explicitly unsupported in your pipeline
         raise ValueError("Cartesian meshes are not supported for puffing.")
 
     new.file_units = model.file_units
