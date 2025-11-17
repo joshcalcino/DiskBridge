@@ -8,7 +8,7 @@ import pint
 from ._config import read_config
 
 # Global registry
-units = pint.UnitRegistry()
+units = pint.UnitRegistry(system='cgs')
 Quantity = units.Quantity
 
 

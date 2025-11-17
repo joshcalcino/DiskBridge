@@ -20,11 +20,13 @@ density = "kg/m^3"
 [units.definitions]
 solar_mass = "1.988461e30 kg"
 solar_radius = "6.959500e8 m"
+solar_luminosity = "3.8525e33 erg/s"
+solar_temperature = "5.780e3 K"
 earth_mass = "5.979e24 kg"
 earth_radius = "6.371315e6 m"
 jupiter_mass = "1.89813e27 kg"
+jupiter_radius = "7.1492e7 m"
 
-au = "149597870700 m"
 
 [arrays.dimensions]
 # minimal arrays used early on

@@ -109,13 +109,13 @@ class Model:
         return self
 
 
-class SubModel(Model):
+class SubModel:
+    """Component that holds/modifies fields in a region."""
 
-    def __init__(self, base: Model):
-        self.base = base
-        self.mesh = base.mesh
-        self.disk = base.disk
-        self.coord_system = base.coord_system
+    def __init__(self, parent: Model):
+        self.parent = parent
+        self.mesh = parent.mesh
+        self.coord_system = parent.coord_system
         self._fields: Dict[str, Field] = {}
         self._lazy: Dict[str, Callable[[], Field]] = {}
 
@@ -190,7 +190,6 @@ class SubModel(Model):
         Returns:
             Field containing boolean mask (True = included)
         """
-        import numpy as np
         
         mesh = self.mesh
         if mesh is None:
@@ -269,7 +268,6 @@ class SubModel(Model):
         Returns:
             Field containing boolean mask
         """
-        import numpy as np
         
         # Get density from the submodel
         if 'density' in self:
@@ -333,7 +331,6 @@ class SubModel(Model):
         Returns:
             Field containing mask
         """
-        import numpy as np
         
         mesh = self.mesh
         
@@ -384,6 +381,7 @@ class SubModel(Model):
 
 
 class Disk(SubModel):
+    """Disk component with disk-specific operations."""
 
     _required_parameters = [
         "aspectratio",
@@ -391,19 +389,29 @@ class Disk(SubModel):
         "r0"
     ]
 
-    def __init__(self, base: Model, parameters: Dict[str, Any]):
-        super().__init__(base)
+    def __init__(self, parent: Model, parameters: Dict[str, Any]):
+        super().__init__(parent)
         for key in self._required_parameters:
             if key not in parameters:
                 raise ValueError(f"Missing required parameter in Disk class: {key}")
         self.parameters: Dict[str, Any] = parameters
+    
+    @property
+    def gas(self) -> SubModel:
+        """Access to gas fields (convenience accessor to parent.gas)."""
+        return self.parent.gas
+    
+    @property
+    def dust(self):
+        """Access to dust fields (convenience accessor to parent.dust)."""
+        return self.parent.dust
 
     def _puff_density(self, nz: int = 64, zmax_scale: float = 5.0):
-        if "surface_density" not in self.base.gas:
+        if "surface_density" not in self.parent.gas:
             raise KeyError("Missing gas field 'surface_density'")
 
-        Sigma = self.base.gas["surface_density"].data  # Quantity (nrad, nsec)
-        r     = self.base.mesh.centers("r")            # Quantity (nrad,)   <— changed
+        Sigma = self.parent.gas["surface_density"].data  # Quantity (nrad, nsec)
+        r     = self.parent.mesh.centers("r")            # Quantity (nrad,)
 
         h0 = self.parameters["aspectratio"]
         fl = self.parameters["flaringindex"]
@@ -414,7 +422,7 @@ class Disk(SubModel):
         rho3d = _puff_gaussian(Sigma, H, zmed)           # (nz, nrad, nsec) Quantity
 
         # 3D cylindrical mesh: reuse r/phi, add z centers
-        new_mesh = self.base.mesh.with_vertical(zmed)     # <— pure builder
+        new_mesh = self.parent.mesh.with_vertical(zmed)
 
         # Return density (meshless Field) and new mesh
         dens_field = Field(
@@ -425,14 +433,14 @@ class Disk(SubModel):
         return dens_field, new_mesh
 
     def _puff_velocity(self, nz: int = 64, zmed=None):
-        vr2d   = self.base.gas['vr'].data   # (nrad, nsec) Quantity
-        vphi2d = self.base.gas['vphi'].data # (nrad, nsec) Quantity
+        vr2d   = self.parent.gas['vr'].data   # (nrad, nsec) Quantity
+        vphi2d = self.parent.gas['vphi'].data # (nrad, nsec) Quantity
 
         if zmed is None:
             h0 = self.parameters["aspectratio"]
             fl = self.parameters["flaringindex"]
             r0 = self.parameters["r0"]
-            H  = _scale_height(self.base.mesh.centers("r"), h0, fl, r0)
+            H  = _scale_height(self.parent.mesh.centers("r"), h0, fl, r0)
             zmed = _build_z_grid(nz, 5.0, H)
 
         nrad = vr2d.shape[0]
@@ -445,12 +453,12 @@ class Disk(SubModel):
         return {"vr3d_cyl": vr3d, "vphi3d_cyl": vphi3d, "zmed": zmed}
     
     def puff_up_disk(
-    self,
-    n: int,
-    coordinates: str = "cylindrical",
-    zmax_over_H: float = 5.0,
-) -> "Model":
-        r  = self.base.mesh.centers("r")
+        self,
+        n: int,
+        coordinates: str = "cylindrical",
+        zmax_over_H: float = 5.0,
+    ) -> "Model":
+        r  = self.parent.mesh.centers("r")
         h0 = self.parameters["aspectratio"]
         fl = self.parameters["flaringindex"]
         r0 = self.parameters["r0"]
@@ -460,21 +468,21 @@ class Disk(SubModel):
             vel = self._puff_velocity(nz=n, zmed=new_mesh.centers("z"))
 
             # 3) Update all mesh references in the model
-            self.base.mesh = new_mesh
+            self.parent.mesh = new_mesh
             self.mesh = new_mesh
-            if hasattr(self.base, "gas") and self.base.gas is not None:
-                self.base.gas.mesh = new_mesh
+            if hasattr(self.parent, "gas") and self.parent.gas is not None:
+                self.parent.gas.mesh = new_mesh
 
             new_fields: Dict[str, Field] = {}
             new_fields["density"] = dens_field
 
-            if "vr" in self.base.gas:
+            if "vr" in self.parent.gas:
                 new_fields["vr"] = Field(
                     quantity="vr",
                     data=vel["vr3d_cyl"],
                     axis_order=("z", "r", "phi"),
                 )
-            if "vphi" in self.base.gas:
+            if "vphi" in self.parent.gas:
                 new_fields["vphi"] = Field(
                     quantity="vphi",
                     data=vel["vphi3d_cyl"],
@@ -482,9 +490,9 @@ class Disk(SubModel):
                 )
 
             # vz = 0 with velocity units if available
-            vunit = (getattr(self.base.gas["vr"].data, "units", None)
-                    if "vr" in self.base.gas else
-                    getattr(self.base.gas["vphi"].data, "units", None) if "vphi" in self.base.gas else None)
+            vunit = (getattr(self.parent.gas["vr"].data, "units", None)
+                    if "vr" in self.parent.gas else
+                    getattr(self.parent.gas["vphi"].data, "units", None) if "vphi" in self.parent.gas else None)
             nr = int(new_mesh.ncell("r") or 0)
             nphi = int(new_mesh.ncell("phi") or 0)
             vz = np.zeros((len(new_mesh.centers("z")), nr, nphi))
@@ -492,9 +500,9 @@ class Disk(SubModel):
                 vz = vz * vunit
             new_fields["vz"] = Field(quantity="vz", data=vz, axis_order=("z", "r", "phi"))
 
-            self.base.gas.clear()
+            self.parent.gas.clear()
             for k, f in new_fields.items():
-                self.base.gas_register(k, f)
+                self.parent.gas_register(k, f)
             self.coord_system = "cylindrical"
             return self
 
@@ -517,12 +525,12 @@ class Disk(SubModel):
 
             # Extract units before interpolation and reattach after
             rho_units = getattr(dens_field_cyl.data, "units", None)
-            vr_units = getattr(vel["vr3d_cyl"], "units", None) if "vr" in self.base.gas else None
-            vphi_units = getattr(vel["vphi3d_cyl"], "units", None) if "vphi" in self.base.gas else None
+            vr_units = getattr(vel["vr3d_cyl"], "units", None) if "vr" in self.parent.gas else None
+            vphi_units = getattr(vel["vphi3d_cyl"], "units", None) if "vphi" in self.parent.gas else None
 
             rho_sph_raw = _interp_cyl_to_sph(dens_field_cyl.data, r_cyl, zmed, r_sph, t_sph)
-            vr_sph_raw = _interp_cyl_to_sph(vel["vr3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vr" in self.base.gas else None
-            vphi_sph_raw = _interp_cyl_to_sph(vel["vphi3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vphi" in self.base.gas else None
+            vr_sph_raw = _interp_cyl_to_sph(vel["vr3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vr" in self.parent.gas else None
+            vphi_sph_raw = _interp_cyl_to_sph(vel["vphi3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vphi" in self.parent.gas else None
 
             # Reattach units
             rho_sph = rho_sph_raw * rho_units if rho_units else rho_sph_raw
@@ -530,9 +538,9 @@ class Disk(SubModel):
             vphi_sph = vphi_sph_raw * vphi_units if vphi_units and vphi_sph_raw is not None else None
 
             # vtheta = 0 with proper unit
-            vunit = (getattr(self.base.gas["vr"].data, "units", None)
-                    if "vr" in self.base.gas else
-                    getattr(self.base.gas["vphi"].data, "units", None) if "vphi" in self.base.gas else None)
+            vunit = (getattr(self.parent.gas["vr"].data, "units", None)
+                    if "vr" in self.parent.gas else
+                    getattr(self.parent.gas["vphi"].data, "units", None) if "vphi" in self.parent.gas else None)
             ntheta = int(sph_mesh.ncell("theta") or 0)
             nr = int(sph_mesh.ncell("r") or 0)
             nphi = int(sph_mesh.ncell("phi") or 0)
@@ -541,19 +549,19 @@ class Disk(SubModel):
                 vtheta = vtheta * vunit
 
             # Commit spherical mesh + fields
-            self.base.mesh = sph_mesh
+            self.parent.mesh = sph_mesh
             self.mesh = sph_mesh
-            if hasattr(self.base, "gas") and self.base.gas is not None:
-                self.base.gas.mesh = sph_mesh
+            if hasattr(self.parent, "gas") and self.parent.gas is not None:
+                self.parent.gas.mesh = sph_mesh
             self.coord_system = "spherical"
 
-            self.base.gas.clear()
-            self.base.gas_register("density", Field(quantity="density", data=rho_sph, axis_order=("theta","r","phi")))
+            self.parent.gas.clear()
+            self.parent.gas_register("density", Field(quantity="density", data=rho_sph, axis_order=("theta","r","phi")))
             if vr_sph is not None:
-                self.base.gas_register("vr", Field(quantity="vr", data=vr_sph, axis_order=("theta","r","phi")))
+                self.parent.gas_register("vr", Field(quantity="vr", data=vr_sph, axis_order=("theta","r","phi")))
             if vphi_sph is not None:
-                self.base.gas_register("vphi", Field(quantity="vphi", data=vphi_sph, axis_order=("theta","r","phi")))
-            self.base.gas_register("vtheta", Field(quantity="vtheta", data=vtheta, axis_order=("theta","r","phi")))
+                self.parent.gas_register("vphi", Field(quantity="vphi", data=vphi_sph, axis_order=("theta","r","phi")))
+            self.parent.gas_register("vtheta", Field(quantity="vtheta", data=vtheta, axis_order=("theta","r","phi")))
             return self
 
         else:

@@ -216,9 +216,6 @@ class Dust(SubModel):
         # Call SubModel.__init__
         super().__init__(parent_model)
         
-        # Use base for consistency with SubModel
-        self.parent = parent_model  # Keep for backwards compatibility
-        
         # Dust-specific fields
         self._dust_fields: Dict[str, Field] = {}
         self._lazy_builders: Dict[str, Callable[[], Field]] = {}
