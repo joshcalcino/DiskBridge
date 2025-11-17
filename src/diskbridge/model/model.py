@@ -9,7 +9,7 @@ from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
-from .utils import validate_field_against_mesh  # <— add
+from .utils import validate_field_against_mesh
 
 
 class Model:
@@ -29,9 +29,10 @@ class Model:
         self.n_file: Optional[int] = None
         self.filename: Optional[str] = None 
         
-        # Initialize properties of the simulation
+        # Initialize submodels
         self.gas: SubModel = None
         self.disk: Disk = None
+        self.dust: 'Dust' = None  # Dust submodel
         
     def get_variables(self) -> Dict[str, Any]:
         return dict(self.variables)
@@ -84,6 +85,10 @@ class Model:
         
         # Initialize submodels
         self.gas = SubModel(self)
+        
+        # Initialize Dust submodel (lazy import to avoid circular dependency)
+        from .dust import Dust
+        self.dust = Dust(self)
 
         # Initialize Disk parameters if present
         if "disk_parameters" in snap:
@@ -111,15 +116,6 @@ class SubModel(Model):
         self.mesh = base.mesh
         self.disk = base.disk
         self.coord_system = base.coord_system
-        self.variables = {}
-        self.compile_options = {}
-        self.macros = {}
-        self.file_units = base.file_units 
-        self.directory = None
-        self.n_file = None
-        self.filename = None
-
-        # Internal field storage and lazy builders
         self._fields: Dict[str, Field] = {}
         self._lazy: Dict[str, Callable[[], Field]] = {}
 
@@ -169,11 +165,221 @@ class SubModel(Model):
     def clear(self) -> None:
         self._fields.clear()
 
-    def _get_mask(self):
-        pass 
-
-    def set_mask(self):
-        pass
+    def set_mask_from_geometry(
+        self,
+        r_min: Optional[Quantity] = None,
+        r_max: Optional[Quantity] = None,
+        z_min: Optional[Quantity] = None,
+        z_max: Optional[Quantity] = None,
+        theta_min: Optional[Quantity] = None,
+        theta_max: Optional[Quantity] = None,
+    ) -> Field:
+        """Create mask based on geometric bounds.
+        
+        For spherical coordinates, use theta_min/theta_max (colatitude).
+        For cylindrical coordinates, use z_min/z_max.
+        
+        Args:
+            r_min: Minimum radius
+            r_max: Maximum radius
+            z_min: Minimum height (cylindrical)
+            z_max: Maximum height (cylindrical)
+            theta_min: Minimum colatitude (spherical)
+            theta_max: Maximum colatitude (spherical)
+            
+        Returns:
+            Field containing boolean mask (True = included)
+        """
+        import numpy as np
+        
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+            
+        # Get coordinate arrays
+        if mesh.coord_system == 'spherical':
+            r = mesh.centers('r')
+            theta = mesh.centers('theta')
+            phi = mesh.centers('phi')
+            
+            r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
+            mask = np.ones_like(r_grid, dtype=bool)
+            
+            if r_min is not None:
+                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+            if r_max is not None:
+                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+            if theta_min is not None:
+                mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
+            if theta_max is not None:
+                mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
+                
+            axis_order = ('r', 'phi', 'theta')
+            
+        elif mesh.coord_system == 'cylindrical':
+            r = mesh.centers('r')
+            phi = mesh.centers('phi')
+            z = mesh.centers('z')
+            
+            r_grid, phi_grid, z_grid = np.meshgrid(r, phi, z, indexing='ij')
+            mask = np.ones_like(r_grid, dtype=bool)
+            
+            if r_min is not None:
+                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+            if r_max is not None:
+                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+            if z_min is not None:
+                mask &= (z_grid.magnitude >= z_min.to(z.units).magnitude)
+            if z_max is not None:
+                mask &= (z_grid.magnitude <= z_max.to(z.units).magnitude)
+                
+            axis_order = ('r', 'phi', 'z')
+        else:
+            raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+            
+        mask_quantity = Quantity(mask, 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        self.mask = mask_field
+        
+        logger.info(
+            f"{self.__class__.__name__} mask set: {np.sum(mask)} / {mask.size} cells "
+            f"({100*np.sum(mask)/mask.size:.1f}%)"
+        )
+        
+        return mask_field
+        
+    def set_mask_from_density(
+        self,
+        density_threshold: Quantity,
+        r_min: Optional[Quantity] = None,
+        r_max: Optional[Quantity] = None,
+    ) -> Field:
+        """Create mask based on density threshold.
+        
+        Args:
+            density_threshold: Minimum density for inclusion
+            r_min: Optional minimum radius
+            r_max: Optional maximum radius
+            
+        Returns:
+            Field containing boolean mask
+        """
+        import numpy as np
+        
+        # Get density from the submodel
+        if 'density' in self:
+            density = self['density'].data
+        else:
+            raise KeyError("No density field found in submodel")
+            
+        threshold_val = density_threshold.to(density.units).magnitude
+        mask = (density.magnitude >= threshold_val)
+        
+        # Apply radial constraints if given
+        if r_min is not None or r_max is not None:
+            mesh = self.mesh
+            if mesh.coord_system == 'spherical':
+                r = mesh.centers('r')
+                phi = mesh.centers('phi')
+                theta = mesh.centers('theta')
+                r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
+                axis_order = ('r', 'phi', 'theta')
+            elif mesh.coord_system == 'cylindrical':
+                r = mesh.centers('r')
+                phi = mesh.centers('phi')
+                z = mesh.centers('z')
+                r_grid, _, _ = np.meshgrid(r, phi, z, indexing='ij')
+                axis_order = ('r', 'phi', 'z')
+            else:
+                raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+                
+            if r_min is not None:
+                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+            if r_max is not None:
+                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+        else:
+            if mesh.coord_system == 'spherical':
+                axis_order = ('r', 'phi', 'theta')
+            else:
+                axis_order = ('r', 'phi', 'z')
+                
+        mask_quantity = Quantity(mask, 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        self.mask = mask_field
+        
+        logger.info(
+            f"{self.__class__.__name__} mask set (density): {np.sum(mask)} / {mask.size} cells "
+            f"({100*np.sum(mask)/mask.size:.1f}%)"
+        )
+        
+        return mask_field
+        
+    def set_mask_from_array(self, mask_array: np.ndarray) -> Field:
+        """Set mask from custom boolean array.
+        
+        Args:
+            mask_array: Boolean array matching grid shape
+            
+        Returns:
+            Field containing mask
+        """
+        import numpy as np
+        
+        mesh = self.mesh
+        
+        # Verify shape
+        if 'density' in self:
+            expected_shape = self['density'].data.shape
+        else:
+            # Get shape from mesh
+            if mesh.coord_system == 'spherical':
+                expected_shape = (len(mesh.axes['r'].centers),
+                                len(mesh.axes['phi'].centers),
+                                len(mesh.axes['theta'].centers))
+            elif mesh.coord_system == 'cylindrical':
+                expected_shape = (len(mesh.axes['r'].centers),
+                                len(mesh.axes['phi'].centers),
+                                len(mesh.axes['z'].centers))
+            else:
+                raise ValueError(f"Cannot determine shape for {mesh.coord_system}")
+            
+        if mask_array.shape != expected_shape:
+            raise ValueError(
+                f"Mask shape {mask_array.shape} doesn't match grid shape {expected_shape}"
+            )
+            
+        if mesh.coord_system == 'spherical':
+            axis_order = ('r', 'phi', 'theta')
+        elif mesh.coord_system == 'cylindrical':
+            axis_order = ('r', 'phi', 'z')
+        else:
+            axis_order = None
+            
+        mask_quantity = Quantity(mask_array.astype(bool), 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        self.mask = mask_field
+        
+        logger.info(
+            f"{self.__class__.__name__} mask set: {np.sum(mask_array)} / {mask_array.size} cells "
+            f"({100*np.sum(mask_array)/mask_array.size:.1f}%)"
+        )
+        
+        return mask_field
 
 
 
@@ -420,7 +626,7 @@ def _interp_cyl_to_sph(cyl: Optional[np.ndarray], r_cyl: np.ndarray, zmed: np.nd
 def puff_up_model(
     model: "Model",
     n: int,
-    coordinates: str = "cylindrical",
+    coordinates: str = "spherical",
     zmax_over_H: float = 5.0,
 ) -> "Model":
 
