@@ -9,7 +9,7 @@ from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
-from .utils import validate_field_against_mesh
+from .utils import validate_field_against_mesh, _interp_cyl_to_sph
 
 
 class Model:
@@ -45,14 +45,73 @@ class Model:
     def gas_register_lazy(self, name: str, builder: Callable[[], Field]) -> None:
         self.gas.register_lazy(name, builder)
 
-    def rescale_length_units(self, factor_or_unit) -> None:
-        # Placeholder: record intent only
-        # Future: apply scaling to mesh edges/centers and to velocity fields
-        setattr(self, "_length_scale", factor_or_unit)
+    def _apply_rescaling(self, length_scale=None, mass_scale=None) -> None:
+        """
+        Internal method to apply length and mass rescaling during initialization.
+        
+        Parameters
+        ----------
+        length_scale : float, optional
+            Dimensionless multiplier for length (e.g., 10 means 1 code_length = 10 au)
+        mass_scale : float, optional
+            Dimensionless multiplier for mass (e.g., 2 means 1 code_mass = 2 M_sun)
+            
+        Notes
+        -----
+        Code units are already defined as:
+        - code_length = 1 au
+        - code_mass = 1 M_sun
+        - code_time = sqrt(au^3 / (G * M_sun))
 
-    def rescale_mass_units(self, factor_or_unit) -> None:
-        # Placeholder: record intent only
-        setattr(self, "_mass_scale", factor_or_unit)
+        """
+        # Get dimensionless scaling factors (default to 1 if not provided)
+        length_factor = float(length_scale) if length_scale is not None else 1.0
+        mass_factor = float(mass_scale) if mass_scale is not None else 1.0
+        
+        # Derived scaling factors based on Keplerian dynamics
+        # Time: T² ∝ L³/M → time_factor = sqrt(length_factor³ / mass_factor)
+        time_factor = np.sqrt(length_factor**3 / mass_factor)
+        
+        # Velocity: V = L/T → velocity_factor = length_factor / time_factor = sqrt(mass_factor / length_factor)
+        velocity_factor = np.sqrt(mass_factor / length_factor)
+        
+        # Apply rescaling only if at least one scale is provided
+        if length_scale is not None or mass_scale is not None:
+            # Rescale mesh coordinates
+            if self.mesh is not None:
+                self.mesh = self.mesh.rescale_length(length_factor)
+            
+            # Rescale gas fields
+            if self.gas is not None:
+                for name, field in list(self.gas.items()):
+                    new_data = field.data
+                    
+                    if 'density' in name or 'surface_density' in name:
+                        # Volume density: ρ = M/L³ → scale by mass_factor/length_factor³
+                        # Surface density: Σ = M/L² → scale by mass_factor/length_factor²
+                        if 'surface' in name:
+                            new_data = field.data * (mass_factor / length_factor**2)
+                        else:
+                            new_data = field.data * (mass_factor / length_factor**3)
+                    
+                    elif 'v' in name and name in ['vr', 'vphi', 'vz', 'vtheta']:
+                        # Velocity: V = L/T → scale by sqrt(M/L)
+                        new_data = field.data * velocity_factor
+                    
+                    # Replace field with rescaled version
+                    if new_data is not field.data:
+                        self.gas[name] = Field(
+                            data=new_data,
+                            quantity=field.quantity,
+                            axis_order=field.axis_order,
+                            attrs=field.attrs
+                        )
+            
+            # Store the scaling factors
+            self.length_scale = length_factor
+            self.mass_scale = mass_factor
+            self.time_scale = time_factor
+            self.velocity_scale = velocity_factor
 
     def load_model(
         self,
@@ -60,9 +119,44 @@ class Model:
         reader: str = "fargo",
         file_n: int = 0,
         file_units: str = "code",
+        length_scale: Optional[float] = None,
+        mass_scale: Optional[float] = None,
     ) -> "Model":
         """
         Load a hydro snapshot and populate this Model, then return self.
+        
+        Parameters
+        ----------
+        path : str or Path
+            Path to the simulation data directory
+        reader : str, optional
+            Reader type (default: "fargo")
+        file_n : int, optional
+            File number to load (default: 0)
+        file_units : str, optional
+            Unit system of the files: 'code', 'cgs', or 'kms' (default: 'code')
+        length_scale : float, optional
+            Dimensionless multiplier for length units. For code units (1 au), 
+            this rescales by this factor (e.g., 10 means 1 code_length = 10 au).
+            Time is also rescaled following Keplerian dynamics.
+        mass_scale : float, optional
+            Dimensionless multiplier for mass units. For code units (1 M_sun),
+            this rescales by this factor (e.g., 2 means 1 code_mass = 2 M_sun).
+            Velocities are rescaled as V -> V*sqrt(mass_scale/length_scale).
+        
+        Returns
+        -------
+        Model
+            The populated model instance
+            
+        Notes
+        -----
+        Rescaling follows Keplerian dynamics where T² ∝ L³/M:
+        - Lengths scale by length_scale
+        - Masses scale by mass_scale  
+        - Times scale by sqrt(length_scale³/mass_scale)
+        - Velocities scale by sqrt(mass_scale/length_scale)
+        - Densities scale by mass_scale/length_scale³
         """
         p = Path(path)
         if reader.lower() == "fargo":
@@ -97,6 +191,17 @@ class Model:
         # Register gas fields
         for name, field in snap["gas_fields"].items():
             self.gas_register(name, field)
+        
+        # Apply rescaling if requested
+        if length_scale is not None or mass_scale is not None:
+            self._apply_rescaling(length_scale=length_scale, mass_scale=mass_scale)
+            # Update SubModel mesh references after rescaling
+            if self.gas is not None:
+                self.gas.mesh = self.mesh
+            if self.dust is not None:
+                self.dust.mesh = self.mesh
+            if hasattr(self, 'disk') and self.disk is not None:
+                self.disk.mesh = self.mesh
 
         return self
 
@@ -407,6 +512,12 @@ class Disk(SubModel):
         return self.parent.dust
 
     def _puff_density(self, nz: int = 64, zmax_scale: float = 5.0):
+        """
+        Puff 2D surface density to 3D volume density in cylindrical coordinates.
+        
+        Follows fargo2radmc3d's approach with proper normalization including
+        the radial coordinate factor for cylindrical geometry and mass conservation.
+        """
         if "surface_density" not in self.parent.gas:
             raise KeyError("Missing gas field 'surface_density'")
 
@@ -417,12 +528,21 @@ class Disk(SubModel):
         fl = self.parameters["flaringindex"]
         r0 = self.parameters["r0"]
 
-        H     = _scale_height(r, h0, fl, r0)             # (nrad,)
-        zmed  = _build_z_grid(nz, zmax_scale, H)         # (nz,)
-        rho3d = _puff_gaussian(Sigma, H, zmed)           # (nz, nrad, nsec) Quantity
+        # Compute dimensionless aspect ratio h(r) = h₀ * (r/r₀)^β
+        h = h0 * (r / r0) ** fl  # dimensionless
+        
+        # Build vertical grid based on maximum scale height
+        H_max = np.max(h * r)  # maximum scale height with units
+        zmed = _build_z_grid(nz, zmax_scale, H_max)  # (nz,) with units
+        
+        # Puff using fargo2radmc3d gas formula (all Quantities)
+        rho3d = _puff_gaussian(Sigma, r, h, zmed)  # (nz, nrad, nsec) Quantity
 
         # 3D cylindrical mesh: reuse r/phi, add z centers
         new_mesh = self.parent.mesh.with_vertical(zmed)
+        
+        # Mass conservation renormalization
+        rho3d = _renormalize_mass_conservation(rho3d, Sigma, new_mesh)
 
         # Return density (meshless Field) and new mesh
         dens_field = Field(
@@ -455,7 +575,7 @@ class Disk(SubModel):
     def puff_up_disk(
         self,
         n: int,
-        coordinates: str = "cylindrical",
+        coordinates: str = "spherical",
         zmax_over_H: float = 5.0,
     ) -> "Model":
         r  = self.parent.mesh.centers("r")
@@ -463,51 +583,9 @@ class Disk(SubModel):
         fl = self.parameters["flaringindex"]
         r0 = self.parameters["r0"]
 
-        if coordinates == "cylindrical":
-            dens_field, new_mesh = self._puff_density(nz=n, zmax_scale=zmax_over_H)
-            vel = self._puff_velocity(nz=n, zmed=new_mesh.centers("z"))
-
-            # 3) Update all mesh references in the model
-            self.parent.mesh = new_mesh
-            self.mesh = new_mesh
-            if hasattr(self.parent, "gas") and self.parent.gas is not None:
-                self.parent.gas.mesh = new_mesh
-
-            new_fields: Dict[str, Field] = {}
-            new_fields["density"] = dens_field
-
-            if "vr" in self.parent.gas:
-                new_fields["vr"] = Field(
-                    quantity="vr",
-                    data=vel["vr3d_cyl"],
-                    axis_order=("z", "r", "phi"),
-                )
-            if "vphi" in self.parent.gas:
-                new_fields["vphi"] = Field(
-                    quantity="vphi",
-                    data=vel["vphi3d_cyl"],
-                    axis_order=("z", "r", "phi"),
-                )
-
-            # vz = 0 with velocity units if available
-            vunit = (getattr(self.parent.gas["vr"].data, "units", None)
-                    if "vr" in self.parent.gas else
-                    getattr(self.parent.gas["vphi"].data, "units", None) if "vphi" in self.parent.gas else None)
-            nr = int(new_mesh.ncell("r") or 0)
-            nphi = int(new_mesh.ncell("phi") or 0)
-            vz = np.zeros((len(new_mesh.centers("z")), nr, nphi))
-            if vunit is not None:
-                vz = vz * vunit
-            new_fields["vz"] = Field(quantity="vz", data=vz, axis_order=("z", "r", "phi"))
-
-            self.parent.gas.clear()
-            for k, f in new_fields.items():
-                self.parent.gas_register(k, f)
-            self.coord_system = "cylindrical"
-            return self
-
-        elif coordinates == "spherical":
-            # Puff in cyl at half the target polar resolution for economy
+        if coordinates == "spherical":
+            # Puff in cylindrical coordinates first, then interpolate to spherical
+            # This matches fargo2radmc3d's approach (gas_density.py lines 130-207)
             nz_cyl = max(3, int(0.5 * n))
             dens_field_cyl, cyl_mesh = self._puff_density(nz=nz_cyl, zmax_scale=zmax_over_H)
             vel = self._puff_velocity(nz=nz_cyl, zmed=cyl_mesh.centers("z"))
@@ -537,6 +615,7 @@ class Disk(SubModel):
             vr_sph = vr_sph_raw * vr_units if vr_units and vr_sph_raw is not None else None
             vphi_sph = vphi_sph_raw * vphi_units if vphi_units and vphi_sph_raw is not None else None
 
+            
             # vtheta = 0 with proper unit
             vunit = (getattr(self.parent.gas["vr"].data, "units", None)
                     if "vr" in self.parent.gas else
@@ -565,70 +644,134 @@ class Disk(SubModel):
             return self
 
         else:
-            raise ValueError("coordinates must be 'cylindrical' or 'spherical'")
+            raise ValueError(f"coordinates must be 'spherical', got '{coordinates}'")
 
 
-def _scale_height(r: Quantity, h0: Quantity, flaringindex: Quantity, r0: Quantity) -> Quantity:
-    return (h0 * (r / r0) ** flaringindex) * r
+def _build_z_grid(nver: int, zmax_scale: float, H_max: Quantity) -> Quantity:
+    """
+    Build vertical grid for cylindrical coordinates.
+    
+    Parameters
+    ----------
+    nver : int
+        Number of vertical cells
+    zmax_scale : float
+        Vertical extent in units of scale height
+    H_max : Quantity
+        Maximum scale height with units
+        
+    Returns
+    -------
+    z : Quantity array (nver,)
+        Vertical grid centers with same units as H_max
+    """
+    zmax = float(zmax_scale) * H_max
+    z_mag = np.linspace(-zmax.magnitude, zmax.magnitude, int(nver))
+    return z_mag * H_max.units
 
 
-def _build_z_grid(nver: int, zmax_scale: float, H: np.ndarray) -> np.ndarray:
-    # Keep units if H is a Quantity by working on magnitude and reattaching units
-    try:
-        zmax_mag = float(zmax_scale) * np.max(getattr(H, "magnitude", H))
-        units = getattr(H, "units", None)
-        z = np.linspace(-zmax_mag, zmax_mag, int(nver))
-        if units is not None:
-            return z * units
-        return z
-    except Exception:
-        zmax = float(zmax_scale) * float(np.max(H))
-        return np.linspace(-zmax, zmax, int(nver))
-
-
-def _puff_gaussian(Sigma: np.ndarray, H: np.ndarray, zmed: np.ndarray) -> np.ndarray:
-    # Unit-aware Gaussian that integrates to Sigma over z
+def _puff_gaussian(Sigma: Quantity, r: Quantity, h: Quantity, zmed: Quantity) -> Quantity:
+    """
+    Gaussian vertical puffing matching fargo2radmc3d's gas formula.
+    
+    Formula: rho(z) = Sigma / (sqrt(2π) * r * h) * exp(-0.5*(z/(h*r))²)
+    
+    Parameters
+    ----------
+    Sigma : Quantity (nrad, nsec)
+        Surface density
+    r : Quantity (nrad,)
+        Radial centers
+    h : Quantity (nrad,)
+        Dimensionless aspect ratio h(r)
+    zmed : Quantity (nver,)
+        Vertical grid centers
+        
+    Returns
+    -------
+    rho : Quantity (nver, nrad, nsec)
+        3D volume density
+    """
     nrad, nsec = Sigma.shape
-    nver = zmed.size
-    H2 = H.reshape(1, nrad, 1)
-    Z = zmed.reshape(nver, 1, 1)
-    norm = 1.0 / (np.sqrt(2.0 * np.pi) * H2)
-    expo = np.exp(-0.5 * (Z / H2) ** 2)
-    rho = Sigma.reshape(1, nrad, nsec) * norm * expo
+    nver = len(zmed)
+    
+    # Work directly with Quantities - Pint will handle unit conversions
+    # Broadcast arrays: z(nver,1,1), r(1,nrad,1), h(1,nrad,1), Sigma(1,nrad,nsec)
+    Z = zmed.magnitude.reshape(nver, 1, 1)
+    R = r.magnitude.reshape(1, nrad, 1)
+    H = h.magnitude.reshape(1, nrad, 1)
+    S = Sigma.magnitude.reshape(1, nrad, nsec)
+    
+    # Exponential factor: exp(-0.5 * (z/(h*r))²) - dimensionless
+    expo = np.exp(-0.5 * (Z / (H * R)) ** 2)
+    
+    # Normalization: 1 / (sqrt(2π) * r * h) - units: 1/length
+    norm = 1.0 / (np.sqrt(2.0 * np.pi) * R * H)
+    
+    # Calculate density magnitude
+    rho_mag = S * norm * expo
+    
+    # Reattach units: Sigma/r = surface_density/length = volume_density
+    rho = rho_mag * (Sigma.units / r.units)
+    
     return rho
 
 
-def _interp_cyl_to_sph(cyl: Optional[np.ndarray], r_cyl: np.ndarray, zmed: np.ndarray, r_sph: np.ndarray, tmed_sph: np.ndarray) -> Optional[np.ndarray]:
-    if cyl is None:
-        return None
-    nz, nrad, nsec = cyl.shape
-    nt = len(tmed_sph)
-    out = []
-    for j in range(nt):
-        theta = tmed_sph[j]
-        R = r_sph * np.sin(theta)
-        Z = r_sph * np.cos(theta)
-        slice_j = np.zeros((nrad, nsec))
-        for i in range(nrad):
-            Ri = R[i]
-            Zi = Z[i]
-            ir = int(np.clip(np.searchsorted(r_cyl, Ri) - 1, 0, nrad - 2))
-            iz = int(np.clip(np.searchsorted(zmed, Zi) - 1, 0, nz - 2))
-            r0 = r_cyl[ir]
-            r1 = r_cyl[ir + 1]
-            z0 = zmed[iz]
-            z1 = zmed[iz + 1]
-            dr = (Ri - r0) / (r1 - r0) if r1 != r0 else 0.0
-            dz = (Zi - z0) / (z1 - z0) if z1 != z0 else 0.0
-            c00 = cyl[iz, ir, :]
-            c01 = cyl[iz, ir + 1, :]
-            c10 = cyl[iz + 1, ir, :]
-            c11 = cyl[iz + 1, ir + 1, :]
-            c0 = c00 * (1 - dr) + c01 * dr
-            c1 = c10 * (1 - dr) + c11 * dr
-            slice_j[i, :] = c0 * (1 - dz) + c1 * dz
-        out.append(slice_j)
-    return np.stack(out, axis=0)
+def _renormalize_mass_conservation(rho3d: Quantity, Sigma: Quantity, mesh: Mesh) -> Quantity:
+    """
+    Renormalize 3D density to conserve mass, following fargo2radmc3d's approach.
+    
+    Parameters
+    ----------
+    rho3d : Quantity (nz, nrad, nsec)
+        3D volume density
+    Sigma : Quantity (nrad, nsec)
+        2D surface density
+    mesh : Mesh
+        Cylindrical mesh with z, r, phi axes
+        
+    Returns
+    -------
+    rho3d_norm : Quantity (nz, nrad, nsec)
+        Renormalized 3D volume density
+    """
+    # Get mesh edges  
+    redge = mesh.edges('r')
+    zedge = mesh.edges('z')
+    phiedge = mesh.edges('phi')
+    
+    # Build meshgrid for cell edges (z, r, phi) - work with magnitudes
+    Zedge, Redge, Phiedge = np.meshgrid(zedge.magnitude, redge.magnitude, phiedge.magnitude, indexing='ij')
+    
+    # Cell dimensions
+    dz = Zedge[1:, :-1, :-1] - Zedge[:-1, :-1, :-1]
+    dr = Redge[:-1, 1:, :-1] - Redge[:-1, :-1, :-1]
+    dphi = Phiedge[:-1, :-1, 1:] - Phiedge[:-1, :-1, :-1]
+    
+    # Cell volumes in cylindrical coords: dV = R * dR * dphi * dz  
+    R_centers = Redge[:-1, :-1, :-1] + 0.5 * dr
+    cell_vol = R_centers * dr * dphi * dz  # dimensionless magnitude
+    cell_vol_units = redge.units ** 2 * zedge.units  # r² * z
+    
+    # Total mass in 3D grid
+    total_mass_3d = np.sum(rho3d.magnitude * cell_vol) * (rho3d.units * cell_vol_units)
+    
+    # Expected mass from 2D surface density (cell areas: dA = R * dR * dphi)
+    Redge_2d, Phiedge_2d = np.meshgrid(redge.magnitude, phiedge.magnitude, indexing='ij')
+    dr_2d = Redge_2d[1:, :-1] - Redge_2d[:-1, :-1]
+    dphi_2d = Phiedge_2d[:-1, 1:] - Phiedge_2d[:-1, :-1]
+    R_centers_2d = Redge_2d[:-1, :-1] + 0.5 * dr_2d
+    cell_area = R_centers_2d * dr_2d * dphi_2d  # dimensionless magnitude  
+    cell_area_units = redge.units ** 2
+    
+    expected_mass = np.sum(Sigma.magnitude * cell_area) * (Sigma.units * cell_area_units)
+    
+    # Normalization factor (dimensionless)
+    norm_factor = (expected_mass / total_mass_3d).to_base_units().magnitude
+    
+    return rho3d * norm_factor
+
+
 
 
 def puff_up_model(

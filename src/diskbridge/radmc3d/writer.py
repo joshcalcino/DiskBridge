@@ -163,9 +163,9 @@ class RADMC3DWriter:
     def write_stars(
         self,
         output_dir: str | Path = '.',
-        rstar: Optional[float] = None,
-        tstar: Optional[float] = None,
-        mstar: Optional[float] = None,
+        rstar: Optional[float] = 2.0,
+        tstar: Optional[float] = 4000.0,
+        mstar: Optional[float] = 1.0,
         position: Tuple[float, float, float] = (0., 0., 0.),
     ) -> None:
         """Write stars.inp file for stellar radiation source.
@@ -180,14 +180,6 @@ class RADMC3DWriter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir / 'stars.inp'
-        
-        # Use defaults if not provided
-        if rstar is None:
-            rstar = 2.0
-        if tstar is None:
-            tstar = 4000.0
-        if mstar is None:
-            mstar = 1.0
         
         # Convert to CGS using Pint constants
         rstar_cgs = (rstar * units('solar_radius')).to_base_units().magnitude  # Solar radii to cm

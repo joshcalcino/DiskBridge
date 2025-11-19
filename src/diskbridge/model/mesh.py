@@ -240,14 +240,22 @@ class Mesh:
         zmax_over_H: float = 5.0
     ) -> "Mesh":
         """
-        Docstring
+        Build spherical grid matching fargo2radmc3d's approach.
+        Creates edges such that cells are centered near the midplane.
         """
         ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
         thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
         thmax = np.pi/2.0
-        upper = np.linspace(thmin, thmax, int(ncol)//2 + 1)
-        lower = np.pi - upper[1:int(ncol)//2 + 1]
-        tedge = np.concatenate([lower, upper]) * units.radian
+        
+        # Follow fargo2radmc3d's approach (mesh.py lines 122-128)
+        # Create edges from thmin to thmax for half the grid
+        ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
+        # Transform to get lower hemisphere edges
+        ym_lower = -ymp + thmin + thmax  # = -ymp + π/2 + thmin
+        # Mirror to upper hemisphere (skip first element to avoid duplication)
+        ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
+        # Concatenate: lower (reversed) + upper
+        tedge = np.concatenate([ym_lower[::-1], ym_upper]) * units.radian
 
         r_ax = self.axes.get("r", Axis())
         p_ax = self.axes.get("phi", Axis())
@@ -256,3 +264,64 @@ class Mesh:
             theta=Axis(edges=tedge),
             phi=Axis(edges=p_ax.edges, centers=p_ax.centers)
         )
+    
+    def add_theta_by_scale_height(
+        self,
+        ncol: int,
+        aspect_ratio: float,
+        zmax_over_H: float = 5.0
+    ) -> "Mesh":
+        """
+        Add theta axis to a spherical mesh using scale height-based grid.
+        Similar to to_spherical_by_scale_height but for spherical meshes without theta.
+        """
+        ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
+        thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
+        thmax = np.pi/2.0
+        
+        # Follow fargo2radmc3d's approach
+        ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
+        ym_lower = -ymp + thmin + thmax
+        ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
+        tedge = np.concatenate([ym_lower[::-1], ym_upper]) * units.radian
+        
+        # Return new mesh with theta axis added
+        new_axes = dict(self.axes)
+        new_axes["theta"] = Axis(edges=tedge)
+        return Mesh(self.coord_system, new_axes)
+    
+    def rescale_length(self, factor: float) -> "Mesh":
+        """
+        Rescale all length-based axes by the given factor.
+        
+        Parameters
+        ----------
+        factor : float
+            Multiplicative scaling factor for length units
+            
+        Returns
+        -------
+        Mesh
+            New mesh with rescaled length axes
+            
+        Notes
+        -----
+        - For spherical/cylindrical: rescales r, z (but not theta, phi which are angles)
+        - For cartesian: rescales x, y, z
+        - Angles (theta, phi) are not rescaled
+        """
+        new_axes = {}
+        
+        for name, ax in self.axes.items():
+            # Determine if this axis should be rescaled
+            # Don't rescale angular coordinates (theta, phi)
+            if name in ['theta', 'phi']:
+                new_axes[name] = ax
+                continue
+            
+            # Rescale length coordinates (r, z, x, y, z)
+            new_edges = ax.edges * factor if ax.edges is not None else None
+            new_centers = ax.centers * factor if ax.centers is not None else None
+            new_axes[name] = Axis(edges=new_edges, centers=new_centers)
+        
+        return Mesh(self.coord_system, new_axes)
