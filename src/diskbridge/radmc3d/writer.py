@@ -113,11 +113,18 @@ class RADMC3DWriter:
             f.write(f'{active_dims[0]} {active_dims[1]} {active_dims[2]}\n')
             f.write(f'{dims[0]} {dims[1]} {dims[2]}\n')
             
-            # Write grid edges for each dimension (in cm)
+            # Write grid edges for each dimension (in cm or radians)
             for name in axis_names:
                 edges = mesh.edges(name)
                 if edges is not None:
                     edges_cgs = self._to_cgs(edges)
+                    
+                    # RADMC-3D expects phi from 0 to 2π
+                    # FARGO uses -π to +π, so we create a uniform grid for RADMC-3D
+                    if name == 'phi':
+                        nphi = len(edges_cgs)
+                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi)
+                    
                     for val in edges_cgs:
                         f.write(f'{val:13.6e} ')
                 else:
@@ -167,8 +174,13 @@ class RADMC3DWriter:
         tstar: Optional[float] = 4000.0,
         mstar: Optional[float] = 1.0,
         position: Tuple[float, float, float] = (0., 0., 0.),
+        wmin_micron: float = 0.1,
+        wmax_micron: float = 10000.0,
+        nwav: int = 150,
     ) -> None:
         """Write stars.inp file for stellar radiation source.
+        
+        This uses format 2 with wavelength-dependent spectrum (blackbody).
         
         Args:
             output_dir: Directory to write the file
@@ -176,6 +188,9 @@ class RADMC3DWriter:
             tstar: Stellar effective temperature in K (default: 4000.0)
             mstar: Stellar mass in solar masses (default: 1.0)
             position: (x, y, z) position in AU (default: origin)
+            wmin_micron: Minimum wavelength in microns
+            wmax_micron: Maximum wavelength in microns
+            nwav: Number of wavelength points
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,12 +201,25 @@ class RADMC3DWriter:
         mstar_cgs = (mstar * units('solar_mass')).to_base_units().magnitude  # Solar masses to g
         pos_cgs = [(p * units('astronomical_unit')).to_base_units().magnitude for p in position]  # AU to cm
         
+        # Build wavelength grid (matches wavelength_micron.inp)
+        Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
+        waves_micron = wmin_micron * Pw ** np.arange(nwav)
+        
         with open(filepath, 'w') as f:
-            f.write('2\n')  # Format number
-            f.write('1 1\n')  # 1 star, take spectral template from next
+            # Format 2: wavelength-dependent spectrum
+            f.write('2\n')  
+            f.write(f'1 {nwav}\n')  # 1 star, nwav wavelength points
+            
+            # Star properties: R, M, x, y, z (one line per star)
             f.write(f'{rstar_cgs:13.6e} {mstar_cgs:13.6e} ')
             f.write(f'{pos_cgs[0]:13.6e} {pos_cgs[1]:13.6e} {pos_cgs[2]:13.6e}\n')
-            f.write(f'{tstar:13.6e}\n')
+            
+            # Wavelength grid in microns
+            for wav in waves_micron:
+                f.write(f'{wav:13.6e}\n')
+            
+            # Negative temperature indicates blackbody emission (one line per star)
+            f.write(f'{-tstar:13.6e}\n')
         
         logger.info(f"Wrote stars file: {filepath}")
     
@@ -278,18 +306,29 @@ class RADMC3DWriter:
         nbin: int,
         ncells: int,
     ) -> None:
-        """Write binary dust density file."""
+        """Write binary dust density file.
+        
+        RADMC-3D expects data in (nsec, ncol, nrad) order for spherical grids.
+        DiskBridge stores data in (r, phi, theta) = (nrad, nsec, ncol) order.
+        We need to transpose before writing.
+        """
         with open(filepath, 'wb') as f:
-            # Header
-            header = np.array([1, ncells, nbin], dtype=np.int64)
+            # Header: format_number, precision(8=double), ncells, nbin
+            header = np.array([1, 8, ncells, nbin], dtype=np.int64)
             header.tofile(f)
             
             # Write density for each bin
             for ibin in range(nbin):
-                bin_data = self.model.dust.bins[ibin]
-                rho = bin_data['density']  # Pint Quantity
-                rho_cgs = self._to_cgs(rho).flatten()
-                rho_cgs.astype(np.float64).tofile(f)
+                bin_data = self.model.dust.bins[f"bin_{ibin}"]
+                rho_field = bin_data['density']  # Field object
+                rho_cgs = self._to_cgs(rho_field.data)
+                
+                # Transpose from DiskBridge order (nrad, nsec, ncol) 
+                # to RADMC-3D order (nsec, ncol, nrad)
+                if rho_field.axis_order == ('r', 'phi', 'theta'):
+                    rho_cgs = np.transpose(rho_cgs, (1, 2, 0))  # (nrad, nsec, ncol) -> (nsec, ncol, nrad)
+                
+                rho_cgs.flatten().astype(np.float64).tofile(f)
     
     def _write_dust_density_ascii(
         self,
@@ -297,7 +336,12 @@ class RADMC3DWriter:
         nbin: int,
         ncells: int,
     ) -> None:
-        """Write ASCII dust density file."""
+        """Write ASCII dust density file.
+        
+        RADMC-3D expects data in (nsec, ncol, nrad) order for spherical grids.
+        DiskBridge stores data in (r, phi, theta) = (nrad, nsec, ncol) order.
+        We need to transpose before writing.
+        """
         with open(filepath, 'w') as f:
             # Header
             f.write('1\n')  # Format number
@@ -306,11 +350,17 @@ class RADMC3DWriter:
             
             # Write density for each bin
             for ibin in range(nbin):
-                bin_data = self.model.dust.bins[ibin]
-                rho = bin_data['density']  # Pint Quantity
-                rho_cgs = self._to_cgs(rho).flatten()
+                bin_data = self.model.dust.bins[f"bin_{ibin}"]
+                rho_field = bin_data['density']  # Field object
+                rho_cgs = self._to_cgs(rho_field.data)
                 
-                for val in rho_cgs:
+                # Transpose from DiskBridge order (nrad, nsec, ncol) 
+                # to RADMC-3D order (nsec, ncol, nrad)
+                if rho_field.axis_order == ('r', 'phi', 'theta'):
+                    rho_cgs = np.transpose(rho_cgs, (1, 2, 0))  # (nrad, nsec, ncol) -> (nsec, ncol, nrad)
+                
+                rho_flat = rho_cgs.flatten()
+                for val in rho_flat:
                     f.write(f'{val:13.6e}\n')
     
     def write_dustopac(
@@ -399,7 +449,7 @@ class RADMC3DWriter:
         
         # Compute opacity for each dust bin
         for ibin in range(self.model.dust.nbin):
-            bin_data = self.model.dust.bins[ibin]
+            bin_data = self.model.dust.bins[f"bin_{ibin}"]
             
             # Get grain size in CGS
             grain_size_cgs = self._to_cgs(bin_data.size)
@@ -439,6 +489,8 @@ class RADMC3DWriter:
         mstar: float = 1.0,
         scattering_mode: int = 0,
         nphot: int = 1000000,
+        nphot_scat: int = 1000000,
+        setthreads: int = 1,
         **kwargs,
     ) -> None:
         """Write all RADMC-3D input files in one call.
@@ -452,16 +504,23 @@ class RADMC3DWriter:
             mstar: Stellar mass in solar masses
             scattering_mode: Scattering mode (0=none, >=3=full matrix)
             nphot: Number of photons for Monte Carlo
+            nphot_scat: Number of photons for scattering Monte Carlo
+            setthreads: Number of OpenMP threads
             **kwargs: Additional arguments passed to individual writers
         """
         logger.info(f"Writing all RADMC-3D input files to {output_dir}")
         
         # Write grid files
         self.write_amr_grid(output_dir)
-        self.write_wavelength_grid(output_dir)
+        self.write_wavelength_grid(output_dir, **{k: v for k, v in kwargs.items() 
+                                                   if k in ['wmin_micron', 'wmax_micron', 'nwav']})
         
         # Write stellar source
-        self.write_stars(output_dir, rstar=rstar, tstar=tstar, mstar=mstar)
+        wmin = kwargs.get('wmin_micron', 0.1)
+        wmax = kwargs.get('wmax_micron', 10000.0)
+        nwav = kwargs.get('nwav', 150)
+        self.write_stars(output_dir, rstar=rstar, tstar=tstar, mstar=mstar,
+                        wmin_micron=wmin, wmax_micron=wmax, nwav=nwav)
         
         # Write dust data
         if self.model.dust is not None and self.model.dust.nbin > 0:
@@ -474,7 +533,8 @@ class RADMC3DWriter:
                     optconst_file=optconst_file,
                     grain_density=grain_density,
                     scattering_mode=scattering_mode,
-                    **kwargs,
+                    **{k: v for k, v in kwargs.items() 
+                       if k in ['wmin_micron', 'wmax_micron', 'nwav', 'ntheta', 'logawidth', 'na']},
                 )
         
         # Write control file
@@ -482,7 +542,8 @@ class RADMC3DWriter:
             output_dir,
             scattering_mode_max=scattering_mode,
             nphot=nphot,
-            nphot_scat=nphot,
+            nphot_scat=nphot_scat,
+            setthreads=setthreads,
         )
         
         logger.info("All RADMC-3D input files written successfully")
