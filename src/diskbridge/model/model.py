@@ -95,9 +95,15 @@ class Model:
                         else:
                             new_data = field.data * (mass_factor / length_factor**3)
                     
-                    elif 'v' in name and name in ['vr', 'vphi', 'vz', 'vtheta']:
+                    elif name in ['vr', 'vphi', 'vz', 'vtheta']:
                         # Velocity: V = L/T → scale by sqrt(M/L)
                         new_data = field.data * velocity_factor
+                    
+                    elif name == 'temperature':
+                        # Temperature: cutemp ∝ M/L, so T → T × (M/L)
+                        # When length increases, temperature decreases
+                        temp_factor = mass_factor / length_factor
+                        new_data = field.data * temp_factor
                     
                     # Replace field with rescaled version
                     if new_data is not field.data:

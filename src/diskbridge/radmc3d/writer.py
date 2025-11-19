@@ -1,6 +1,6 @@
 """RADMC-3D input file writer for DiskBridge Models.
 
-This module provides the RADMC3DWriter class that takes a Model instance
+This module provides the RadWriter class that takes a Model instance
 and writes the necessary RADMC-3D input files, handling unit conversion
 from Pint Quantities to CGS units.
 """
@@ -18,7 +18,7 @@ from diskbridge._units import Quantity, units
 from .opacities import DustOpacityCalculator
 
 
-class RADMC3DWriter:
+class RadWriter:
     """Write RADMC-3D input files from a DiskBridge Model.
     
     This class handles conversion from Pint Quantities to CGS units
@@ -28,7 +28,7 @@ class RADMC3DWriter:
         model = Model()
         model.load_model('path/to/data', reader='fargo')
         
-        writer = RADMC3DWriter(model)
+        writer = RadWriter(model)
         writer.write_amr_grid(output_dir='.')
         writer.write_dust_density(output_dir='.')
         writer.write_wavelength_grid(output_dir='.')

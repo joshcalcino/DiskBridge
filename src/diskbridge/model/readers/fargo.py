@@ -156,15 +156,26 @@ def _read_summary(directory: Path, file_n: int) -> Tuple[Dict[str, Optional[bool
     lines = [ln.rstrip() for ln in text.splitlines()]
 
     in_comp = False
+    skip_next_equals = False
     flags_found: Dict[str, bool] = {}
-    for ln in lines:
+    for i, ln in enumerate(lines):
         if "COMPILATION OPTION SECTION" in ln:
             in_comp = True
+            skip_next_equals = True  # Skip the ===== line right after section header
             continue
         if in_comp:
-            if not ln or ln.startswith("=") or ln.startswith("Ghost layer") or "SECTION:" in ln:
+            # Skip the first ===== line after section header
+            if skip_next_equals and ln.startswith("="):
+                skip_next_equals = False
+                continue
+            # End section on empty line, subsequent ===, or new SECTION
+            if not ln or (ln.startswith("=") and not skip_next_equals) or "SECTION:" in ln:
                 in_comp = False
                 continue
+            # Split on "Ghost layer" if present (it can be on the same line as flags)
+            if "Ghost layer" in ln:
+                ln = ln.split("Ghost layer")[0]
+                in_comp = False  # End section after this line
             parts = ln.split()
             for tok in parts:
                 if tok.startswith("-D"):
@@ -437,6 +448,61 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         gas_fields["vtheta"] = _read_field(f"gasvz{file_n}.dat", 
                                             "vtheta", 
                                             units=unit_dict['unit_velocity'])
+    
+    # Read temperature from gasenergy file
+    gasenergy_field = _read_field(f"gasenergy{file_n}.dat", 
+                                   "gasenergy",
+                                   units=units('dimensionless'))
+    
+    if gasenergy_field is not None:
+        # Check if simulation is isothermal from compile options
+        is_isothermal = compile_options.get('ISOTHERMAL', False)
+        temp_data = None
+        
+        if is_isothermal:
+            # For isothermal: gasenergy contains sound speed c_s
+            # Temperature in code units: T = c_s^2
+            c_s = gasenergy_field.data.magnitude
+            temp_data = c_s ** 2
+            logger.debug(f"Isothermal: c_s range = {c_s.min():.3e} - {c_s.max():.3e}")
+            logger.debug(f"T_code range = {temp_data.min():.3e} - {temp_data.max():.3e}")
+        else:
+            # For non-isothermal: gasenergy contains thermal energy per unit volume
+            # T = (gamma-1) * e / rho
+            gamma = variables.get("GAMMA", 1.4)
+            if is_3d:
+                rho = gas_fields["density"].data.magnitude
+                e = gasenergy_field.data.magnitude
+                temp_data = (gamma - 1.0) * e / rho
+            else:
+                # For 2D, we can't directly compute temperature without vertical structure
+                logger.warning("Temperature calculation for 2D non-isothermal requires vertical puffing")
+        
+        if temp_data is not None:
+            # Convert from FARGO code units to Kelvin
+            # Following fargo2radmc3d: cutemp = μ * 8.0841643e-15 * M / L
+            # where μ=2.35 (mean molecular weight), M in kg, L in m
+            # This factor converts v^2 (in code units) to K
+            # Note: This uses the BASE code units (1 AU, 1 M_sun)
+            # Any length_scale/mass_scale rescaling is handled in Model._apply_rescaling()
+            
+            if file_units.lower() == "code":
+                # For base code units: 1 code_length = 1 AU, 1 code_mass = 1 M_sun
+                code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
+                code_length_m = (1.0 * au).to('m').magnitude
+                mu = 2.35  # mean molecular weight
+                cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
+            else:
+                # For CGS or SI units, cutemp is different but we assume already in K
+                cutemp = 1.0
+            
+            temp_data_K = temp_data * cutemp
+            temp_field = Field(
+                data=Quantity(temp_data_K, 'K'),
+                quantity="temperature",
+                axis_order=gasenergy_field.axis_order,
+            )
+            gas_fields["temperature"] = temp_field
 
     # Curate disk parameters used by downstream steps
     disk_parameters: Dict[str, Any] = {}

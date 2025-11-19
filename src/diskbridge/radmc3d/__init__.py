@@ -1,20 +1,38 @@
-"""RADMC-3D writer and utilities for DiskBridge Models.
+"""RADMC-3D interface for DiskBridge Models.
 
-This submodule provides tools to write RADMC-3D input files from DiskBridge
-Model objects, handling unit conversions and data formatting automatically.
+This submodule provides a complete interface to RADMC-3D, mirroring the
+structure of radmc3dPy with clear separation of concerns:
 
 Main components:
-- RADMC3DWriter: Write RADMC-3D input files (AMR grid, dust density, opacity, etc.)
-- RADMC3DModel: Extended model class for molecular line radiative transfer
-- DustOpacityCalculator: Compute dust opacities using Mie theory
+- writer: Write RADMC-3D input files (AMR grid, dust density, etc.)
+- data: Read RADMC-3D output files (temperature, intensity, etc.)
+- model: High-level model wrapper for photochemistry and workflows
+- molecule: Molecular data handling (Leiden LAMDA format)
+- opacities: Dust opacity calculations using Mie theory
+
+Architecture:
+- RadWriter: Writes input files from DiskBridge models
+- RadData: Reads RADMC-3D output files
+- RadModel: High-level wrapper for molecular RT workflows
+- RadMolecule: Molecular data from molecule_*.inp files
+- DustOpacityCalculator: Dust opacity computations
+
+This separation ensures clean interfaces:
+- Input (writer) vs Output (data)
+- Low-level I/O (data, writer) vs High-level workflows (model)
+- Model building (Model class) vs RADMC-3D operations (RadModel)
 """
 
-from .writer import RADMC3DWriter
-from .model import RADMC3DModel
+from .writer import RadWriter
+from .data import RadData
+from .model import RadModel
+from .molecule import RadMolecule
 from .opacities import DustOpacityCalculator
 
 __all__ = [
-    'RADMC3DWriter',
-    'RADMC3DModel',
+    'RadWriter',
+    'RadData',
+    'RadModel',
+    'RadMolecule',
     'DustOpacityCalculator',
 ]
