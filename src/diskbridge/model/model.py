@@ -4,6 +4,7 @@ from dataclasses import dataclass, field as dcfield
 from typing import Any, Callable, Dict, Optional, Union
 from pathlib import Path
 import numpy as np
+import pickle
 
 from .mesh import Mesh, Axis
 from .field import Field
@@ -212,6 +213,236 @@ class Model:
     ) -> "Model":
         self.disk.puff_up_disk(n=n, coordinates=coordinates, zmax_over_H=zmax_over_H)
         return self
+
+    def save(self, filepath: Union[str, Path]) -> None:
+        """Save the complete model to a file using pickle.
+        
+        This saves all model components including:
+        - Mesh and coordinate system
+        - Gas fields
+        - Dust distribution and parameters
+        - Disk parameters
+        - All metadata (variables, compile options, etc.)
+        
+        Parameters
+        ----------
+        filepath : str or Path
+            Path to save the model file (recommended extension: .pkl)
+            
+        Examples
+        --------
+        >>> model.save('my_model.pkl')
+        >>> # Later...
+        >>> loaded_model = diskbridge.load_model('my_model.pkl')
+        
+        Notes
+        -----
+        The saved file uses Python's pickle format and can only be loaded
+        with the same (or compatible) version of DiskBridge.
+        """
+        filepath = Path(filepath)
+        
+        # Create a dictionary with all model state
+        model_data = {
+            'coord_system': self.coord_system,
+            'variables': self.variables,
+            'compile_options': self.compile_options,
+            'macros': self.macros,
+            'mesh': self.mesh,
+            'file_units': self.file_units,
+            'directory': self.directory,
+            'n_file': self.n_file,
+            'filename': self.filename,
+        }
+        
+        # Save gas fields
+        if self.gas is not None:
+            gas_fields = {}
+            for name in self.gas.keys():
+                field = self.gas[name]
+                gas_fields[name] = {
+                    'data': field.data,
+                    'quantity': field.quantity,
+                    'axis_order': field.axis_order,
+                    'attrs': field.attrs,
+                }
+            model_data['gas_fields'] = gas_fields
+            
+            # Save gas mask if present
+            if self.gas.mask is not None:
+                model_data['gas_mask'] = {
+                    'data': self.gas.mask.data,
+                    'quantity': self.gas.mask.quantity,
+                    'axis_order': self.gas.mask.axis_order,
+                }
+        
+        # Save disk parameters
+        if self.disk is not None:
+            model_data['disk_parameters'] = self.disk.parameters
+        
+        # Save dust distribution and parameters
+        if self.dust is not None and self.dust.distribution is not None:
+            dust_data = {
+                'amin': self.dust.distribution.amin,
+                'amax': self.dust.distribution.amax,
+                'nbin': self.dust.distribution.nbin,
+                'power_index': self.dust.distribution.power_index,
+                'grain_density': self.dust.distribution.grain_density,
+                'dust_to_gas_ratio': self.dust.dust_to_gas_ratio,
+                'mode': self.dust.mode,
+                'alpha': self.dust.alpha,
+                'delta': self.dust.delta,
+                'mean_molecular_weight': self.dust.mean_molecular_weight,
+                'spherical_interp_r_factor': self.dust.spherical_interp_r_factor,
+                'spherical_interp_z_factor': self.dust.spherical_interp_z_factor,
+            }
+            model_data['dust'] = dust_data
+            
+            # Save dust mask if present
+            if self.dust.mask is not None:
+                model_data['dust_mask'] = {
+                    'data': self.dust.mask.data,
+                    'quantity': self.dust.mask.quantity,
+                    'axis_order': self.dust.mask.axis_order,
+                }
+        
+        # Save scaling factors if they exist
+        if hasattr(self, 'length_scale'):
+            model_data['length_scale'] = self.length_scale
+        if hasattr(self, 'mass_scale'):
+            model_data['mass_scale'] = self.mass_scale
+        if hasattr(self, 'time_scale'):
+            model_data['time_scale'] = self.time_scale
+        if hasattr(self, 'velocity_scale'):
+            model_data['velocity_scale'] = self.velocity_scale
+        
+        # Write to file
+        with open(filepath, 'wb') as f:
+            pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        logger.info(f"Model saved to {filepath}")
+    
+    @classmethod
+    def load(cls, filepath: Union[str, Path]) -> "Model":
+        """Load a saved model from file.
+        
+        Parameters
+        ----------
+        filepath : str or Path
+            Path to the saved model file (.pkl)
+            
+        Returns
+        -------
+        Model
+            The loaded model instance with all components restored
+            
+        Examples
+        --------
+        >>> model = Model.load('my_model.pkl')
+        >>> # Or using the module-level function
+        >>> model = diskbridge.load_model('my_model.pkl')
+        
+        See Also
+        --------
+        Model.save : Save a model to file
+        """
+        filepath = Path(filepath)
+        
+        if not filepath.exists():
+            raise FileNotFoundError(f"Model file not found: {filepath}")
+        
+        # Load the pickled data
+        with open(filepath, 'rb') as f:
+            model_data = pickle.load(f)
+        
+        # Create a new Model instance
+        model = cls()
+        
+        # Restore basic attributes
+        model.coord_system = model_data.get('coord_system')
+        model.variables = model_data.get('variables', {})
+        model.compile_options = model_data.get('compile_options', {})
+        model.macros = model_data.get('macros', {})
+        model.mesh = model_data.get('mesh')
+        model.file_units = model_data.get('file_units')
+        model.directory = model_data.get('directory')
+        model.n_file = model_data.get('n_file')
+        model.filename = model_data.get('filename')
+        
+        # Restore scaling factors if present
+        if 'length_scale' in model_data:
+            model.length_scale = model_data['length_scale']
+        if 'mass_scale' in model_data:
+            model.mass_scale = model_data['mass_scale']
+        if 'time_scale' in model_data:
+            model.time_scale = model_data['time_scale']
+        if 'velocity_scale' in model_data:
+            model.velocity_scale = model_data['velocity_scale']
+        
+        # Initialize submodels
+        model.gas = SubModel(model)
+        model.gas.mesh = model.mesh
+        
+        # Initialize Dust submodel
+        from .dust import Dust
+        model.dust = Dust(model)
+        model.dust.mesh = model.mesh
+        
+        # Restore gas fields
+        if 'gas_fields' in model_data:
+            for name, field_data in model_data['gas_fields'].items():
+                field = Field(
+                    data=field_data['data'],
+                    quantity=field_data['quantity'],
+                    axis_order=field_data['axis_order'],
+                    attrs=field_data.get('attrs', {}),
+                )
+                model.gas_register(name, field)
+        
+        # Restore gas mask
+        if 'gas_mask' in model_data:
+            mask_data = model_data['gas_mask']
+            model.gas.mask = Field(
+                data=mask_data['data'],
+                quantity=mask_data['quantity'],
+                axis_order=mask_data['axis_order'],
+            )
+        
+        # Restore disk parameters
+        if 'disk_parameters' in model_data:
+            model.disk = Disk(model, model_data['disk_parameters'])
+            model.disk.mesh = model.mesh
+        
+        # Restore dust distribution
+        if 'dust' in model_data:
+            dust_data = model_data['dust']
+            model.dust.set_distribution(
+                amin=dust_data['amin'],
+                amax=dust_data['amax'],
+                nbin=dust_data['nbin'],
+                power_index=dust_data['power_index'],
+                grain_density=dust_data['grain_density'],
+                dust_to_gas_ratio=dust_data['dust_to_gas_ratio'],
+                mode=dust_data['mode'],
+                alpha=dust_data.get('alpha'),
+                delta=dust_data.get('delta'),
+                mean_molecular_weight=dust_data.get('mean_molecular_weight', 2.3),
+                spherical_interp_r_factor=dust_data.get('spherical_interp_r_factor'),
+                spherical_interp_z_factor=dust_data.get('spherical_interp_z_factor'),
+            )
+        
+        # Restore dust mask
+        if 'dust_mask' in model_data:
+            mask_data = model_data['dust_mask']
+            model.dust.mask = Field(
+                data=mask_data['data'],
+                quantity=mask_data['quantity'],
+                axis_order=mask_data['axis_order'],
+            )
+        
+        logger.info(f"Model loaded from {filepath}")
+        
+        return model
 
 
 class SubModel:

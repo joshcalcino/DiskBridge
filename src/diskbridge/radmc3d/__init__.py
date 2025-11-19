@@ -1,18 +1,20 @@
-"""RADMC-3D interface module for DiskBridge.
+"""RADMC-3D writer and utilities for DiskBridge Models.
 
-This module provides functionality to:
-- Compute dust opacities using Mie scattering
-- Write RADMC-3D input files from Model instances
-- Read RADMC-3D output files (future)
+This submodule provides tools to write RADMC-3D input files from DiskBridge
+Model objects, handling unit conversions and data formatting automatically.
 
-The module handles unit conversion from Pint Quantities (used in Model)
-to CGS units (required by RADMC-3D).
+Main components:
+- RADMC3DWriter: Write RADMC-3D input files (AMR grid, dust density, opacity, etc.)
+- RADMC3DModel: Extended model class for molecular line radiative transfer
+- DustOpacityCalculator: Compute dust opacities using Mie theory
 """
 
-from .opacities import DustOpacityCalculator
 from .writer import RADMC3DWriter
+from .model import RADMC3DModel
+from .opacities import DustOpacityCalculator
 
 __all__ = [
-    'DustOpacityCalculator',
     'RADMC3DWriter',
+    'RADMC3DModel',
+    'DustOpacityCalculator',
 ]
