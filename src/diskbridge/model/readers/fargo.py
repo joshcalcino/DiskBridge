@@ -469,7 +469,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         else:
             # For non-isothermal: gasenergy contains thermal energy per unit volume
             # T = (gamma-1) * e / rho
-            gamma = variables.get("GAMMA", 1.4)
+            gamma = variables.get("GAMMA")
             if is_3d:
                 rho = gas_fields["density"].data.magnitude
                 e = gasenergy_field.data.magnitude
