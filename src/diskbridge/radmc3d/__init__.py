@@ -8,6 +8,7 @@ Main components:
 - data: Read RADMC-3D output files (temperature, intensity, etc.)
 - model: High-level model wrapper for photochemistry and workflows
 - molecule: Molecular data handling (Leiden LAMDA format)
+- image: Read RADMC-3D images and write FITS files
 - opacities: Dust opacity calculations using Mie theory
 
 Architecture:
@@ -15,11 +16,12 @@ Architecture:
 - RadData: Reads RADMC-3D output files
 - RadModel: High-level wrapper for molecular RT workflows
 - RadMolecule: Molecular data from molecule_*.inp files
+- RadImage: Reads images and writes FITS files
 - DustOpacityCalculator: Dust opacity computations
 
 This separation ensures clean interfaces:
-- Input (writer) vs Output (data)
-- Low-level I/O (data, writer) vs High-level workflows (model)
+- Input (writer) vs Output (data, image)
+- Low-level I/O (data, writer, image) vs High-level workflows (model)
 - Model building (Model class) vs RADMC-3D operations (RadModel)
 """
 
@@ -27,6 +29,7 @@ from .writer import RadWriter
 from .data import RadData
 from .model import RadModel
 from .molecule import RadMolecule
+from .image import RadImage
 from .opacities import DustOpacityCalculator
 
 __all__ = [
@@ -34,5 +37,6 @@ __all__ = [
     'RadData',
     'RadModel',
     'RadMolecule',
+    'RadImage',
     'DustOpacityCalculator',
 ]

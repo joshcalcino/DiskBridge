@@ -436,11 +436,15 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
                                                     "surface_density", 
                                                     units=unit_dict['unit_surface_density'])
 
-    gas_fields["vr"] = _read_field(f"gasvx{file_n}.dat", 
+    # FARGO3D file convention:
+    # gasvx = azimuthal velocity (vphi)
+    # gasvy = radial velocity (vr)  
+    # gasvz = colatitude velocity (vtheta)
+    gas_fields["vr"] = _read_field(f"gasvy{file_n}.dat", 
                                    "vr", 
                                    units=unit_dict['unit_velocity'])
 
-    gas_fields["vphi"] = _read_field(f"gasvy{file_n}.dat", 
+    gas_fields["vphi"] = _read_field(f"gasvx{file_n}.dat", 
                                      "vphi", 
                                      units=unit_dict['unit_velocity'])
 
@@ -448,6 +452,78 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         gas_fields["vtheta"] = _read_field(f"gasvz{file_n}.dat", 
                                             "vtheta", 
                                             units=unit_dict['unit_velocity'])
+    
+    # Correct for corotating frame if OMEGAFRAME is present in variables.par
+    # FARGO stores velocities in the corotating frame, so we need to add back
+    # the frame rotation to get velocities in the inertial frame
+    omegaframe = variables.get("OMEGAFRAME", 0.0)
+    if omegaframe != 0.0 and gas_fields.get("vphi") is not None:
+        logger.info(f"Applying corotating frame correction: OMEGAFRAME = {omegaframe}")
+        
+        # The correction is: vphi_inertial = vphi_corotating + r * omegaframe
+        # OMEGAFRAME is in code units (code_omega = 1/code_time)
+        # r * omegaframe gives velocity in code_velocity units
+        
+        if is_3d:
+            # For 3D: vphi has shape (r, phi, theta)
+            vphi_data = gas_fields["vphi"].data
+            nr, nphi, ntheta = vphi_data.shape
+            
+            # Create radial grid matching the data shape
+            # redge is dimensionless array in code units, we need cell centers
+            r_centers = 0.5 * (redge[:-1] + redge[1:])
+            # Ensure it's a pure numpy array
+            r_centers = np.asarray(r_centers, dtype=float)
+            
+            # Convert vphi to velocity magnitude (pure numpy array in code units)
+            vphi_mag = np.asarray(vphi_data.to(unit_dict['unit_velocity']).magnitude, dtype=float)
+            
+            # Broadcast radius to match vphi shape: (nr, nphi, ntheta)
+            r_grid = r_centers[:, np.newaxis, np.newaxis]
+            
+            # Add corotating frame correction: vphi_inertial = vphi_corotating + r * omegaframe
+            # All in code units: code_length * code_omega = code_velocity
+            vphi_corrected_mag = vphi_mag + r_grid * omegaframe
+            
+            # Reattach units
+            vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
+            
+            # Update the field with corrected velocity
+            gas_fields["vphi"] = Field(
+                data=vphi_corrected,
+                quantity="vphi",
+                axis_order=gas_fields["vphi"].axis_order,
+            )
+        else:
+            # For 2D: vphi has shape (r, phi)
+            vphi_data = gas_fields["vphi"].data
+            nr, nphi = vphi_data.shape
+            
+            # Create radial grid matching the data shape
+            r_centers = 0.5 * (redge[:-1] + redge[1:])
+            # Ensure it's a pure numpy array
+            r_centers = np.asarray(r_centers, dtype=float)
+            
+            # Convert vphi to velocity magnitude (pure numpy array in code units)
+            vphi_mag = np.asarray(vphi_data.to(unit_dict['unit_velocity']).magnitude, dtype=float)
+            
+            # Broadcast radius to match vphi shape: (nr, nphi)
+            r_grid = r_centers[:, np.newaxis]
+            
+            # Add corotating frame correction
+            vphi_corrected_mag = vphi_mag + r_grid * omegaframe
+            
+            # Reattach units
+            vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
+            
+            # Update the field with corrected velocity
+            gas_fields["vphi"] = Field(
+                data=vphi_corrected,
+                quantity="vphi",
+                axis_order=gas_fields["vphi"].axis_order,
+            )
+        
+        logger.info(f"Corotating frame correction applied to vphi")
     
     # Read temperature from gasenergy file
     gasenergy_field = _read_field(f"gasenergy{file_n}.dat", 

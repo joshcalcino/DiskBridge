@@ -437,7 +437,7 @@ class DustOpacityCalculator:
             S33 = np.zeros(nang)
             S34 = np.zeros(nang)
         
-        # Choose implementation
+        # Choose implementation: always prefer the numba-optimized version when available. It should reproduce the reference bhmie results
         bhmie_func = bhmie_numba if self.use_numba else bhmie
         
         # Loop over wavelengths
@@ -469,7 +469,58 @@ class DustOpacityCalculator:
                     zscat[i, :, 3] += wgt[l] * S33[:] * factor
                     zscat[i, :, 4] += wgt[l] * S34[:] * factor
                     zscat[i, :, 5] += wgt[l] * S33[:] * factor  # Z44 = Z33 for spheres
-        
+
+        # If we have an angular grid, enforce consistency between kscat
+        # and the angular integral of Z11, and optionally apply a
+        # forward-scattering chop (chopforward) following
+        # fargo2radmc3d's compute_opac_mie.
+        if theta is not None:
+            mu = np.cos(angles * math.pi / 180.0)
+            dmu = np.abs(mu[1:] - mu[:-1])
+            kscat_from_z11 = np.zeros(nlam)
+            error = False
+            errmax = 0.0
+
+            # Consistency check between kscat and integral over Z11
+            for i in range(nlam):
+                zav = 0.5 * (zscat[i, 1:, 0] + zscat[i, :-1, 0])
+                dum = 0.5 * zav * dmu
+                integral = dum.sum() * 4.0 * math.pi
+                kscat_from_z11[i] = integral
+                if kscat[i] > 0.0:
+                    rel_err = abs(integral / kscat[i] - 1.0)
+                    if rel_err > errtol:
+                        error = True
+                        errmax = max(errmax, rel_err)
+
+            # Apply forward-scattering chop if requested
+            if chopforward > 0.0:
+                for i in range(nlam):
+                    iang = np.where(angles < chopforward)[0]
+                    if iang.size == 0:
+                        continue
+                    if angles[0] == 0.0:
+                        iiang = int(np.max(iang) + 1)
+                        if iiang >= nang:
+                            iiang = nang - 1
+                    else:
+                        iiang = int(np.min(iang) - 1)
+                        if iiang < 0:
+                            iiang = 0
+                    # Replace Z elements for chopped angles
+                    for k in range(6):
+                        zscat[i, iang, k] = zscat[i, iiang, k]
+                    # Recompute kscat from chopped Z11
+                    zav = 0.5 * (zscat[i, 1:, 0] + zscat[i, :-1, 0])
+                    dum = 0.5 * zav * dmu
+                    kscat[i] = dum.sum() * 4.0 * math.pi
+
+            if error and self.verbose:
+                logger.warning(
+                    "Angular integral of Z11 is not equal to kscat at all wavelengths. "
+                    f"Maximum relative error = {errmax:.6e}"
+                )
+
         # Build output dictionary
         result = {
             'kabs': kabs,
@@ -523,7 +574,7 @@ class DustOpacityCalculator:
                 f.write(f"{lam_micron:13.6e}  {opac['kabs'][i]:13.6e}  "
                        f"{opac['kscat'][i]:13.6e}  {opac['gscat'][i]:13.6e}\n")
         
-        logger.info(f"Wrote opacity file: {filename}")
+        logger.debug(f"Wrote opacity file: {filename}")
     
     def _write_scatmat_file(self, opac: Dict, filename: Path) -> None:
         """Write dustkapscatmat_*.inp file."""

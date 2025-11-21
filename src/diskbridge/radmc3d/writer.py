@@ -444,18 +444,22 @@ class RadWriter:
         waves_micron = wmin_micron * Pw ** np.arange(nwav)
         waves_cm = waves_micron * 1e-4
         
-        # Create angular grid if needed
-        theta = np.linspace(0., 180., ntheta) if scattering_mode >= 3 else None
+        # Create angular grid for scattering.
+        # To match fargo2radmc3d's makedustopac.py, always use a full theta grid
+        # (0..180 degrees, ntheta points) and apply a small forward-scattering
+        # chop when computing opacities. RADMC-3D will still only use the full
+        # scattering matrix if scattering_mode>=3.
+        theta = np.linspace(0., 180., ntheta)
         
         # Compute opacity for each dust bin
         for ibin in range(self.model.dust.nbin):
             bin_data = self.model.dust.bins[f"bin_{ibin}"]
             
             # Get grain size in CGS
-            grain_size_cgs = self._to_cgs(bin_data.size)
+            grain_size_cgs = self._to_cgs(bin_data.size_min)
             
-            logger.info(f"Computing opacity for bin {ibin}: "
-                       f"size = {grain_size_cgs:.6e} cm")
+            logger.debug(f"Computing opacity for bin {ibin}: "
+                         f"size = {grain_size_cgs:.6e} cm")
             
             # Compute opacity
             opac = self.opacity_calculator.compute_opacity(
@@ -466,6 +470,7 @@ class RadWriter:
                 theta=theta,
                 logawidth=logawidth,
                 na=na,
+                chopforward=1.0,
                 extrapolate=True,
             )
             
@@ -547,3 +552,137 @@ class RadWriter:
         )
         
         logger.info("All RADMC-3D input files written successfully")
+    
+    def write_gas_temperature(self, temperature: Quantity, output_dir: str | Path = '.') -> None:
+        """Write gas temperature to gas_temperature.inp.
+        
+        Parameters
+        ----------
+        temperature : Quantity
+            Gas temperature field in K, shape (nx, ny, nz)
+        output_dir : str or Path, optional
+            Directory to write file (default: '.')
+            
+        Notes
+        -----
+        Writes ASCII format gas_temperature.inp file for RADMC-3D LTE line transfer.
+        Temperature should be in Kelvin.
+        
+        RADMC-3D expects cells in the same order as the grid.
+        For spherical grids, cells are ordered as (nsec, ncol, nrad) = (phi, theta, r).
+        DiskBridge stores data in (r, phi, theta) order, so we transpose before writing.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fpath = output_dir / 'gas_temperature.inp'
+        
+        # Convert to K and CGS
+        temp = self._to_cgs(temperature.to('K'))
+        
+        # Transpose from DiskBridge order to RADMC-3D order
+        # This matches the approach used in write_dust_density and write_gas_velocity
+        mesh = self.model.mesh
+        if mesh.coord_system == 'spherical':
+            # DiskBridge: (r, phi, theta) = (nrad, nsec, ncol)
+            # RADMC-3D:   (phi, theta, r) = (nsec, ncol, nrad)
+            # Transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
+            temp = np.transpose(temp, (1, 2, 0))
+        
+        # Flatten in C order (row-major) to match RADMC-3D cell ordering
+        temp_flat = temp.flatten()
+        ncells = temp_flat.size
+        
+        logger.info(f"Writing gas temperature to {fpath}: {ncells} cells, "
+                   f"T_range=[{temp.min():.1f}, {temp.max():.1f}] K")
+        
+        with open(fpath, 'w') as f:
+            f.write('1\n')  # Format number
+            f.write(f'{ncells}\n')
+            for T in temp_flat:
+                f.write(f'{T:.6e}\n')
+                
+        logger.info(f"Wrote {fpath}")
+        
+    def write_gas_velocity(
+        self, 
+        vr: Quantity, 
+        vtheta: Quantity, 
+        vphi: Quantity, 
+        output_dir: str | Path = '.',
+        binary: bool = True
+    ) -> None:
+        """Write gas velocity to gas_velocity.binp or gas_velocity.inp.
+        
+        Parameters
+        ----------
+        vr : Quantity
+            Radial velocity component, shape (nx, ny, nz)
+        vtheta : Quantity
+            Theta velocity component, shape (nx, ny, nz)
+        vphi : Quantity
+            Phi velocity component, shape (nx, ny, nz)
+        output_dir : str or Path, optional
+            Directory to write file (default: '.')
+        binary : bool, optional
+            Write binary format (default: True)
+            
+        Notes
+        -----
+        Writes gas velocity in cm/s for RADMC-3D LTE line transfer. 
+        Binary format is recommended for large grids. Velocities should 
+        be in the same coordinate system as the grid (spherical, cylindrical, 
+        or Cartesian).
+        
+        RADMC-3D expects velocities in cell order matching the grid.
+        For spherical grids, cells are ordered as (nsec, ncol, nrad) = (phi, theta, r).
+        DiskBridge stores data in (r, phi, theta) order, so we transpose before writing.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Convert to cm/s
+        vr_cgs = self._to_cgs(vr.to('cm/s'))
+        vtheta_cgs = self._to_cgs(vtheta.to('cm/s'))
+        vphi_cgs = self._to_cgs(vphi.to('cm/s'))
+        
+        # Transpose from DiskBridge order to RADMC-3D order
+        # This matches the approach used in write_dust_density
+        mesh = self.model.mesh
+        if mesh.coord_system == 'spherical':
+            # DiskBridge: (r, phi, theta) = (nrad, nsec, ncol)
+            # RADMC-3D:   (phi, theta, r) = (nsec, ncol, nrad)
+            # Transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
+            vr_cgs = np.transpose(vr_cgs, (1, 2, 0))
+            vtheta_cgs = np.transpose(vtheta_cgs, (1, 2, 0))
+            vphi_cgs = np.transpose(vphi_cgs, (1, 2, 0))
+        
+        # Flatten in C order (row-major) to match RADMC-3D cell ordering
+        vr_flat = vr_cgs.flatten()
+        vtheta_flat = vtheta_cgs.flatten()
+        vphi_flat = vphi_cgs.flatten()
+        ncells = vr_flat.size
+        
+        if binary:
+            fpath = output_dir / 'gas_velocity.binp'
+            logger.info(f"Writing gas velocity (binary) to {fpath}: {ncells} cells")
+            
+            with open(fpath, 'wb') as f:
+                # Write header
+                np.array([1], dtype=np.int64).tofile(f)  # Format
+                np.array([ncells], dtype=np.int64).tofile(f)  # Number of cells
+                
+                # Write velocities (vr, vtheta, vphi for each cell)
+                for i in range(ncells):
+                    np.array([vr_flat[i], vtheta_flat[i], vphi_flat[i]], 
+                            dtype=np.float64).tofile(f)
+        else:
+            fpath = output_dir / 'gas_velocity.inp'
+            logger.info(f"Writing gas velocity (ASCII) to {fpath}: {ncells} cells")
+            
+            with open(fpath, 'w') as f:
+                f.write('1\n')  # Format number
+                f.write(f'{ncells}\n')
+                for i in range(ncells):
+                    f.write(f'{vr_flat[i]:.6e} {vtheta_flat[i]:.6e} {vphi_flat[i]:.6e}\n')
+                    
+        logger.info(f"Wrote {fpath}")

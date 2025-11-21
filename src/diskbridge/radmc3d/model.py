@@ -315,8 +315,9 @@ class RadModel:
                             
                             # Reshape: RADMC-3D uses Fortran order (column-major)
                             J = data.reshape((nw, nrad, ncol, nsec), order='F')
-                            # Transpose to match DiskBridge data order (nrad, nsec, ncol, nw)
-                            J = np.transpose(J, (1, 3, 2, 0))
+                            # Transpose to match DiskBridge data order (nrad, ncol, nsec, nw)
+                            # This matches the temperature order from readDustTemp: (nr, ntheta, nphi)
+                            J = np.transpose(J, (1, 2, 3, 0))
                             
                             lam_cm = lam_micron * 1e-4
                             
@@ -401,9 +402,18 @@ class RadModel:
         
         # Get gas density in CGS
         rho_gas = self.model.gas['density'].data.to('g/cm^3')
-        
-        # Convert to H nuclei number density: nH = rho / (mu_H * m_H)
         nH_cgs = rho_gas.magnitude / (MU_H * M_H)
+        
+        # Model gas density has axis_order ('r', 'phi', 'theta') for spherical coords
+        # but RADMC-3D/RadData uses ('r', 'theta', 'phi')
+        # Need to transpose if necessary
+        field = self.model.gas['density']
+        if hasattr(field, 'axis_order'):
+            axis_order = field.axis_order
+            # For spherical: convert (r, phi, theta) -> (r, theta, phi)
+            if axis_order == ('r', 'phi', 'theta'):
+                nH_cgs = np.transpose(nH_cgs, (0, 2, 1))  # (r, phi, theta) -> (r, theta, phi)
+        
         self.nH = Quantity(nH_cgs, 'cm^-3')
         
         logger.info(f"Computed nH from gas density: "
