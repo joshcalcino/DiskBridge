@@ -15,6 +15,7 @@ lambda_max_micron = 3000.0
 
 [map]
 nbpixels         = 1024
+size_au         = 400.0
 
 [dust_rt]
 scat_mode        = 0

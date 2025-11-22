@@ -487,22 +487,22 @@ class RadImage:
         """
         # Get defaults from params (with proper section/option format)
         if inclinations is None:
-            inclinations = self.params.getfloat('star_disc', 'inclination_deg', fallback=45.0)
+            inclinations = self.params.getfloat('star_disc', 'inclination_deg')
             inclinations = [inclinations]
         if posangs is None:
             posangs = [0.0]  # Not in params typically
         if phis is None:
             phis = [0.0]  # Not in params typically
         if npix is None:
-            npix = 256  # Use hardcoded default
+            npix = self.params.getint('map', 'nbpixels')
         if sizeau is None:
-            sizeau = 400.0  # Use hardcoded default
+            sizeau = self.params.getfloat('map', 'size_au')
         if widthkms is None:
-            widthkms = self.params.getfloat('gas_rt', 'widthkms', fallback=10.0)
+            widthkms = self.params.getfloat('gas_rt', 'widthkms')
         if linenlam is None:
-            linenlam = self.params.getint('gas_rt', 'n_line_colors', fallback=100)
+            linenlam = self.params.getint('gas_rt', 'n_line_colors')
         if distance is None:
-            distance = self.params.getfloat('star_disc', 'distance_pc', fallback=140.0)
+            distance = self.params.getfloat('star_disc', 'distance_pc')
         if coord is None:
             coord = '0h0m0s 0d0m0s'  # Use hardcoded default
         
@@ -653,19 +653,19 @@ class RadImage:
         """
         # Get defaults from params
         if inclinations is None:
-            inclinations = self.params.get('incl', [45.0])
+            inclinations = self.params.getfloat('star_disc', 'inclination_deg')
         if posangs is None:
-            posangs = self.params.get('posang', [0.0])
+            posangs = [0.0]
         if phis is None:
-            phis = self.params.get('phi', [0.0])
+            phis = [0.0]
         if npix is None:
-            npix = self.params.get('npix', 256)
+            npix = self.params.getint('map', 'nbpixels')
         if sizeau is None:
-            sizeau = self.params.get('sizeau', 400.0)
+            sizeau = self.params.getfloat('map', 'size_au')
         if distance is None:
-            distance = self.params.get('distance', 140.0)
+            distance = self.params.getfloat('star_disc', 'distance_pc')
         if coord is None:
-            coord = self.params.get('coord', '0h0m0s 0d0m0s')
+            coord = '0h0m0s 0d0m0s'
         if output_dir is None:
             output_dir = f'image_{wavelength:.2f}um'
         
