@@ -733,11 +733,23 @@ class RadModel:
             text=True
         )
         
+        log_path = self.model_dir / 'radmc3d.out'
+        try:
+            with open(log_path, 'a') as f:
+                f.write('\n--- mctherm ---\n')
+                if result.stdout:
+                    f.write(result.stdout)
+                if result.stderr:
+                    f.write('\n[stderr]\n')
+                    f.write(result.stderr)
+        except Exception:
+            pass
+        
         if result.returncode != 0:
-            logger.error(f"RADMC-3D mctherm failed: {result.stderr}")
+            logger.error(f"RADMC-3D mctherm failed (see {log_path})")
             raise RuntimeError("mctherm failed")
         
-        logger.info("✓ mctherm completed")
+        logger.info(f"mctherm completed (log written to {log_path})")
         
         # Organize output
         self._organize_output(
@@ -910,11 +922,23 @@ class RadModel:
             text=True
         )
         
+        log_path = self.model_dir / 'radmc3d.out'
+        try:
+            with open(log_path, 'a') as f:
+                f.write('\n--- mcmono ---\n')
+                if result.stdout:
+                    f.write(result.stdout)
+                if result.stderr:
+                    f.write('\n[stderr]\n')
+                    f.write(result.stderr)
+        except Exception:
+            pass
+        
         if result.returncode != 0:
-            logger.error(f"RADMC-3D mcmono failed: {result.stderr}")
+            logger.error(f"RADMC-3D mcmono failed (see {log_path})")
             raise RuntimeError("mcmono failed")
         
-        logger.info("✓ mcmono completed")
+        logger.info(f"mcmono completed (log written to {log_path})")
         
         # Organize output (move mean_intensity file to mcmono/ directory)
         self._organize_output(
