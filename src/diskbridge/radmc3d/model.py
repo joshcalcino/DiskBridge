@@ -33,6 +33,7 @@ C_LIGHT = 2.99792458e10  # cm/s
 M_H = 1.6735575e-24  # g
 MU_H = 1.4  # mass per H nucleus in units of m_H
 SIGMA_SB = 5.670374419e-5  # Stefan-Boltzmann constant (erg cm^-2 s^-1 K^-4)
+U_DRAINE = 9.0e-14
 
 # Default Pinte+18 thresholds
 T_FRZ_DEFAULT = 21.0  # K
@@ -379,8 +380,9 @@ class RadModel:
         # Radiation energy density: u_lambda = 4π J_lambda / c
         u_lambda = 4.0 * np.pi * J_uv / C_LIGHT
         
-        # Integrate over UV wavelengths
-        chi_array = np.trapz(u_lambda, lam_uv, axis=-1)
+        # Integrate over UV wavelengths and normalize by Draine FUV energy density
+        u_band = np.trapz(u_lambda, lam_uv, axis=-1)
+        chi_array = u_band / U_DRAINE
         
         self.chi = Quantity(chi_array, 'dimensionless')
         
@@ -722,9 +724,9 @@ class RadModel:
         # Create output directory
         output_dir.mkdir(exist_ok=True)
         
-        # Run mctherm
+        # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
         logger.info(f"Running RADMC-3D mctherm with {nphot} photons...")
-        cmd = ['radmc3d', 'mctherm', 'nphot', str(nphot), 'setthreads', '8']
+        cmd = ['radmc3d', 'mctherm']
         
         result = subprocess.run(
             cmd,
@@ -835,6 +837,9 @@ class RadModel:
         # Validate UV range
         uv_min_cm = uv_min_nm * 1e-7
         uv_max_cm = uv_max_nm * 1e-7
+        u_draine = U_DRAINE
+        if hasattr(diskbridge, 'params'):
+            u_draine = diskbridge.params.getfloat('gas_rt', 'u_draine', fallback=U_DRAINE)
         
         logger.info(f"UV field configuration: {uv_min_nm:.1f}-{uv_max_nm:.1f} nm, {n_wavelengths} wavelengths")
         
@@ -865,7 +870,7 @@ class RadModel:
             nx, ny, nz = self.data._getMeshShape()
             self.mean_intensity = j_lambda
             
-            # Compute chi by integrating over UV wavelengths
+            # Compute chi by integrating over UV band in frequency space
             uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
             if not np.any(uv_mask):
                 raise ValueError(
@@ -875,9 +880,14 @@ class RadModel:
             
             lam_uv = lam_cm[uv_mask]
             j_uv = j_lambda[:, uv_mask]
-            
-            u_lambda = 4.0 * np.pi * j_uv / C_LIGHT
-            chi_flat = np.trapz(u_lambda, lam_uv, axis=1)
+
+            nu_uv = freq_hz[uv_mask]
+            u_nu = 4.0 * np.pi * j_uv / C_LIGHT
+            sort_idx = np.argsort(nu_uv)
+            nu_sorted = nu_uv[sort_idx]
+            u_nu_sorted = u_nu[:, sort_idx]
+            u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
+            chi_flat = u_band / u_draine
             chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
             self.chi = Quantity(chi_3d, 'dimensionless')
             
@@ -914,6 +924,16 @@ class RadModel:
         # Run mcmono at UV wavelengths
         logger.info(f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm)...")
         cmd = ['radmc3d', 'mcmono', 'setthreads', '8']
+
+        # Preserve any existing radmc3d.out log (e.g. from mctherm)
+        log_path = self.model_dir / 'radmc3d.out'
+        previous_log = ""
+        if log_path.exists():
+            try:
+                with open(log_path, 'r') as f:
+                    previous_log = f.read()
+            except Exception:
+                previous_log = ""
         
         result = subprocess.run(
             cmd,
@@ -921,16 +941,19 @@ class RadModel:
             capture_output=True,
             text=True
         )
-        
-        log_path = self.model_dir / 'radmc3d.out'
+
+        # Rebuild radmc3d.out to contain both the previous log and the new mcmono output
+        combined_log = previous_log
+        combined_log += '\n--- mcmono ---\n'
+        if result.stdout:
+            combined_log += result.stdout
+        if result.stderr:
+            combined_log += '\n[stderr]\n'
+            combined_log += result.stderr
+
         try:
-            with open(log_path, 'a') as f:
-                f.write('\n--- mcmono ---\n')
-                if result.stdout:
-                    f.write(result.stdout)
-                if result.stderr:
-                    f.write('\n[stderr]\n')
-                    f.write(result.stderr)
+            with open(log_path, 'w') as f:
+                f.write(combined_log)
         except Exception:
             pass
         
@@ -978,7 +1001,7 @@ class RadModel:
         nx, ny, nz = self.data._getMeshShape()
         self.mean_intensity = j_lambda  # Keep full spectral dimension
         
-        # Compute chi by integrating over UV wavelengths
+        # Compute chi by integrating over UV band in frequency space
         # Following Pinte et al. 2018 and fargo2radmc3d implementation
         uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
         
@@ -990,12 +1013,14 @@ class RadModel:
         
         lam_uv = lam_cm[uv_mask]
         j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
-        
-        # Radiation energy density: u_lambda = 4π J_lambda / c
-        u_lambda = 4.0 * np.pi * j_uv / C_LIGHT  # c in cm/s
-        
-        # Integrate over UV wavelengths using trapezoidal rule
-        chi_flat = np.trapz(u_lambda, lam_uv, axis=1)  # Shape: (nrcells,)
+
+        nu_uv = freq_hz[uv_mask]
+        u_nu = 4.0 * np.pi * j_uv / C_LIGHT
+        sort_idx = np.argsort(nu_uv)
+        nu_sorted = nu_uv[sort_idx]
+        u_nu_sorted = u_nu[:, sort_idx]
+        u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
+        chi_flat = u_band / u_draine  # Shape: (nrcells,)
         
         # Reshape to 3D grid
         chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
