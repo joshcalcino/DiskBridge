@@ -12,6 +12,7 @@ import numpy as np
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge._params import params
 from .utils import _interp_sph_to_cyl, _interp_cyl_to_sph
 from .mesh import Mesh, Axis
 
@@ -237,12 +238,12 @@ class Dust(SubModel):
         
     def set_distribution(
         self,
-        amin: Quantity,
-        amax: Quantity,
-        nbin: int,
-        power_index: float = 3.5,
-        grain_density: Quantity = 2.7 * units('g/cm^3'),
-        dust_to_gas_ratio: float = 0.01,
+        amin: Optional[Quantity] = None,
+        amax: Optional[Quantity] = None,
+        nbin: Optional[int] = None,
+        power_index: Optional[float] = None,
+        grain_density: Optional[Quantity] = None,
+        dust_to_gas_ratio: Optional[float] = None,
         mode: Literal['proportional', 'settling'] = 'proportional',
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
@@ -252,13 +253,15 @@ class Dust(SubModel):
     ) -> None:
         """Set dust grain size distribution.
         
+        All parameters are optional and will be pulled from diskbridge.params if not provided.
+        
         Args:
-            amin: Minimum grain size
-            amax: Maximum grain size  
-            nbin: Number of size bins
-            power_index: Power-law exponent (3.5 for MRN)
-            grain_density: Material density of grains
-            dust_to_gas_ratio: Global dust-to-gas mass ratio
+            amin: Minimum grain size (default: from params)
+            amax: Maximum grain size (default: from params)
+            nbin: Number of size bins (default: from params)
+            power_index: Power-law exponent (default: from params, typically 3.5 for MRN)
+            grain_density: Material density of grains (default: from params)
+            dust_to_gas_ratio: Global dust-to-gas mass ratio (default: from params)
             mode: Distribution mode ('proportional' or 'settling')
             alpha: Turbulent viscosity parameter (required for 'settling' mode)
             delta: Turbulent diffusion parameter (default: = alpha, assumes Sc ~ 1)
@@ -270,6 +273,20 @@ class Dust(SubModel):
                 converting from spherical to cylindrical coordinates. If None (default),
                 automatically determined based on mesh resolution. Typical range: 1-5.
         """
+        # Pull defaults from params if not provided
+        if amin is None:
+            amin = params.get_dust_size_m('amin') * units('m')
+        if amax is None:
+            amax = params.get_dust_size_m('amax') * units('m')
+        if nbin is None:
+            nbin = params.getint('dust_sizes', 'nbins')
+        if power_index is None:
+            power_index = params.getfloat('dust_sizes', 'pindex')
+        if grain_density is None:
+            grain_density = params.getfloat('dust_sizes', 'grain_density') * units('g/cm^3')
+        if dust_to_gas_ratio is None:
+            dust_to_gas_ratio = params.getfloat('dust_sizes', 'dust_to_gas_ratio')
+        
         self.distribution = DustDistribution(
             amin=amin,
             amax=amax,
@@ -288,7 +305,10 @@ class Dust(SubModel):
         # Set turbulence parameters for settling mode
         if mode == 'settling':
             if alpha is None:
-                raise ValueError("alpha parameter required for settling mode")
+                # Try to read from params
+                alpha = params.getfloat('dust_sizes', 'alpha', fallback=None)
+                if alpha is None:
+                    raise ValueError("alpha parameter required for settling mode (add to params.txt or pass as argument)")
             self.alpha = alpha
             self.delta = delta if delta is not None else alpha  # Assume Sc ~ 1
             logger.info(f"Settling mode: alpha={self.alpha}, delta={self.delta}")
@@ -311,7 +331,7 @@ class Dust(SubModel):
             self._bins[f"bin_{i}"] = dust_bin
         
         logger.info(
-            f"Dust distribution set: {nbin} bins from {amin} to {amax}, "
+            f"Dust distribution set: {nbin} bins from {amin.to('um')} to {amax.to('um')}, "
             f"dust/gas={dust_to_gas_ratio:.3e}, power_index={power_index}, mode={mode}"
         )
         
@@ -489,7 +509,7 @@ class Dust(SubModel):
             else:
                 z_factor = 1.5
         
-        logger.info(
+        logger.debug(
             f"Spherical interpolation factors (adaptive): "
             f"r_factor={r_factor:.1f}, z_factor={z_factor:.1f} "
             f"(mesh: {n_r}×{n_theta} cells)"
@@ -629,28 +649,32 @@ class Dust(SubModel):
         
         # Compute Keplerian frequency (function of r only)
         Omega_K_1d = self._get_keplerian_frequency()
-        Omega_K_grid = np.meshgrid(Omega_K_1d, phi, z, indexing='ij')[0]
-        
-        # Compute Stokes number at each cell
-        St = self._compute_stokes_number(
+        Omega_K = Omega_K_1d[:, None]
+
+        # Midplane index (closest to z = 0)
+        k0 = int(np.argmin(np.abs(z.magnitude)))
+
+        # Midplane gas density and temperature
+        rho_g0 = gas_density.data[:, :, k0]
+        T0 = gas_temp[:, :, k0]
+
+        # Midplane sound speed and gas scale height
+        mu = self.mean_molecular_weight
+        c_s0 = np.sqrt(k_B * T0 / (mu * m_H))
+        H_g0 = c_s0 / Omega_K
+
+        # Stokes number at midplane only (one value per column)
+        St0 = self._compute_stokes_number(
             grain_size=grain_size,
-            gas_density=gas_density.data,
-            gas_temperature=gas_temp,
-            keplerian_frequency=Omega_K_grid,
+            gas_density=rho_g0,
+            gas_temperature=T0,
+            keplerian_frequency=Omega_K,
         )
-        
-        # Compute gas scale height
-        # This may return 1D (if using disk parameters) or 3D (if using temperature)
-        H_g = self._compute_gas_scale_height()
-        if H_g.ndim == 1:
-            # If 1D, broadcast to 3D grid
-            H_g_grid = np.meshgrid(H_g, phi, z, indexing='ij')[0]
-        else:
-            # If already 3D, use directly
-            H_g_grid = H_g
-        
-        # Compute dust scale height
-        H_d = self._compute_dust_scale_height(H_g_grid, St)
+        St0 = St0[:, :, None]
+
+        # Dust scale height from midplane Stokes number
+        delta = self.delta
+        H_d = H_g0[:, :, None] * np.sqrt(delta / (St0 + delta))
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
         vertical_profile = np.exp(-z_grid**2 / (2 * H_d**2))
@@ -658,19 +682,18 @@ class Dust(SubModel):
         # Normalize to preserve column density
         # The midplane density enhancement factor ensures that
         # integrating rho_d over z gives the desired surface density
-        normalization = 1.0 / (np.sqrt(2 * np.pi) * H_d / H_g_grid)
-        
-        # Base dust-to-gas ratio scaled by mass fraction
         dust_to_gas_local = self.dust_to_gas_ratio * mass_fraction
-        
+        prefactor = dust_to_gas_local * (H_g0[:, :, None] / H_d)
+
         # Final dust density
-        dust_density_data = (
-            gas_density.data * 
-            dust_to_gas_local * 
-            vertical_profile * 
-            normalization
-        )
-        
+        dust_density_data = rho_g0[:, :, None] * prefactor * vertical_profile
+
+        # Ensure numerical stability: clamp NaNs and negative values to zero
+        dust_density_mag = dust_density_data.magnitude
+        dust_density_mag[~np.isfinite(dust_density_mag)] = 0.0
+        dust_density_mag[dust_density_mag < 0.0] = 0.0
+        dust_density_data = dust_density_mag * dust_density_data.units
+
         # Apply mask if set
         if self.mask is not None:
             mask_array = self.mask.data.magnitude.astype(bool)
@@ -712,7 +735,7 @@ class Dust(SubModel):
             raise ValueError("Settling mode requires temperature field")
         gas_temp_sph = self.parent.gas['temperature'].data
         
-        logger.info(f"Computing dust settling in spherical coordinates for bin {bin_index} (converting to cylindrical)")
+        logger.debug(f"Computing dust settling in spherical coordinates for bin {bin_index} (converting to cylindrical)")
         
         # Get spherical grid coordinates
         r_sph = mesh_sph.centers('r')
@@ -724,18 +747,32 @@ class Dust(SubModel):
         
         # Create cylindrical mesh covering the same domain
         # Use higher resolution to reduce interpolation smoothing
+        r_sph_min = r_sph.magnitude.min()
         r_sph_max = r_sph.magnitude.max()
         theta_range = theta_sph.magnitude
         
-        # Cylindrical r: use max extent from spherical grid
+        # Calculate exact extent needed in cylindrical coordinates
+        # For spherical (r, theta), cylindrical coords are:
+        #   R = r * sin(theta)
+        #   Z = r * cos(theta)
+        
+        # Cylindrical r: maximum occurs at largest r and theta closest to pi/2
         r_cyl_max = r_sph_max * np.sin(theta_range).max()
         n_r_cyl = int(len(r_sph) * r_factor)
-        r_cyl_edges = np.linspace(r_sph.magnitude.min() * 0.1, r_cyl_max, n_r_cyl + 1) * r_sph.units
+        r_cyl_edges = np.linspace(r_sph_min * 0.1, r_cyl_max, n_r_cyl + 1) * r_sph.units
         
-        # Cylindrical z: symmetric about midplane
-        # Vertical direction is most critical for settling structure
+        # Cylindrical z: maximum |z| occurs at largest r and theta at extremes
+        # Calculate the actual max and min z values from spherical grid corners
+        z_at_max_r_min_theta = r_sph_max * np.cos(theta_range.min())  # Upper hemisphere
+        z_at_max_r_max_theta = r_sph_max * np.cos(theta_range.max())  # Lower hemisphere
+        
+        # Take the maximum absolute value to ensure full coverage
+        z_max = max(abs(z_at_max_r_min_theta), abs(z_at_max_r_max_theta))
+        
+        # Add small buffer (5%) to avoid edge effects
+        z_max = z_max * 1.05
+        
         n_z = int(len(theta_sph) * z_factor)
-        z_max = r_sph_max
         z_edges = np.linspace(-z_max, z_max, n_z + 1) * r_sph.units
         
         # Phi: same as spherical
@@ -785,41 +822,49 @@ class Dust(SubModel):
         # Compute Keplerian frequency in cylindrical coordinates
         G = 6.674e-8 * units('cm^3 / (g * s^2)')
         Omega_K_1d_cyl = np.sqrt(G * M_star / r_cyl**3)
-        Omega_K_grid_cyl = np.meshgrid(Omega_K_1d_cyl, phi_cyl, z_cyl, indexing='ij')[0]
-        
-        # Compute Stokes number
-        St_cyl = self._compute_stokes_number(
-            grain_size=grain_size,
-            gas_density=gas_dens_cyl,
-            gas_temperature=gas_temp_cyl,
-            keplerian_frequency=Omega_K_grid_cyl,
-        )
-        
-        # Compute gas scale height
+        Omega_K = Omega_K_1d_cyl[:, None]
+
+        # Midplane index (closest to z = 0 in cylindrical grid)
+        k0_cyl = int(np.argmin(np.abs(z_cyl.magnitude)))
+
+        # Midplane gas density and temperature in cylindrical coordinates
+        rho_g0_cyl = gas_dens_cyl[:, :, k0_cyl]
+        T0_cyl = gas_temp_cyl[:, :, k0_cyl]
+
+        # Midplane sound speed and gas scale height
         mu = self.mean_molecular_weight
-        c_s_cyl = np.sqrt(k_B * gas_temp_cyl / (mu * m_H))
-        # Use midplane values for scale height
-        H_g_1d_cyl = c_s_cyl[:, 0, len(z_cyl)//2] / Omega_K_1d_cyl
-        H_g_grid_cyl = np.meshgrid(H_g_1d_cyl, phi_cyl, z_cyl, indexing='ij')[0]
-        
-        # Compute dust scale height
-        H_d_cyl = self._compute_dust_scale_height(H_g_grid_cyl, St_cyl)
-        
-        # Compute vertical profile
-        vertical_profile_cyl = np.exp(-z_cyl_grid**2 / (2 * H_d_cyl**2))
-        
-        # Normalize to preserve column density
-        normalization_cyl = 1.0 / (np.sqrt(2 * np.pi) * H_d_cyl / H_g_grid_cyl)
-        
-        # Compute dust density in cylindrical coordinates
-        dust_to_gas_local = self.dust_to_gas_ratio * mass_fraction
-        dust_dens_cyl = (
-            gas_dens_cyl * 
-            dust_to_gas_local * 
-            vertical_profile_cyl * 
-            normalization_cyl
+        c_s0_cyl = np.sqrt(k_B * T0_cyl / (mu * m_H))
+        H_g0_cyl = c_s0_cyl / Omega_K
+
+        # Stokes number at midplane only (one value per cylindrical column)
+        St0_cyl = self._compute_stokes_number(
+            grain_size=grain_size,
+            gas_density=rho_g0_cyl,
+            gas_temperature=T0_cyl,
+            keplerian_frequency=Omega_K,
         )
-        
+        St0_cyl = St0_cyl[:, :, None]
+
+        # Dust scale height from midplane Stokes number
+        delta = self.delta
+        H_d_cyl = H_g0_cyl[:, :, None] * np.sqrt(delta / (St0_cyl + delta))
+
+        # Compute vertical profile: single Gaussian with scale height H_d_cyl
+        vertical_profile_cyl = np.exp(-z_cyl_grid**2 / (2 * H_d_cyl**2))
+
+        # Prefactor ensures desired dust surface density per bin
+        dust_to_gas_local = self.dust_to_gas_ratio * mass_fraction
+        prefactor_cyl = dust_to_gas_local * (H_g0_cyl[:, :, None] / H_d_cyl)
+
+        # Final dust density in cylindrical coordinates
+        dust_dens_cyl = rho_g0_cyl[:, :, None] * prefactor_cyl * vertical_profile_cyl
+
+        # Ensure numerical stability: clamp NaNs and negative values to zero
+        dust_dens_cyl_mag = dust_dens_cyl.magnitude
+        dust_dens_cyl_mag[~np.isfinite(dust_dens_cyl_mag)] = 0.0
+        dust_dens_cyl_mag[dust_dens_cyl_mag < 0.0] = 0.0
+        dust_dens_cyl = dust_dens_cyl_mag * dust_dens_cyl.units
+
         # Transpose for interpolation back to spherical
         # From (r, phi, z) to (z, r, phi) for cylindrical
         dust_dens_cyl_transposed = np.transpose(dust_dens_cyl.magnitude, (2, 0, 1))
@@ -848,7 +893,7 @@ class Dust(SubModel):
             axis_order=axis_order,
         )
         
-        logger.info(f"Dust settling calculation completed for bin {bin_index} in spherical coordinates")
+        logger.debug(f"Dust settling calculation completed for bin {bin_index} in spherical coordinates")
         
         return dust_field
         

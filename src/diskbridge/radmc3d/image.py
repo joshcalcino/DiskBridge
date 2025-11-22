@@ -7,9 +7,12 @@ This is adapted from radmc3dPy.image but simplified to focus on FITS output.
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Dict, Any
 from pathlib import Path
 import numpy as np
+import subprocess
+import shutil
+import datetime
 
 try:
     from astropy.io import fits
@@ -74,8 +77,24 @@ class RadImage:
     >>> img.writeFits('output.fits', dpc=140.0, coord='16h32m22s -24d28m30s')
     """
     
-    def __init__(self):
-        """Initialize empty image."""
+    def __init__(self, model_dir: str | Path = '.', model=None):
+        """Initialize RadImage.
+        
+        Parameters
+        ----------
+        model_dir : str or Path, optional
+            Directory containing RADMC-3D files (default: '.')
+        model : Model, optional
+            DiskBridge model (needed for auto-generating gas velocity)
+        """
+        self.model_dir = Path(model_dir)
+        self.model = model
+        
+        # Get params from diskbridge global
+        import diskbridge
+        self.params = diskbridge.params if hasattr(diskbridge, 'params') else {}
+        
+        # Image data
         self.image: Optional[np.ndarray] = None
         self.imageJyppix: Optional[np.ndarray] = None
         self.x: Optional[np.ndarray] = None
@@ -90,6 +109,10 @@ class RadImage:
         self.wav: Optional[np.ndarray] = None
         self.stokes: bool = False
         self.filename: str = ''
+        
+        # Multi-angle storage
+        self.multi_angle_images: list[np.ndarray] = []
+        self.viewing_angles: list[tuple[float, float, float]] = []  # (incl, PA, phi)
         
     def readImage(self, fname: str | Path = 'image.out', binary: bool = False) -> None:
         """Read a RADMC-3D image file.
@@ -412,6 +435,315 @@ class RadImage:
         # Write file
         hdu.writeto(fname, overwrite=overwrite)
         logger.info(f"FITS file written: {fname}")
+    
+    def make_line_image(
+        self,
+        molecule: str,
+        transition: int,
+        inclinations: Optional[list[float] | float] = None,
+        posangs: Optional[list[float] | float] = None,
+        phis: Optional[list[float] | float] = None,
+        npix: Optional[int] = None,
+        sizeau: Optional[float] = None,
+        widthkms: Optional[float] = None,
+        linenlam: Optional[int] = None,
+        output_dir: Optional[str] = None,
+        distance: Optional[float] = None,
+        coord: Optional[str] = None,
+        object_name: str = '',
+        **kwargs
+    ) -> None:
+        """Make molecular line image(s) at specified viewing angles.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name (e.g., 'co', '13co')
+        transition : int
+            Transition number (e.g., 3 for J=3-2)
+        inclinations : float or list of float, optional
+            Inclination(s) in degrees. If None, uses params
+        posangs : float or list of float, optional
+            Position angle(s) in degrees. If None, uses params
+        phis : float or list of float, optional
+            Azimuthal angle(s) in degrees. If None, uses params
+        npix : int, optional
+            Number of pixels. If None, uses params
+        sizeau : float, optional
+            Image size in AU. If None, uses params
+        widthkms : float, optional
+            Velocity width in km/s. If None, uses params
+        linenlam : int, optional
+            Number of velocity channels. If None, uses params
+        output_dir : str, optional
+            Output directory name (default: 'image_{molecule}_J{transition}')
+        distance : float, optional
+            Distance in pc. If None, uses params
+        coord : str, optional
+            Source coordinates. If None, uses params or default
+        object_name : str, optional
+            Object name for FITS header
+        **kwargs : additional arguments passed to _run_radmc3d_image
+        """
+        # Get defaults from params (with proper section/option format)
+        if inclinations is None:
+            inclinations = self.params.getfloat('star_disc', 'inclination_deg', fallback=45.0)
+            inclinations = [inclinations]
+        if posangs is None:
+            posangs = [0.0]  # Not in params typically
+        if phis is None:
+            phis = [0.0]  # Not in params typically
+        if npix is None:
+            npix = 256  # Use hardcoded default
+        if sizeau is None:
+            sizeau = 400.0  # Use hardcoded default
+        if widthkms is None:
+            widthkms = self.params.getfloat('gas_rt', 'widthkms', fallback=10.0)
+        if linenlam is None:
+            linenlam = self.params.getint('gas_rt', 'n_line_colors', fallback=100)
+        if distance is None:
+            distance = self.params.getfloat('star_disc', 'distance_pc', fallback=140.0)
+        if coord is None:
+            coord = '0h0m0s 0d0m0s'  # Use hardcoded default
+        
+        logger.debug(f"Parameters after defaults: npix={npix}, sizeau={sizeau}, widthkms={widthkms}, linenlam={linenlam}, phis={phis}")
+        if output_dir is None:
+            output_dir = f'image_{molecule}_J{transition}'
+        
+        # Convert single values to lists
+        if not isinstance(inclinations, (list, tuple, np.ndarray)):
+            inclinations = [inclinations]
+        if not isinstance(posangs, (list, tuple, np.ndarray)):
+            posangs = [posangs]
+        if not isinstance(phis, (list, tuple, np.ndarray)):
+            phis = [phis]
+        
+        # Ensure all required files exist
+        self._ensure_molecule_file(molecule)
+        self._ensure_gas_velocity()
+        self._ensure_radmc3d_inp_configured()
+        self._ensure_lines_inp(molecule)
+        
+        # Determine iline from molecule data
+        iline = self._get_iline(molecule, transition)
+        
+        # Generate viewing angle combinations
+        viewing_angles = [(i, p, phi) for i in inclinations for p in posangs for phi in phis]
+        
+        logger.info(f"Making {molecule} J={transition}-{transition-1} line images at {len(viewing_angles)} viewing angles")
+        
+        # Store parameters for FITS header
+        self.widthkms = widthkms
+        self.linenlam = linenlam
+        
+        # Run RADMC-3D for each viewing angle
+        self.multi_angle_images = []
+        self.viewing_angles = []
+        
+        # Store pixel sizes from first image
+        saved_sizepix_x = None
+        saved_sizepix_y = None
+        
+        for incl, pa, phi in viewing_angles:
+            phi_str = f"{phi:.1f}°" if phi is not None else "None"
+            logger.info(f"  incl={incl:.1f}°, PA={pa:.1f}°, phi={phi_str}")
+            
+            # Run radmc3d image
+            self._run_radmc3d_image(
+                npix=npix,
+                incl=incl,
+                posang=pa,
+                phi=phi,
+                sizeau=sizeau,
+                widthkms=widthkms,
+                linenlam=linenlam,
+                iline=iline,
+                **kwargs
+            )
+            
+            # Read image
+            self.readImage('image.out')
+            
+            logger.debug(f"After readImage: sizepix_x={self.sizepix_x}, sizepix_y={self.sizepix_y}")
+            
+            # Save pixel sizes from first image
+            if saved_sizepix_x is None:
+                saved_sizepix_x = self.sizepix_x
+                saved_sizepix_y = self.sizepix_y
+                logger.debug(f"Saved pixel sizes: x={saved_sizepix_x}, y={saved_sizepix_y}")
+            
+            # Store for multi-angle FITS
+            self.multi_angle_images.append(self.image.copy())
+            self.viewing_angles.append((incl, pa, phi))
+        
+        logger.debug(f"Loop finished. Restoring: saved_x={saved_sizepix_x}, saved_y={saved_sizepix_y}")
+        
+        # Restore pixel sizes for FITS writing
+        self.sizepix_x = saved_sizepix_x
+        self.sizepix_y = saved_sizepix_y
+        
+        logger.debug(f"After restore: sizepix_x={self.sizepix_x}, sizepix_y={self.sizepix_y}")
+        
+        if self.sizepix_x is None or self.sizepix_y is None:
+            raise RuntimeError(f"Pixel sizes not set for line image! sizepix_x={self.sizepix_x}, sizepix_y={self.sizepix_y}. "
+                             f"This usually means readImage() failed or no images were processed.")
+        
+        logger.debug(f"Using pixel sizes: sizepix_x={self.sizepix_x/AU:.3f} AU, sizepix_y={self.sizepix_y/AU:.3f} AU")
+        
+        # Write multi-angle FITS
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        fits_path = output_path / 'image.fits'
+        self._write_multiangle_fits(
+            fits_path,
+            distance=distance,
+            coord=coord,
+            object_name=object_name,
+            nu0=self._get_rest_frequency(molecule, transition),
+        )
+        
+        # Copy params and add metadata
+        self._organize_image_output(output_path, f"radmc3d image iline {iline}")
+        
+        logger.info(f"Line images written to {output_path}/image.fits")
+    
+    def make_image(
+        self,
+        wavelength: float,
+        inclinations: Optional[list[float] | float] = None,
+        posangs: Optional[list[float] | float] = None,
+        phis: Optional[list[float] | float] = None,
+        npix: Optional[int] = None,
+        sizeau: Optional[float] = None,
+        stokes: bool = False,
+        output_dir: Optional[str] = None,
+        distance: Optional[float] = None,
+        coord: Optional[str] = None,
+        object_name: str = '',
+        **kwargs
+    ) -> None:
+        """Make continuum/scattered light image(s) at specified viewing angles.
+        
+        Parameters
+        ----------
+        wavelength : float
+            Wavelength in microns
+        inclinations : float or list of float, optional
+            Inclination(s) in degrees. If None, uses params
+        posangs : float or list of float, optional
+            Position angle(s) in degrees. If None, uses params
+        phis : float or list of float, optional
+            Azimuthal angle(s) in degrees. If None, uses params
+        npix : int, optional
+            Number of pixels. If None, uses params
+        sizeau : float, optional
+            Image size in AU. If None, uses params
+        stokes : bool, optional
+            Compute full Stokes parameters (default: False)
+        output_dir : str, optional
+            Output directory name (default: 'image_{wavelength}um')
+        distance : float, optional
+            Distance in pc. If None, uses params
+        coord : str, optional
+            Source coordinates. If None, uses params or default
+        object_name : str, optional
+            Object name for FITS header
+        **kwargs : additional arguments passed to _run_radmc3d_image
+        """
+        # Get defaults from params
+        if inclinations is None:
+            inclinations = self.params.get('incl', [45.0])
+        if posangs is None:
+            posangs = self.params.get('posang', [0.0])
+        if phis is None:
+            phis = self.params.get('phi', [0.0])
+        if npix is None:
+            npix = self.params.get('npix', 256)
+        if sizeau is None:
+            sizeau = self.params.get('sizeau', 400.0)
+        if distance is None:
+            distance = self.params.get('distance', 140.0)
+        if coord is None:
+            coord = self.params.get('coord', '0h0m0s 0d0m0s')
+        if output_dir is None:
+            output_dir = f'image_{wavelength:.2f}um'
+        
+        # Convert single values to lists
+        if not isinstance(inclinations, (list, tuple, np.ndarray)):
+            inclinations = [inclinations]
+        if not isinstance(posangs, (list, tuple, np.ndarray)):
+            posangs = [posangs]
+        if not isinstance(phis, (list, tuple, np.ndarray)):
+            phis = [phis]
+        
+        # Generate viewing angle combinations
+        viewing_angles = [(i, p, phi) for i in inclinations for p in posangs for phi in phis]
+        
+        logger.info(f"Making {wavelength}um images at {len(viewing_angles)} viewing angles")
+        
+        # Run RADMC-3D for each viewing angle
+        self.multi_angle_images = []
+        self.viewing_angles = []
+        
+        # Store pixel sizes from first image
+        saved_sizepix_x = None
+        saved_sizepix_y = None
+        
+        for incl, pa, phi in viewing_angles:
+            phi_str = f"{phi:.1f}°" if phi is not None else "None"
+            logger.info(f"  incl={incl:.1f}°, PA={pa:.1f}°, phi={phi_str}")
+            
+            # Run radmc3d image
+            self._run_radmc3d_image(
+                npix=npix,
+                incl=incl,
+                posang=pa,
+                phi=phi,
+                sizeau=sizeau,
+                wavelength=wavelength,
+                stokes=stokes,
+                **kwargs
+            )
+            
+            # Read image
+            self.readImage('image.out')
+            
+            # Save pixel sizes from first image
+            if saved_sizepix_x is None:
+                saved_sizepix_x = self.sizepix_x
+                saved_sizepix_y = self.sizepix_y
+            
+            # Store for multi-angle FITS
+            self.multi_angle_images.append(self.image.copy())
+            self.viewing_angles.append((incl, pa, phi))
+        
+        # Restore pixel sizes for FITS writing
+        self.sizepix_x = saved_sizepix_x
+        self.sizepix_y = saved_sizepix_y
+        
+        if self.sizepix_x is None or self.sizepix_y is None:
+            raise RuntimeError(f"Pixel sizes not set for continuum image! sizepix_x={self.sizepix_x}, sizepix_y={self.sizepix_y}. "
+                             f"This usually means readImage() failed.")
+        
+        logger.debug(f"Using pixel sizes: sizepix_x={self.sizepix_x/AU:.3f} AU, sizepix_y={self.sizepix_y/AU:.3f} AU")
+        
+        # Write multi-angle FITS
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        fits_path = output_path / 'image.fits'
+        self._write_multiangle_fits(
+            fits_path,
+            distance=distance,
+            coord=coord,
+            object_name=object_name,
+        )
+        
+        # Copy params and add metadata
+        self._organize_image_output(output_path, f"radmc3d image lambda {wavelength}")
+        
+        logger.info(f"Images written to {output_path}/image.fits")
         
     def _parse_coords(self, coord: str) -> tuple[float, float]:
         """Parse coordinate string to RA and Dec in degrees.
@@ -429,6 +761,10 @@ class RadImage:
         dec : float
             Declination in degrees
         """
+        # Use default if None
+        if coord is None:
+            coord = '0h0m0s 0d0m0s'
+        
         # Parse RA
         dum = coord
         ra = []
@@ -464,3 +800,424 @@ class RadImage:
             target_dec = dec[0] - dec[1] / 60. - dec[2] / 3600.
             
         return target_ra, target_dec
+    
+    def _run_radmc3d_image(
+        self,
+        npix: int,
+        incl: float,
+        posang: float = 0.0,
+        phi: float = 0.0,
+        sizeau: Optional[float] = None,
+        wavelength: Optional[float] = None,
+        widthkms: Optional[float] = None,
+        linenlam: Optional[int] = None,
+        iline: Optional[int] = None,
+        stokes: bool = False,
+        **kwargs
+    ) -> None:
+        """Run RADMC-3D image command.
+        
+        Parameters
+        ----------
+        npix : int
+            Number of pixels
+        incl : float
+            Inclination in degrees
+        posang : float, optional
+            Position angle in degrees
+        phi : float, optional
+            Azimuthal angle in degrees
+        sizeau : float, optional
+            Image size in AU
+        wavelength : float, optional
+            Wavelength in microns (for continuum)
+        widthkms : float, optional
+            Velocity width in km/s (for lines)
+        linenlam : int, optional
+            Number of channels (for lines)
+        iline : int, optional
+            Line transition index (for lines)
+        stokes : bool, optional
+            Compute Stokes parameters
+        **kwargs : additional flags for radmc3d
+        """
+        # Build command
+        cmd = ['radmc3d', 'image']
+        cmd += ['npix', str(npix)]
+        cmd += ['incl', str(incl)]
+        cmd += ['posang', str(posang)]
+        cmd += ['phi', str(phi)]
+        
+        if sizeau is not None:
+            cmd += ['sizeau', str(sizeau)]
+        
+        # Wavelength or line parameters
+        if wavelength is not None:
+            cmd += ['lambda', str(wavelength)]
+        elif iline is not None:
+            cmd += ['iline', str(iline)]
+            if widthkms is not None:
+                cmd += ['widthkms', str(widthkms)]
+            if linenlam is not None:
+                cmd += ['linenlam', str(linenlam)]
+        
+        if stokes:
+            cmd += ['stokes']
+        
+        # Additional kwargs
+        for key, value in kwargs.items():
+            if isinstance(value, bool) and value:
+                cmd.append(key)
+            elif not isinstance(value, bool):
+                cmd.extend([key, str(value)])
+        
+        # Run command
+        cmd_str = ' '.join(cmd)
+        logger.info(f"Running: {cmd_str}")
+        
+        result = subprocess.run(
+            cmd,
+            cwd=self.model_dir,
+            capture_output=True,
+            text=True,
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"RADMC-3D failed with exit code {result.returncode}")
+            logger.error(f"stdout: {result.stdout}")
+            logger.error(f"stderr: {result.stderr}")
+            raise RuntimeError(f"radmc3d image failed with exit code {result.returncode}")
+        
+        logger.debug(f"RADMC-3D completed successfully")
+    
+    def _get_iline(self, molecule: str, transition: int) -> int:
+        """Get iline index from molecule and transition.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name (e.g., 'co')
+        transition : int
+            Transition number (e.g., 3 for J=3-2)
+            
+        Returns
+        -------
+        int
+            Line index for RADMC-3D (1-indexed for command line)
+        """
+        try:
+            from .molecule import RadMolecule
+            
+            mol = RadMolecule()
+            mol_file = self.model_dir / f'molecule_{molecule}.inp'
+            
+            if not mol_file.exists():
+                # Fall back to simple mapping
+                logger.warning(f"molecule_{molecule}.inp not found, using transition as iline")
+                return transition
+            
+            mol.read(fname=mol_file)
+            # Get 0-indexed line, add 1 for RADMC-3D command line
+            iline = mol.getTransitionIndex(transition) + 1
+            
+            label = mol.getTransitionLabel(iline - 1)
+            logger.info(f"Transition {molecule} {label} → iline={iline}")
+            
+            return iline
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse molecule file: {e}, using transition as iline")
+            return transition
+    
+    def _get_rest_frequency(self, molecule: str, transition: int) -> float:
+        """Get rest frequency for a molecular transition.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name (e.g., 'co')
+        transition : int
+            Transition number (e.g., 3 for J=3-2)
+            
+        Returns
+        -------
+        float
+            Rest frequency in Hz
+        """
+        try:
+            from .molecule import RadMolecule
+            
+            mol = RadMolecule()
+            mol_file = self.model_dir / f'molecule_{molecule}.inp'
+            
+            if not mol_file.exists():
+                logger.warning(f"molecule_{molecule}.inp not found, cannot determine rest frequency")
+                return 0.0
+            
+            mol.read(fname=mol_file)
+            freq = mol.getRestFrequency(transition)
+            
+            logger.info(f"Rest frequency for {molecule} J={transition}: {freq/1e9:.6f} GHz")
+            
+            return freq
+            
+        except Exception as e:
+            logger.warning(f"Failed to get rest frequency: {e}")
+            return 0.0
+    
+    def _write_multiangle_fits(
+        self,
+        fname: Path,
+        distance: float,
+        coord: str,
+        object_name: str = '',
+        nu0: float = 0.0,
+    ) -> None:
+        """Write multi-angle 6D FITS file.
+        
+        Parameters
+        ----------
+        fname : Path
+            Output FITS filename
+        distance : float
+            Distance in pc
+        coord : str
+            Source coordinates
+        object_name : str, optional
+            Object name
+        nu0 : float, optional
+            Rest frequency in Hz
+        """
+        if not self.multi_angle_images:
+            logger.warning("No multi-angle images to write")
+            return
+        
+        # Parse coordinates
+        target_ra, target_dec = self._parse_coords(coord)
+        
+        # Organize angles
+        incls = sorted(set(a[0] for a in self.viewing_angles))
+        pas = sorted(set(a[1] for a in self.viewing_angles))
+        phis = sorted(set(a[2] for a in self.viewing_angles))
+        
+        n_incl = len(incls)
+        n_pa = len(pas)
+        n_phi = len(phis)
+        
+        # Build 6D array: (n_phi, n_pa, n_incl, nfreq, ny, nx)
+        # This matches the MCFOST format from the example
+        if self.nfreq > 1:
+            # Line cube
+            data_6d = np.zeros((n_phi, n_pa, n_incl, self.nfreq, self.ny, self.nx), dtype=np.float32)
+        else:
+            # Continuum (no freq axis)
+            data_6d = np.zeros((n_phi, n_pa, n_incl, self.ny, self.nx), dtype=np.float32)
+        
+        # Fill array
+        conv = self.sizepix_x * self.sizepix_y / (distance * PC)**2 * 1e23
+        
+        for idx, (incl, pa, phi) in enumerate(self.viewing_angles):
+            i_incl = incls.index(incl)
+            i_pa = pas.index(pa)
+            i_phi = phis.index(phi)
+            
+            img = self.multi_angle_images[idx]
+            
+            if self.nfreq > 1:
+                # Line cube: transpose and convert
+                for ifreq in range(self.nfreq):
+                    data_6d[i_phi, i_pa, i_incl, ifreq, :, :] = img[:, :, ifreq].T * conv
+            else:
+                # Continuum
+                data_6d[i_phi, i_pa, i_incl, :, :] = img[:, :, 0].T * conv
+        
+        # Create FITS HDU
+        hdu = fits.PrimaryHDU(data_6d)
+        
+        # WCS headers for spatial axes
+        hdu.header['CTYPE1'] = 'RA---TAN'
+        hdu.header['CRVAL1'] = target_ra
+        hdu.header['CRPIX1'] = (self.nx + 1.) / 2.
+        hdu.header['CDELT1'] = -self.sizepix_x / AU / distance / 3600.
+        hdu.header['CUNIT1'] = 'deg'
+        
+        hdu.header['CTYPE2'] = 'DEC--TAN'
+        hdu.header['CRVAL2'] = target_dec
+        hdu.header['CRPIX2'] = (self.ny + 1.) / 2.
+        hdu.header['CDELT2'] = self.sizepix_y / AU / distance / 3600.
+        hdu.header['CUNIT2'] = 'deg'
+        
+        # Frequency axis (if line cube)
+        if self.nfreq > 1:
+            hdu.header['CTYPE3'] = 'VELO-LSR'
+            hdu.header['CRPIX3'] = 1
+            hdu.header['CRVAL3'] = -self.widthkms / 2.0 if hasattr(self, 'widthkms') else 0.0
+            hdu.header['CDELT3'] = self.widthkms / self.nfreq if hasattr(self, 'widthkms') else 0.5
+            hdu.header['CUNIT3'] = 'km/s'
+            if nu0 > 0:
+                hdu.header['RESTFRQ'] = nu0
+        
+        # Viewing angle metadata
+        hdu.header['N_INCL'] = n_incl
+        hdu.header['N_PA'] = n_pa
+        hdu.header['N_PHI'] = n_phi
+        for i, incl in enumerate(incls):
+            hdu.header[f'INCL_{i}'] = incl
+        for i, pa in enumerate(pas):
+            hdu.header[f'PA_{i}'] = pa
+        for i, phi in enumerate(phis):
+            hdu.header[f'PHI_{i}'] = phi
+        
+        # Additional metadata
+        hdu.header['BUNIT'] = 'W.m-2.pixel-1'  # Match MCFOST
+        hdu.header['DISTANCE'] = (distance, 'Distance (pc)')
+        if object_name:
+            hdu.header['OBJECT'] = object_name
+        
+        # Write file
+        hdu.writeto(fname, overwrite=True)
+        logger.info(f"Multi-angle FITS written: {fname} (shape={data_6d.shape})")
+    
+    def _organize_image_output(self, output_dir: Path, command: str) -> None:
+        """Copy params file and add metadata to output directory.
+        
+        Parameters
+        ----------
+        output_dir : Path
+            Output directory
+        command : str
+            Command that was run
+        """
+        # Copy params file if it exists
+        params_file = self.model_dir / 'params.txt'
+        if params_file.exists():
+            dst_params = output_dir / 'params.txt'
+            shutil.copy2(str(params_file), str(dst_params))
+            
+            # Append metadata
+            with open(dst_params, 'a') as f:
+                f.write('\n# --- Run metadata (auto-generated) ---\n')
+                f.write(f'timestamp = {datetime.datetime.now().isoformat()}\n')
+                f.write(f'radmc3d_command = {command}\n')
+            
+            logger.debug(f"Copied params.txt -> {output_dir}")
+    
+    def _ensure_molecule_file(self, molecule: str) -> None:
+        """Ensure molecule data file exists, download if necessary.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name (e.g., 'co')
+        """
+        mol_file = self.model_dir / f'molecule_{molecule}.inp'
+        if mol_file.exists():
+            return
+        
+        logger.info(f"Molecule file not found, attempting to download {molecule}...")
+        
+        # Try to download from LAMDA
+        import urllib.request
+        try:
+            url = f'https://home.strw.leidenuniv.nl/~moldata/datafiles/{molecule}.dat'
+            urllib.request.urlretrieve(url, mol_file)
+            logger.info(f"Downloaded molecule_{molecule}.inp from LAMDA")
+        except Exception as e:
+            logger.error(f"Failed to download molecule data: {e}")
+            raise RuntimeError(f"molecule_{molecule}.inp not found and download failed")
+    
+    def _ensure_gas_velocity(self) -> None:
+        """Ensure gas velocity file exists, create if necessary."""
+        vel_file = self.model_dir / 'gas_velocity.binp'
+        if vel_file.exists():
+            return
+        
+        if self.model is None:
+            raise RuntimeError(
+                "gas_velocity.binp not found and no model provided to RadImage. "
+                "Either provide model in __init__ or create gas_velocity.binp manually."
+            )
+        
+        logger.info("Gas velocity file not found, creating from model...")
+        
+        from .writer import RadWriter
+        writer = RadWriter(self.model)
+        writer.write_gas_velocity(
+            self.model.gas['vr'].data,
+            self.model.gas['vtheta'].data,
+            self.model.gas['vphi'].data,
+            binary=True,
+            output_dir=str(self.model_dir)
+        )
+        logger.info("Created gas_velocity.binp")
+    
+    def _ensure_radmc3d_inp_configured(self) -> None:
+        """Ensure radmc3d.inp is properly configured for line transfer."""
+        inp_file = self.model_dir / 'radmc3d.inp'
+        
+        # Read existing file
+        if inp_file.exists():
+            with open(inp_file, 'r') as f:
+                content = f.read()
+            
+            # Check if already configured
+            has_lines = 'incl_lines' in content and '= 1' in content
+            has_tgas = 'tgas_eq_tdust' in content
+            has_itemp = 'itempdecoup' in content
+            has_rto = 'rto_style' in content
+            
+            if has_lines and has_tgas and has_itemp and has_rto:
+                return  # Already configured
+        else:
+            content = ""
+        
+        logger.info("Updating radmc3d.inp for line transfer...")
+        
+        # Write/update configuration
+        from .writer import RadWriter
+        writer = RadWriter(self.model) if self.model else None
+        
+        if writer:
+            writer.write_radmc3d_inp(
+                output_dir=str(self.model_dir),
+                incl_dust=1,
+                incl_lines=1,
+            )
+        
+        # Append additional settings
+        with open(inp_file, 'a') as f:
+            if 'tgas_eq_tdust' not in content:
+                f.write('tgas_eq_tdust = 1\n')
+            if 'itempdecoup' not in content:
+                f.write('itempdecoup = 1\n')
+            if 'rto_style' not in content:
+                f.write('rto_style = 3\n')
+        
+        logger.info("Updated radmc3d.inp")
+    
+    def _ensure_lines_inp(self, molecule: str) -> None:
+        """Ensure lines.inp file exists for specified molecule.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name
+        """
+        lines_file = self.model_dir / 'lines.inp'
+        
+        # Check if file exists and already has this molecule
+        if lines_file.exists():
+            with open(lines_file, 'r') as f:
+                content = f.read()
+            if molecule in content:
+                return  # Already configured
+        
+        logger.info(f"Creating lines.inp for {molecule}...")
+        
+        # Write lines.inp
+        with open(lines_file, 'w') as f:
+            f.write('2\n')  # Format number
+            f.write('1\n')  # Number of molecules
+            f.write(f'{molecule}    leiden    0    0    0\n')
+        
+        logger.info(f"Created lines.inp")

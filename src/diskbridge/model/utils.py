@@ -68,6 +68,10 @@ def _interp_sph_to_cyl(sph: Optional[np.ndarray], r_sph: np.ndarray, tmed_sph: n
             dr = (r_s - r0) / (r1 - r0) if r1 != r0 else 0.0
             dt = (theta - t0) / (t1 - t0) if t1 != t0 else 0.0
             
+            # Clamp interpolation weights
+            dr = np.clip(dr, 0.0, 1.0)
+            dt = np.clip(dt, 0.0, 1.0)
+            
             # Bilinear interpolation
             c00 = sph[it, ir, :]
             c01 = sph[it, ir + 1, :]
@@ -75,7 +79,10 @@ def _interp_sph_to_cyl(sph: Optional[np.ndarray], r_sph: np.ndarray, tmed_sph: n
             c11 = sph[it + 1, ir + 1, :]
             c0 = c00 * (1 - dr) + c01 * dr
             c1 = c10 * (1 - dr) + c11 * dr
-            slice_k[i, :] = c0 * (1 - dt) + c1 * dt
+            result = c0 * (1 - dt) + c1 * dt
+            
+            # Clamp to non-negative
+            slice_k[i, :] = np.maximum(result, 0.0)
         out.append(slice_k)
     return np.stack(out, axis=0)
 
@@ -117,6 +124,12 @@ def _interp_cyl_to_sph(cyl: Optional[np.ndarray], r_cyl: np.ndarray, zmed: np.nd
         for i in range(nrad_sph):
             Ri = R[i]
             Zi = Z[i]
+            # Check if point is outside grid bounds
+            if Ri < r_cyl[0] or Ri > r_cyl[-1] or Zi < zmed[0] or Zi > zmed[-1]:
+                # Extrapolation - set to zero (atmosphere beyond grid)
+                slice_j[i, :] = 0.0
+                continue
+                
             ir = int(np.clip(np.searchsorted(r_cyl, Ri) - 1, 0, nrad_cyl - 2))
             iz = int(np.clip(np.searchsorted(zmed, Zi) - 1, 0, nz - 2))
             r0 = r_cyl[ir]
@@ -125,12 +138,20 @@ def _interp_cyl_to_sph(cyl: Optional[np.ndarray], r_cyl: np.ndarray, zmed: np.nd
             z1 = zmed[iz + 1]
             dr = (Ri - r0) / (r1 - r0) if r1 != r0 else 0.0
             dz = (Zi - z0) / (z1 - z0) if z1 != z0 else 0.0
+            
+            # Clamp interpolation weights to [0, 1]
+            dr = np.clip(dr, 0.0, 1.0)
+            dz = np.clip(dz, 0.0, 1.0)
+            
             c00 = cyl[iz, ir, :]
             c01 = cyl[iz, ir + 1, :]
             c10 = cyl[iz + 1, ir, :]
             c11 = cyl[iz + 1, ir + 1, :]
             c0 = c00 * (1 - dr) + c01 * dr
             c1 = c10 * (1 - dr) + c11 * dr
-            slice_j[i, :] = c0 * (1 - dz) + c1 * dz
+            result = c0 * (1 - dz) + c1 * dz
+            
+            # Clamp result to non-negative (dust density must be >= 0)
+            slice_j[i, :] = np.maximum(result, 0.0)
         out.append(slice_j)
     return np.stack(out, axis=0)

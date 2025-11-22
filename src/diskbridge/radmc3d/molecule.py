@@ -373,11 +373,103 @@ class RadMolecule:
         
         return indices
     
+    def getTransitionIndex(self, J_upper: int, J_lower: Optional[int] = None) -> int:
+        """Get line index for a specific rotational transition.
+        
+        For linear rotors (like CO), transitions are specified by the upper
+        J level. The lower level is J_upper - 1 for emission.
+        
+        Parameters
+        ----------
+        J_upper : int
+            Upper J quantum number
+        J_lower : int, optional
+            Lower J quantum number (default: J_upper - 1)
+            
+        Returns
+        -------
+        int
+            Line index (0-indexed, suitable for RADMC-3D iline)
+            
+        Raises
+        ------
+        ValueError
+            If the transition is not found
+            
+        Examples
+        --------
+        >>> mol = RadMolecule()
+        >>> mol.read(mol='co')
+        >>> iline = mol.getTransitionIndex(3)  # J=3-2 transition
+        """
+        if J_lower is None:
+            J_lower = J_upper - 1
+        
+        # Find the transition
+        # Note: iup and ilow are 1-indexed in the file, so we need to check
+        # the actual J values from the levels
+        for i in range(self.nlin):
+            # Convert from 1-indexed to 0-indexed
+            jup = self.jrot[self.iup[i] - 1]
+            jlow = self.jrot[self.ilow[i] - 1]
+            
+            if abs(jup - J_upper) < 0.1 and abs(jlow - J_lower) < 0.1:
+                return i
+        
+        raise ValueError(
+            f"Transition J={J_upper}-{J_lower} not found in molecule '{self.name}'"
+        )
+    
+    def getRestFrequency(self, J_upper: int, J_lower: Optional[int] = None) -> float:
+        """Get rest frequency for a specific transition.
+        
+        Parameters
+        ----------
+        J_upper : int
+            Upper J quantum number
+        J_lower : int, optional
+            Lower J quantum number (default: J_upper - 1)
+            
+        Returns
+        -------
+        float
+            Rest frequency in Hz
+            
+        Examples
+        --------
+        >>> mol = RadMolecule()
+        >>> mol.read(mol='co')
+        >>> freq = mol.getRestFrequency(3)  # CO J=3-2 at 345.796 GHz
+        """
+        iline = self.getTransitionIndex(J_upper, J_lower)
+        return self.freq[iline]
+    
+    def getTransitionLabel(self, iline: int) -> str:
+        """Get a human-readable label for a transition.
+        
+        Parameters
+        ----------
+        iline : int
+            Line index (0-indexed)
+            
+        Returns
+        -------
+        str
+            Label like "J=3-2" or "J=10-9"
+        """
+        if iline < 0 or iline >= self.nlin:
+            raise ValueError(f"Line index {iline} out of range")
+        
+        jup = int(self.jrot[self.iup[iline] - 1])
+        jlow = int(self.jrot[self.ilow[iline] - 1])
+        
+        return f"J={jup}-{jlow}"
+    
     def __repr__(self) -> str:
         """String representation of molecule."""
         if self.name:
-            return (f"radmc3dMolecule(name='{self.name}', "
+            return (f"RadMolecule(name='{self.name}', "
                    f"nlev={self.nlev}, nlin={self.nlin}, "
                    f"weight={self.molweight:.2f})")
         else:
-            return "radmc3dMolecule(empty)"
+            return "RadMolecule(empty)"

@@ -231,12 +231,19 @@ class RadData:
             data = self._readScalarFieldASCII(fpath)
         
         # Extract the requested species
+        logger.debug(f"Dust temperature data shape: {data.shape}, dtype: {data.dtype}, ispec: {ispec}, type(ispec): {type(ispec)}")
+        
         if len(data.shape) == 2:
             # Multiple species: (nspec, ncells)
+            if not isinstance(ispec, (int, np.integer)):
+                ispec = int(ispec)
             temp = data[ispec, :]
-        else:
-            # Single species
+        elif len(data.shape) == 1:
+            # Single species: just use the data directly
             temp = data
+        else:
+            # Unexpected shape
+            raise ValueError(f"Unexpected dust temperature data shape: {data.shape}")
         
         # Reshape to mesh
         nx, ny, nz = self._getMeshShape()

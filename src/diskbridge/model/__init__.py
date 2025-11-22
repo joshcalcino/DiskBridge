@@ -5,7 +5,6 @@ from .mesh import Mesh
 from .field import Field
 from .model import Model, puff_up_model
 
-
 def load_model(
     path: Union[str, Path],
     reader: str = "fargo",

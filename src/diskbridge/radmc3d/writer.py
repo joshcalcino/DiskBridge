@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge._params import params
 from .opacities import DustOpacityCalculator
 
 
@@ -228,11 +229,11 @@ class RadWriter:
         output_dir: str | Path = '.',
         incl_dust: int = 1,
         incl_lines: int = 0,
-        nphot: int = 1000000,
-        nphot_scat: int = 1000000,
-        scattering_mode_max: int = 0,
+        nphot: Optional[int] = None,
+        nphot_scat: Optional[int] = None,
+        scattering_mode_max: Optional[int] = None,
         modified_random_walk: int = 1,
-        setthreads: int = 1,
+        setthreads: Optional[int] = None,
     ) -> None:
         """Write radmc3d.inp control file.
         
@@ -249,6 +250,15 @@ class RadWriter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir / 'radmc3d.inp'
+
+        if nphot is None:
+            nphot = params.getint('photons', 'n_thermal')
+        if nphot_scat is None:
+            nphot_scat = params.getint('photons', 'n_scat')
+        if scattering_mode_max is None:
+            scattering_mode_max = params.getint('dust_rt', 'scat_mode')
+        if setthreads is None:
+            setthreads = params.getint('simulation', 'nbcores')
         
         with open(filepath, 'w') as f:
             f.write(f'incl_dust = {incl_dust}\n')
@@ -406,13 +416,13 @@ class RadWriter:
     def compute_and_write_dust_opacities(
         self,
         output_dir: str | Path = '.',
-        optconst_file: str | Path = None,
+        optconst_file: Optional[str | Path] = None,
         grain_density: float = 2.7,
         wmin_micron: float = 0.1,
         wmax_micron: float = 10000.0,
         nwav: int = 200,
         ntheta: int = 181,
-        scattering_mode: int = 0,
+        scattering_mode: Optional[int] = None,
         logawidth: float = 0.05,
         na: int = 20,
     ) -> None:
@@ -432,9 +442,16 @@ class RadWriter:
         """
         if self.model.dust is None:
             raise ValueError("Model has no dust data")
-        
+
+        # Derive optical constants file from global parameters if not provided
         if optconst_file is None:
-            raise ValueError("Must provide optical constants file")
+            opacity_dir = params.get('opacity', 'opacity_dir')
+            species = params.get('opacity', 'species')
+            optconst_file = Path(opacity_dir) / f"{species}.lnk"
+
+        # Default scattering mode from global parameters if not provided
+        if scattering_mode is None:
+            scattering_mode = params.getint('dust_rt', 'scat_mode')
         
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -488,14 +505,14 @@ class RadWriter:
         self,
         output_dir: str | Path = '.',
         optconst_file: Optional[str | Path] = None,
-        grain_density: float = 2.7,
-        rstar: float = 2.0,
-        tstar: float = 4000.0,
-        mstar: float = 1.0,
-        scattering_mode: int = 0,
-        nphot: int = 1000000,
-        nphot_scat: int = 1000000,
-        setthreads: int = 1,
+        grain_density: Optional[float] = None,
+        rstar: Optional[float] = None,
+        tstar: Optional[float] = None,
+        mstar: Optional[float] = None,
+        scattering_mode: Optional[int] = None,
+        nphot: Optional[int] = None,
+        nphot_scat: Optional[int] = None,
+        setthreads: Optional[int] = None,
         **kwargs,
     ) -> None:
         """Write all RADMC-3D input files in one call.
@@ -514,16 +531,38 @@ class RadWriter:
             **kwargs: Additional arguments passed to individual writers
         """
         logger.info(f"Writing all RADMC-3D input files to {output_dir}")
+
+        # Fill defaults from global parameter set if not explicitly given
+        if grain_density is None:
+            grain_density = params.getfloat('dust_sizes', 'grain_density')
+        if rstar is None:
+            rstar = params.getfloat('star_disc', 'rstar_rsun')
+        if tstar is None:
+            tstar = params.getfloat('star_disc', 'teff_K')
+        if mstar is None:
+            mstar = params.getfloat('star_disc', 'mstar_msun')
+        if scattering_mode is None:
+            scattering_mode = params.getint('dust_rt', 'scat_mode')
+        if nphot is None:
+            nphot = params.getint('photons', 'n_thermal')
+        if nphot_scat is None:
+            nphot_scat = params.getint('photons', 'n_scat')
+        if setthreads is None:
+            setthreads = params.getint('simulation', 'nbcores')
         
+        # Determine wavelength grid from kwargs or global parameters
+        wmin = kwargs.get('wmin_micron', params.getfloat('wavelengths', 'lambda_min_micron'))
+        wmax = kwargs.get('wmax_micron', params.getfloat('wavelengths', 'lambda_max_micron'))
+        nwav = kwargs.get('nwav', 150)
+
         # Write grid files
         self.write_amr_grid(output_dir)
-        self.write_wavelength_grid(output_dir, **{k: v for k, v in kwargs.items() 
-                                                   if k in ['wmin_micron', 'wmax_micron', 'nwav']})
+        self.write_wavelength_grid(output_dir, wmin_micron=wmin, wmax_micron=wmax, nwav=nwav)
         
         # Write stellar source
-        wmin = kwargs.get('wmin_micron', 0.1)
-        wmax = kwargs.get('wmax_micron', 10000.0)
-        nwav = kwargs.get('nwav', 150)
+        wmin = wmin
+        wmax = wmax
+        nwav = nwav
         self.write_stars(output_dir, rstar=rstar, tstar=tstar, mstar=mstar,
                         wmin_micron=wmin, wmax_micron=wmax, nwav=nwav)
         
@@ -533,13 +572,16 @@ class RadWriter:
             self.write_dustopac(output_dir, scattering_mode=scattering_mode)
             
             if optconst_file is not None:
+                op_kwargs = {k: v for k, v in kwargs.items() 
+                             if k in ['wmin_micron', 'wmax_micron', 'nwav', 'ntheta', 'logawidth', 'na']}
+                op_kwargs.setdefault('wmin_micron', wmin)
+                op_kwargs.setdefault('wmax_micron', wmax)
                 self.compute_and_write_dust_opacities(
                     output_dir,
                     optconst_file=optconst_file,
                     grain_density=grain_density,
                     scattering_mode=scattering_mode,
-                    **{k: v for k, v in kwargs.items() 
-                       if k in ['wmin_micron', 'wmax_micron', 'nwav', 'ntheta', 'logawidth', 'na']},
+                    **op_kwargs,
                 )
         
         # Write control file
@@ -667,8 +709,9 @@ class RadWriter:
             logger.info(f"Writing gas velocity (binary) to {fpath}: {ncells} cells")
             
             with open(fpath, 'wb') as f:
-                # Write header
+                # Write header: format, precision, ncells
                 np.array([1], dtype=np.int64).tofile(f)  # Format
+                np.array([8], dtype=np.int64).tofile(f)  # Precision (8 bytes for float64)
                 np.array([ncells], dtype=np.int64).tofile(f)  # Number of cells
                 
                 # Write velocities (vr, vtheta, vphi for each cell)

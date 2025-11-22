@@ -16,6 +16,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple
 from pathlib import Path
 import numpy as np
+import subprocess
+import shutil
+import datetime
 
 if TYPE_CHECKING:
     from diskbridge.model.model import Model
@@ -148,11 +151,13 @@ class RadModel:
         self.temperature = self.data.readGasTemp()
         return self.temperature
     
-    def read_dust_temperature(self, ispec: int = 0) -> Quantity:
+    def read_dust_temperature(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
         """Read dust temperature from RADMC-3D output using radmc3dData.
         
         Parameters
         ----------
+        fname : str or Path, optional
+            Path to temperature file (if None, uses default in model_dir)
         ispec : int, optional
             Dust species index to read (default: 0)
             
@@ -166,7 +171,7 @@ class RadModel:
         FileNotFoundError
             If no dust temperature file is found
         """
-        self.temperature = self.data.readDustTemp(ispec=ispec)
+        self.temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
         return self.temperature
     
     def read_temperature(self, source: str = 'auto', ispec: int = 0) -> Quantity:
@@ -421,18 +426,18 @@ class RadModel:
         
         return self.nH
     
-    def compute_pinte2018_abundance(
+    def compute_abundance(
         self,
         molecule: str = 'co',
         X0: float = 5e-5,
         eps: float = EPS_DEFAULT,
         Tfrz: float = T_FRZ_DEFAULT,
-        apply_photodissociation: bool = True,
-        apply_freezeout: bool = True,
-        apply_photodesorption: bool = False,
+        photodissociation: bool = True,
+        freezeout: bool = True,
+        photodesorption: bool = False,
         write_output: bool = True,
     ) -> Tuple[Quantity, Quantity]:
-        """Compute molecular abundance using Pinte et al. (2018) prescription.
+        """Compute molecular abundance with photochemistry (Pinte et al. 2018).
         
         Applies three processes:
         1. Photodissociation: X = 0 where log10(chi/nH) > -6
@@ -446,15 +451,15 @@ class RadModel:
         X0 : float, optional
             Initial abundance X/nH (default: 5e-5)
         eps : float, optional
-            Freeze-out survival fraction (default: 8e-5)
+            Depletion factor for freeze-out (default: 1e-3)
         Tfrz : float, optional
-            Freeze-out temperature threshold in K (default: 21.0)
-        apply_photodissociation : bool, optional
+            Freeze-out temperature in K (default: 20 K)
+        photodissociation : bool, optional
             Apply photodissociation (default: True)
-        apply_freezeout : bool, optional
+        freezeout : bool, optional
             Apply freeze-out (default: True)
-        apply_photodesorption : bool, optional
-            Apply photodesorption escape (default: False)
+        photodesorption : bool, optional
+            Apply photodesorption (default: False)
         write_output : bool, optional
             Write numberdens file (default: True)
             
@@ -490,14 +495,14 @@ class RadModel:
         X = np.full_like(T, float(X0), dtype=float)
         
         # 1. Photodissociation (kill molecule)
-        if apply_photodissociation:
+        if photodissociation:
             mask_pdiss = (np.log10(chi / (nH + 1e-99)) > LOG_CHI_OVER_NH_PDISS)
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
             logger.info(f"Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)")
         
         # 2. Photodesorption escape (optional)
-        if apply_photodesorption:
+        if photodesorption:
             mask_pdes = (np.log10(chi / (nH + 1e-99)) > LOG_CHI_OVER_NH_PDES)
             n_pdes = np.sum(mask_pdes)
             logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
@@ -505,7 +510,7 @@ class RadModel:
             mask_pdes = np.zeros_like(T, dtype=bool)
         
         # 3. Freeze-out (reduce abundance)
-        if apply_freezeout:
+        if freezeout:
             mask_frz = (T < Tfrz) & ~mask_pdes  # Don't freeze where photodesorption occurs
             X[mask_frz] *= eps
             n_frz = np.sum(mask_frz)
@@ -590,3 +595,428 @@ class RadModel:
                 f.write('\n')
             
             logger.info(f"Wrote {filepath}")
+    
+    def compute_simple_abundance(
+        self,
+        molecule: str,
+        X0: float,
+        apply_freezeout: bool = False,
+        freeze_temp: float = 20.0,
+        write_output: bool = True,
+    ) -> Tuple[Quantity, Quantity]:
+        """Compute simple molecular abundance without photodissociation.
+        
+        This provides a simpler alternative to compute_abundance
+        for cases where photodissociation effects are negligible.
+        
+        Parameters
+        ----------
+        molecule : str
+            Molecule name (e.g., 'co', '13co')
+        X0 : float
+            Reference abundance per H nucleus
+        apply_freezeout : bool, optional
+            Apply freeze-out below freeze_temp (default: False)
+        freeze_temp : float, optional
+            Freeze-out temperature in K (default: 20 K)
+        write_output : bool, optional
+            Write numberdens_<molecule>.binp file (default: True)
+            
+        Returns
+        -------
+        X : Quantity
+            Abundance per H nucleus (dimensionless)
+        n : Quantity
+            Number density in 1/cm^3
+            
+        Examples
+        --------
+        >>> rad = RadModel(model)
+        >>> X_co, n_co = rad.compute_simple_abundance('co', X0=5e-5, apply_freezeout=True)
+        """
+        # Read temperature
+        if self.temperature is None:
+            self.read_dust_temperature()
+        
+        # Compute H nuclei density
+        if self.nH is None:
+            self.compute_nH()
+        
+        # Start with constant abundance
+        X = np.ones_like(self.nH.magnitude) * X0
+        
+        # Apply freeze-out if requested
+        if apply_freezeout:
+            frozen_mask = self.temperature.magnitude < freeze_temp
+            X[frozen_mask] = 0.0
+            
+            n_frozen = np.sum(frozen_mask)
+            percent_frozen = 100.0 * n_frozen / X.size
+            logger.info(f"Applied freeze-out at T < {freeze_temp} K: "
+                       f"{percent_frozen:.1f}% of cells frozen")
+        
+        # Compute number density
+        n = (X * self.nH.magnitude) * units('1/cm^3')
+        X_quantity = X * units('dimensionless')
+        
+        logger.info(f"Simple abundance computed: mean X = {X.mean():.2e}")
+        
+        # Write output if requested
+        if write_output:
+            self.write_numberdens(molecule, n)
+        
+        return X_quantity, n
+    
+    def compute_temperature(
+        self,
+        nphot: Optional[int] = None,
+        output_dir: Optional[str | Path] = None,
+        force: bool = False,
+    ) -> Quantity:
+        """Run RADMC-3D thermal Monte Carlo to compute dust temperature.
+        
+        Parameters
+        ----------
+        nphot : int, optional
+            Number of photon packages (uses nphot_thermal from params if None)
+        output_dir : str or Path, optional
+            Output directory (default: 'temperature/')
+        force : bool, optional
+            Force recomputation even if output exists (default: False)
+            
+        Returns
+        -------
+        Quantity
+            Dust temperature field in K
+            
+        Examples
+        --------
+        >>> rad = RadModel(model)
+        >>> temperature = rad.compute_temperature()  # Uses params defaults
+        >>> temperature = rad.compute_temperature(nphot=1000000, force=True)
+        """
+        # Get nphot from params if not provided
+        if nphot is None:
+            import diskbridge
+            if hasattr(diskbridge, 'params'):
+                nphot = diskbridge.params.getint('radmc', 'nphot_thermal', fallback=1000000)
+            else:
+                nphot = 1000000
+        
+        # Set output directory
+        if output_dir is None:
+            output_dir = self.model_dir / 'temperature'
+        else:
+            output_dir = Path(output_dir)
+        
+        # Check if already computed (check for any temperature file)
+        temp_files = [output_dir / 'dust_temperature.dat', 
+                     output_dir / 'dust_temperature.bdat',
+                     output_dir / 'dust_temperature.binp']
+        existing_file = next((f for f in temp_files if f.exists()), None)
+        if existing_file is not None and not force:
+            logger.info(f"Temperature already computed at {existing_file}")
+            self.read_dust_temperature(fname=str(existing_file))
+            return self.temperature
+        
+        # Create output directory
+        output_dir.mkdir(exist_ok=True)
+        
+        # Run mctherm
+        logger.info(f"Running RADMC-3D mctherm with {nphot} photons...")
+        cmd = ['radmc3d', 'mctherm', 'nphot', str(nphot), 'setthreads', '8']
+        
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.model_dir),
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"RADMC-3D mctherm failed: {result.stderr}")
+            raise RuntimeError("mctherm failed")
+        
+        logger.info("✓ mctherm completed")
+        
+        # Organize output
+        self._organize_output(
+            output_dir,
+            ['dust_temperature.dat', 'dust_temperature.bdat', 'dust_temperature.binp'],
+            f'radmc3d mctherm nphot={nphot}'
+        )
+        
+        # Read temperature from the output directory
+        # Find the temperature file that was moved
+        for suffix in ['.bdat', '.dat', '.binp']:
+            temp_file = output_dir / f'dust_temperature{suffix}'
+            if temp_file.exists():
+                self.read_dust_temperature(fname=str(temp_file))
+                break
+        
+        return self.temperature
+    
+    def compute_mcmono(
+        self,
+        nphot: Optional[int] = None,
+        output_dir: Optional[str | Path] = None,
+        force: bool = False,
+        uv_min_nm: Optional[float] = None,
+        uv_max_nm: Optional[float] = None,
+        n_wavelengths: Optional[int] = None
+    ) -> Quantity:
+        """Run RADMC-3D monochromatic Monte Carlo for UV field.
+        
+        Parameters
+        ----------
+        nphot : int, optional
+            Number of photon packages (uses nphot_mono from params if None)
+        output_dir : str or Path, optional
+            Output directory (default: 'mcmono/')
+        force : bool, optional
+            Force recomputation even if output exists (default: False)
+        uv_min_nm : float, optional
+            UV range lower bound in nm (default: 91.2 nm, from params)
+        uv_max_nm : float, optional
+            UV range upper bound in nm (default: 205.0 nm, from params)
+        n_wavelengths : int, optional
+            Number of wavelengths for integration (default: 10, from params)
+            
+        Returns
+        -------
+        Quantity
+            UV field chi in Draine units
+            
+        Examples
+        --------
+        >>> rad = RadModel(model)
+        >>> chi = rad.compute_mcmono()
+        """
+        import diskbridge
+        
+        # Get nphot from params if not provided
+        if nphot is None:
+            if hasattr(diskbridge, 'params'):
+                nphot = diskbridge.params.getint('radmc', 'nphot_mono', fallback=1000000)
+            else:
+                nphot = 1000000
+        
+        # Get UV wavelength range from params if not provided
+        if uv_min_nm is None:
+            if hasattr(diskbridge, 'params'):
+                uv_min_nm = diskbridge.params.getfloat('gas_rt', 'uv_min_nm', fallback=91.2)
+            else:
+                uv_min_nm = 91.2
+        
+        if uv_max_nm is None:
+            if hasattr(diskbridge, 'params'):
+                uv_max_nm = diskbridge.params.getfloat('gas_rt', 'uv_max_nm', fallback=205.0)
+            else:
+                uv_max_nm = 205.0
+        
+        if n_wavelengths is None:
+            if hasattr(diskbridge, 'params'):
+                n_wavelengths = diskbridge.params.getint('gas_rt', 'uv_n_wavelengths', fallback=10)
+            else:
+                n_wavelengths = 10
+        
+        # Validate UV range
+        uv_min_cm = uv_min_nm * 1e-7
+        uv_max_cm = uv_max_nm * 1e-7
+        
+        logger.info(f"UV field configuration: {uv_min_nm:.1f}-{uv_max_nm:.1f} nm, {n_wavelengths} wavelengths")
+        
+        # Set output directory
+        if output_dir is None:
+            output_dir = self.model_dir / 'mcmono'
+        else:
+            output_dir = Path(output_dir)
+        
+        # Check if already computed
+        mean_intensity_file = output_dir / 'mean_intensity.out'
+        if mean_intensity_file.exists() and not force:
+            logger.info(f"Mean intensity already computed at {mean_intensity_file}")
+            # Parse the existing file with multi-wavelength format
+            with open(mean_intensity_file, 'r') as f:
+                iformat = int(f.readline().strip())
+                nrcells = int(f.readline().strip())
+                nwav = int(f.readline().strip())
+                
+                # Read frequencies (Hz) and convert to wavelength (cm)
+                freq_hz = np.array([float(x) for x in f.readline().split()])
+                lam_cm = C_LIGHT / freq_hz
+                
+                # Read mean intensity values
+                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+                j_lambda = j_flat.reshape((nrcells, nwav))
+            
+            nx, ny, nz = self.data._getMeshShape()
+            self.mean_intensity = j_lambda
+            
+            # Compute chi by integrating over UV wavelengths
+            uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
+            if not np.any(uv_mask):
+                raise ValueError(
+                    f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) in existing mean intensity file. '
+                    f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
+                )
+            
+            lam_uv = lam_cm[uv_mask]
+            j_uv = j_lambda[:, uv_mask]
+            
+            u_lambda = 4.0 * np.pi * j_uv / C_LIGHT
+            chi_flat = np.trapz(u_lambda, lam_uv, axis=1)
+            chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
+            self.chi = Quantity(chi_3d, 'dimensionless')
+            
+            logger.info(f"Loaded chi from {np.sum(uv_mask)} UV wavelengths: "
+                       f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")
+            return self.chi
+        
+        # Create output directory
+        output_dir.mkdir(exist_ok=True)
+        
+        # RADMC-3D mcmono needs temperature file in main directory
+        # Create symlink if temperature file exists in temperature/ subdirectory
+        temp_subdir = self.model_dir / 'temperature'
+        for suffix in ['.bdat', '.dat', '.binp']:
+            src_temp = temp_subdir / f'dust_temperature{suffix}'
+            dst_temp = self.model_dir / f'dust_temperature{suffix}'
+            if src_temp.exists() and not dst_temp.exists():
+                import os
+                os.symlink(src_temp, dst_temp)
+                logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
+                break
+        
+        # Create mcmono_wavelength_micron.inp with UV wavelength range
+        mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
+        uv_lam_nm = np.linspace(uv_min_nm, uv_max_nm, n_wavelengths)
+        uv_lam_micron = uv_lam_nm / 1000.0  # Convert to microns
+        
+        with open(mcmono_wav_file, 'w') as f:
+            f.write(f'{len(uv_lam_micron)}\n')  # Number of wavelengths
+            for lam in uv_lam_micron:
+                f.write(f'{lam:.6f}\n')
+        logger.debug(f"Wrote {mcmono_wav_file} with {len(uv_lam_micron)} UV wavelengths")
+        
+        # Run mcmono at UV wavelengths
+        logger.info(f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm)...")
+        cmd = ['radmc3d', 'mcmono', 'setthreads', '8']
+        
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.model_dir),
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"RADMC-3D mcmono failed: {result.stderr}")
+            raise RuntimeError("mcmono failed")
+        
+        logger.info("✓ mcmono completed")
+        
+        # Organize output (move mean_intensity file to mcmono/ directory)
+        self._organize_output(
+            output_dir,
+            ['mean_intensity.out'],
+            f'radmc3d mcmono UV_range_{uv_min_nm:.1f}-{uv_max_nm:.1f}nm_{n_wavelengths}wavelengths'
+        )
+        
+        # Read mean intensity directly from the mcmono output directory
+        mean_intensity_path = output_dir / 'mean_intensity.out'
+        if not mean_intensity_path.exists():
+            raise FileNotFoundError(f"Mean intensity file not found at {mean_intensity_path}")
+        
+        # Parse the mean intensity file
+        with open(mean_intensity_path, 'r') as f:
+            # Format: iformat (line 1), nrcells (line 2), nwav (line 3)
+            # Line 4: all wavelengths (space-separated)
+            # Remaining lines: mean intensity values (one per line, nwav * nrcells total)
+            iformat = int(f.readline().strip())
+            nrcells = int(f.readline().strip())
+            nwav = int(f.readline().strip())
+            
+            # Read wavelengths (all on one line, space-separated, in Hz)
+            freq_hz = np.array([float(x) for x in f.readline().split()])
+            
+            # Convert frequency (Hz) to wavelength (cm): lambda = c / nu
+            lam_cm = C_LIGHT / freq_hz
+            
+            # Read mean intensity values (nwav * nrcells values, one per line)
+            # Data is ordered: all wavelengths for cell 0, then all for cell 1, etc.
+            j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+            
+            # Reshape to (nrcells, nwav)
+            j_lambda = j_flat.reshape((nrcells, nwav))
+        
+        # Store wavelengths and mean intensity
+        nx, ny, nz = self.data._getMeshShape()
+        self.mean_intensity = j_lambda  # Keep full spectral dimension
+        
+        # Compute chi by integrating over UV wavelengths
+        # Following Pinte et al. 2018 and fargo2radmc3d implementation
+        uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
+        
+        if not np.any(uv_mask):
+            raise ValueError(
+                f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) found in mean intensity file. '
+                f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
+            )
+        
+        lam_uv = lam_cm[uv_mask]
+        j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
+        
+        # Radiation energy density: u_lambda = 4π J_lambda / c
+        u_lambda = 4.0 * np.pi * j_uv / C_LIGHT  # c in cm/s
+        
+        # Integrate over UV wavelengths using trapezoidal rule
+        chi_flat = np.trapz(u_lambda, lam_uv, axis=1)  # Shape: (nrcells,)
+        
+        # Reshape to 3D grid
+        chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
+        self.chi = Quantity(chi_3d, 'dimensionless')
+        
+        logger.info(f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm): "
+                   f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")
+        
+        return self.chi
+    
+    def _organize_output(
+        self,
+        output_dir: Path,
+        files: list[str],
+        command: str
+    ) -> None:
+        """Organize RADMC-3D output files into a directory.
+        
+        Parameters
+        ----------
+        output_dir : Path
+            Target directory
+        files : list of str
+            Files to move
+        command : str
+            Command that was run (for metadata)
+        """
+        # Move files
+        for fname in files:
+            src = self.model_dir / fname
+            if src.exists():
+                dst = output_dir / fname
+                shutil.move(str(src), str(dst))
+                logger.debug(f"Moved {fname} -> {output_dir}")
+        
+        # Copy params file if it exists
+        params_file = self.model_dir / 'params.txt'
+        if params_file.exists():
+            dst_params = output_dir / 'params.txt'
+            shutil.copy2(str(params_file), str(dst_params))
+            
+            # Append metadata
+            with open(dst_params, 'a') as f:
+                f.write('\n# --- Run metadata (auto-generated) ---\n')
+                f.write(f'timestamp = {datetime.datetime.now().isoformat()}\n')
+                f.write(f'radmc3d_command = {command}\n')
+            
+            logger.debug(f"Copied params.txt -> {output_dir}")
