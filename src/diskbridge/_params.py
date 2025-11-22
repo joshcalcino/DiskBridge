@@ -25,7 +25,11 @@ class ParamsHelper:
         return self._parser.has_option(section, option)
     
     def get(self, section: str, option: str, fallback=None):
-        return self._parser.get(section, option, fallback=fallback)
+        value = self._parser.get(section, option, fallback=fallback)
+        # Strip inline comments for string values as well
+        if isinstance(value, str):
+            value = value.split('#')[0].strip()
+        return value
     
     def getint(self, section: str, option: str, fallback=None) -> int:
         if fallback is not None and not self._parser.has_option(section, option):
@@ -86,11 +90,22 @@ def read_params(filename: Union[str, Path, None] = None) -> ParamsHelper:
         with open(path, "r") as f:
             parser.read_file(f)
     
+    # If a global ParamsHelper already exists, update its underlying parser in-place
+    # so that all imports of "params" see the new values.
+    existing = globals().get("params", None)
+    if isinstance(existing, ParamsHelper):
+        base_parser = existing._parser
+        for section in parser.sections():
+            if not base_parser.has_section(section):
+                base_parser.add_section(section)
+            for key, value in parser.items(section):
+                base_parser.set(section, key, value)
+        params = existing
+        return params
+    
+    # First-time initialization: create a new ParamsHelper
     new_params = ParamsHelper(parser)
-    
-    # Automatically update global params
     params = new_params
-    
     return params
 
 
