@@ -1,0 +1,51 @@
+##############################
+#  Default DiskBridge params #
+##############################
+
+[simulation]
+nbcores          = 12
+
+[photons]
+n_thermal        = 1e7
+n_scat           = 1e5
+
+[wavelengths]
+lambda_min_micron = 0.1
+lambda_max_micron = 3000.0
+
+[map]
+nbpixels         = 1024
+
+[dust_rt]
+scat_mode        = 0
+
+[dust_sizes]
+amin             = 0.01
+amax             = 100.0
+pindex           = 3.0
+dust_to_gas_ratio = 1e-2
+nbins            = 10
+grain_density    = 1.26
+
+[opacity]
+species          = mix_2species_ice70
+opacity_dir      = /home/josh/code/fargo2radmc3d/data/opac
+
+[gas_rt]
+gasspecies       = co
+iline            = 3
+abundance        = 5e-5
+widthkms         = 2.0
+n_line_colors    = 40
+turbvel_ms       = 0.0
+photodissociation_model = Pinte2018
+
+[star_disc]
+distance_pc      = 140.0
+inclination_deg  = 45.0
+rstar_rsun       = 2.0
+teff_K           = 6130.0
+mstar_msun       = 1.0
+
+[radmc]
+secondorder      = no
