@@ -575,7 +575,7 @@ class RadModel:
             # RADMC-3D expects (nsec, ncol, nrad) order
             # DiskBridge uses (nrad, nsec, ncol/nz) order
             # Need to transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-            n_radmc = np.transpose(n_cgs, (1, 2, 0))
+            n_radmc = np.transpose(n_cgs, (2, 1, 0))
             
             with open(filepath, 'wb') as f:
                 # Header: format, precision, ncells
@@ -588,7 +588,7 @@ class RadModel:
             filepath = self.model_dir / f'numberdens_{mol_lower}.inp'
             
             # Transpose for RADMC-3D
-            n_radmc = np.transpose(n_cgs, (1, 2, 0))
+            n_radmc = np.transpose(n_cgs, (2, 1, 0))
             
             with open(filepath, 'w') as f:
                 f.write('1\n')
