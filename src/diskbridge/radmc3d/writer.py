@@ -297,13 +297,13 @@ class RadWriter:
         filepath = output_dir / 'radmc3d.inp'
 
         if nphot is None:
-            nphot = params.getint('photons', 'n_thermal')
+            nphot = int(params.n_thermal)
         if nphot_scat is None:
-            nphot_scat = params.getint('photons', 'n_scat')
+            nphot_scat = int(params.n_scat)
         if scattering_mode_max is None:
-            scattering_mode_max = params.getint('dust_rt', 'scat_mode')
+            scattering_mode_max = params.scat_mode
         if setthreads is None:
-            setthreads = params.getint('simulation', 'nbcores')
+            setthreads = params.nbcores
         
         with open(filepath, 'w') as f:
             f.write(f'incl_dust = {incl_dust}\n')
@@ -610,26 +610,26 @@ class RadWriter:
 
         # Fill defaults from global parameter set if not explicitly given
         if grain_density is None:
-            grain_density = params.getfloat('dust_sizes', 'grain_density')
+            grain_density = params.grain_density
         if rstar is None:
-            rstar = params.getfloat('star', 'rstar_rsun')
+            rstar = params.rstar_rsun
         if tstar is None:
-            tstar = params.getfloat('star', 'teff_K')
+            tstar = params.teff_K
         if mstar is None:
-            mstar = params.getfloat('star', 'mstar_msun')
+            mstar = params.mstar_msun
         if scattering_mode is None:
-            scattering_mode = params.getint('dust_rt', 'scat_mode')
+            scattering_mode = params.scat_mode
         if nphot is None:
-            nphot = params.getint('photons', 'n_thermal')
+            nphot = int(params.n_thermal)
         if nphot_scat is None:
-            nphot_scat = params.getint('photons', 'n_scat')
+            nphot_scat = int(params.n_scat)
         if setthreads is None:
-            setthreads = params.getint('simulation', 'nbcores')
+            setthreads = params.nbcores
         
         # Determine wavelength grid from kwargs or global parameters
-        wmin = kwargs.get('wmin_micron', params.getfloat('wavelengths', 'lambda_min_micron'))
-        wmax = kwargs.get('wmax_micron', params.getfloat('wavelengths', 'lambda_max_micron'))
-        nwav = kwargs.get('nwav', params.getint('wavelengths', 'n_lambda', fallback=150))
+        wmin = kwargs.get('wmin_micron', params.lambda_min_micron)
+        wmax = kwargs.get('wmax_micron', params.lambda_max_micron)
+        nwav = kwargs.get('nwav', params.n_lambda)
 
         # Write grid files
         self.write_amr_grid(output_dir)

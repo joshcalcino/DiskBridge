@@ -92,7 +92,7 @@ class RadImage:
         
         # Get params from diskbridge global
         import diskbridge
-        self.params = diskbridge.params if hasattr(diskbridge, 'params') else {}
+        self.params = diskbridge.params
         
         # Subdirectory paths for organized file storage (matching RadModel/RadWriter)
         self.grid_dir = self.model_dir / 'input_grids'
@@ -576,34 +576,31 @@ class RadImage:
             Object name for FITS header
         **kwargs : additional arguments passed to _run_radmc3d_image
         """
-        # Get defaults from params (with proper section/option format)
+        # Get defaults from params
         if inclinations is None:
-            inclinations = self.params.getfloat_or_list('map', 'inclination', fallback=45.0)
+            inclinations = self.params.inclination
             if not isinstance(inclinations, list):
                 inclinations = [inclinations]
         if posangs is None:
             # Read PA from params in standard convention (0=N, 90=E)
             # Convert to RADMC-3D convention by adding 90 degrees
-            try:
-                pa_standard = self.params.getfloat_or_list('map', 'posangle', fallback=0.0)
-                if isinstance(pa_standard, list):
-                    posangs = [(pa + 90.0) % 360.0 for pa in pa_standard]
-                else:
-                    posangs = [(pa_standard + 90.0) % 360.0]
-            except:
-                posangs = [0.0]  # Default if not in params
+            pa_standard = self.params.posangle
+            if isinstance(pa_standard, list):
+                posangs = [(pa + 90.0) % 360.0 for pa in pa_standard]
+            else:
+                posangs = [(pa_standard + 90.0) % 360.0]
         if phis is None:
             phis = [0.0]  # Not in params typically
         if npix is None:
-            npix = self.params.getint('map', 'nbpixels')
+            npix = self.params.nbpixels
         if sizeau is None:
-            sizeau = self.params.getfloat('map', 'size_au')
+            sizeau = self.params.size_au
         if widthkms is None:
-            widthkms = self.params.getfloat('gas_rt', 'widthkms')
+            widthkms = self.params.widthkms
         if linenlam is None:
-            linenlam = self.params.getint('gas_rt', 'nline', fallback=40)
+            linenlam = self.params.nline
         if distance is None:
-            distance = self.params.getfloat('map', 'distance_pc', fallback=140.0)
+            distance = self.params.distance_pc
         if coord is None:
             coord = '0h0m0s 0d0m0s'  # Use hardcoded default
         
@@ -754,25 +751,24 @@ class RadImage:
         """
         # Get defaults from params
         if inclinations is None:
-            inclinations = self.params.getfloat_or_list('map', 'inclination', fallback=45.0)
+            inclinations = self.params.inclination
+            if not isinstance(inclinations, list):
+                inclinations = [inclinations]
         if posangs is None:
             # Read PA from params in standard convention, convert to RADMC-3D
-            try:
-                pa_standard = self.params.getfloat_or_list('map', 'posangle', fallback=0.0)
-                if isinstance(pa_standard, list):
-                    posangs = [(pa + 90.0) % 360.0 for pa in pa_standard]
-                else:
-                    posangs = [(pa_standard + 90.0) % 360.0]
-            except:
-                posangs = [0.0]
+            pa_standard = self.params.posangle
+            if isinstance(pa_standard, list):
+                posangs = [(pa + 90.0) % 360.0 for pa in pa_standard]
+            else:
+                posangs = [(pa_standard + 90.0) % 360.0]
         if phis is None:
             phis = [0.0]
         if npix is None:
-            npix = self.params.getint('map', 'nbpixels')
+            npix = self.params.nbpixels
         if sizeau is None:
-            sizeau = self.params.getfloat('map', 'size_au')
+            sizeau = self.params.size_au
         if distance is None:
-            distance = self.params.getfloat('map', 'distance_pc', fallback=140.0)
+            distance = self.params.distance_pc
         if coord is None:
             coord = '0h0m0s 0d0m0s'
         if output_dir is None:

@@ -2,19 +2,19 @@
 #  Default DiskBridge params #
 ##############################
 
-[simulation]
+# Simulation 
 nbcores          = 12
 
-[photons]
+# Photons 
 n_thermal        = 1e7
 n_scat           = 1e5
 
-[wavelengths]
+# Wavelengths 
 n_lambda          = 150
 lambda_min_micron = 0.1
 lambda_max_micron = 3000.0
 
-[map]
+# Map 
 nbpixels         = 1024
 size_au          = 400.0
 
@@ -22,10 +22,10 @@ distance_pc      = 140.0
 inclination      = 45.0
 posangle         = 0.0
 
-[dust_rt]
+# Dust RT 
 scat_mode        = 0
 
-[dust_sizes]
+# Dust sizes 
 amin             = 0.01
 amax             = 100.0
 pindex           = 3.0
@@ -33,11 +33,11 @@ dust_to_gas_ratio = 1e-2
 nbins            = 10
 grain_density    = 1.26
 
-[opacity]
+# Opacity 
 species          = mix_2species_ice70
 opacity_dir      = /home/josh/code/fargo2radmc3d/data/opac
 
-[gas_rt]
+# Gas RT 
 gasspecies       = co
 iline            = 3
 abundance        = 5e-5
@@ -47,11 +47,14 @@ turbvel_ms       = 0.0
 photodissociation = F
 freezeout        = F
 photodesorption  = F
+uv_min_nm        = 91.2
+uv_max_nm        = 205.0
+uv_n_wavelengths = 10
 
-[star]
+# Star 
 rstar_rsun       = 2.0
 teff_K           = 6130.0
 mstar_msun       = 1.0
 
-[radmc]
+# RADMC 
 secondorder      = F

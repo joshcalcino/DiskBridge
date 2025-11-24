@@ -1,139 +1,186 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Union
-import configparser
+from typing import Union, List, Optional, Dict, get_origin, get_args, get_type_hints
 
 
+# Default params file shipped with the package
 DEFAULT_PARAMS_FILE = Path(__file__).parent / "params.txt"
 
 
-class ParamsHelper:
-    """Wrapper around ConfigParser with convenience methods for common conversions."""
-    
-    def __init__(self, parser: configparser.ConfigParser):
-        self._parser = parser
-    
-    def __getitem__(self, section: str) -> configparser.SectionProxy:
-        """Access sections directly: params['simulation']['data_directory']"""
-        return self._parser[section]
-    
-    def has_section(self, section: str) -> bool:
-        return self._parser.has_section(section)
-    
-    def has_option(self, section: str, option: str) -> bool:
-        return self._parser.has_option(section, option)
-    
-    def get(self, section: str, option: str, fallback=None):
-        value = self._parser.get(section, option, fallback=fallback)
-        # Strip inline comments for string values as well
-        if isinstance(value, str):
-            value = value.split('#')[0].strip()
-        return value
-    
-    def getint(self, section: str, option: str, fallback=None) -> int:
-        if fallback is not None and not self._parser.has_option(section, option):
-            return fallback
-        # Handle scientific notation like 1e7
-        raw = self._parser.get(section, option)
-        # Strip inline comments
-        raw = raw.split('#')[0].strip()
-        return int(float(raw))
-    
-    def getfloat(self, section: str, option: str, fallback=None) -> float:
-        if fallback is not None and not self._parser.has_option(section, option):
-            return fallback
-        # Handle scientific notation like 1e7
-        raw = self._parser.get(section, option)
-        # Strip inline comments
-        raw = raw.split('#')[0].strip()
+# ---------------------------------------------------------------------------
+# Typed parameter container 
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Params:
+    # simulation / photons
+    nbcores: int
+    n_thermal: float
+    n_scat: float
+
+    # wavelengths
+    n_lambda: int
+    lambda_min_micron: float
+    lambda_max_micron: float
+
+    # map
+    nbpixels: int
+    size_au: float
+    distance_pc: float
+    inclination: Union[float, List[float]]
+    posangle: float
+
+    # dust_rt
+    scat_mode: int
+
+    # dust_sizes
+    amin: float
+    amax: float
+    pindex: float
+    dust_to_gas_ratio: float
+    nbins: int
+    grain_density: float
+
+    # opacity
+    species: str
+    opacity_dir: str
+
+    # gas_rt
+    gasspecies: str
+    iline: int
+    abundance: float
+    widthkms: float
+    nline: int
+    turbvel_ms: float
+    photodissociation: bool
+    freezeout: bool
+    photodesorption: bool
+    uv_min_nm: float
+    uv_max_nm: float
+    uv_n_wavelengths: int
+
+    # star
+    rstar_rsun: float
+    teff_K: float
+    mstar_msun: float
+
+    # radmc
+    secondorder: bool
+
+
+
+# ---------------------------------------------------------------------------
+# Simple "key = value" parser
+# ---------------------------------------------------------------------------
+
+def _parse_param_file(path: Path) -> Dict[str, str]:
+    """Return {key: raw_value_string} from a flat key=value file."""
+    result: Dict[str, str] = {}
+    if not path.exists():
+        return result
+
+    with path.open("r") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Type casting
+# ---------------------------------------------------------------------------
+
+def _parse_bool(raw: str) -> bool:
+    raw = raw.strip().lower()
+    return raw in ("1", "true", "t", "yes", "y")
+
+
+def _parse_scalar(raw: str, target_type):
+    raw = raw.strip()
+    if target_type is bool:
+        return _parse_bool(raw)
+    if target_type is int:
+        return int(float(raw))  # handles 1e6, etc.
+    if target_type is float:
         return float(raw)
-    
-    def getbool(self, section: str, option: str, fallback=None) -> bool:
-        if fallback is not None and not self._parser.has_option(section, option):
-            return fallback
-        raw = self._parser.get(section, option)
-        # Strip inline comments
-        raw = raw.split('#')[0].strip()
-        # Support both yes/no and T/F formats
-        return raw.lower() in ("1", "true", "t", "yes", "y")
-    
-    def getfloat_or_list(self, section: str, option: str, fallback=None):
-        """Get a parameter that can be either a float or a list of floats.
-        
-        Supports formats like:
-        - 45.0 -> returns 45.0
-        - [30, 45, 60] -> returns [30.0, 45.0, 60.0]
-        - 30, 45, 60 -> returns [30.0, 45.0, 60.0]
-        """
-        if fallback is not None and not self._parser.has_option(section, option):
-            return fallback
-        raw = self._parser.get(section, option)
-        # Strip inline comments
-        raw = raw.split('#')[0].strip()
-        
-        # Check if it looks like a list
-        if '[' in raw or ',' in raw:
-            # Remove brackets if present
-            raw = raw.strip('[]')
-            # Split by comma and convert to floats
-            values = [float(x.strip()) for x in raw.split(',')]
-            return values
-        else:
-            # Single value
+    if target_type is str:
+        return raw
+    return raw
+
+
+def _parse_value(raw: str, target_type):
+    raw = raw.split("#", 1)[0].strip()
+    origin = get_origin(target_type)
+
+    # Union[float, List[float]] support
+    if origin is Union:
+        args = get_args(target_type)
+        list_type = next((t for t in args if get_origin(t) is list or t is list), None)
+        if list_type:
+            if "," in raw or "[" in raw:
+                inner = float
+                vals = raw.strip("[]")
+                if not vals:
+                    return []
+                return [inner(x.strip()) for x in vals.split(",")]
             return float(raw)
-    
-    # Convenience getters with unit conversions
-    def get_dust_size_m(self, which: str) -> float:
-        """Get amin or amax from [dust_sizes] in meters (file has microns)."""
-        microns = self.getfloat('dust_sizes', which, fallback=0.0)
-        return microns * 1.0e-6
+
+    # List[T]
+    if origin is list:
+        inner = get_args(target_type)[0]
+        vals = raw.strip("[]")
+        if not vals:
+            return []
+        return [_parse_scalar(part.strip(), inner) for part in vals.split(",")]
+
+    return _parse_scalar(raw, target_type)
 
 
-def read_params(filename: Union[str, Path, None] = None) -> ParamsHelper:
-    """Read params.txt file and automatically update the global diskbridge.params.
-    
-    Access parameters via section/key:
-        params['simulation']['data_directory']
-        params.getint('simulation', 'output_number')
-        params.getfloat('wavelengths', 'lambda_min_micron')
-    
-    Args:
-        filename: Path to params file. If None, uses package default.
-    
-    Returns:
-        ParamsHelper wrapper around ConfigParser
-    """
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
+
+params: Params  # global
+
+
+def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
+    """Load defaults from DEFAULT_PARAMS_FILE, overlay user overrides, and build Params."""
     global params
+
+    # 1. Read defaults (the *real* default source)
+    values = _parse_param_file(DEFAULT_PARAMS_FILE)
+
+    # 2. Overlay user file
+    if filename is not None:
+        user_vals = _parse_param_file(Path(filename))
+        values.update(user_vals)
+
+    # 3. Build typed Params instance
+    # Use get_type_hints to resolve string annotations to actual types
+    type_hints = get_type_hints(Params)
     
-    if filename is None:
-        filename = DEFAULT_PARAMS_FILE
-    
-    path = Path(filename)
-    parser = configparser.ConfigParser()
-    
-    if path.exists():
-        with open(path, "r") as f:
-            parser.read_file(f)
-    
-    # If a global ParamsHelper already exists, update its underlying parser in-place
-    # so that all imports of "params" see the new values.
-    existing = globals().get("params", None)
-    if isinstance(existing, ParamsHelper):
-        base_parser = existing._parser
-        for section in parser.sections():
-            if not base_parser.has_section(section):
-                base_parser.add_section(section)
-            for key, value in parser.items(section):
-                base_parser.set(section, key, value)
-        params = existing
-        return params
-    
-    # First-time initialization: create a new ParamsHelper
-    new_params = ParamsHelper(parser)
-    params = new_params
+    kwargs = {}
+    for field in fields(Params):
+        key = field.name
+        if key not in values:
+            raise KeyError(
+                f"Missing required parameter '{key}' in params.txt (no default provided)."
+            )
+        raw = values[key]
+        # Use the resolved type from type_hints, not field.type which may be a string
+        field_type = type_hints[key]
+        parsed = _parse_value(raw, field_type)
+        kwargs[key] = parsed
+
+    params = Params(**kwargs)
     return params
 
 
-# Global parameter instance, created on import
-params = read_params()
+# Initialize once on import using only the defaults
+params = read_params(None)

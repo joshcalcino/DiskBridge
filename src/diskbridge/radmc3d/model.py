@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .data import RadData
-
+import diskbridge 
 
 # Physical constants (CGS)
 C_LIGHT = 2.99792458e10  # cm/s
@@ -115,6 +115,7 @@ class RadModel:
         
         # Initialize data reader
         self.data = RadData(model, model_dir)
+        self.params = diskbridge.params
         
         # Storage for computed fields
         self.temperature: Optional[Quantity] = None
@@ -518,8 +519,8 @@ class RadModel:
         X0: float = 5e-5,
         eps: float = EPS_DEFAULT,
         Tfrz: float = T_FRZ_DEFAULT,
-        photodissociation: bool = True,
-        freezeout: bool = True,
+        photodissociation: bool = False,
+        freezeout: bool = False,
         photodesorption: bool = False,
         write_output: bool = True,
     ) -> Tuple[Quantity, Quantity]:
@@ -689,80 +690,9 @@ class RadModel:
             
             logger.info(f"Wrote {filepath}")
     
-    def compute_simple_abundance(
-        self,
-        molecule: str,
-        X0: float,
-        apply_freezeout: bool = False,
-        freeze_temp: float = 20.0,
-        write_output: bool = True,
-    ) -> Tuple[Quantity, Quantity]:
-        """Compute simple molecular abundance without photodissociation.
-        
-        This provides a simpler alternative to compute_abundance
-        for cases where photodissociation effects are negligible.
-        
-        Parameters
-        ----------
-        molecule : str
-            Molecule name (e.g., 'co', '13co')
-        X0 : float
-            Reference abundance per H nucleus
-        apply_freezeout : bool, optional
-            Apply freeze-out below freeze_temp (default: False)
-        freeze_temp : float, optional
-            Freeze-out temperature in K (default: 20 K)
-        write_output : bool, optional
-            Write numberdens_<molecule>.binp file (default: True)
-            
-        Returns
-        -------
-        X : Quantity
-            Abundance per H nucleus (dimensionless)
-        n : Quantity
-            Number density in 1/cm^3
-            
-        Examples
-        --------
-        >>> rad = RadModel(model)
-        >>> X_co, n_co = rad.compute_simple_abundance('co', X0=5e-5, apply_freezeout=True)
-        """
-        # Read temperature
-        if self.temperature is None:
-            self.read_dust_temperature()
-        
-        # Compute H nuclei density
-        if self.nH is None:
-            self.compute_nH()
-        
-        # Start with constant abundance
-        X = np.ones_like(self.nH.magnitude) * X0
-        
-        # Apply freeze-out if requested
-        if apply_freezeout:
-            frozen_mask = self.temperature.magnitude < freeze_temp
-            X[frozen_mask] = 0.0
-            
-            n_frozen = np.sum(frozen_mask)
-            percent_frozen = 100.0 * n_frozen / X.size
-            logger.info(f"Applied freeze-out at T < {freeze_temp} K: "
-                       f"{percent_frozen:.1f}% of cells frozen")
-        
-        # Compute number density
-        n = (X * self.nH.magnitude) * units('1/cm^3')
-        X_quantity = X * units('dimensionless')
-        
-        logger.info(f"Simple abundance computed: mean X = {X.mean():.2e}")
-        
-        # Write output if requested
-        if write_output:
-            self.write_numberdens(molecule, n)
-        
-        return X_quantity, n
-    
     def compute_temperature(
         self,
-        nphot: Optional[int] = None,
+        nphot: int = None,
         output_dir: Optional[str | Path] = None,
         force: bool = False,
     ) -> Quantity:
@@ -788,13 +718,8 @@ class RadModel:
         >>> temperature = rad.compute_temperature()  # Uses params defaults
         >>> temperature = rad.compute_temperature(nphot=1000000, force=True)
         """
-        # Get nphot from params if not provided
         if nphot is None:
-            import diskbridge
-            if hasattr(diskbridge, 'params'):
-                nphot = diskbridge.params.getint('radmc', 'nphot_thermal', fallback=1000000)
-            else:
-                nphot = 1000000
+            nphot = int(self.params.n_thermal)
         
         # Set output directory
         if output_dir is None:
@@ -870,12 +795,12 @@ class RadModel:
     
     def compute_mcmono(
         self,
-        nphot: Optional[int] = None,
+        nphot: int = None,
         output_dir: Optional[str | Path] = None,
         force: bool = False,
-        uv_min_nm: Optional[float] = None,
-        uv_max_nm: Optional[float] = None,
-        n_wavelengths: Optional[int] = None
+        uv_min_nm: float = None,
+        uv_max_nm: float = None,
+        n_wavelengths: int = None
     ) -> Quantity:
         """Run RADMC-3D monochromatic Monte Carlo for UV field.
         
@@ -904,40 +829,19 @@ class RadModel:
         >>> rad = RadModel(model)
         >>> chi = rad.compute_mcmono()
         """
-        import diskbridge
-        
-        # Get nphot from params if not provided
         if nphot is None:
-            if hasattr(diskbridge, 'params'):
-                nphot = diskbridge.params.getint('radmc', 'nphot_mono', fallback=1000000)
-            else:
-                nphot = 1000000
-        
-        # Get UV wavelength range from params if not provided
+            nphot = self.params.n_thermal
         if uv_min_nm is None:
-            if hasattr(diskbridge, 'params'):
-                uv_min_nm = diskbridge.params.getfloat('gas_rt', 'uv_min_nm', fallback=91.2)
-            else:
-                uv_min_nm = 91.2
-        
+            uv_min_nm = self.params.uv_min_nm
         if uv_max_nm is None:
-            if hasattr(diskbridge, 'params'):
-                uv_max_nm = diskbridge.params.getfloat('gas_rt', 'uv_max_nm', fallback=205.0)
-            else:
-                uv_max_nm = 205.0
-        
+            uv_max_nm = self.params.uv_max_nm
         if n_wavelengths is None:
-            if hasattr(diskbridge, 'params'):
-                n_wavelengths = diskbridge.params.getint('gas_rt', 'uv_n_wavelengths', fallback=10)
-            else:
-                n_wavelengths = 10
+            n_wavelengths = self.params.uv_n_wavelengths
         
         # Validate UV range
         uv_min_cm = uv_min_nm * 1e-7
         uv_max_cm = uv_max_nm * 1e-7
         u_draine = U_DRAINE
-        if hasattr(diskbridge, 'params'):
-            u_draine = diskbridge.params.getfloat('gas_rt', 'u_draine', fallback=U_DRAINE)
         
         logger.info(f"UV field configuration: {uv_min_nm:.1f}-{uv_max_nm:.1f} nm, {n_wavelengths} wavelengths")
         
@@ -957,8 +861,10 @@ class RadModel:
                 nrcells = int(f.readline().strip())
                 nwav = int(f.readline().strip())
                 
-                # Read frequencies (Hz) and convert to wavelength (cm)
+                # Read wavelengths (all on one line, space-separated, in Hz)
                 freq_hz = np.array([float(x) for x in f.readline().split()])
+                
+                # Convert frequency (Hz) to wavelength (cm): lambda = c / nu
                 lam_cm = C_LIGHT / freq_hz
                 
                 # Read mean intensity values
@@ -1026,8 +932,9 @@ class RadModel:
         
         try:
             # Run mcmono at UV wavelengths
+            setthreads = self.params.nbcores
             logger.info(f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm)...")
-            cmd = ['radmc3d', 'mcmono', 'setthreads', '8']
+            cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads)]
 
             # Preserve any existing radmc3d.out log (e.g. from mctherm)
             log_path = self.model_dir / 'radmc3d.out'

@@ -275,17 +275,19 @@ class Dust(SubModel):
         """
         # Pull defaults from params if not provided
         if amin is None:
-            amin = params.get_dust_size_m('amin') * units('m')
+            # params stores in microns, convert to meters
+            amin = params.amin * units('micron')
         if amax is None:
-            amax = params.get_dust_size_m('amax') * units('m')
+            # params stores in microns, convert to meters
+            amax = params.amax * units('micron')
         if nbin is None:
-            nbin = params.getint('dust_sizes', 'nbins')
+            nbin = params.nbins
         if power_index is None:
-            power_index = params.getfloat('dust_sizes', 'pindex')
+            power_index = params.pindex
         if grain_density is None:
-            grain_density = params.getfloat('dust_sizes', 'grain_density') * units('g/cm^3')
+            grain_density = params.grain_density * units('g/cm^3')
         if dust_to_gas_ratio is None:
-            dust_to_gas_ratio = params.getfloat('dust_sizes', 'dust_to_gas_ratio')
+            dust_to_gas_ratio = params.dust_to_gas_ratio
         
         self.distribution = DustDistribution(
             amin=amin,
@@ -305,10 +307,8 @@ class Dust(SubModel):
         # Set turbulence parameters for settling mode
         if mode == 'settling':
             if alpha is None:
-                # Try to read from params
-                alpha = params.getfloat('dust_sizes', 'alpha', fallback=None)
-                if alpha is None:
-                    raise ValueError("alpha parameter required for settling mode (add to params.txt or pass as argument)")
+                # alpha is not in the default params, so use a sensible default or raise error
+                raise ValueError("alpha parameter required for settling mode (pass as argument)")
             self.alpha = alpha
             self.delta = delta if delta is not None else alpha  # Assume Sc ~ 1
             logger.info(f"Settling mode: alpha={self.alpha}, delta={self.delta}")
