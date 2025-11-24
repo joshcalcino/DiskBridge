@@ -662,6 +662,10 @@ class RadImage:
             # Read image
             self.readImage('image.out')
             
+            image_file = self.model_dir / 'image.out'
+            if image_file.exists() or image_file.is_symlink():
+                image_file.unlink()
+            
             logger.debug(f"After readImage: sizepix_x={self.sizepix_x}, sizepix_y={self.sizepix_y}")
             
             # Save pixel sizes from first image
@@ -813,6 +817,10 @@ class RadImage:
             
             # Read image
             self.readImage('image.out')
+            
+            image_file = self.model_dir / 'image.out'
+            if image_file.exists() or image_file.is_symlink():
+                image_file.unlink()
             
             # Save pixel sizes from first image
             if saved_sizepix_x is None:
@@ -979,6 +987,10 @@ class RadImage:
         # Run command with symlink management
         cmd_str = ' '.join(cmd)
         logger.info(f"Running: {cmd_str}")
+        
+        image_file = self.model_dir / 'image.out'
+        if image_file.exists() or image_file.is_symlink():
+            image_file.unlink()
         
         # Create symlinks to organized input files
         self.create_symlinks()
