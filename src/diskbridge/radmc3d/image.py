@@ -14,13 +14,10 @@ import subprocess
 import shutil
 import datetime
 
-try:
-    from astropy.io import fits
-except ImportError:
-    fits = None
-    print("Warning: astropy.io.fits not available. FITS writing disabled.")
-
+from astropy.io import fits
 from diskbridge._logging import logger
+from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
+import diskbridge
 
 # Physical constants (CGS)
 C_LIGHT = 2.99792458e10  # cm/s
@@ -91,7 +88,6 @@ class RadImage:
         self.model = model
         
         # Get params from diskbridge global
-        import diskbridge
         self.params = diskbridge.params
         
         # Subdirectory paths for organized file storage (matching RadModel/RadWriter)
@@ -133,9 +129,6 @@ class RadImage:
         RADMC-3D expects input files in the directory where it runs. This method
         creates symlinks from the model directory to the organized subdirectories.
         """
-        import os
-        
-        # Define files to symlink from each subdirectory
         file_map = {
             self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
             self.star_dir: ['stars.inp'],
@@ -146,48 +139,15 @@ class RadImage:
             self.temperature_dir: ['dust_temperature.*'],
             self.mcmono_dir: ['mean_intensity.out'],
         }
-        
-        # Add dust opacity files dynamically
+
         if self.opacity_dir.exists():
             opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
             if opacity_files and self.opacity_dir not in file_map:
                 file_map[self.opacity_dir] = []
             for opac_file in opacity_files:
                 file_map[self.opacity_dir].append(opac_file.name)
-        
-        # Create symlinks
-        for source_dir, file_patterns in file_map.items():
-            if not source_dir.exists():
-                continue
-                
-            for pattern in file_patterns:
-                # Handle glob patterns
-                if '*' in pattern:
-                    source_files = list(source_dir.glob(pattern))
-                else:
-                    source_files = [source_dir / pattern]
-                
-                for source in source_files:
-                    if not source.exists():
-                        continue
-                    
-                    target = self.model_dir / source.name
-                    
-                    # Skip if target already exists and is the correct symlink
-                    if target.is_symlink() and target.resolve() == source.resolve():
-                        self._active_symlinks.append(target)
-                        continue
-                    
-                    # Remove existing file/symlink if it exists
-                    if target.exists() or target.is_symlink():
-                        target.unlink()
-                    
-                    # Create symlink
-                    os.symlink(source, target)
-                    self._active_symlinks.append(target)
-                    logger.debug(f"Created symlink: {target} -> {source}")
-        
-        logger.info(f"Created {len(self._active_symlinks)} symlinks to input files")
+
+        create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
     
     def cleanup_symlinks(self) -> None:
         """Remove all symlinks created by create_symlinks().
@@ -195,15 +155,7 @@ class RadImage:
         This ensures the model directory stays clean after RADMC-3D runs.
         Only removes symlinks that were tracked by this instance.
         """
-        removed_count = 0
-        for symlink in self._active_symlinks:
-            if symlink.is_symlink():
-                symlink.unlink()
-                logger.debug(f"Removed symlink: {symlink}")
-                removed_count += 1
-        
-        self._active_symlinks.clear()
-        logger.info(f"Cleaned up {removed_count} symlinks")
+        cleanup_symlinks(self._active_symlinks)
         
     def readImage(self, fname: str | Path = 'image.out', binary: bool = False) -> None:
         """Read a RADMC-3D image file.
@@ -1010,6 +962,13 @@ class RadImage:
             logger.error(f"RADMC-3D failed with exit code {result.returncode}")
             logger.error(f"stdout: {result.stdout}")
             logger.error(f"stderr: {result.stderr}")
+            log_path = self.model_dir / 'radmc3d.out'
+            errors = _extract_radmc_errors(log_path)
+            if errors:
+                logger.error(f"RADMC-3D errors:\n{errors}")
+                raise RuntimeError(
+                    f"radmc3d image failed with exit code {result.returncode} and errors:\n{errors}"
+                )
             raise RuntimeError(f"radmc3d image failed with exit code {result.returncode}")
         
         logger.debug(f"RADMC-3D completed successfully")

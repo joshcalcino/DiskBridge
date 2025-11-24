@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .data import RadData
+from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
 import diskbridge 
 
 # Physical constants (CGS)
@@ -156,8 +157,6 @@ class RadModel:
         RADMC-3D expects input files in the directory where it runs. This method
         creates symlinks from the model directory to the organized subdirectories.
         """
-        import os
-        
         # Define files to symlink from each subdirectory
         file_map = {
             self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
@@ -167,43 +166,15 @@ class RadModel:
             self.gas_dir: ['gas_velocity.binp', 'gas_velocity.inp'],
             self.config_dir: ['radmc3d.inp'],
         }
-        
-        # Add dust opacity files dynamically
+
         if self.opacity_dir.exists():
             opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
             if opacity_files and self.opacity_dir not in file_map:
                 file_map[self.opacity_dir] = []
             for opac_file in opacity_files:
                 file_map[self.opacity_dir].append(opac_file.name)
-        
-        # Create symlinks
-        for source_dir, filenames in file_map.items():
-            if not source_dir.exists():
-                continue
-                
-            for filename in filenames:
-                source = source_dir / filename
-                target = self.model_dir / filename
-                
-                # Skip if source doesn't exist
-                if not source.exists():
-                    continue
-                
-                # Skip if target already exists and is the correct symlink
-                if target.is_symlink() and target.resolve() == source.resolve():
-                    self._active_symlinks.append(target)
-                    continue
-                
-                # Remove existing file/symlink if it exists
-                if target.exists() or target.is_symlink():
-                    target.unlink()
-                
-                # Create symlink
-                os.symlink(source, target)
-                self._active_symlinks.append(target)
-                logger.debug(f"Created symlink: {target} -> {source}")
-        
-        logger.info(f"Created {len(self._active_symlinks)} symlinks to input files")
+
+        create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
     
     def cleanup_symlinks(self) -> None:
         """Remove all symlinks created by create_symlinks().
@@ -211,15 +182,7 @@ class RadModel:
         This ensures the model directory stays clean after RADMC-3D runs.
         Only removes symlinks that were tracked by this instance.
         """
-        removed_count = 0
-        for symlink in self._active_symlinks:
-            if symlink.is_symlink():
-                symlink.unlink()
-                logger.debug(f"Removed symlink: {symlink}")
-                removed_count += 1
-        
-        self._active_symlinks.clear()
-        logger.info(f"Cleaned up {removed_count} symlinks")
+        cleanup_symlinks(self._active_symlinks)
     
     def read_gas_temperature(self) -> Quantity:
         """Read gas_temperature file using radmc3dData.
@@ -769,6 +732,10 @@ class RadModel:
             
             if result.returncode != 0:
                 logger.error(f"RADMC-3D mctherm failed (see {log_path})")
+                errors = _extract_radmc_errors(log_path)
+                if errors:
+                    logger.error(f"RADMC-3D errors:\n{errors}")
+                    raise RuntimeError(f"mctherm failed with RADMC-3D errors:\n{errors}")
                 raise RuntimeError("mctherm failed")
             
             logger.info(f"mctherm completed (log written to {log_path})")
@@ -970,6 +937,10 @@ class RadModel:
             
             if result.returncode != 0:
                 logger.error(f"RADMC-3D mcmono failed (see {log_path})")
+                errors = _extract_radmc_errors(log_path)
+                if errors:
+                    logger.error(f"RADMC-3D errors:\n{errors}")
+                    raise RuntimeError(f"mcmono failed with RADMC-3D errors:\n{errors}")
                 raise RuntimeError("mcmono failed")
             
             logger.info(f"mcmono completed (log written to {log_path})")
