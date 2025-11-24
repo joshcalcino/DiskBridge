@@ -466,7 +466,7 @@ class RadWriter:
         self,
         output_dir: str | Path = '.',
         optconst_file: Optional[str | Path] = None,
-        grain_density: float = 2.7,
+        grain_density: Optional[float] = None,
         wmin_micron: float = 0.1,
         wmax_micron: float = 10000.0,
         nwav: int = 200,
@@ -477,17 +477,22 @@ class RadWriter:
     ) -> None:
         """Compute and write dust opacity files for all dust bins.
         
+        Uses Mie theory with parameters matching fargo2radmc3d defaults:
+        - logawidth = 0.05 (5% grain size smearing)
+        - na = 20 (number of size samples)
+        - chopforward = 1.0 degree (forward scattering removal)
+        
         Args:
             output_dir: Directory to write files
             optconst_file: Path to optical constants file (.lnk format)
-            grain_density: Grain material density in g/cm^3
+            grain_density: Grain material density in g/cm^3 (default: species-dependent)
             wmin_micron: Minimum wavelength in microns
             wmax_micron: Maximum wavelength in microns
             nwav: Number of wavelength points
             ntheta: Number of scattering angles
             scattering_mode: Scattering mode (>=3 for full matrix)
-            logawidth: Width parameter for size distribution smoothing
-            na: Number of size samples for smoothing
+            logawidth: Width parameter for size distribution smoothing (default: 0.05)
+            na: Number of size samples for smoothing (default: 20)
         """
         if self.model.dust is None:
             raise ValueError("Model has no dust data")
@@ -497,6 +502,24 @@ class RadWriter:
             opacity_dir = params.get('opacity', 'opacity_dir')
             species = params.get('opacity', 'species')
             optconst_file = Path(opacity_dir) / f"{species}.lnk"
+        else:
+            # Extract species name from optconst_file for density lookup
+            species = Path(optconst_file).stem
+        
+        # Set grain density based on species (matching fargo2radmc3d defaults)
+        if grain_density is None:
+            species_lower = species.lower()
+            if 'ice70' in species_lower or species_lower == 'mix_2species_ice70':
+                grain_density = 1.26  # g/cm³ for mix_2species_ice70
+            elif 'porous' in species_lower:
+                grain_density = 0.1   # g/cm³ for porous species
+            elif species_lower in ['mix_2species', 'mix_2species_60silicates_40ice']:
+                grain_density = 1.7   # g/cm³
+            elif '60silicates_40carbons' in species_lower:
+                grain_density = 2.7   # g/cm³
+            else:
+                grain_density = 2.7   # g/cm³ default
+                logger.warning(f"Unknown species '{species}', using default grain_density = {grain_density} g/cm³")
 
         # Default scattering mode from global parameters if not provided
         if scattering_mode is None:
