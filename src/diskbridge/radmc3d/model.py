@@ -174,6 +174,12 @@ class RadModel:
             for opac_file in opacity_files:
                 file_map[self.opacity_dir].append(opac_file.name)
 
+        opacity_dir_global = getattr(self.params, 'opacity_dir', None)
+        if opacity_dir_global is not None:
+            opacity_dir_path = Path(opacity_dir_global)
+            if opacity_dir_path.exists():
+                file_map[opacity_dir_path] = ['dustkappa_*.inp']
+
         create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
     
     def cleanup_symlinks(self) -> None:
@@ -482,9 +488,9 @@ class RadModel:
         X0: float = 5e-5,
         eps: float = EPS_DEFAULT,
         Tfrz: float = T_FRZ_DEFAULT,
-        photodissociation: bool = False,
-        freezeout: bool = False,
-        photodesorption: bool = False,
+        photodissociation: Optional[bool] = None,
+        freezeout: Optional[bool] = None,
+        photodesorption: Optional[bool] = None,
         write_output: bool = True,
     ) -> Tuple[Quantity, Quantity]:
         """Compute molecular abundance with photochemistry (Pinte et al. 2018).
@@ -524,6 +530,14 @@ class RadModel:
         ----------
         Pinte et al. (2018), A&A 609, A47
         """
+        # Resolve photochemistry flags from params if not explicitly set
+        if photodissociation is None:
+            photodissociation = self.params.photodissociation
+        if freezeout is None:
+            freezeout = self.params.freezeout
+        if photodesorption is None:
+            photodesorption = self.params.photodesorption
+
         # Ensure we have temperature
         if self.temperature is None:
             self.read_temperature()
