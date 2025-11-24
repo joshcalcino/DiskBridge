@@ -35,15 +35,57 @@ class RadWriter:
         writer.write_wavelength_grid(output_dir='.')
     """
     
-    def __init__(self, model: 'Model'):
+    def __init__(self, model: 'Model', organize_files: bool = True):
         """Initialize the writer with a Model instance.
         
         Args:
             model: DiskBridge Model instance containing the hydro data
+            organize_files: If True, organize files into subdirectories (default: True)
         """
         self.model = model
         self.opacity_calculator = DustOpacityCalculator()
+        self.organize_files = organize_files
         
+        # Define subdirectories for different file types
+        self.grid_dir = 'input_grids'
+        self.opacity_dir = 'input_opacities'
+        self.star_dir = 'input_stars'
+        self.dust_dir = 'input_dust'
+        self.gas_dir = 'input_gas'
+        self.config_dir = 'input_config'
+        
+        # Track written files for symlink management
+        self.written_files = {}
+        
+    def _get_output_dir(self, base_dir: Path, file_type: str) -> Path:
+        """Get output directory for a file type.
+        
+        Args:
+            base_dir: Base output directory
+            file_type: Type of file ('grid', 'opacity', 'star', 'dust', 'gas', 'config')
+            
+        Returns:
+            Path to output directory
+        """
+        if not self.organize_files:
+            return base_dir
+        
+        subdir_map = {
+            'grid': self.grid_dir,
+            'opacity': self.opacity_dir,
+            'star': self.star_dir,
+            'dust': self.dust_dir,
+            'gas': self.gas_dir,
+            'config': self.config_dir,
+        }
+        
+        if file_type not in subdir_map:
+            raise ValueError(f"Unknown file type: {file_type}")
+        
+        output_dir = base_dir / subdir_map[file_type]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+    
     def _to_cgs(self, quantity: Quantity) -> np.ndarray:
         """Convert Pint Quantity to CGS magnitude array.
         
@@ -70,8 +112,8 @@ class RadWriter:
                 - 200-299: Cylindrical
                 Default: 101 (spherical)
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'grid')
         filepath = output_dir / 'amr_grid.inp'
         
         mesh = self.model.mesh
@@ -133,6 +175,7 @@ class RadWriter:
                     f.write('0.0 1.0 ')
                 f.write('\n')
         
+        self.written_files['amr_grid.inp'] = filepath
         logger.info(f"Wrote AMR grid file: {filepath}")
     
     def write_wavelength_grid(
@@ -150,8 +193,8 @@ class RadWriter:
             wmax_micron: Maximum wavelength in microns
             nwav: Number of wavelength points
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'grid')
         filepath = output_dir / 'wavelength_micron.inp'
         
         # Create logarithmically spaced wavelength grid
@@ -166,6 +209,7 @@ class RadWriter:
             for w in waves:
                 f.write(f'{w:13.6e}\n')
         
+        self.written_files['wavelength_micron.inp'] = filepath
         logger.info(f"Wrote wavelength grid file: {filepath}")
     
     def write_stars(
@@ -193,8 +237,8 @@ class RadWriter:
             wmax_micron: Maximum wavelength in microns
             nwav: Number of wavelength points
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'star')
         filepath = output_dir / 'stars.inp'
         
         # Convert to CGS using Pint constants
@@ -222,6 +266,7 @@ class RadWriter:
             # Negative temperature indicates blackbody emission (one line per star)
             f.write(f'{-tstar:13.6e}\n')
         
+        self.written_files['stars.inp'] = filepath
         logger.info(f"Wrote stars file: {filepath}")
     
     def write_radmc3d_inp(
@@ -247,8 +292,8 @@ class RadWriter:
             modified_random_walk: Use modified random walk (1=yes, 0=no)
             setthreads: Number of OpenMP threads
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'config')
         filepath = output_dir / 'radmc3d.inp'
 
         if nphot is None:
@@ -269,6 +314,7 @@ class RadWriter:
             f.write(f'modified_random_walk = {modified_random_walk}\n')
             f.write(f'setthreads = {setthreads}\n')
         
+        self.written_files['radmc3d.inp'] = filepath
         logger.info(f"Wrote radmc3d.inp control file: {filepath}")
     
     def write_dust_density(
@@ -282,8 +328,8 @@ class RadWriter:
             output_dir: Directory to write the file
             binary: Write binary format (True) or ASCII (False)
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'dust')
         
         if self.model.dust is None:
             raise ValueError("Model has no dust data")
@@ -304,9 +350,11 @@ class RadWriter:
         if binary:
             filepath = output_dir / 'dust_density.binp'
             self._write_dust_density_binary(filepath, nbin, ncells)
+            self.written_files['dust_density.binp'] = filepath
         else:
             filepath = output_dir / 'dust_density.inp'
             self._write_dust_density_ascii(filepath, nbin, ncells)
+            self.written_files['dust_density.inp'] = filepath
         
         logger.info(f"Wrote dust density file: {filepath}")
     
@@ -386,8 +434,8 @@ class RadWriter:
             species_names: List of species names (default: bin_0, bin_1, ...)
             scattering_mode: Scattering mode (0=no scat, >=3=full matrix)
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'opacity')
         filepath = output_dir / 'dustopac.inp'
         
         if self.model.dust is None:
@@ -411,6 +459,7 @@ class RadWriter:
                 f.write(f'{name}\n')
                 f.write('-' * 77 + '\n')
         
+        self.written_files['dustopac.inp'] = filepath
         logger.info(f"Wrote dustopac.inp file: {filepath}")
     
     def compute_and_write_dust_opacities(
@@ -453,8 +502,8 @@ class RadWriter:
         if scattering_mode is None:
             scattering_mode = params.getint('dust_rt', 'scat_mode')
         
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'opacity')
         
         # Create wavelength grid in cm
         Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
@@ -498,6 +547,10 @@ class RadWriter:
                 output_path=output_path,
                 scattering_matrix=(scattering_mode >= 3),
             )
+            
+            # Track the opacity file
+            opacity_file = f"dustkappa_bin_{ibin}.inp"
+            self.written_files[opacity_file] = output_dir / opacity_file
         
         logger.info(f"Wrote {self.model.dust.nbin} opacity files")
     
@@ -679,8 +732,8 @@ class RadWriter:
         For spherical grids, cells are ordered as (nsec, ncol, nrad) = (phi, theta, r).
         DiskBridge stores data in (r, phi, theta) order, so we transpose before writing.
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'gas')
         
         # Convert to cm/s
         vr_cgs = self._to_cgs(vr.to('cm/s'))
@@ -727,5 +780,7 @@ class RadWriter:
                 f.write(f'{ncells}\n')
                 for i in range(ncells):
                     f.write(f'{vr_flat[i]:.6e} {vtheta_flat[i]:.6e} {vphi_flat[i]:.6e}\n')
-                    
+        
+        # Track the written file
+        self.written_files[fpath.name] = fpath
         logger.info(f"Wrote {fpath}")

@@ -31,7 +31,7 @@ from .data import RadData
 # Physical constants (CGS)
 C_LIGHT = 2.99792458e10  # cm/s
 M_H = 1.6735575e-24  # g
-MU_H = 1.4  # mass per H nucleus in units of m_H
+MU_H = 2.3  # mean molecular weight for H2 + He (protoplanetary disk standard)
 SIGMA_SB = 5.670374419e-5  # Stefan-Boltzmann constant (erg cm^-2 s^-1 K^-4)
 U_DRAINE = 9.0e-14
 
@@ -121,6 +121,19 @@ class RadModel:
         self.chi: Optional[Quantity] = None  # UV field in Draine units
         self.nH: Optional[Quantity] = None  # H nuclei number density
         
+        # Subdirectory paths for organized file storage
+        self.grid_dir = self.model_dir / 'input_grids'
+        self.opacity_dir = self.model_dir / 'input_opacities'
+        self.star_dir = self.model_dir / 'input_stars'
+        self.dust_dir = self.model_dir / 'input_dust'
+        self.gas_dir = self.model_dir / 'input_gas'
+        self.config_dir = self.model_dir / 'input_config'
+        self.temperature_dir = self.model_dir / 'temperature'
+        self.mcmono_dir = self.model_dir / 'mcmono'
+        
+        # Track active symlinks for cleanup
+        self._active_symlinks: list[Path] = []
+        
     def _to_cgs(self, quantity: Quantity) -> np.ndarray:
         """Convert Pint Quantity to CGS magnitude array.
         
@@ -135,6 +148,77 @@ class RadModel:
             NumPy array of CGS values
         """
         return quantity.to_base_units().magnitude
+    
+    def create_symlinks(self) -> None:
+        """Create symlinks to organized input files in the model directory.
+        
+        RADMC-3D expects input files in the directory where it runs. This method
+        creates symlinks from the model directory to the organized subdirectories.
+        """
+        import os
+        
+        # Define files to symlink from each subdirectory
+        file_map = {
+            self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
+            self.star_dir: ['stars.inp'],
+            self.opacity_dir: ['dustopac.inp'],
+            self.dust_dir: ['dust_density.binp', 'dust_density.inp'],
+            self.gas_dir: ['gas_velocity.binp', 'gas_velocity.inp'],
+            self.config_dir: ['radmc3d.inp'],
+        }
+        
+        # Add dust opacity files dynamically
+        if self.opacity_dir.exists():
+            opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
+            if opacity_files and self.opacity_dir not in file_map:
+                file_map[self.opacity_dir] = []
+            for opac_file in opacity_files:
+                file_map[self.opacity_dir].append(opac_file.name)
+        
+        # Create symlinks
+        for source_dir, filenames in file_map.items():
+            if not source_dir.exists():
+                continue
+                
+            for filename in filenames:
+                source = source_dir / filename
+                target = self.model_dir / filename
+                
+                # Skip if source doesn't exist
+                if not source.exists():
+                    continue
+                
+                # Skip if target already exists and is the correct symlink
+                if target.is_symlink() and target.resolve() == source.resolve():
+                    self._active_symlinks.append(target)
+                    continue
+                
+                # Remove existing file/symlink if it exists
+                if target.exists() or target.is_symlink():
+                    target.unlink()
+                
+                # Create symlink
+                os.symlink(source, target)
+                self._active_symlinks.append(target)
+                logger.debug(f"Created symlink: {target} -> {source}")
+        
+        logger.info(f"Created {len(self._active_symlinks)} symlinks to input files")
+    
+    def cleanup_symlinks(self) -> None:
+        """Remove all symlinks created by create_symlinks().
+        
+        This ensures the model directory stays clean after RADMC-3D runs.
+        Only removes symlinks that were tracked by this instance.
+        """
+        removed_count = 0
+        for symlink in self._active_symlinks:
+            if symlink.is_symlink():
+                symlink.unlink()
+                logger.debug(f"Removed symlink: {symlink}")
+                removed_count += 1
+        
+        self._active_symlinks.clear()
+        logger.info(f"Cleaned up {removed_count} symlinks")
     
     def read_gas_temperature(self) -> Quantity:
         """Read gas_temperature file using radmc3dData.
@@ -573,8 +657,11 @@ class RadModel:
         else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
         
+        # Create gas_dir if it doesn't exist
+        self.gas_dir.mkdir(parents=True, exist_ok=True)
+        
         if binary:
-            filepath = self.model_dir / f'numberdens_{mol_lower}.binp'
+            filepath = self.gas_dir / f'numberdens_{mol_lower}.binp'
             
             # RADMC-3D expects (nsec, ncol, nrad) order
             # DiskBridge uses (nrad, nsec, ncol/nz) order
@@ -589,7 +676,7 @@ class RadModel:
             
             logger.info(f"Wrote {filepath}")
         else:
-            filepath = self.model_dir / f'numberdens_{mol_lower}.inp'
+            filepath = self.gas_dir / f'numberdens_{mol_lower}.inp'
             
             # Transpose for RADMC-3D
             n_radmc = np.transpose(n_cgs, (2, 1, 0))
@@ -728,34 +815,41 @@ class RadModel:
         # Create output directory
         output_dir.mkdir(exist_ok=True)
         
-        # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
-        logger.info(f"Running RADMC-3D mctherm with {nphot} photons...")
-        cmd = ['radmc3d', 'mctherm']
+        # Create symlinks to input files
+        self.create_symlinks()
         
-        result = subprocess.run(
-            cmd,
-            cwd=str(self.model_dir),
-            capture_output=True,
-            text=True
-        )
-        
-        log_path = self.model_dir / 'radmc3d.out'
         try:
-            with open(log_path, 'a') as f:
-                f.write('\n--- mctherm ---\n')
-                if result.stdout:
-                    f.write(result.stdout)
-                if result.stderr:
-                    f.write('\n[stderr]\n')
-                    f.write(result.stderr)
-        except Exception:
-            pass
-        
-        if result.returncode != 0:
-            logger.error(f"RADMC-3D mctherm failed (see {log_path})")
-            raise RuntimeError("mctherm failed")
-        
-        logger.info(f"mctherm completed (log written to {log_path})")
+            # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
+            logger.info(f"Running RADMC-3D mctherm with {nphot} photons...")
+            cmd = ['radmc3d', 'mctherm']
+            
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.model_dir),
+                capture_output=True,
+                text=True
+            )
+            
+            log_path = self.model_dir / 'radmc3d.out'
+            try:
+                with open(log_path, 'a') as f:
+                    f.write('\n--- mctherm ---\n')
+                    if result.stdout:
+                        f.write(result.stdout)
+                    if result.stderr:
+                        f.write('\n[stderr]\n')
+                        f.write(result.stderr)
+            except Exception:
+                pass
+            
+            if result.returncode != 0:
+                logger.error(f"RADMC-3D mctherm failed (see {log_path})")
+                raise RuntimeError("mctherm failed")
+            
+            logger.info(f"mctherm completed (log written to {log_path})")
+        finally:
+            # Clean up symlinks
+            self.cleanup_symlinks()
         
         # Organize output
         self._organize_output(
@@ -902,18 +996,6 @@ class RadModel:
         # Create output directory
         output_dir.mkdir(exist_ok=True)
         
-        # RADMC-3D mcmono needs temperature file in main directory
-        # Create symlink if temperature file exists in temperature/ subdirectory
-        temp_subdir = self.model_dir / 'temperature'
-        for suffix in ['.bdat', '.dat', '.binp']:
-            src_temp = temp_subdir / f'dust_temperature{suffix}'
-            dst_temp = self.model_dir / f'dust_temperature{suffix}'
-            if src_temp.exists() and not dst_temp.exists():
-                import os
-                os.symlink(src_temp, dst_temp)
-                logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
-                break
-        
         # Create mcmono_wavelength_micron.inp with UV wavelength range
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
         uv_lam_nm = np.linspace(uv_min_nm, uv_max_nm, n_wavelengths)
@@ -925,52 +1007,73 @@ class RadModel:
                 f.write(f'{lam:.6f}\n')
         logger.debug(f"Wrote {mcmono_wav_file} with {len(uv_lam_micron)} UV wavelengths")
         
-        # Run mcmono at UV wavelengths
-        logger.info(f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm)...")
-        cmd = ['radmc3d', 'mcmono', 'setthreads', '8']
-
-        # Preserve any existing radmc3d.out log (e.g. from mctherm)
-        log_path = self.model_dir / 'radmc3d.out'
-        previous_log = ""
-        if log_path.exists():
-            try:
-                with open(log_path, 'r') as f:
-                    previous_log = f.read()
-            except Exception:
-                previous_log = ""
+        # Create symlinks to input files
+        self.create_symlinks()
         
-        result = subprocess.run(
-            cmd,
-            cwd=str(self.model_dir),
-            capture_output=True,
-            text=True
-        )
-
-        # Rebuild radmc3d.out to contain both the previous log and the new mcmono output
-        combined_log = previous_log
-        combined_log += '\n--- mcmono ---\n'
-        if result.stdout:
-            combined_log += result.stdout
-        if result.stderr:
-            combined_log += '\n[stderr]\n'
-            combined_log += result.stderr
-
+        # RADMC-3D mcmono also needs temperature file - create symlink if it exists in subdirectory
+        temp_subdir = self.model_dir / 'temperature'
+        temp_symlink_created = False
+        for suffix in ['.bdat', '.dat', '.binp']:
+            src_temp = temp_subdir / f'dust_temperature{suffix}'
+            dst_temp = self.model_dir / f'dust_temperature{suffix}'
+            if src_temp.exists() and not dst_temp.exists():
+                import os
+                os.symlink(src_temp, dst_temp)
+                self._active_symlinks.append(dst_temp)
+                logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
+                temp_symlink_created = True
+                break
+        
         try:
-            with open(log_path, 'w') as f:
-                f.write(combined_log)
-        except Exception:
-            pass
+            # Run mcmono at UV wavelengths
+            logger.info(f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm)...")
+            cmd = ['radmc3d', 'mcmono', 'setthreads', '8']
+
+            # Preserve any existing radmc3d.out log (e.g. from mctherm)
+            log_path = self.model_dir / 'radmc3d.out'
+            previous_log = ""
+            if log_path.exists():
+                try:
+                    with open(log_path, 'r') as f:
+                        previous_log = f.read()
+                except Exception:
+                    previous_log = ""
+            
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.model_dir),
+                capture_output=True,
+                text=True
+            )
+
+            # Rebuild radmc3d.out to contain both the previous log and the new mcmono output
+            combined_log = previous_log
+            combined_log += '\n--- mcmono ---\n'
+            if result.stdout:
+                combined_log += result.stdout
+            if result.stderr:
+                combined_log += '\n[stderr]\n'
+                combined_log += result.stderr
+
+            try:
+                with open(log_path, 'w') as f:
+                    f.write(combined_log)
+            except Exception:
+                pass
+            
+            if result.returncode != 0:
+                logger.error(f"RADMC-3D mcmono failed (see {log_path})")
+                raise RuntimeError("mcmono failed")
+            
+            logger.info(f"mcmono completed (log written to {log_path})")
+        finally:
+            # Clean up symlinks
+            self.cleanup_symlinks()
         
-        if result.returncode != 0:
-            logger.error(f"RADMC-3D mcmono failed (see {log_path})")
-            raise RuntimeError("mcmono failed")
-        
-        logger.info(f"mcmono completed (log written to {log_path})")
-        
-        # Organize output (move mean_intensity file to mcmono/ directory)
+        # Organize output (move mean_intensity file and mcmono_wavelength_micron.inp to mcmono/ directory)
         self._organize_output(
             output_dir,
-            ['mean_intensity.out'],
+            ['mean_intensity.out', 'mcmono_wavelength_micron.inp'],
             f'radmc3d mcmono UV_range_{uv_min_nm:.1f}-{uv_max_nm:.1f}nm_{n_wavelengths}wavelengths'
         )
         

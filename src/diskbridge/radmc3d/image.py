@@ -94,6 +94,19 @@ class RadImage:
         import diskbridge
         self.params = diskbridge.params if hasattr(diskbridge, 'params') else {}
         
+        # Subdirectory paths for organized file storage (matching RadModel/RadWriter)
+        self.grid_dir = self.model_dir / 'input_grids'
+        self.opacity_dir = self.model_dir / 'input_opacities'
+        self.star_dir = self.model_dir / 'input_stars'
+        self.dust_dir = self.model_dir / 'input_dust'
+        self.gas_dir = self.model_dir / 'input_gas'
+        self.config_dir = self.model_dir / 'input_config'
+        self.temperature_dir = self.model_dir / 'temperature'
+        self.mcmono_dir = self.model_dir / 'mcmono'
+        
+        # Track active symlinks for cleanup
+        self._active_symlinks: list[Path] = []
+        
         # Image data
         self.image: Optional[np.ndarray] = None
         self.imageJyppix: Optional[np.ndarray] = None
@@ -113,6 +126,84 @@ class RadImage:
         # Multi-angle storage
         self.multi_angle_images: list[np.ndarray] = []
         self.viewing_angles: list[tuple[float, float, float]] = []  # (incl, PA, phi)
+    
+    def create_symlinks(self) -> None:
+        """Create symlinks to organized input files in the model directory.
+        
+        RADMC-3D expects input files in the directory where it runs. This method
+        creates symlinks from the model directory to the organized subdirectories.
+        """
+        import os
+        
+        # Define files to symlink from each subdirectory
+        file_map = {
+            self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
+            self.star_dir: ['stars.inp'],
+            self.opacity_dir: ['dustopac.inp'],
+            self.dust_dir: ['dust_density.binp', 'dust_density.inp'],
+            self.gas_dir: ['gas_velocity.binp', 'gas_velocity.inp', 'numberdens_*.binp', 'numberdens_*.inp'],
+            self.config_dir: ['radmc3d.inp', 'lines.inp', 'molecule_*.inp'],
+            self.temperature_dir: ['dust_temperature.*'],
+            self.mcmono_dir: ['mean_intensity.out'],
+        }
+        
+        # Add dust opacity files dynamically
+        if self.opacity_dir.exists():
+            opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
+            if opacity_files and self.opacity_dir not in file_map:
+                file_map[self.opacity_dir] = []
+            for opac_file in opacity_files:
+                file_map[self.opacity_dir].append(opac_file.name)
+        
+        # Create symlinks
+        for source_dir, file_patterns in file_map.items():
+            if not source_dir.exists():
+                continue
+                
+            for pattern in file_patterns:
+                # Handle glob patterns
+                if '*' in pattern:
+                    source_files = list(source_dir.glob(pattern))
+                else:
+                    source_files = [source_dir / pattern]
+                
+                for source in source_files:
+                    if not source.exists():
+                        continue
+                    
+                    target = self.model_dir / source.name
+                    
+                    # Skip if target already exists and is the correct symlink
+                    if target.is_symlink() and target.resolve() == source.resolve():
+                        self._active_symlinks.append(target)
+                        continue
+                    
+                    # Remove existing file/symlink if it exists
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                    
+                    # Create symlink
+                    os.symlink(source, target)
+                    self._active_symlinks.append(target)
+                    logger.debug(f"Created symlink: {target} -> {source}")
+        
+        logger.info(f"Created {len(self._active_symlinks)} symlinks to input files")
+    
+    def cleanup_symlinks(self) -> None:
+        """Remove all symlinks created by create_symlinks().
+        
+        This ensures the model directory stays clean after RADMC-3D runs.
+        Only removes symlinks that were tracked by this instance.
+        """
+        removed_count = 0
+        for symlink in self._active_symlinks:
+            if symlink.is_symlink():
+                symlink.unlink()
+                logger.debug(f"Removed symlink: {symlink}")
+                removed_count += 1
+        
+        self._active_symlinks.clear()
+        logger.info(f"Cleaned up {removed_count} symlinks")
         
     def readImage(self, fname: str | Path = 'image.out', binary: bool = False) -> None:
         """Read a RADMC-3D image file.
@@ -490,7 +581,13 @@ class RadImage:
             inclinations = self.params.getfloat('star_disc', 'inclination_deg')
             inclinations = [inclinations]
         if posangs is None:
-            posangs = [0.0]  # Not in params typically
+            # Read PA from params in standard convention (0=N, 90=E)
+            # Convert to RADMC-3D convention by adding 90 degrees
+            try:
+                pa_standard = self.params.getfloat('star_disc', 'posangle_deg')
+                posangs = [(pa_standard + 90.0) % 360.0]
+            except:
+                posangs = [0.0]  # Default if not in params
         if phis is None:
             phis = [0.0]  # Not in params typically
         if npix is None:
@@ -655,7 +752,12 @@ class RadImage:
         if inclinations is None:
             inclinations = self.params.getfloat('star_disc', 'inclination_deg')
         if posangs is None:
-            posangs = [0.0]
+            # Read PA from params in standard convention, convert to RADMC-3D
+            try:
+                pa_standard = self.params.getfloat('star_disc', 'posangle_deg')
+                posangs = [(pa_standard + 90.0) % 360.0]
+            except:
+                posangs = [0.0]
         if phis is None:
             phis = [0.0]
         if npix is None:
@@ -871,16 +973,23 @@ class RadImage:
             elif not isinstance(value, bool):
                 cmd.extend([key, str(value)])
         
-        # Run command
+        # Run command with symlink management
         cmd_str = ' '.join(cmd)
         logger.info(f"Running: {cmd_str}")
         
-        result = subprocess.run(
-            cmd,
-            cwd=self.model_dir,
-            capture_output=True,
-            text=True,
-        )
+        # Create symlinks to organized input files
+        self.create_symlinks()
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.model_dir,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            # Always clean up symlinks
+            self.cleanup_symlinks()
         
         if result.returncode != 0:
             logger.error(f"RADMC-3D failed with exit code {result.returncode}")
@@ -909,7 +1018,10 @@ class RadImage:
             from .molecule import RadMolecule
             
             mol = RadMolecule()
-            mol_file = self.model_dir / f'molecule_{molecule}.inp'
+            # Check config_dir first, then model_dir for backward compatibility
+            mol_file = self.config_dir / f'molecule_{molecule}.inp'
+            if not mol_file.exists():
+                mol_file = self.model_dir / f'molecule_{molecule}.inp'
             
             if not mol_file.exists():
                 # Fall back to simple mapping
@@ -948,7 +1060,10 @@ class RadImage:
             from .molecule import RadMolecule
             
             mol = RadMolecule()
-            mol_file = self.model_dir / f'molecule_{molecule}.inp'
+            # Check config_dir first, then model_dir for backward compatibility
+            mol_file = self.config_dir / f'molecule_{molecule}.inp'
+            if not mol_file.exists():
+                mol_file = self.model_dir / f'molecule_{molecule}.inp'
             
             if not mol_file.exists():
                 logger.warning(f"molecule_{molecule}.inp not found, cannot determine rest frequency")
@@ -1110,7 +1225,10 @@ class RadImage:
         molecule : str
             Molecule name (e.g., 'co')
         """
-        mol_file = self.model_dir / f'molecule_{molecule}.inp'
+        # Create config_dir if it doesn't exist
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        
+        mol_file = self.config_dir / f'molecule_{molecule}.inp'
         if mol_file.exists():
             return
         
@@ -1121,13 +1239,17 @@ class RadImage:
         try:
             url = f'https://home.strw.leidenuniv.nl/~moldata/datafiles/{molecule}.dat'
             urllib.request.urlretrieve(url, mol_file)
-            logger.info(f"Downloaded molecule_{molecule}.inp from LAMDA")
+            logger.info(f"Downloaded molecule_{molecule}.inp from LAMDA to {mol_file}")
         except Exception as e:
             logger.error(f"Failed to download molecule data: {e}")
             raise RuntimeError(f"molecule_{molecule}.inp not found and download failed")
     
     def _ensure_gas_velocity(self) -> None:
         """Ensure gas velocity file exists, create if necessary."""
+        # Check in gas_dir first, then model_dir for backward compatibility
+        vel_file = self.gas_dir / 'gas_velocity.binp'
+        if vel_file.exists():
+            return
         vel_file = self.model_dir / 'gas_velocity.binp'
         if vel_file.exists():
             return
@@ -1153,7 +1275,10 @@ class RadImage:
     
     def _ensure_radmc3d_inp_configured(self) -> None:
         """Ensure radmc3d.inp is properly configured for line transfer."""
-        inp_file = self.model_dir / 'radmc3d.inp'
+        # Check config_dir first, then model_dir for backward compatibility
+        inp_file = self.config_dir / 'radmc3d.inp'
+        if not inp_file.exists():
+            inp_file = self.model_dir / 'radmc3d.inp'
         
         # Read existing file
         if inp_file.exists():
@@ -1173,16 +1298,26 @@ class RadImage:
         
         logger.info("Updating radmc3d.inp for line transfer...")
         
-        # Write/update configuration
-        from .writer import RadWriter
-        writer = RadWriter(self.model) if self.model else None
-        
-        if writer:
-            writer.write_radmc3d_inp(
-                output_dir=str(self.model_dir),
-                incl_dust=1,
-                incl_lines=1,
-            )
+        # If file doesn't exist, create it in config_dir
+        if not inp_file.exists():
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            inp_file = self.config_dir / 'radmc3d.inp'
+            
+            # Write/update configuration
+            from .writer import RadWriter
+            writer = RadWriter(self.model, organize_files=True) if self.model else None
+            
+            if writer:
+                writer.write_radmc3d_inp(
+                    output_dir=str(self.model_dir),
+                    incl_dust=1,
+                    incl_lines=1,
+                )
+                # Re-read to get the file in config_dir
+                inp_file = self.config_dir / 'radmc3d.inp'
+                if inp_file.exists():
+                    with open(inp_file, 'r') as f:
+                        content = f.read()
         
         # Append additional settings
         with open(inp_file, 'a') as f:
@@ -1193,7 +1328,7 @@ class RadImage:
             if 'rto_style' not in content:
                 f.write('rto_style = 3\n')
         
-        logger.info("Updated radmc3d.inp")
+        logger.info(f"Updated radmc3d.inp at {inp_file}")
     
     def _ensure_lines_inp(self, molecule: str) -> None:
         """Ensure lines.inp file exists for specified molecule.
@@ -1203,7 +1338,10 @@ class RadImage:
         molecule : str
             Molecule name
         """
-        lines_file = self.model_dir / 'lines.inp'
+        # Create config_dir if it doesn't exist
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        
+        lines_file = self.config_dir / 'lines.inp'
         
         # Check if file exists and already has this molecule
         if lines_file.exists():
@@ -1220,4 +1358,4 @@ class RadImage:
             f.write('1\n')  # Number of molecules
             f.write(f'{molecule}    leiden    0    0    0\n')
         
-        logger.info(f"Created lines.inp")
+        logger.info(f"Created lines.inp to {lines_file}")
