@@ -484,14 +484,18 @@ class RadModel:
         if self.nH is None:
             self.compute_nH_from_model()
         
-        # Ensure we have chi from mcmono
-        if self.chi is None:
-            self.compute_chi_from_mean_intensity()
+        # Ensure we have chi from mcmono only if needed
+        # chi is required for photodissociation and photodesorption,
+        # but not for pure freeze-out cases.
+        chi = None
+        if photodissociation or photodesorption:
+            if self.chi is None:
+                self.compute_chi_from_mean_intensity()
+            chi = self.chi.magnitude
         
         # Get arrays in correct units
         T = self.temperature.to('K').magnitude
         nH = self.nH.to('cm^-3').magnitude
-        chi = self.chi.magnitude
         
         # Initialize abundance
         X = np.full_like(T, float(X0), dtype=float)
