@@ -56,5 +56,8 @@ rstar_rsun       = 2.0
 teff_K           = 6130.0
 mstar_msun       = 1.0
 
+mdot             = 0.0
+accretion_fill_factor = 0.01
+
 # RADMC 
 secondorder      = F

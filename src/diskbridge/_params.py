@@ -66,6 +66,9 @@ class Params:
     teff_K: float
     mstar_msun: float
 
+    mdot: float
+    accretion_fill_factor: float
+
     # radmc
     secondorder: bool
 

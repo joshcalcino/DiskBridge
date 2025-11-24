@@ -15,8 +15,11 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
-from diskbridge._params import params
+import diskbridge
 from .opacities import DustOpacityCalculator
+
+G_CGS = 6.67430e-8
+SIGMA_SB = 5.670374419e-5
 
 
 class RadWriter:
@@ -43,6 +46,7 @@ class RadWriter:
             organize_files: If True, organize files into subdirectories (default: True)
         """
         self.model = model
+        self.params = diskbridge.params  # Reference to global params (updated dynamically)
         self.opacity_calculator = DustOpacityCalculator()
         self.organize_files = organize_files
         
@@ -242,29 +246,39 @@ class RadWriter:
         filepath = output_dir / 'stars.inp'
         
         # Convert to CGS using Pint constants
-        rstar_cgs = (rstar * units('solar_radius')).to_base_units().magnitude  # Solar radii to cm
-        mstar_cgs = (mstar * units('solar_mass')).to_base_units().magnitude  # Solar masses to g
-        pos_cgs = [(p * units('astronomical_unit')).to_base_units().magnitude for p in position]  # AU to cm
-        
+        rstar_cgs = (rstar * units('solar_radius')).to_base_units().magnitude
+        mstar_cgs = (mstar * units('solar_mass')).to_base_units().magnitude
+        pos_cgs = [(p * units('astronomical_unit')).to_base_units().magnitude for p in position]
+
         # Build wavelength grid (matches wavelength_micron.inp)
         Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
         waves_micron = wmin_micron * Pw ** np.arange(nwav)
-        
+
+        stars = []
+        stars.append({'R_cm': rstar_cgs, 'M_g': mstar_cgs, 'T_K': float(tstar)})
+
+        mdot_msun_per_yr = getattr(self.params, 'mdot', 0.0)
+        if mdot_msun_per_yr > 0.0:
+            f_fill = getattr(self.params, 'accretion_fill_factor', 0.01)
+            f_fill = max(min(f_fill, 1.0), 1e-6)
+            m_sun_cgs = (1.0 * units('solar_mass')).to_base_units().magnitude
+            mdot_g_per_s = mdot_msun_per_yr * m_sun_cgs / (365.25 * 24.0 * 3600.0)
+            Lacc = G_CGS * mstar_cgs * mdot_g_per_s / rstar_cgs
+            r_acc = (f_fill ** 0.5) * rstar_cgs
+            Tacc = (Lacc / (4.0 * np.pi * SIGMA_SB * r_acc * r_acc)) ** 0.25
+            if Tacc > 0.0:
+                stars.append({'R_cm': r_acc, 'M_g': mstar_cgs, 'T_K': float(Tacc)})
+
         with open(filepath, 'w') as f:
-            # Format 2: wavelength-dependent spectrum
-            f.write('2\n')  
-            f.write(f'1 {nwav}\n')  # 1 star, nwav wavelength points
-            
-            # Star properties: R, M, x, y, z (one line per star)
-            f.write(f'{rstar_cgs:13.6e} {mstar_cgs:13.6e} ')
-            f.write(f'{pos_cgs[0]:13.6e} {pos_cgs[1]:13.6e} {pos_cgs[2]:13.6e}\n')
-            
-            # Wavelength grid in microns
+            f.write('2\n')
+            f.write(f'{len(stars)} {nwav}\n')
+            for s in stars:
+                f.write(f"{s['R_cm']:13.6e} {s['M_g']:13.6e} ")
+                f.write(f"{pos_cgs[0]:13.6e} {pos_cgs[1]:13.6e} {pos_cgs[2]:13.6e}\n")
             for wav in waves_micron:
                 f.write(f'{wav:13.6e}\n')
-            
-            # Negative temperature indicates blackbody emission (one line per star)
-            f.write(f'{-tstar:13.6e}\n')
+            for s in stars:
+                f.write(f"{-s['T_K']:13.6e}\n")
         
         self.written_files['stars.inp'] = filepath
         logger.info(f"Wrote stars file: {filepath}")
@@ -297,13 +311,13 @@ class RadWriter:
         filepath = output_dir / 'radmc3d.inp'
 
         if nphot is None:
-            nphot = int(params.n_thermal)
+            nphot = int(self.params.n_thermal)
         if nphot_scat is None:
-            nphot_scat = int(params.n_scat)
+            nphot_scat = int(self.params.n_scat)
         if scattering_mode_max is None:
-            scattering_mode_max = params.scat_mode
+            scattering_mode_max = self.params.scat_mode
         if setthreads is None:
-            setthreads = params.nbcores
+            setthreads = self.params.nbcores
         
         with open(filepath, 'w') as f:
             f.write(f'incl_dust = {incl_dust}\n')
@@ -499,8 +513,8 @@ class RadWriter:
 
         # Derive optical constants file from global parameters if not provided
         if optconst_file is None:
-            opacity_dir = params.get('opacity', 'opacity_dir')
-            species = params.get('opacity', 'species')
+            opacity_dir = self.params.opacity_dir
+            species = self.params.species
             optconst_file = Path(opacity_dir) / f"{species}.lnk"
         else:
             # Extract species name from optconst_file for density lookup
@@ -523,7 +537,7 @@ class RadWriter:
 
         # Default scattering mode from global parameters if not provided
         if scattering_mode is None:
-            scattering_mode = params.getint('dust_rt', 'scat_mode')
+            scattering_mode = self.params.scat_mode
         
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'opacity')
@@ -610,26 +624,26 @@ class RadWriter:
 
         # Fill defaults from global parameter set if not explicitly given
         if grain_density is None:
-            grain_density = params.grain_density
+            grain_density = self.params.grain_density
         if rstar is None:
-            rstar = params.rstar_rsun
+            rstar = self.params.rstar_rsun
         if tstar is None:
-            tstar = params.teff_K
+            tstar = self.params.teff_K
         if mstar is None:
-            mstar = params.mstar_msun
+            mstar = self.params.mstar_msun
         if scattering_mode is None:
-            scattering_mode = params.scat_mode
+            scattering_mode = self.params.scat_mode
         if nphot is None:
-            nphot = int(params.n_thermal)
+            nphot = int(self.params.n_thermal)
         if nphot_scat is None:
-            nphot_scat = int(params.n_scat)
+            nphot_scat = int(self.params.n_scat)
         if setthreads is None:
-            setthreads = params.nbcores
+            setthreads = self.params.nbcores
         
         # Determine wavelength grid from kwargs or global parameters
-        wmin = kwargs.get('wmin_micron', params.lambda_min_micron)
-        wmax = kwargs.get('wmax_micron', params.lambda_max_micron)
-        nwav = kwargs.get('nwav', params.n_lambda)
+        wmin = kwargs.get('wmin_micron', self.params.lambda_min_micron)
+        wmax = kwargs.get('wmax_micron', self.params.lambda_max_micron)
+        nwav = kwargs.get('nwav', self.params.n_lambda)
 
         # Write grid files
         self.write_amr_grid(output_dir)
