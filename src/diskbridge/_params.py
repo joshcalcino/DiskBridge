@@ -55,7 +55,33 @@ class ParamsHelper:
         raw = self._parser.get(section, option)
         # Strip inline comments
         raw = raw.split('#')[0].strip()
+        # Support both yes/no and T/F formats
         return raw.lower() in ("1", "true", "t", "yes", "y")
+    
+    def getfloat_or_list(self, section: str, option: str, fallback=None):
+        """Get a parameter that can be either a float or a list of floats.
+        
+        Supports formats like:
+        - 45.0 -> returns 45.0
+        - [30, 45, 60] -> returns [30.0, 45.0, 60.0]
+        - 30, 45, 60 -> returns [30.0, 45.0, 60.0]
+        """
+        if fallback is not None and not self._parser.has_option(section, option):
+            return fallback
+        raw = self._parser.get(section, option)
+        # Strip inline comments
+        raw = raw.split('#')[0].strip()
+        
+        # Check if it looks like a list
+        if '[' in raw or ',' in raw:
+            # Remove brackets if present
+            raw = raw.strip('[]')
+            # Split by comma and convert to floats
+            values = [float(x.strip()) for x in raw.split(',')]
+            return values
+        else:
+            # Single value
+            return float(raw)
     
     # Convenience getters with unit conversions
     def get_dust_size_m(self, which: str) -> float:

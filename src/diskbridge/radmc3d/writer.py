@@ -612,11 +612,11 @@ class RadWriter:
         if grain_density is None:
             grain_density = params.getfloat('dust_sizes', 'grain_density')
         if rstar is None:
-            rstar = params.getfloat('star_disc', 'rstar_rsun')
+            rstar = params.getfloat('star', 'rstar_rsun')
         if tstar is None:
-            tstar = params.getfloat('star_disc', 'teff_K')
+            tstar = params.getfloat('star', 'teff_K')
         if mstar is None:
-            mstar = params.getfloat('star_disc', 'mstar_msun')
+            mstar = params.getfloat('star', 'mstar_msun')
         if scattering_mode is None:
             scattering_mode = params.getint('dust_rt', 'scat_mode')
         if nphot is None:
@@ -629,7 +629,7 @@ class RadWriter:
         # Determine wavelength grid from kwargs or global parameters
         wmin = kwargs.get('wmin_micron', params.getfloat('wavelengths', 'lambda_min_micron'))
         wmax = kwargs.get('wmax_micron', params.getfloat('wavelengths', 'lambda_max_micron'))
-        nwav = kwargs.get('nwav', 150)
+        nwav = kwargs.get('nwav', params.getint('wavelengths', 'n_lambda', fallback=150))
 
         # Write grid files
         self.write_amr_grid(output_dir)
