@@ -457,7 +457,11 @@ class RadWriter:
         
         nbin = self.model.dust.nbin
         if species_names is None:
-            species_names = [f"bin_{i}" for i in range(nbin)]
+            base_species = getattr(self.params, 'species', None)
+            if base_species is not None:
+                species_names = [f"{base_species}{i}" for i in range(nbin)]
+            else:
+                species_names = [f"bin_{i}" for i in range(nbin)]
         
         # Determine input style based on scattering mode
         inputstyle = 10 if scattering_mode >= 3 else 1
@@ -542,6 +546,8 @@ class RadWriter:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'opacity')
         
+        species_base = species
+        
         # Create wavelength grid in cm
         Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
         waves_micron = wmin_micron * Pw ** np.arange(nwav)
@@ -578,7 +584,8 @@ class RadWriter:
             )
             
             # Write to file
-            output_path = output_dir / f"bin_{ibin}"
+            species_name = f"{species_base}{ibin}"
+            output_path = output_dir / species_name
             self.opacity_calculator.write_radmc3d_opacity_file(
                 opacity_data=opac,
                 output_path=output_path,
@@ -586,7 +593,7 @@ class RadWriter:
             )
             
             # Track the opacity file
-            opacity_file = f"dustkappa_bin_{ibin}.inp"
+            opacity_file = f"dustkappa_{species_name}.inp"
             self.written_files[opacity_file] = output_dir / opacity_file
         
         logger.info(f"Wrote {self.model.dust.nbin} opacity files")
