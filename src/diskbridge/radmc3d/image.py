@@ -921,6 +921,10 @@ class RadImage:
         if sizeau is not None:
             cmd += ['sizeau', str(sizeau)]
         
+        secondorder_flag = getattr(self.params, 'secondorder', False)
+        if secondorder_flag:
+            cmd.append('secondorder')
+        
         # Wavelength or line parameters
         if wavelength is not None:
             cmd += ['lambda', str(wavelength)]
