@@ -50,13 +50,8 @@ class RadWriter:
         self.opacity_calculator = DustOpacityCalculator()
         self.organize_files = organize_files
         
-        # Define subdirectories for different file types
-        self.grid_dir = 'input_grids'
-        self.opacity_dir = 'input_opacities'
-        self.star_dir = 'input_stars'
-        self.dust_dir = 'input_dust'
-        self.gas_dir = 'input_gas'
-        self.config_dir = 'input_config'
+        # Define single input directory for all radmc3d input files
+        self.inputs_dir = 'radmc3d_inputs'
         
         # Track written files for symlink management
         self.written_files = {}
@@ -66,7 +61,7 @@ class RadWriter:
         
         Args:
             base_dir: Base output directory
-            file_type: Type of file ('grid', 'opacity', 'star', 'dust', 'gas', 'config')
+            file_type: Type of file (all input files go to radmc3d_inputs)
             
         Returns:
             Path to output directory
@@ -74,19 +69,8 @@ class RadWriter:
         if not self.organize_files:
             return base_dir
         
-        subdir_map = {
-            'grid': self.grid_dir,
-            'opacity': self.opacity_dir,
-            'star': self.star_dir,
-            'dust': self.dust_dir,
-            'gas': self.gas_dir,
-            'config': self.config_dir,
-        }
-        
-        if file_type not in subdir_map:
-            raise ValueError(f"Unknown file type: {file_type}")
-        
-        output_dir = base_dir / subdir_map[file_type]
+        # All input files now go to the same directory
+        output_dir = base_dir / self.inputs_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
     

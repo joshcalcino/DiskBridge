@@ -67,3 +67,4 @@ def cleanup_symlinks(active_symlinks: List[Path]) -> None:
 
     active_symlinks.clear()
     logger.info(f"Cleaned up {removed_count} symlinks")
+

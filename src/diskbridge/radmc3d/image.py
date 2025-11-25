@@ -18,6 +18,7 @@ from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
 import diskbridge
+from .molecule import RadMolecule
 
 # Physical constants (CGS)
 C_LIGHT = 2.99792458e10  # cm/s
@@ -91,14 +92,8 @@ class RadImage:
         self.params = diskbridge.params
         
         # Subdirectory paths for organized file storage (matching RadModel/RadWriter)
-        self.grid_dir = self.model_dir / 'input_grids'
-        self.opacity_dir = self.model_dir / 'input_opacities'
-        self.star_dir = self.model_dir / 'input_stars'
-        self.dust_dir = self.model_dir / 'input_dust'
-        self.gas_dir = self.model_dir / 'input_gas'
-        self.config_dir = self.model_dir / 'input_config'
-        self.temperature_dir = self.model_dir / 'temperature'
-        self.mcmono_dir = self.model_dir / 'mcmono'
+        self.inputs_dir = self.model_dir / 'radmc3d_inputs'
+        self.outputs_dir = self.model_dir / 'radmc3d_outputs'
         
         # Track active symlinks for cleanup
         self._active_symlinks: list[Path] = []
@@ -129,23 +124,28 @@ class RadImage:
         RADMC-3D expects input files in the directory where it runs. This method
         creates symlinks from the model directory to the organized subdirectories.
         """
+        # All input files from radmc3d_inputs
+        input_files = [
+            'amr_grid.inp', 'wavelength_micron.inp',
+            'stars.inp', 'dustopac.inp',
+            'dust_density.binp', 'dust_density.inp',
+            'gas_velocity.binp', 'gas_velocity.inp',
+            'numberdens_*.binp', 'numberdens_*.inp',
+            'radmc3d.inp', 'lines.inp', 'molecule_*.inp'
+        ]
+        
+        # All output files from radmc3d_outputs
+        output_files = ['dust_temperature.*', 'mean_intensity.out']
+        
         file_map = {
-            self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
-            self.star_dir: ['stars.inp'],
-            self.opacity_dir: ['dustopac.inp'],
-            self.dust_dir: ['dust_density.binp', 'dust_density.inp'],
-            self.gas_dir: ['gas_velocity.binp', 'gas_velocity.inp', 'numberdens_*.binp', 'numberdens_*.inp'],
-            self.config_dir: ['radmc3d.inp', 'lines.inp', 'molecule_*.inp'],
-            self.temperature_dir: ['dust_temperature.*'],
-            self.mcmono_dir: ['mean_intensity.out'],
+            self.inputs_dir: input_files,
+            self.outputs_dir: output_files,
         }
 
-        if self.opacity_dir.exists():
-            opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
-            if opacity_files and self.opacity_dir not in file_map:
-                file_map[self.opacity_dir] = []
+        if self.inputs_dir.exists():
+            opacity_files = list(self.inputs_dir.glob('dustkappa_*.inp'))
             for opac_file in opacity_files:
-                file_map[self.opacity_dir].append(opac_file.name)
+                file_map[self.inputs_dir].append(opac_file.name)
 
         create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
     
@@ -992,14 +992,10 @@ class RadImage:
             from .molecule import RadMolecule
             
             mol = RadMolecule()
-            # Check config_dir first, then model_dir for backward compatibility
-            mol_file = self.config_dir / f'molecule_{molecule}.inp'
+            # Molecule files are read from inputs_dir (radmc3d_inputs)
+            mol_file = self.inputs_dir / f'molecule_{molecule}.inp'
             if not mol_file.exists():
-                mol_file = self.model_dir / f'molecule_{molecule}.inp'
-            
-            if not mol_file.exists():
-                # Fall back to simple mapping
-                logger.warning(f"molecule_{molecule}.inp not found, using transition as iline")
+                logger.warning(f"molecule_{molecule}.inp not found in radmc3d_inputs, using transition as iline")
                 return transition
             
             mol.read(fname=mol_file)
@@ -1030,29 +1026,21 @@ class RadImage:
         float
             Rest frequency in Hz
         """
-        try:
-            from .molecule import RadMolecule
-            
-            mol = RadMolecule()
-            # Check config_dir first, then model_dir for backward compatibility
-            mol_file = self.config_dir / f'molecule_{molecule}.inp'
-            if not mol_file.exists():
-                mol_file = self.model_dir / f'molecule_{molecule}.inp'
-            
-            if not mol_file.exists():
-                logger.warning(f"molecule_{molecule}.inp not found, cannot determine rest frequency")
-                return 0.0
-            
-            mol.read(fname=mol_file)
-            freq = mol.getRestFrequency(transition)
-            
-            logger.info(f"Rest frequency for {molecule} J={transition}: {freq/1e9:.6f} GHz")
-            
-            return freq
-            
-        except Exception as e:
-            logger.warning(f"Failed to get rest frequency: {e}")
+
+        mol = RadMolecule()
+        # Molecule files are read from inputs_dir (radmc3d_inputs)
+        mol_file = self.inputs_dir / f'molecule_{molecule}.inp'
+        if not mol_file.exists():
+            logger.warning(f"molecule_{molecule}.inp not found in radmc3d_inputs, cannot determine rest frequency")
             return 0.0
+        
+        mol.read(fname=mol_file)
+        freq = mol.getRestFrequency(transition)
+        
+        logger.info(f"Rest frequency for {molecule} J={transition}: {freq/1e9:.6f} GHz")
+        
+        return freq
+
     
     def _write_multiangle_fits(
         self,
@@ -1199,10 +1187,10 @@ class RadImage:
         molecule : str
             Molecule name (e.g., 'co')
         """
-        # Create config_dir if it doesn't exist
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # Create inputs_dir if it doesn't exist
+        self.inputs_dir.mkdir(parents=True, exist_ok=True)
         
-        mol_file = self.config_dir / f'molecule_{molecule}.inp'
+        mol_file = self.inputs_dir / f'molecule_{molecule}.inp'
         if mol_file.exists():
             return
         
@@ -1220,11 +1208,8 @@ class RadImage:
     
     def _ensure_gas_velocity(self) -> None:
         """Ensure gas velocity file exists, create if necessary."""
-        # Check in gas_dir first, then model_dir for backward compatibility
-        vel_file = self.gas_dir / 'gas_velocity.binp'
-        if vel_file.exists():
-            return
-        vel_file = self.model_dir / 'gas_velocity.binp'
+        # Check if gas_velocity.binp already exists in inputs_dir
+        vel_file = self.inputs_dir / 'gas_velocity.binp'
         if vel_file.exists():
             return
         
@@ -1249,10 +1234,8 @@ class RadImage:
     
     def _ensure_radmc3d_inp_configured(self) -> None:
         """Ensure radmc3d.inp is properly configured for line transfer."""
-        # Check config_dir first, then model_dir for backward compatibility
-        inp_file = self.config_dir / 'radmc3d.inp'
-        if not inp_file.exists():
-            inp_file = self.model_dir / 'radmc3d.inp'
+        # Use radmc3d_inputs/radmc3d.inp
+        inp_file = self.inputs_dir / 'radmc3d.inp'
         
         # Read existing file
         if inp_file.exists():
@@ -1272,10 +1255,10 @@ class RadImage:
         
         logger.info("Updating radmc3d.inp for line transfer...")
         
-        # If file doesn't exist, create it in config_dir
+        # If file doesn't exist, create it in inputs_dir
         if not inp_file.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            inp_file = self.config_dir / 'radmc3d.inp'
+            self.inputs_dir.mkdir(parents=True, exist_ok=True)
+            inp_file = self.inputs_dir / 'radmc3d.inp'
             
             # Write/update configuration
             from .writer import RadWriter
@@ -1287,8 +1270,8 @@ class RadImage:
                     incl_dust=1,
                     incl_lines=1,
                 )
-                # Re-read to get the file in config_dir
-                inp_file = self.config_dir / 'radmc3d.inp'
+                # Re-read to get the file in inputs_dir
+                inp_file = self.inputs_dir / 'radmc3d.inp'
                 if inp_file.exists():
                     with open(inp_file, 'r') as f:
                         content = f.read()
@@ -1312,10 +1295,10 @@ class RadImage:
         molecule : str
             Molecule name
         """
-        # Create config_dir if it doesn't exist
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # Create inputs_dir if it doesn't exist
+        self.inputs_dir.mkdir(parents=True, exist_ok=True)
         
-        lines_file = self.config_dir / 'lines.inp'
+        lines_file = self.inputs_dir / 'lines.inp'
         
         # Check if file exists and already has this molecule
         if lines_file.exists():

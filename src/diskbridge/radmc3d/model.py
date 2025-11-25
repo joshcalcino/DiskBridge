@@ -124,14 +124,8 @@ class RadModel:
         self.nH: Optional[Quantity] = None  # H nuclei number density
         
         # Subdirectory paths for organized file storage
-        self.grid_dir = self.model_dir / 'input_grids'
-        self.opacity_dir = self.model_dir / 'input_opacities'
-        self.star_dir = self.model_dir / 'input_stars'
-        self.dust_dir = self.model_dir / 'input_dust'
-        self.gas_dir = self.model_dir / 'input_gas'
-        self.config_dir = self.model_dir / 'input_config'
-        self.temperature_dir = self.model_dir / 'temperature'
-        self.mcmono_dir = self.model_dir / 'mcmono'
+        self.inputs_dir = self.model_dir / 'radmc3d_inputs'
+        self.outputs_dir = self.model_dir / 'radmc3d_outputs'
         
         # Track active symlinks for cleanup
         self._active_symlinks: list[Path] = []
@@ -158,21 +152,21 @@ class RadModel:
         creates symlinks from the model directory to the organized subdirectories.
         """
         # Define files to symlink from each subdirectory
-        file_map = {
-            self.grid_dir: ['amr_grid.inp', 'wavelength_micron.inp'],
-            self.star_dir: ['stars.inp'],
-            self.opacity_dir: ['dustopac.inp'],
-            self.dust_dir: ['dust_density.binp', 'dust_density.inp'],
-            self.gas_dir: ['gas_velocity.binp', 'gas_velocity.inp'],
-            self.config_dir: ['radmc3d.inp'],
-        }
+        # All input files come from the inputs directory
+        input_files = [
+            'amr_grid.inp', 'wavelength_micron.inp',
+            'stars.inp', 'dustopac.inp',
+            'dust_density.binp', 'dust_density.inp',
+            'gas_velocity.binp', 'gas_velocity.inp',
+            'radmc3d.inp'
+        ]
+        
+        file_map = {self.inputs_dir: input_files}
 
-        if self.opacity_dir.exists():
-            opacity_files = list(self.opacity_dir.glob('dustkappa_*.inp'))
-            if opacity_files and self.opacity_dir not in file_map:
-                file_map[self.opacity_dir] = []
+        if self.inputs_dir.exists():
+            opacity_files = list(self.inputs_dir.glob('dustkappa_*.inp'))
             for opac_file in opacity_files:
-                file_map[self.opacity_dir].append(opac_file.name)
+                file_map[self.inputs_dir].append(opac_file.name)
 
         opacity_dir_global = getattr(self.params, 'opacity_dir', None)
         if opacity_dir_global is not None:
@@ -395,56 +389,6 @@ class RadModel:
             "No mean intensity file found. Run 'radmc3d mcmono' with UV wavelengths first."
         )
     
-    def compute_chi_from_mean_intensity(
-        self,
-        lam_cm: Optional[np.ndarray] = None,
-        J_lambda: Optional[np.ndarray] = None,
-    ) -> Quantity:
-        """Compute UV field from mean intensity.
-        
-        Integrates mean intensity over UV wavelengths (91.2-205 nm) to get chi.
-        
-        Parameters
-        ----------
-        lam_cm : np.ndarray, optional
-            Wavelengths in cm (if None, reads from file)
-        J_lambda : np.ndarray, optional
-            Mean intensity (if None, reads from file)
-            
-        Returns
-        -------
-        Quantity
-            UV field in Draine units (dimensionless)
-        """
-        if lam_cm is None or J_lambda is None:
-            lam_cm, J_lambda = self.read_mean_intensity_uv()
-        
-        # UV wavelength range: 91.2-205 nm
-        uv_mask = (lam_cm >= 91.2e-7) & (lam_cm <= 205e-7)
-        
-        if not np.any(uv_mask):
-            raise ValueError(
-                'No UV wavelengths (91.2-205 nm) found in mean intensity file. '
-                'Run mcmono with UV wavelengths.'
-            )
-        
-        lam_uv = lam_cm[uv_mask]
-        J_uv = J_lambda[..., uv_mask]
-        
-        # Radiation energy density: u_lambda = 4π J_lambda / c
-        u_lambda = 4.0 * np.pi * J_uv / C_LIGHT
-        
-        # Integrate over UV wavelengths and normalize by Draine FUV energy density
-        u_band = np.trapz(u_lambda, lam_uv, axis=-1)
-        chi_array = u_band / U_DRAINE
-        
-        self.chi = Quantity(chi_array, 'dimensionless')
-        
-        logger.info(f"Computed chi from mean intensity: "
-                   f"min={np.min(chi_array):.2e}, max={np.max(chi_array):.2e}")
-        
-        return self.chi
-    
     def compute_nH_from_model(self) -> Quantity:
         """Compute H nuclei number density from model gas density.
         
@@ -463,7 +407,8 @@ class RadModel:
         
         # Get gas density in CGS
         rho_gas = self.model.gas['density'].data.to('g/cm^3')
-        nH_cgs = rho_gas.magnitude / (MU_H * M_H)
+        MU_HNUC = 1.4  # mass per H nucleus including He
+        nH_cgs = rho_gas.magnitude / (MU_HNUC * M_H)
         
         # Model gas density has axis_order ('r', 'phi', 'theta') for spherical coords
         # but RADMC-3D/RadData uses ('r', 'theta', 'phi')
@@ -552,7 +497,7 @@ class RadModel:
         chi = None
         if photodissociation or photodesorption:
             if self.chi is None:
-                self.compute_chi_from_mean_intensity()
+                self.compute_mcmono()
             chi = self.chi.magnitude
         
         # Get arrays in correct units
@@ -635,16 +580,12 @@ class RadModel:
         else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
         
-        # Create gas_dir if it doesn't exist
-        self.gas_dir.mkdir(parents=True, exist_ok=True)
+        # Create inputs_dir if it doesn't exist
+        self.inputs_dir.mkdir(parents=True, exist_ok=True)
         
+        n_radmc = np.transpose(n_cgs, (2, 1, 0))
         if binary:
-            filepath = self.gas_dir / f'numberdens_{mol_lower}.binp'
-            
-            # RADMC-3D expects (nsec, ncol, nrad) order
-            # DiskBridge uses (nrad, nsec, ncol/nz) order
-            # Need to transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-            n_radmc = np.transpose(n_cgs, (2, 1, 0))
+            filepath = self.inputs_dir / f'numberdens_{mol_lower}.binp'
             
             with open(filepath, 'wb') as f:
                 # Header: format, precision, ncells
@@ -654,10 +595,7 @@ class RadModel:
             
             logger.info(f"Wrote {filepath}")
         else:
-            filepath = self.gas_dir / f'numberdens_{mol_lower}.inp'
-            
-            # Transpose for RADMC-3D
-            n_radmc = np.transpose(n_cgs, (2, 1, 0))
+            filepath = self.inputs_dir / f'numberdens_{mol_lower}.inp'
             
             with open(filepath, 'w') as f:
                 f.write('1\n')
@@ -700,7 +638,7 @@ class RadModel:
         
         # Set output directory
         if output_dir is None:
-            output_dir = self.model_dir / 'temperature'
+            output_dir = self.outputs_dir
         else:
             output_dir = Path(output_dir)
         
@@ -828,7 +766,7 @@ class RadModel:
         
         # Set output directory
         if output_dir is None:
-            output_dir = self.model_dir / 'mcmono'
+            output_dir = self.outputs_dir
         else:
             output_dir = Path(output_dir)
         
@@ -863,7 +801,6 @@ class RadModel:
                     f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
                 )
             
-            lam_uv = lam_cm[uv_mask]
             j_uv = j_lambda[:, uv_mask]
 
             nu_uv = freq_hz[uv_mask]
@@ -897,18 +834,15 @@ class RadModel:
         # Create symlinks to input files
         self.create_symlinks()
         
-        # RADMC-3D mcmono also needs temperature file - create symlink if it exists in subdirectory
-        temp_subdir = self.model_dir / 'temperature'
-        temp_symlink_created = False
+        # RADMC-3D mcmono also needs temperature file - create symlink if it exists in outputs subdirectory
         for suffix in ['.bdat', '.dat', '.binp']:
-            src_temp = temp_subdir / f'dust_temperature{suffix}'
+            src_temp = self.outputs_dir / f'dust_temperature{suffix}'
             dst_temp = self.model_dir / f'dust_temperature{suffix}'
             if src_temp.exists() and not dst_temp.exists():
                 import os
                 os.symlink(src_temp, dst_temp)
                 self._active_symlinks.append(dst_temp)
                 logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
-                temp_symlink_created = True
                 break
         
         try:
@@ -1010,7 +944,6 @@ class RadModel:
                 f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
             )
         
-        lam_uv = lam_cm[uv_mask]
         j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
 
         nu_uv = freq_hz[uv_mask]
