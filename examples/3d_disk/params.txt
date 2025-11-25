@@ -5,8 +5,8 @@
 nbcores          = 12
 
 # Photons
-n_thermal         = 1e7               # Monte Carlo photons for dust temperature
-n_scat            = 1e5               # photons for images
+nphot_thermal     = 1e7               # Monte Carlo photons for dust temperature
+nphot_scat        = 1e5               # photons for images
 
 ##########################
 #  Wavelength settings   #

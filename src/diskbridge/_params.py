@@ -18,8 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 class Params:
     # simulation / photons
     nbcores: int
-    n_thermal: float
-    n_scat: float
+    nphot_thermal: float
+    nphot_scat: float
+    nphot_mono: float
 
     # wavelengths
     n_lambda: int

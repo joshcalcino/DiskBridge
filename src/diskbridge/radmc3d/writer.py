@@ -274,6 +274,7 @@ class RadWriter:
         incl_lines: int = 0,
         nphot: Optional[int] = None,
         nphot_scat: Optional[int] = None,
+        nphot_mono: Optional[int] = None,
         scattering_mode_max: Optional[int] = None,
         modified_random_walk: int = 1,
         setthreads: Optional[int] = None,
@@ -295,9 +296,11 @@ class RadWriter:
         filepath = output_dir / 'radmc3d.inp'
 
         if nphot is None:
-            nphot = int(self.params.n_thermal)
+            nphot = int(self.params.nphot_thermal)
         if nphot_scat is None:
-            nphot_scat = int(self.params.n_scat)
+            nphot_scat = int(self.params.nphot_scat)
+        if nphot_mono is None:
+            nphot_mono = int(getattr(self.params, 'nphot_mono', self.params.nphot_thermal))
         if scattering_mode_max is None:
             scattering_mode_max = self.params.scat_mode
         if setthreads is None:
@@ -308,6 +311,7 @@ class RadWriter:
             f.write(f'incl_lines = {incl_lines}\n')
             f.write(f'nphot = {nphot}\n')
             f.write(f'nphot_scat = {nphot_scat}\n')
+            f.write(f'nphot_mono = {nphot_mono}\n')
             f.write(f'scattering_mode_max = {scattering_mode_max}\n')
             f.write(f'modified_random_walk = {modified_random_walk}\n')
             f.write(f'setthreads = {setthreads}\n')
@@ -625,9 +629,9 @@ class RadWriter:
         if scattering_mode is None:
             scattering_mode = self.params.scat_mode
         if nphot is None:
-            nphot = int(self.params.n_thermal)
+            nphot = int(self.params.nphot_thermal)
         if nphot_scat is None:
-            nphot_scat = int(self.params.n_scat)
+            nphot_scat = int(self.params.nphot_scat)
         if setthreads is None:
             setthreads = self.params.nbcores
         

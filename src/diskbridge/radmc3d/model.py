@@ -628,7 +628,7 @@ class RadModel:
         >>> temperature = rad.compute_temperature(nphot=1000000, force=True)
         """
         if nphot is None:
-            nphot = int(self.params.n_thermal)
+            nphot = int(self.params.nphot_thermal)
         
         # Set output directory
         if output_dir is None:
@@ -743,7 +743,7 @@ class RadModel:
         >>> chi = rad.compute_mcmono()
         """
         if nphot is None:
-            nphot = self.params.n_thermal
+            nphot = self.params.nphot_mono
         if uv_min_nm is None:
             uv_min_nm = self.params.uv_min_nm
         if uv_max_nm is None:
@@ -907,7 +907,6 @@ class RadModel:
             # Format: iformat (line 1), nrcells (line 2), nwav (line 3)
             # Line 4: all wavelengths (space-separated)
             # Remaining lines: mean intensity values (one per line, nwav * nrcells total)
-            iformat = int(f.readline().strip())
             nrcells = int(f.readline().strip())
             nwav = int(f.readline().strip())
             

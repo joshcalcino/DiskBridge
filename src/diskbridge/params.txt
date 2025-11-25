@@ -6,8 +6,9 @@
 nbcores          = 12
 
 # Photons 
-n_thermal        = 1e7
-n_scat           = 1e5
+nphot_thermal    = 1e7
+nphot_scat       = 1e5
+nphot_mono       = 1e7
 
 # Wavelengths 
 n_lambda          = 150
