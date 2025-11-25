@@ -56,3 +56,6 @@ temperature = "kelvin"
 time = "s"
 velocity = "m / s"
 
+
+[dependencies]
+scipy = ">=1.8"

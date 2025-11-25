@@ -168,12 +168,6 @@ class RadModel:
             for opac_file in opacity_files:
                 file_map[self.inputs_dir].append(opac_file.name)
 
-        opacity_dir_global = getattr(self.params, 'opacity_dir', None)
-        if opacity_dir_global is not None:
-            opacity_dir_path = Path(opacity_dir_global)
-            if opacity_dir_path.exists():
-                file_map[opacity_dir_path] = ['dustkappa_*.inp']
-
         create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
     
     def cleanup_symlinks(self) -> None:
