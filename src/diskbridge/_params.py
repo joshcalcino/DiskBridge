@@ -74,6 +74,10 @@ class Params:
     # radmc
     secondorder: bool
 
+    # naming
+    prepend_name: str
+    append_name: str
+
 
 
 # ---------------------------------------------------------------------------

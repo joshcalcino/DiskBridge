@@ -62,3 +62,7 @@ accretion_fill_factor = 0.01
 
 # RADMC 
 secondorder      = F
+
+# Naming (optional)
+prepend_name     =
+append_name      =

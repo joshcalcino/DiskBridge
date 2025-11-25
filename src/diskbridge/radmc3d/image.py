@@ -561,7 +561,8 @@ class RadImage:
         
         logger.debug(f"Parameters after defaults: npix={npix}, sizeau={sizeau}, widthkms={widthkms}, linenlam={linenlam}, phis={phis}")
         if output_dir is None:
-            output_dir = f'image_{molecule}_J{transition}'
+            base_name = f'image_{molecule}_J{transition}'
+            output_dir = self._apply_name_templates(base_name)
         
         # Convert single values to lists
         if not isinstance(inclinations, (list, tuple, np.ndarray)):
@@ -731,7 +732,8 @@ class RadImage:
         if coord is None:
             coord = '0h0m0s 0d0m0s'
         if output_dir is None:
-            output_dir = f'image_{wavelength:.2f}um'
+            base_name = f'image_{wavelength:.2f}um'
+            output_dir = self._apply_name_templates(base_name)
         
         # Convert single values to lists
         if not isinstance(inclinations, (list, tuple, np.ndarray)):
@@ -1181,6 +1183,29 @@ class RadImage:
                 f.write(f'radmc3d_command = {command}\n')
             
             logger.debug(f"Copied params.txt -> {output_dir}")
+    
+    def _format_name_template(self, template: str) -> str:
+        if not template:
+            return ''
+        try:
+            params_obj = getattr(self, 'params', None)
+            if params_obj is None:
+                return template
+            context = dict(params_obj.__dict__)
+            for key, value in list(context.items()):
+                if isinstance(value, bool):
+                    context[key] = 'T' if value else 'F'
+            return template.format(**context)
+        except Exception as e:
+            logger.warning(f"Failed to format name template '{template}': {e}")
+            return template
+    
+    def _apply_name_templates(self, base_name: str) -> str:
+        prepend = getattr(self.params, 'prepend_name', '')
+        append = getattr(self.params, 'append_name', '')
+        prepend_fmt = self._format_name_template(prepend) if prepend else ''
+        append_fmt = self._format_name_template(append) if append else ''
+        return f"{prepend_fmt}{base_name}{append_fmt}"
     
     def _ensure_molecule_file(self, molecule: str) -> None:
         """Ensure molecule data file exists, download if necessary.
