@@ -35,7 +35,7 @@ grain_density    = 1.26
 
 # Opacity 
 species          = mix_2species_ice70
-opacity_dir      = /home/josh/code/fargo2radmc3d/data/opac
+opacity_dir      = data/opac
 
 # Gas RT 
 gasspecies       = co

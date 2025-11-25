@@ -14,6 +14,9 @@ import subprocess
 import shutil
 import datetime
 
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = PACKAGE_ROOT.parent.parent
+
 from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
@@ -1194,6 +1197,13 @@ class RadImage:
         if mol_file.exists():
             return
         
+        local_moldata_dir = REPO_ROOT / "data" / "moldata"
+        local_dat = local_moldata_dir / f"{molecule}.dat"
+        if local_dat.exists():
+            shutil.copyfile(local_dat, mol_file)
+            logger.info(f"Copied local moldata file {local_dat} to {mol_file}")
+            return
+
         logger.info(f"Molecule file not found, attempting to download {molecule}...")
         
         # Try to download from LAMDA

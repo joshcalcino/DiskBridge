@@ -7,6 +7,7 @@ from typing import Union, List, Optional, Dict, get_origin, get_args, get_type_h
 
 # Default params file shipped with the package
 DEFAULT_PARAMS_FILE = Path(__file__).parent / "params.txt"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +183,9 @@ def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
         kwargs[key] = parsed
 
     params = Params(**kwargs)
+    opacity_path = Path(params.opacity_dir)
+    if not opacity_path.is_absolute():
+        params.opacity_dir = str((REPO_ROOT / opacity_path).resolve())
     return params
 
 

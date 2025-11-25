@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "diskbridge"
 version = "0.1.0"
 description = "RADMC-3D post-processor for FARGO-3D / Dusty FARGO-ADSG outputs"
-readme = "README.md"
+readme = "README"
 requires-python = ">=3.9"
 license = {text = "MIT"}        # or the repo’s actual license
 authors = [{name = ""}]
