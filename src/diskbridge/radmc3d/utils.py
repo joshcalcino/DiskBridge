@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List
+import subprocess
 
 from diskbridge._logging import logger
 
@@ -55,6 +56,33 @@ def create_symlinks_for_file_map(
                 logger.debug(f"Created symlink: {target} -> {source}")
 
     logger.info(f"Created {len(active_symlinks)} symlinks to input files")
+
+
+def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]:
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(model_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdout_lines: list[str] = []
+    try:
+        if process.stdout is not None:
+            for line in process.stdout:
+                logger.info(line.rstrip())
+                stdout_lines.append(line)
+        process.wait()
+        stderr_text = ""
+        if process.stderr is not None:
+            stderr_text = process.stderr.read()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    return process.returncode, "".join(stdout_lines), stderr_text
 
 
 def cleanup_symlinks(active_symlinks: List[Path]) -> None:

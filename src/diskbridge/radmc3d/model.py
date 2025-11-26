@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple
 from pathlib import Path
 import numpy as np
-import subprocess
 import shutil
 import datetime
 
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .data import RadData
-from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
+from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks, run_radmc3d_command
 import diskbridge 
 
 # Physical constants (CGS)
@@ -657,26 +656,21 @@ class RadModel:
             logger.info(f"Running RADMC-3D mctherm with {nphot} photons...")
             cmd = ['radmc3d', 'mctherm']
             
-            result = subprocess.run(
-                cmd,
-                cwd=str(self.model_dir),
-                capture_output=True,
-                text=True
-            )
+            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
             
             log_path = self.model_dir / 'radmc3d.out'
             try:
                 with open(log_path, 'a') as f:
                     f.write('\n--- mctherm ---\n')
-                    if result.stdout:
-                        f.write(result.stdout)
-                    if result.stderr:
+                    if stdout:
+                        f.write(stdout)
+                    if stderr:
                         f.write('\n[stderr]\n')
-                        f.write(result.stderr)
+                        f.write(stderr)
             except Exception:
                 pass
             
-            if result.returncode != 0:
+            if returncode != 0:
                 logger.error(f"RADMC-3D mctherm failed (see {log_path})")
                 errors = _extract_radmc_errors(log_path)
                 if errors:
@@ -855,21 +849,16 @@ class RadModel:
                 except Exception:
                     previous_log = ""
             
-            result = subprocess.run(
-                cmd,
-                cwd=str(self.model_dir),
-                capture_output=True,
-                text=True
-            )
+            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
 
             # Rebuild radmc3d.out to contain both the previous log and the new mcmono output
             combined_log = previous_log
             combined_log += '\n--- mcmono ---\n'
-            if result.stdout:
-                combined_log += result.stdout
-            if result.stderr:
+            if stdout:
+                combined_log += stdout
+            if stderr:
                 combined_log += '\n[stderr]\n'
-                combined_log += result.stderr
+                combined_log += stderr
 
             try:
                 with open(log_path, 'w') as f:
@@ -877,7 +866,7 @@ class RadModel:
             except Exception:
                 pass
             
-            if result.returncode != 0:
+            if returncode != 0:
                 logger.error(f"RADMC-3D mcmono failed (see {log_path})")
                 errors = _extract_radmc_errors(log_path)
                 if errors:

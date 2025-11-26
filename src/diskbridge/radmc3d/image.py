@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 from pathlib import Path
 import numpy as np
-import subprocess
 import shutil
 import datetime
 
@@ -19,7 +18,7 @@ REPO_ROOT = PACKAGE_ROOT.parent.parent
 
 from astropy.io import fits
 from diskbridge._logging import logger
-from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks
+from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks, run_radmc3d_command
 import diskbridge
 from .molecule import RadMolecule
 
@@ -957,28 +956,23 @@ class RadImage:
         self.create_symlinks()
         
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.model_dir,
-                capture_output=True,
-                text=True,
-            )
+            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
         finally:
             # Always clean up symlinks
             self.cleanup_symlinks()
         
-        if result.returncode != 0:
-            logger.error(f"RADMC-3D failed with exit code {result.returncode}")
-            logger.error(f"stdout: {result.stdout}")
-            logger.error(f"stderr: {result.stderr}")
+        if returncode != 0:
+            logger.error(f"RADMC-3D failed with exit code {returncode}")
+            logger.error(f"stdout: {stdout}")
+            logger.error(f"stderr: {stderr}")
             log_path = self.model_dir / 'radmc3d.out'
             errors = _extract_radmc_errors(log_path)
             if errors:
                 logger.error(f"RADMC-3D errors:\n{errors}")
                 raise RuntimeError(
-                    f"radmc3d image failed with exit code {result.returncode} and errors:\n{errors}"
+                    f"radmc3d image failed with exit code {returncode} and errors:\n{errors}"
                 )
-            raise RuntimeError(f"radmc3d image failed with exit code {result.returncode}")
+            raise RuntimeError(f"radmc3d image failed with exit code {returncode}")
         
         logger.debug(f"RADMC-3D completed successfully")
     
