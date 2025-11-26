@@ -317,6 +317,146 @@ class Model:
         )
         
         return target_region
+    
+    def set_mask_from_density(
+        self,
+        density_threshold: Quantity,
+        r_min: Optional[Quantity] = None,
+        r_max: Optional[Quantity] = None,
+        is_a_disk: bool = False,
+    ) -> SubModel:
+        """Define a masked region based on density threshold.
+        
+        Args:
+            density_threshold: Minimum density for inclusion
+            r_min: Optional minimum radius
+            r_max: Optional maximum radius
+            is_a_disk: Mark region as disk (enables settling mode)
+            
+        Returns:
+            SubModel (or Disk) with mask applied
+        """
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+        
+        if mesh.coord_system != 'spherical':
+            raise ValueError(
+                f"set_mask_from_density only supports spherical coordinates, "
+                f"got {mesh.coord_system}"
+            )
+        
+        # Determine target region
+        if is_a_disk and self.disk is not None:
+            target_region = self.disk
+        else:
+            target_region = SubModel(self)
+        
+        # Get density from gas
+        if 'density' not in self.gas:
+            raise KeyError("No density field found in gas")
+        
+        density = self.gas['density'].data
+        threshold_val = density_threshold.to(density.units).magnitude
+        mask = (density.magnitude >= threshold_val)
+        
+        # Apply radial constraints if given
+        if r_min is not None or r_max is not None:
+            r = mesh.centers('r')
+            phi = mesh.centers('phi')
+            theta = mesh.centers('theta')
+            r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
+            
+            if r_min is not None:
+                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+            if r_max is not None:
+                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+        
+        axis_order = ('r', 'phi', 'theta')
+        
+        mask_quantity = Quantity(mask, 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        target_region.mask = mask_field
+        
+        # Mark as disk region if requested
+        if is_a_disk:
+            target_region.is_disk_region = True
+        
+        logger.info(
+            f"{target_region.__class__.__name__} mask set (density): {np.sum(mask)} / {mask.size} cells "
+            f"({100*np.sum(mask)/mask.size:.1f}%)"
+        )
+        
+        return target_region
+    
+    def set_mask_from_array(
+        self,
+        mask_array: np.ndarray,
+        is_a_disk: bool = False,
+    ) -> SubModel:
+        """Define a masked region from a custom boolean array.
+        
+        Args:
+            mask_array: Boolean array matching grid shape
+            is_a_disk: Mark region as disk (enables settling mode)
+            
+        Returns:
+            SubModel (or Disk) with mask applied
+        """
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+        
+        if mesh.coord_system != 'spherical':
+            raise ValueError(
+                f"set_mask_from_array only supports spherical coordinates, "
+                f"got {mesh.coord_system}"
+            )
+        
+        # Determine target region
+        if is_a_disk and self.disk is not None:
+            target_region = self.disk
+        else:
+            target_region = SubModel(self)
+        
+        # Verify shape
+        expected_shape = (
+            len(mesh.axes['r'].centers),
+            len(mesh.axes['phi'].centers),
+            len(mesh.axes['theta'].centers)
+        )
+        
+        if mask_array.shape != expected_shape:
+            raise ValueError(
+                f"Mask shape {mask_array.shape} doesn't match grid shape {expected_shape}"
+            )
+        
+        axis_order = ('r', 'phi', 'theta')
+        
+        mask_quantity = Quantity(mask_array.astype(bool), 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        target_region.mask = mask_field
+        
+        # Mark as disk region if requested
+        if is_a_disk:
+            target_region.is_disk_region = True
+        
+        logger.info(
+            f"{target_region.__class__.__name__} mask set: {np.sum(mask_array)} / {mask_array.size} cells "
+            f"({100*np.sum(mask_array)/mask_array.size:.1f}%)"
+        )
+        
+        return target_region
 
     def puff_up_model(
         self, n: int, 
@@ -394,125 +534,6 @@ class SubModel:
             mask=self.mask,
             is_disk_region=self.is_disk_region,
         )
-
-    def set_mask_from_density(
-        self,
-        density_threshold: Quantity,
-        r_min: Optional[Quantity] = None,
-        r_max: Optional[Quantity] = None,
-    ) -> Field:
-        """Create mask based on density threshold.
-        
-        Args:
-            density_threshold: Minimum density for inclusion
-            r_min: Optional minimum radius
-            r_max: Optional maximum radius
-            
-        Returns:
-            Field containing boolean mask
-        """
-        
-        # Get density from the submodel
-        if 'density' in self:
-            density = self['density'].data
-        else:
-            raise KeyError("No density field found in submodel")
-        
-        mesh = self.mesh
-        if mesh.coord_system != 'spherical':
-            raise ValueError(
-                f"set_mask_from_density only supports spherical coordinates, "
-                f"got {mesh.coord_system}"
-            )
-            
-        threshold_val = density_threshold.to(density.units).magnitude
-        mask = (density.magnitude >= threshold_val)
-        
-        # Apply radial constraints if given
-        if r_min is not None or r_max is not None:
-            r = mesh.centers('r')
-            phi = mesh.centers('phi')
-            theta = mesh.centers('theta')
-            r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
-            
-            if r_min is not None:
-                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
-            if r_max is not None:
-                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-        
-        axis_order = ('r', 'phi', 'theta')
-                
-        mask_quantity = Quantity(mask, 'dimensionless')
-        mask_field = Field(
-            data=mask_quantity,
-            quantity='mask',
-            axis_order=axis_order,
-        )
-        
-        self.mask = mask_field
-        
-        logger.info(
-            f"{self.__class__.__name__} mask set (density): {np.sum(mask)} / {mask.size} cells "
-            f"({100*np.sum(mask)/mask.size:.1f}%)"
-        )
-        
-        return mask_field
-        
-    def set_mask_from_array(self, mask_array: np.ndarray) -> Field:
-        """Set mask from custom boolean array.
-        
-        Args:
-            mask_array: Boolean array matching grid shape
-            
-        Returns:
-            Field containing mask
-        """
-        
-        mesh = self.mesh
-        
-        # Verify shape
-        if 'density' in self:
-            expected_shape = self['density'].data.shape
-        else:
-            # Get shape from mesh
-            if mesh.coord_system == 'spherical':
-                expected_shape = (len(mesh.axes['r'].centers),
-                                len(mesh.axes['phi'].centers),
-                                len(mesh.axes['theta'].centers))
-            elif mesh.coord_system == 'cylindrical':
-                expected_shape = (len(mesh.axes['r'].centers),
-                                len(mesh.axes['phi'].centers),
-                                len(mesh.axes['z'].centers))
-            else:
-                raise ValueError(f"Cannot determine shape for {mesh.coord_system}")
-            
-        if mask_array.shape != expected_shape:
-            raise ValueError(
-                f"Mask shape {mask_array.shape} doesn't match grid shape {expected_shape}"
-            )
-            
-        if mesh.coord_system == 'spherical':
-            axis_order = ('r', 'phi', 'theta')
-        elif mesh.coord_system == 'cylindrical':
-            axis_order = ('r', 'phi', 'z')
-        else:
-            axis_order = None
-            
-        mask_quantity = Quantity(mask_array.astype(bool), 'dimensionless')
-        mask_field = Field(
-            data=mask_quantity,
-            quantity='mask',
-            axis_order=axis_order,
-        )
-        
-        self.mask = mask_field
-        
-        logger.info(
-            f"{self.__class__.__name__} mask set: {np.sum(mask_array)} / {mask_array.size} cells "
-            f"({100*np.sum(mask_array)/mask_array.size:.1f}%)"
-        )
-        
-        return mask_field
     
     def anti_mask(self) -> "SubModel":
         """Create a new SubModel with the complement of this submodel's mask.
@@ -527,12 +548,8 @@ class SubModel:
         mask_bool = self.mask.data.magnitude.astype(bool)
         other_bool = ~mask_bool
         
-        # Create new SubModel for the complement region
-        other = SubModel(self.parent)
-        other.set_mask_from_array(other_bool)
-        
-        # Explicitly mark as not a disk region
-        other.is_disk_region = False
+        # Use parent model's set_mask_from_array method
+        other = self.parent.set_mask_from_array(other_bool, is_a_disk=False)
         
         logger.info(
             f"Created complement region: {np.sum(other_bool)} / {other_bool.size} cells "
