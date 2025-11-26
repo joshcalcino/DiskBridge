@@ -907,6 +907,7 @@ class RadModel:
             # Format: iformat (line 1), nrcells (line 2), nwav (line 3)
             # Line 4: all wavelengths (space-separated)
             # Remaining lines: mean intensity values (one per line, nwav * nrcells total)
+            iformat = int(f.readline().strip())
             nrcells = int(f.readline().strip())
             nwav = int(f.readline().strip())
             
