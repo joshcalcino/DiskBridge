@@ -37,16 +37,16 @@ class Params:
     # dust_rt
     scat_mode: int
 
-    # dust_sizes
-    amin: float
-    amax: float
-    pindex: float
-    dust_to_gas_ratio: float
-    nbins: int
-    grain_density: float
+    # dust_sizes (can be scalar or list for multi-component dust)
+    amin: Union[float, List[float]]
+    amax: Union[float, List[float]]
+    pindex: Union[float, List[float]]
+    dust_to_gas_ratio: Union[float, List[float]]
+    nbins: Union[int, List[int]]
+    grain_density: Union[float, List[float]]
 
-    # opacity
-    species: str
+    # opacity (can be scalar or list for multi-component dust)
+    species: Union[str, List[str]]
     opacity_dir: str
 
     # gas_rt
@@ -127,18 +127,32 @@ def _parse_value(raw: str, target_type):
     raw = raw.split("#", 1)[0].strip()
     origin = get_origin(target_type)
 
-    # Union[float, List[float]] support
+    # Union[T, List[T]] support (e.g. Union[float, List[float]] or Union[str, List[str]])
     if origin is Union:
         args = get_args(target_type)
         list_type = next((t for t in args if get_origin(t) is list or t is list), None)
         if list_type:
+            # Check if raw value is a list
             if "," in raw or "[" in raw:
-                inner = float
+                # Parse as list
+                if get_origin(list_type) is list:
+                    inner = get_args(list_type)[0]
+                else:
+                    # Fallback for older Python or edge cases
+                    scalar_type = next((t for t in args if t is not list_type), None)
+                    inner = scalar_type if scalar_type else str
+                
                 vals = raw.strip("[]")
                 if not vals:
                     return []
-                return [inner(x.strip()) for x in vals.split(",")]
-            return float(raw)
+                return [_parse_scalar(part.strip(), inner) for part in vals.split(",")]
+            else:
+                # Parse as scalar - find the non-list type in the Union
+                scalar_type = next((t for t in args if get_origin(t) is not list and t is not list), None)
+                if scalar_type:
+                    return _parse_scalar(raw, scalar_type)
+                # Fallback
+                return raw
 
     # List[T]
     if origin is list:
@@ -192,6 +206,59 @@ def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
     if not opacity_path.is_absolute():
         params.opacity_dir = str((REPO_ROOT / opacity_path).resolve())
     return params
+
+
+def canonicalize_dust_params(params_obj: Params) -> dict:
+    """Canonicalize dust parameters to per-component lists with broadcasting.
+    
+    Rules:
+    - Convert all dust params to lists
+    - Determine ncomp from the longest list
+    - Broadcast scalars (length-1 lists) to all components
+    - Validate all lists have length 1 or ncomp
+    
+    Returns:
+        dict with keys:
+            - 'ncomp': int, number of dust components
+            - 'amin': list of floats
+            - 'amax': list of floats
+            - 'pindex': list of floats
+            - 'dust_to_gas_ratio': list of floats
+            - 'nbins': list of ints
+            - 'grain_density': list of floats
+            - 'species': list of strings
+    """
+    # Dust parameters to canonicalize
+    dust_param_names = [
+        'amin', 'amax', 'pindex', 'dust_to_gas_ratio',
+        'nbins', 'grain_density', 'species'
+    ]
+    
+    # Convert each to list
+    def to_list(x):
+        return x if isinstance(x, list) else [x]
+    
+    lists = {k: to_list(getattr(params_obj, k)) for k in dust_param_names}
+    
+    # Determine number of components
+    ncomp = max(len(v) for v in lists.values())
+    
+    # Broadcast scalars and validate lengths
+    canonical = {'ncomp': ncomp}
+    for k, v in lists.items():
+        if len(v) == 1 and ncomp > 1:
+            # Broadcast scalar to all components
+            canonical[k] = v * ncomp
+        elif len(v) == ncomp:
+            # Already correct length
+            canonical[k] = v
+        else:
+            raise ValueError(
+                f"Dust parameter '{k}' has length {len(v)}, but other parameters "
+                f"imply {ncomp} components. Each parameter must have length 1 or {ncomp}."
+            )
+    
+    return canonical
 
 
 # Initialize once on import using only the defaults

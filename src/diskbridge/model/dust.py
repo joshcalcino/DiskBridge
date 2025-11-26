@@ -197,6 +197,72 @@ class DustDistribution:
         return species
 
 
+class DustComponent:
+    """Represents a single dust component with its own distribution and spatial region.
+    
+    Attributes:
+        distribution: DustDistribution for this component
+        dust_to_gas_ratio: Dust-to-gas mass ratio for this component
+        mode: 'proportional' or 'settling'
+        mask: Optional Field defining where this component exists
+        alpha: Turbulent viscosity parameter (for settling mode)
+        delta: Turbulent diffusion parameter (for settling mode)
+        mean_molecular_weight: Mean molecular weight for gas
+        species_base: Base name for dust species (for opacity files)
+        component_index: Index of this component in the parent Dust
+    """
+    
+    def __init__(
+        self,
+        distribution: DustDistribution,
+        dust_to_gas_ratio: float,
+        mode: Literal['proportional', 'settling'] = 'proportional',
+        mask: Optional[Field] = None,
+        alpha: Optional[float] = None,
+        delta: Optional[float] = None,
+        mean_molecular_weight: float = 2.3,
+        species_base: str = "dust",
+        component_index: int = 0,
+        spherical_interp_r_factor: Optional[float] = None,
+        spherical_interp_z_factor: Optional[float] = None,
+    ):
+        """Initialize a dust component.
+        
+        Args:
+            distribution: DustDistribution instance
+            dust_to_gas_ratio: Dust-to-gas mass ratio
+            mode: 'proportional' or 'settling'
+            mask: Optional mask Field (True = included)
+            alpha: Turbulent viscosity parameter
+            delta: Turbulent diffusion parameter
+            mean_molecular_weight: Mean molecular weight
+            species_base: Base name for opacity files
+            component_index: Component index (for naming)
+            spherical_interp_r_factor: Spherical interpolation factor (r)
+            spherical_interp_z_factor: Spherical interpolation factor (z)
+        """
+        self.distribution = distribution
+        self.dust_to_gas_ratio = dust_to_gas_ratio
+        self.mode = mode
+        self.mask = mask
+        self.alpha = alpha
+        self.delta = delta if delta is not None else alpha
+        self.mean_molecular_weight = mean_molecular_weight
+        self.species_base = species_base
+        self.component_index = component_index
+        self.spherical_interp_r_factor = spherical_interp_r_factor
+        self.spherical_interp_z_factor = spherical_interp_z_factor
+        
+    def __repr__(self) -> str:
+        return (
+            f"DustComponent(index={self.component_index}, "
+            f"nbin={self.distribution.nbin}, "
+            f"size_range={self.distribution.amin} to {self.distribution.amax}, "
+            f"dust/gas={self.dust_to_gas_ratio:.3e}, mode='{self.mode}', "
+            f"species='{self.species_base}')"
+        )
+
+
 class Dust(SubModel):
     """SubModel for dust grains in a disk model.
     
@@ -226,15 +292,24 @@ class Dust(SubModel):
         self._lazy_builders: Dict[str, Callable[[], Field]] = {}
         self._bins: Dict[str, DustBin] = {}
         
-        # Dust distribution parameters
+        # Multi-component support
+        self._components: List[DustComponent] = []
+        self._global_bins: Dict[str, tuple[int, int]] = {}  # bin_name -> (comp_idx, local_bin_idx)
+        
+        # Legacy single-component attributes (for backward compatibility)
+        # These now proxy to the first component when available
         self.distribution: Optional[DustDistribution] = None
         self.dust_to_gas_ratio: Optional[float] = None
         self.mode: Literal['proportional', 'settling'] = 'proportional'
         
-        # Settling-diffusion parameters
+        # Settling-diffusion parameters (legacy)
         self.alpha: Optional[float] = None  # Turbulent viscosity parameter
         self.delta: Optional[float] = None  # Turbulent diffusion parameter (default: = alpha)
         self.mean_molecular_weight: float = 2.3  # Mean molecular weight (for H2)
+        
+        # Spherical interpolation factors (legacy)
+        self.spherical_interp_r_factor: Optional[float] = None
+        self.spherical_interp_z_factor: Optional[float] = None
         
     def set_distribution(
         self,
@@ -289,46 +364,73 @@ class Dust(SubModel):
         if dust_to_gas_ratio is None:
             dust_to_gas_ratio = params.dust_to_gas_ratio
         
-        self.distribution = DustDistribution(
+        distribution = DustDistribution(
             amin=amin,
             amax=amax,
             nbin=nbin,
             power_index=power_index,
             grain_density=grain_density,
         )
-        self.dust_to_gas_ratio = dust_to_gas_ratio
-        self.mode = mode
-        self.mean_molecular_weight = mean_molecular_weight
-        
-        # Store spherical interpolation resolution factors (will be auto-determined if None)
-        self.spherical_interp_r_factor = spherical_interp_r_factor
-        self.spherical_interp_z_factor = spherical_interp_z_factor
         
         # Set turbulence parameters for settling mode
         if mode == 'settling':
             if alpha is None:
-                # alpha is not in the default params, so use a sensible default or raise error
                 raise ValueError("alpha parameter required for settling mode (pass as argument)")
-            self.alpha = alpha
-            self.delta = delta if delta is not None else alpha  # Assume Sc ~ 1
-            logger.info(f"Settling mode: alpha={self.alpha}, delta={self.delta}")
-        else:
-            self.alpha = alpha
-            self.delta = delta
+            alpha = alpha
+            delta = delta if delta is not None else alpha  # Assume Sc ~ 1
+            logger.info(f"Settling mode: alpha={alpha}, delta={delta}")
         
-        # Create DustBin objects for each bin
+        # Get species base name from params
+        species_base = params.species if isinstance(params.species, str) else params.species[0]
+        
+        # Create a single component (for backward compatibility)
+        component = DustComponent(
+            distribution=distribution,
+            dust_to_gas_ratio=dust_to_gas_ratio,
+            mode=mode,
+            mask=self.mask,  # Use dust-level mask if set
+            alpha=alpha,
+            delta=delta,
+            mean_molecular_weight=mean_molecular_weight,
+            species_base=species_base,
+            component_index=0,
+            spherical_interp_r_factor=spherical_interp_r_factor,
+            spherical_interp_z_factor=spherical_interp_z_factor,
+        )
+        
+        # Set as the only component
+        self._components = [component]
+        
+        # Rebuild global bins mapping
+        self._global_bins = {}
         self._bins = {}
+        global_bin_idx = 0
         for i in range(nbin):
+            # Map global bin to (component_index, local_bin_index)
+            self._global_bins[f"bin_{global_bin_idx}"] = (0, i)
+            
+            # Create DustBin for backward compatibility
             dust_bin = DustBin(
                 parent_dust=self,
-                bin_index=i,
-                size=self.distribution.bin_centers[i],
-                size_min=self.distribution.bin_edges[i],
-                size_max=self.distribution.bin_edges[i + 1],
-                mass_fraction=self.distribution.mass_fractions[i],
+                bin_index=global_bin_idx,
+                size=distribution.bin_centers[i],
+                size_min=distribution.bin_edges[i],
+                size_max=distribution.bin_edges[i + 1],
+                mass_fraction=distribution.mass_fractions[i],
                 density_material=grain_density,
             )
-            self._bins[f"bin_{i}"] = dust_bin
+            self._bins[f"bin_{global_bin_idx}"] = dust_bin
+            global_bin_idx += 1
+        
+        # Update legacy attributes to proxy to first component
+        self.distribution = distribution
+        self.dust_to_gas_ratio = dust_to_gas_ratio
+        self.mode = mode
+        self.alpha = alpha
+        self.delta = delta if delta is not None else alpha
+        self.mean_molecular_weight = mean_molecular_weight
+        self.spherical_interp_r_factor = spherical_interp_r_factor
+        self.spherical_interp_z_factor = spherical_interp_z_factor
         
         logger.info(
             f"Dust distribution set: {nbin} bins from {amin.to('um')} to {amax.to('um')}, "
@@ -341,6 +443,8 @@ class Dust(SubModel):
         gas_density: Quantity,
         gas_temperature: Quantity,
         keplerian_frequency: Quantity,
+        grain_density: Quantity,
+        mean_molecular_weight: float,
     ) -> Quantity:
         """Compute Stokes number for Epstein drag regime.
         
@@ -352,15 +456,17 @@ class Dust(SubModel):
             gas_density: Gas density
             gas_temperature: Gas temperature
             keplerian_frequency: Keplerian frequency Omega_K
+            grain_density: Material density of dust grains
+            mean_molecular_weight: Mean molecular weight of gas
             
         Returns:
             Stokes number (dimensionless)
         """
-        # Material density from distribution
-        rho_s = self.distribution.grain_density
+        # Material density
+        rho_s = grain_density
         
         # Sound speed: c_s = sqrt(k_B * T / (mu * m_H))
-        mu = self.mean_molecular_weight
+        mu = mean_molecular_weight
         
         c_s = np.sqrt(k_B * gas_temperature / (mu * m_H))
         
@@ -466,7 +572,7 @@ class Dust(SubModel):
             
         raise ValueError("Cannot compute scale height: no disk parameters or temperature")
         
-    def _get_spherical_interp_factors(self) -> tuple[float, float]:
+    def _get_spherical_interp_factors(self, component: DustComponent) -> tuple[float, float]:
         """Determine resolution factors for spherical to cylindrical interpolation.
         
         The factors are automatically determined based on current mesh resolution:
@@ -474,12 +580,15 @@ class Dust(SubModel):
         - Medium resolution meshes (30-60 cells): Use moderate factors (1.5-2×)
         - High resolution meshes (>60 cells): Use minimal factors (1-1.5×)
         
+        Args:
+            component: DustComponent to get interpolation factors from
+        
         Returns:
             Tuple of (r_factor, z_factor) for radial and vertical resolution
         """
         # Use user-provided factors if available
-        if self.spherical_interp_r_factor is not None and self.spherical_interp_z_factor is not None:
-            return self.spherical_interp_r_factor, self.spherical_interp_z_factor
+        if component.spherical_interp_r_factor is not None and component.spherical_interp_z_factor is not None:
+            return component.spherical_interp_r_factor, component.spherical_interp_z_factor
         
         mesh = self.parent.mesh
         
@@ -488,8 +597,8 @@ class Dust(SubModel):
         n_theta = mesh.ncell('theta') if mesh.coord_system == 'spherical' else mesh.ncell('z')
         
         # Determine radial factor
-        if self.spherical_interp_r_factor is not None:
-            r_factor = self.spherical_interp_r_factor
+        if component.spherical_interp_r_factor is not None:
+            r_factor = component.spherical_interp_r_factor
         else:
             if n_r < 30:
                 r_factor = 2.5
@@ -499,8 +608,8 @@ class Dust(SubModel):
                 r_factor = 1.0
         
         # Determine vertical factor (typically needs higher resolution than radial)
-        if self.spherical_interp_z_factor is not None:
-            z_factor = self.spherical_interp_z_factor
+        if component.spherical_interp_z_factor is not None:
+            z_factor = component.spherical_interp_z_factor
         else:
             if n_theta < 30:
                 z_factor = 3.5
@@ -540,12 +649,10 @@ class Dust(SubModel):
     def _compute_bin_density(self, bin_index: int) -> Field:
         """Compute dust density field for a specific size bin.
         
-        Handles two modes:
-        - 'proportional': Simple scaling of gas density
-        - 'settling': Settling-diffusion equilibrium with vertical structure
+        Component-aware: delegates to the appropriate component's logic.
         
         Args:
-            bin_index: Index of the size bin (0 to nbin-1)
+            bin_index: Global index of the size bin (0 to total_nbin-1)
             
         Returns:
             Field containing dust density for this bin
@@ -554,32 +661,55 @@ class Dust(SubModel):
         key = f"density_bin_{bin_index}"
         if key in self._dust_fields:
             return self._dust_fields[key]
-            
-        if self.distribution is None:
-            raise RuntimeError("Dust distribution not set")
-            
+        
+        # Look up which component this bin belongs to
+        bin_name = f"bin_{bin_index}"
+        if bin_name not in self._global_bins:
+            raise KeyError(f"Bin {bin_name} not found in global bins mapping")
+        
+        comp_idx, local_bin_idx = self._global_bins[bin_name]
+        component = self._components[comp_idx]
+        
         # Get gas density
         if 'density' in self.parent.gas:
             gas_density = self.parent.gas['density']
         elif 'surface_density' in self.parent.gas:
             # For 2D models, use surface density (proportional mode only)
-            if self.mode == 'settling':
+            if component.mode == 'settling':
                 raise ValueError("Settling mode requires 3D model with density field")
             gas_density = self.parent.gas['surface_density']
         else:
             raise KeyError("No gas density or surface_density field found")
+        
+        # Delegate to component-specific computation
+        return self._compute_component_bin_density(
+            component, local_bin_idx, gas_density
+        )
+    
+    def _compute_component_bin_density(
+        self, component: DustComponent, local_bin_idx: int, gas_density: Field
+    ) -> Field:
+        """Compute dust density for a specific bin within a component.
+        
+        Args:
+            component: DustComponent instance
+            local_bin_idx: Index within the component's bins
+            gas_density: Gas density field
             
+        Returns:
+            Field containing dust density for this bin
+        """
         # Mode 1: Proportional (simple scaling)
-        if self.mode == 'proportional':
+        if component.mode == 'proportional':
             dust_density_data = (
-                self.dust_to_gas_ratio * 
-                self.distribution.mass_fractions[bin_index] *
+                component.dust_to_gas_ratio * 
+                component.distribution.mass_fractions[local_bin_idx] *
                 gas_density.data
             )
             
-            # Apply mask if set
-            if self.mask is not None:
-                mask_array = self.mask.data.magnitude.astype(bool)
+            # Apply component mask if set
+            if component.mask is not None:
+                mask_array = component.mask.data.magnitude.astype(bool)
                 dust_density_data = dust_density_data * mask_array
                 
             dust_field = Field(
@@ -591,13 +721,13 @@ class Dust(SubModel):
             return dust_field
             
         # Mode 2: Settling-diffusion equilibrium
-        elif self.mode == 'settling':
-            return self._compute_settling_density(bin_index, gas_density)
+        elif component.mode == 'settling':
+            return self._compute_settling_density(component, local_bin_idx, gas_density)
             
         else:
-            raise ValueError(f"Unknown mode: {self.mode}")
+            raise ValueError(f"Unknown mode: {component.mode}")
             
-    def _compute_settling_density(self, bin_index: int, gas_density: Field) -> Field:
+    def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
         """Compute dust density with settling-diffusion vertical structure.
         
         For spherical coordinate systems, this method converts to cylindrical coordinates,
@@ -605,7 +735,8 @@ class Dust(SubModel):
         naturally applies), and then interpolates back to spherical coordinates.
         
         Args:
-            bin_index: Dust bin index
+            component: DustComponent instance
+            local_bin_idx: Dust bin index within the component
             gas_density: Gas density field
             
         Returns:
@@ -615,25 +746,26 @@ class Dust(SubModel):
         
         # For spherical coordinates, use the conversion method
         if mesh.coord_system == 'spherical':
-            return self._compute_settling_density_spherical(bin_index, gas_density)
+            return self._compute_settling_density_spherical(component, local_bin_idx, gas_density)
         elif mesh.coord_system == 'cylindrical':
-            return self._compute_settling_density_cylindrical(bin_index, gas_density)
+            return self._compute_settling_density_cylindrical(component, local_bin_idx, gas_density)
         else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
     
-    def _compute_settling_density_cylindrical(self, bin_index: int, gas_density: Field) -> Field:
+    def _compute_settling_density_cylindrical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
         """Compute dust settling in cylindrical coordinates (native implementation).
         
         Args:
-            bin_index: Dust bin index
+            component: DustComponent instance
+            local_bin_idx: Dust bin index within component
             gas_density: Gas density field
             
         Returns:
             Dust density field with vertical settling profile
         """
         mesh = self.parent.mesh
-        grain_size = self.distribution.bin_centers[bin_index]
-        mass_fraction = self.distribution.mass_fractions[bin_index]
+        grain_size = component.distribution.bin_centers[local_bin_idx]
+        mass_fraction = component.distribution.mass_fractions[local_bin_idx]
         
         # Need temperature to compute Stokes number
         if 'temperature' not in self.parent.gas:
@@ -659,7 +791,7 @@ class Dust(SubModel):
         T0 = gas_temp[:, :, k0]
 
         # Midplane sound speed and gas scale height
-        mu = self.mean_molecular_weight
+        mu = component.mean_molecular_weight
         c_s0 = np.sqrt(k_B * T0 / (mu * m_H))
         H_g0 = c_s0 / Omega_K
 
@@ -669,11 +801,13 @@ class Dust(SubModel):
             gas_density=rho_g0,
             gas_temperature=T0,
             keplerian_frequency=Omega_K,
+            grain_density=component.distribution.grain_density,
+            mean_molecular_weight=component.mean_molecular_weight,
         )
         St0 = St0[:, :, None]
 
         # Dust scale height from midplane Stokes number
-        delta = self.delta
+        delta = component.delta
         H_d = H_g0[:, :, None] * np.sqrt(delta / (St0 + delta))
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
@@ -682,7 +816,7 @@ class Dust(SubModel):
         # Normalize to preserve column density
         # The midplane density enhancement factor ensures that
         # integrating rho_d over z gives the desired surface density
-        dust_to_gas_local = self.dust_to_gas_ratio * mass_fraction
+        dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
         prefactor = dust_to_gas_local * (H_g0[:, :, None] / H_d)
 
         # Final dust density
@@ -695,8 +829,8 @@ class Dust(SubModel):
         dust_density_data = dust_density_mag * dust_density_data.units
 
         # Apply mask if set
-        if self.mask is not None:
-            mask_array = self.mask.data.magnitude.astype(bool)
+        if component.mask is not None:
+            mask_array = component.mask.data.magnitude.astype(bool)
             dust_density_data = dust_density_data * mask_array
             
         axis_order = gas_density.axis_order
@@ -709,7 +843,7 @@ class Dust(SubModel):
         
         return dust_field
     
-    def _compute_settling_density_spherical(self, bin_index: int, gas_density: Field) -> Field:
+    def _compute_settling_density_spherical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
         """Compute dust settling for spherical coordinates via cylindrical conversion.
         
         This method:
@@ -718,7 +852,8 @@ class Dust(SubModel):
         3. Interpolates the result back to spherical coordinates
         
         Args:
-            bin_index: Dust bin index
+            component: DustComponent instance
+            local_bin_idx: Dust bin index within component
             gas_density: Gas density field in spherical coordinates
             
         Returns:
@@ -727,15 +862,15 @@ class Dust(SubModel):
 
         
         mesh_sph = self.parent.mesh
-        grain_size = self.distribution.bin_centers[bin_index]
-        mass_fraction = self.distribution.mass_fractions[bin_index]
+        grain_size = component.distribution.bin_centers[local_bin_idx]
+        mass_fraction = component.distribution.mass_fractions[local_bin_idx]
         
         # Need temperature to compute Stokes number
         if 'temperature' not in self.parent.gas:
             raise ValueError("Settling mode requires temperature field")
         gas_temp_sph = self.parent.gas['temperature'].data
         
-        logger.debug(f"Computing dust settling in spherical coordinates for bin {bin_index} (converting to cylindrical)")
+        logger.debug(f"Computing dust settling in spherical coordinates for component {component.component_index} bin {local_bin_idx} (converting to cylindrical)")
         
         # Get spherical grid coordinates
         r_sph = mesh_sph.centers('r')
@@ -743,7 +878,7 @@ class Dust(SubModel):
         phi_sph = mesh_sph.centers('phi')
         
         # Get resolution factors (adaptive or user-specified)
-        r_factor, z_factor = self._get_spherical_interp_factors()
+        r_factor, z_factor = self._get_spherical_interp_factors(component)
         
         # Create cylindrical mesh covering the same domain
         # Use higher resolution to reduce interpolation smoothing
@@ -832,7 +967,7 @@ class Dust(SubModel):
         T0_cyl = gas_temp_cyl[:, :, k0_cyl]
 
         # Midplane sound speed and gas scale height
-        mu = self.mean_molecular_weight
+        mu = component.mean_molecular_weight
         c_s0_cyl = np.sqrt(k_B * T0_cyl / (mu * m_H))
         H_g0_cyl = c_s0_cyl / Omega_K
 
@@ -842,18 +977,20 @@ class Dust(SubModel):
             gas_density=rho_g0_cyl,
             gas_temperature=T0_cyl,
             keplerian_frequency=Omega_K,
+            grain_density=component.distribution.grain_density,
+            mean_molecular_weight=component.mean_molecular_weight,
         )
         St0_cyl = St0_cyl[:, :, None]
 
         # Dust scale height from midplane Stokes number
-        delta = self.delta
+        delta = component.delta
         H_d_cyl = H_g0_cyl[:, :, None] * np.sqrt(delta / (St0_cyl + delta))
 
         # Compute vertical profile: single Gaussian with scale height H_d_cyl
         vertical_profile_cyl = np.exp(-z_cyl_grid**2 / (2 * H_d_cyl**2))
 
         # Prefactor ensures desired dust surface density per bin
-        dust_to_gas_local = self.dust_to_gas_ratio * mass_fraction
+        dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
         prefactor_cyl = dust_to_gas_local * (H_g0_cyl[:, :, None] / H_d_cyl)
 
         # Final dust density in cylindrical coordinates
@@ -881,8 +1018,8 @@ class Dust(SubModel):
         dust_dens_sph = np.transpose(dust_dens_sph_transposed, (1, 2, 0)) * dust_dens_cyl.units
         
         # Apply mask if set
-        if self.mask is not None:
-            mask_array = self.mask.data.magnitude.astype(bool)
+        if component.mask is not None:
+            mask_array = component.mask.data.magnitude.astype(bool)
             dust_dens_sph = dust_dens_sph * mask_array
         
         axis_order = gas_density.axis_order
@@ -991,10 +1128,8 @@ class Dust(SubModel):
         
     @property
     def nbin(self) -> int:
-        """Number of dust bins."""
-        if self.distribution is None:
-            return 0
-        return self.distribution.nbin
+        """Total number of dust bins across all components."""
+        return len(self._global_bins)
         
     def __repr__(self) -> str:
         if self.distribution is None:
