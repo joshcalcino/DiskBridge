@@ -436,6 +436,120 @@ class Dust(SubModel):
             f"Dust distribution set: {nbin} bins from {amin.to('um')} to {amax.to('um')}, "
             f"dust/gas={dust_to_gas_ratio:.3e}, power_index={power_index}, mode={mode}"
         )
+    
+    def add_component_from_mask(
+        self,
+        mask: Field,
+        mode: Literal['proportional', 'settling'] = 'proportional',
+        amin: Optional[Quantity] = None,
+        amax: Optional[Quantity] = None,
+        nbin: Optional[int] = None,
+        power_index: Optional[float] = None,
+        grain_density: Optional[Quantity] = None,
+        dust_to_gas_ratio: Optional[float] = None,
+        alpha: Optional[float] = None,
+        delta: Optional[float] = None,
+        mean_molecular_weight: float = 2.3,
+        spherical_interp_r_factor: Optional[float] = None,
+        spherical_interp_z_factor: Optional[float] = None,
+    ) -> None:
+        """Add a new dust component with specific mask and mode.
+        
+        This allows multiple dust distributions in different spatial regions.
+        
+        Args:
+            mask: Field defining where this component exists
+            mode: 'proportional' or 'settling'
+            amin: Minimum grain size (default: from params)
+            amax: Maximum grain size (default: from params)
+            nbin: Number of size bins (default: from params)
+            power_index: Power-law exponent (default: from params)
+            grain_density: Material density of grains (default: from params)
+            dust_to_gas_ratio: Dust-to-gas mass ratio (default: from params)
+            alpha: Turbulent viscosity parameter (for settling)
+            delta: Turbulent diffusion parameter (default: = alpha)
+            mean_molecular_weight: Mean molecular weight (default: 2.3)
+            spherical_interp_r_factor: Resolution multiplier for radial direction
+            spherical_interp_z_factor: Resolution multiplier for vertical direction
+        """
+        # Pull defaults from params if not provided
+        if amin is None:
+            amin = params.amin * units('micron')
+        if amax is None:
+            amax = params.amax * units('micron')
+        if nbin is None:
+            nbin = params.nbins
+        if power_index is None:
+            power_index = params.pindex
+        if grain_density is None:
+            grain_density = params.grain_density * units('g/cm^3')
+        if dust_to_gas_ratio is None:
+            dust_to_gas_ratio = params.dust_to_gas_ratio
+        
+        # Create distribution
+        distribution = DustDistribution(
+            amin=amin,
+            amax=amax,
+            nbin=nbin,
+            power_index=power_index,
+            grain_density=grain_density,
+        )
+        
+        # Validate settling mode
+        if mode == 'settling':
+            if alpha is None:
+                raise ValueError("alpha parameter required for settling mode")
+            delta = delta if delta is not None else alpha
+            logger.info(f"Settling mode component: alpha={alpha}, delta={delta}")
+        
+        # Get species base name
+        species_base = params.species if isinstance(params.species, str) else params.species[0]
+        
+        # Determine component index
+        component_index = len(self._components)
+        
+        # Create component
+        component = DustComponent(
+            distribution=distribution,
+            dust_to_gas_ratio=dust_to_gas_ratio,
+            mode=mode,
+            mask=mask,
+            alpha=alpha,
+            delta=delta,
+            mean_molecular_weight=mean_molecular_weight,
+            species_base=species_base,
+            component_index=component_index,
+            spherical_interp_r_factor=spherical_interp_r_factor,
+            spherical_interp_z_factor=spherical_interp_z_factor,
+        )
+        
+        # Add to components list
+        self._components.append(component)
+        
+        # Update global bins mapping
+        global_bin_start = len(self._global_bins)
+        for local_idx in range(nbin):
+            global_bin_idx = global_bin_start + local_idx
+            bin_name = f"bin_{global_bin_idx}"
+            self._global_bins[bin_name] = (component_index, local_idx)
+            
+            # Create DustBin for backward compatibility
+            dust_bin = DustBin(
+                parent_dust=self,
+                bin_index=global_bin_idx,
+                size=distribution.bin_centers[local_idx],
+                size_min=distribution.bin_edges[local_idx],
+                size_max=distribution.bin_edges[local_idx + 1],
+                mass_fraction=distribution.mass_fractions[local_idx],
+                density_material=grain_density,
+            )
+            self._bins[bin_name] = dust_bin
+        
+        logger.info(
+            f"Added dust component {component_index}: {nbin} bins, "
+            f"{amin.to('um')} to {amax.to('um')}, "
+            f"dust/gas={dust_to_gas_ratio:.3e}, mode={mode}"
+        )
         
     def _compute_stokes_number(
         self,

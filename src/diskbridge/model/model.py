@@ -211,6 +211,112 @@ class Model:
                 self.disk.mesh = self.mesh
 
         return self
+    
+    def set_mask_from_geometry(
+        self,
+        r_min: Optional[Quantity] = None,
+        r_max: Optional[Quantity] = None,
+        theta_min: Optional[Quantity] = None,
+        theta_max: Optional[Quantity] = None,
+        honrmax: Optional[float] = None,
+        is_a_disk: bool = False,
+    ) -> SubModel:
+        """Define a masked region on the model.
+        
+        If is_a_disk=True and self.disk exists, configure self.disk's mask.
+        Otherwise, create and return a new SubModel with the requested mask.
+        
+        Args:
+            r_min: Minimum radius
+            r_max: Maximum radius
+            theta_min: Minimum colatitude (spherical)
+            theta_max: Maximum colatitude (spherical)
+            honrmax: Number of pressure scale heights (disk-specific, requires self.disk)
+            is_a_disk: Mark region as disk (enables settling mode)
+            
+        Returns:
+            SubModel (or Disk) with mask applied
+        """
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+            
+        if mesh.coord_system != 'spherical':
+            raise ValueError(
+                f"set_mask_from_geometry only supports spherical coordinates, "
+                f"got {mesh.coord_system}"
+            )
+        
+        # Determine target region
+        if is_a_disk and self.disk is not None:
+            target_region = self.disk
+        else:
+            target_region = SubModel(self)
+        
+        # Get coordinate arrays
+        r = mesh.centers('r')
+        theta = mesh.centers('theta')
+        phi = mesh.centers('phi')
+        
+        r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
+        
+        # Start with all True
+        mask = np.ones_like(r_grid, dtype=bool)
+        
+        # Apply radial constraints
+        if r_min is not None:
+            mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+        if r_max is not None:
+            mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+        
+        # If honrmax is provided and we have disk parameters, compute hydrostatic mask
+        if honrmax is not None and self.disk is not None:
+            # Convert spherical to cylindrical for height calculation
+            R_cyl = r_grid * np.sin(theta_grid)
+            z_cyl = r_grid * np.cos(theta_grid)
+            
+            # Get disk parameters
+            h0 = self.disk.parameters["aspectratio"]
+            fl = self.disk.parameters["flaringindex"]
+            r0 = self.disk.parameters["r0"]
+            
+            # h(R_cyl) = h0 * (R_cyl/r0)^fl, dimensionless
+            h = h0 * (R_cyl / r0.to(R_cyl.units)) ** fl
+            
+            # H(R_cyl) = h * R_cyl, scale height with units
+            H = h * R_cyl
+            
+            # Mask: |z| <= honrmax * H(R_cyl)
+            z_max = honrmax * H
+            mask &= (np.abs(z_cyl) <= z_max)
+        
+        # Apply theta constraints if given
+        if theta_min is not None:
+            mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
+        if theta_max is not None:
+            mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
+        
+        axis_order = ('r', 'phi', 'theta')
+        
+        mask_quantity = Quantity(mask, 'dimensionless')
+        mask_field = Field(
+            data=mask_quantity,
+            quantity='mask',
+            axis_order=axis_order,
+        )
+        
+        target_region.mask = mask_field
+        
+        # Mark as disk region if requested
+        if is_a_disk:
+            target_region.is_disk_region = True
+        
+        logger.info(
+            f"{target_region.__class__.__name__} mask set: {np.sum(mask)} / {mask.size} cells "
+            f"({100*np.sum(mask)/mask.size:.1f}%)"
+        )
+        
+        return target_region
 
     def puff_up_model(
         self, n: int, 
@@ -233,6 +339,7 @@ class SubModel:
 
         # SubModel specific properties
         self.mask: Optional[Field] = None
+        self.is_disk_region: bool = False  # Marks if this region allows settling
 
     # Registry API
     def register(self, name: str, field: Field) -> None:
@@ -276,94 +383,18 @@ class SubModel:
 
     def clear(self) -> None:
         self._fields.clear()
+    
+    @property
+    def dust(self):
+        """Access to dust with region-aware configuration."""
+        if not hasattr(self.parent, 'dust') or self.parent.dust is None:
+            raise AttributeError("Parent model has no dust submodel")
+        return _RegionDustConfigurator(
+            global_dust=self.parent.dust,
+            mask=self.mask,
+            is_disk_region=self.is_disk_region,
+        )
 
-    def set_mask_from_geometry(
-        self,
-        r_min: Optional[Quantity] = None,
-        r_max: Optional[Quantity] = None,
-        z_min: Optional[Quantity] = None,
-        z_max: Optional[Quantity] = None,
-        theta_min: Optional[Quantity] = None,
-        theta_max: Optional[Quantity] = None,
-    ) -> Field:
-        """Create mask based on geometric bounds.
-        
-        For spherical coordinates, use theta_min/theta_max (colatitude).
-        For cylindrical coordinates, use z_min/z_max.
-        
-        Args:
-            r_min: Minimum radius
-            r_max: Maximum radius
-            z_min: Minimum height (cylindrical)
-            z_max: Maximum height (cylindrical)
-            theta_min: Minimum colatitude (spherical)
-            theta_max: Maximum colatitude (spherical)
-            
-        Returns:
-            Field containing boolean mask (True = included)
-        """
-        
-        mesh = self.mesh
-        if mesh is None:
-            raise ValueError("Model has no mesh")
-            
-        # Get coordinate arrays
-        if mesh.coord_system == 'spherical':
-            r = mesh.centers('r')
-            theta = mesh.centers('theta')
-            phi = mesh.centers('phi')
-            
-            r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
-            mask = np.ones_like(r_grid, dtype=bool)
-            
-            if r_min is not None:
-                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
-            if r_max is not None:
-                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-            if theta_min is not None:
-                mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
-            if theta_max is not None:
-                mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
-                
-            axis_order = ('r', 'phi', 'theta')
-            
-        elif mesh.coord_system == 'cylindrical':
-            r = mesh.centers('r')
-            phi = mesh.centers('phi')
-            z = mesh.centers('z')
-            
-            r_grid, phi_grid, z_grid = np.meshgrid(r, phi, z, indexing='ij')
-            mask = np.ones_like(r_grid, dtype=bool)
-            
-            if r_min is not None:
-                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
-            if r_max is not None:
-                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-            if z_min is not None:
-                mask &= (z_grid.magnitude >= z_min.to(z.units).magnitude)
-            if z_max is not None:
-                mask &= (z_grid.magnitude <= z_max.to(z.units).magnitude)
-                
-            axis_order = ('r', 'phi', 'z')
-        else:
-            raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
-            
-        mask_quantity = Quantity(mask, 'dimensionless')
-        mask_field = Field(
-            data=mask_quantity,
-            quantity='mask',
-            axis_order=axis_order,
-        )
-        
-        self.mask = mask_field
-        
-        logger.info(
-            f"{self.__class__.__name__} mask set: {np.sum(mask)} / {mask.size} cells "
-            f"({100*np.sum(mask)/mask.size:.1f}%)"
-        )
-        
-        return mask_field
-        
     def set_mask_from_density(
         self,
         density_threshold: Quantity,
@@ -386,37 +417,30 @@ class SubModel:
             density = self['density'].data
         else:
             raise KeyError("No density field found in submodel")
+        
+        mesh = self.mesh
+        if mesh.coord_system != 'spherical':
+            raise ValueError(
+                f"set_mask_from_density only supports spherical coordinates, "
+                f"got {mesh.coord_system}"
+            )
             
         threshold_val = density_threshold.to(density.units).magnitude
         mask = (density.magnitude >= threshold_val)
         
         # Apply radial constraints if given
         if r_min is not None or r_max is not None:
-            mesh = self.mesh
-            if mesh.coord_system == 'spherical':
-                r = mesh.centers('r')
-                phi = mesh.centers('phi')
-                theta = mesh.centers('theta')
-                r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
-                axis_order = ('r', 'phi', 'theta')
-            elif mesh.coord_system == 'cylindrical':
-                r = mesh.centers('r')
-                phi = mesh.centers('phi')
-                z = mesh.centers('z')
-                r_grid, _, _ = np.meshgrid(r, phi, z, indexing='ij')
-                axis_order = ('r', 'phi', 'z')
-            else:
-                raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
-                
+            r = mesh.centers('r')
+            phi = mesh.centers('phi')
+            theta = mesh.centers('theta')
+            r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
+            
             if r_min is not None:
                 mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
             if r_max is not None:
                 mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-        else:
-            if mesh.coord_system == 'spherical':
-                axis_order = ('r', 'phi', 'theta')
-            else:
-                axis_order = ('r', 'phi', 'z')
+        
+        axis_order = ('r', 'phi', 'theta')
                 
         mask_quantity = Quantity(mask, 'dimensionless')
         mask_field = Field(
@@ -489,7 +513,66 @@ class SubModel:
         )
         
         return mask_field
+    
+    def anti_mask(self) -> "SubModel":
+        """Create a new SubModel with the complement of this submodel's mask.
+        
+        Returns:
+            SubModel with inverted mask
+        """
+        if self.mask is None:
+            raise ValueError("This SubModel has no mask, cannot create an anti-mask")
+        
+        # Compute boolean complement
+        mask_bool = self.mask.data.magnitude.astype(bool)
+        other_bool = ~mask_bool
+        
+        # Create new SubModel for the complement region
+        other = SubModel(self.parent)
+        other.set_mask_from_array(other_bool)
+        
+        # Explicitly mark as not a disk region
+        other.is_disk_region = False
+        
+        logger.info(
+            f"Created complement region: {np.sum(other_bool)} / {other_bool.size} cells "
+            f"({100*np.sum(other_bool)/other_bool.size:.1f}%)"
+        )
+        
+        return other
 
+
+class _RegionDustConfigurator:
+    """Internal helper that provides region-aware dust configuration."""
+    
+    def __init__(self, global_dust, mask: Optional[Field], is_disk_region: bool):
+        self._dust = global_dust
+        self._mask = mask
+        self._is_disk_region = is_disk_region
+    
+    def set_distribution(self, mode: str = "proportional", **kwargs):
+        """Configure dust distribution for this region.
+        
+        Args:
+            mode: 'proportional' or 'settling'
+            **kwargs: Additional parameters (amin, amax, nbin, etc.)
+        """
+        if self._mask is None:
+            raise ValueError(
+                "Region has no mask defined; call set_mask_from_geometry first"
+            )
+        
+        if mode == "settling" and not self._is_disk_region:
+            raise ValueError(
+                "Settling mode can only be used on regions defined as disk. "
+                "Use is_a_disk=True when creating the mask."
+            )
+        
+        self._dust.add_component_from_mask(
+            mask=self._mask,
+            mode=mode,
+            **kwargs,
+        )
 
 
 class Disk(SubModel):
@@ -515,8 +598,12 @@ class Disk(SubModel):
     
     @property
     def dust(self):
-        """Access to dust fields (convenience accessor to parent.dust)."""
-        return self.parent.dust
+        """Access to dust with region-aware configuration."""
+        return _RegionDustConfigurator(
+            global_dust=self.parent.dust,
+            mask=self.mask,
+            is_disk_region=self.is_disk_region,
+        )
 
     def _puff_density(self, nz: int = 64, zmax_scale: float = 5.0):
         """
