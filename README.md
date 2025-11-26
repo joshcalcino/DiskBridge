@@ -2,7 +2,7 @@
 
 DiskBridge is a Python library for turning 2D or 3D disk hydrodynamics
 simulations (for example FARGO-3D runs) into RADMC-3D models and
-synthetic observables.
+synthetic observations.
 
 ## What it does
 
@@ -29,7 +29,7 @@ In a typical use case you:
 3. Configure the dust distribution with `model.dust` helpers
    (e.g. proportional to gas density, grain size range, number of bins).
 4. Use `diskbridge.radmc3d.RadWriter` to write RADMC-3D input files and
-   (optionally) compute dust opacities for each dust bin.
+   (optionally) compute dust opacities for each dust bin. (this will be updated to be automatic)
 5. Use `diskbridge.radmc3d.RadModel` to run RADMC-3D, compute dust
    temperatures, apply simple CO chemistry, and write number density
    files.
