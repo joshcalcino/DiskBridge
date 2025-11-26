@@ -12,7 +12,7 @@ import numpy as np
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
-from diskbridge._params import params
+from diskbridge._params import params, canonicalize_dust_params
 from .utils import _interp_sph_to_cyl, _interp_cyl_to_sph
 from .mesh import Mesh, Axis
 
@@ -460,33 +460,45 @@ class Dust(SubModel):
         Args:
             mask: Field defining where this component exists
             mode: 'proportional' or 'settling'
-            amin: Minimum grain size (default: from params)
-            amax: Maximum grain size (default: from params)
-            nbin: Number of size bins (default: from params)
-            power_index: Power-law exponent (default: from params)
-            grain_density: Material density of grains (default: from params)
-            dust_to_gas_ratio: Dust-to-gas mass ratio (default: from params)
+            amin: Minimum grain size (default: from canonicalized params)
+            amax: Maximum grain size (default: from canonicalized params)
+            nbin: Number of size bins (default: from canonicalized params)
+            power_index: Power-law exponent (default: from canonicalized params)
+            grain_density: Material density of grains (default: from canonicalized params)
+            dust_to_gas_ratio: Dust-to-gas mass ratio (default: from canonicalized params)
             alpha: Turbulent viscosity parameter (for settling)
             delta: Turbulent diffusion parameter (default: = alpha)
             mean_molecular_weight: Mean molecular weight (default: 2.3)
             spherical_interp_r_factor: Resolution multiplier for radial direction
             spherical_interp_z_factor: Resolution multiplier for vertical direction
         """
-        # Pull defaults from params if not provided
+        # Determine this component's index
+        component_index = len(self._components)
+
+        # Pull canonical dust parameters from global params
+        canon = canonicalize_dust_params(params)
+        ncomp = canon['ncomp']
+        if component_index >= ncomp:
+            raise ValueError(
+                f"Requested dust component index {component_index}, "
+                f"but canonicalized params define only {ncomp} components."
+            )
+
+        # Use canonical per-component values if not explicitly provided
         if amin is None:
-            amin = params.amin * units('micron')
+            amin = canon['amin'][component_index] * units('micron')
         if amax is None:
-            amax = params.amax * units('micron')
+            amax = canon['amax'][component_index] * units('micron')
         if nbin is None:
-            nbin = params.nbins
+            nbin = int(canon['nbins'][component_index])
         if power_index is None:
-            power_index = params.pindex
+            power_index = float(canon['pindex'][component_index])
         if grain_density is None:
-            grain_density = params.grain_density * units('g/cm^3')
+            grain_density = canon['grain_density'][component_index] * units('g/cm^3')
         if dust_to_gas_ratio is None:
-            dust_to_gas_ratio = params.dust_to_gas_ratio
+            dust_to_gas_ratio = float(canon['dust_to_gas_ratio'][component_index])
         
-        # Create distribution
+        # Create distribution for this component
         distribution = DustDistribution(
             amin=amin,
             amax=amax,
@@ -502,11 +514,12 @@ class Dust(SubModel):
             delta = delta if delta is not None else alpha
             logger.info(f"Settling mode component: alpha={alpha}, delta={delta}")
         
-        # Get species base name
-        species_base = params.species if isinstance(params.species, str) else params.species[0]
-        
-        # Determine component index
-        component_index = len(self._components)
+        # Get species base name for this component
+        canon_species = canon['species']
+        if isinstance(canon_species, list):
+            species_base = canon_species[component_index]
+        else:
+            species_base = str(canon_species)
         
         # Create component
         component = DustComponent(
@@ -1144,7 +1157,10 @@ class Dust(SubModel):
             axis_order=axis_order,
         )
         
-        logger.debug(f"Dust settling calculation completed for bin {bin_index} in spherical coordinates")
+        logger.debug(
+            f"Dust settling calculation completed for component {component.component_index} "
+            f"bin {local_bin_idx} in spherical coordinates"
+        )
         
         return dust_field
         
