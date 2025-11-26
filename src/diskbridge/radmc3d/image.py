@@ -1209,7 +1209,22 @@ class RadImage:
         append = getattr(self.params, 'append_name', '')
         prepend_fmt = self._format_name_template(prepend) if prepend else ''
         append_fmt = self._format_name_template(append) if append else ''
-        return f"{prepend_fmt}{base_name}{append_fmt}"
+        full_name = f"{prepend_fmt}{base_name}{append_fmt}"
+        
+        # Sanitize for shell/filesystem safety
+        # Remove quotes, apostrophes, and replace spaces with underscores
+        sanitized = full_name.replace("'", "").replace('"', "").replace(' ', '_')
+        # Remove other problematic characters
+        sanitized = sanitized.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+        sanitized = sanitized.replace('{', '').replace('}', '').replace('|', '_')
+        sanitized = sanitized.replace('&', '_').replace(';', '_').replace('$', '')
+        # Clean up any double underscores
+        while '__' in sanitized:
+            sanitized = sanitized.replace('__', '_')
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip('_')
+        
+        return sanitized
     
     def _ensure_molecule_file(self, molecule: str) -> None:
         """Ensure molecule data file exists, download if necessary.

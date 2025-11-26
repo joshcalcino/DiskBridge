@@ -573,21 +573,35 @@ class RadData:
         """
         with open(fname, 'rb') as f:
             # Read header (format, precision, ncells, [nspec])
-            hdr = np.fromfile(f, dtype=np.int64, count=4)
-            iformat = hdr[0]
-            prec = hdr[1]  # 8 for double, 4 for single
-            ncells = hdr[2]
+            hdr3 = np.fromfile(f, dtype=np.int64, count=3)
+            if hdr3.size < 3:
+                raise ValueError(f"Binary scalar field {fname} has incomplete header")
+            iformat = hdr3[0]
+            prec = hdr3[1]  # 8 for double, 4 for single
+            ncells = hdr3[2]
             
-            if len(hdr) > 3 and hdr[3] > 1:
-                nspec = hdr[3]
-            else:
-                nspec = 1
+            total_bytes = fname.stat().st_size
+            header_bytes_min = 3 * 8
+            remaining_bytes = total_bytes - header_bytes_min
+            nspec = 1
+            item_bytes = 8 if prec == 8 else 4
+
+            if remaining_bytes > item_bytes * ncells:
+                extra = np.fromfile(f, dtype=np.int64, count=1)
+                if extra.size == 1:
+                    candidate_nspec = int(extra[0])
+                    remaining_after_nspec = remaining_bytes - 8
+                    if candidate_nspec > 0 and remaining_after_nspec == item_bytes * ncells * candidate_nspec:
+                        nspec = candidate_nspec
+                    else:
+                        f.seek(-8, 1)
             
-            # Read data
             dtype = np.float64 if prec == 8 else np.float32
-            data = np.fromfile(f, dtype=dtype, count=ncells * nspec)
+            data = np.fromfile(f, dtype=dtype)
             
             if nspec > 1:
+                if data.size != ncells * nspec:
+                    raise ValueError(f"Binary scalar field {fname} has size {data.size}, expected {ncells * nspec}")
                 data = data.reshape((nspec, ncells))
         
         return data
