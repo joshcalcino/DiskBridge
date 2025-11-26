@@ -5,7 +5,7 @@ from typing import Literal, Optional, Dict, Tuple
 import numpy as np
 from .._units import units, Quantity
 
-CoordSystem = Literal["spherical", "cylindrical", "cartesian"]
+CoordSystem = Literal["spherical", "polar", "cartesian"]
 
 
 # ---------- utilities ----------
@@ -61,20 +61,22 @@ class Axis:
 def _allowed_axes(cs: CoordSystem) -> Tuple[str, ...]:
     if cs == "spherical":
         return ("r", "theta", "phi")
-    if cs == "cylindrical":
-        return ("r", "phi", "z")
+    if cs == "polar":
+        return ("r", "phi")  # 2D only, no z axis
     if cs == "cartesian":
         return ("x", "y", "z")
+    raise ValueError(f"Unknown coordinate system: {cs}")
 
 
 def _display_order(cs: CoordSystem) -> Tuple[str, ...]:
     # purely cosmetic order for reporting/iteration
     if cs == "spherical":
         return ("r", "theta", "phi")
-    if cs == "cylindrical":
-        return ("z", "r", "phi")  # common (z, r, phi) workflow
+    if cs == "polar":
+        return ("r", "phi")
     if cs == "cartesian":
         return ("x", "y", "z")
+    raise ValueError(f"Unknown coordinate system: {cs}")
 
 
 # ---------- main Mesh ----------
@@ -189,19 +191,16 @@ class Mesh:
         return cls("spherical", axes)
 
     @classmethod
-    def cylindrical(
+    def polar(
         cls,
         r: Axis,
         phi: Optional[Axis] = None,
-        z: Optional[Axis] = None,
     ) -> "Mesh":
-        """
-        Docstring
-        """
+        """Create a 2D polar mesh (r, phi). For 2D disk simulations."""
         axes = {"r": r}
-        if phi is not None: axes["phi"] = phi
-        if z is not None:   axes["z"] = z
-        return cls("cylindrical", axes)
+        if phi is not None:
+            axes["phi"] = phi
+        return cls("polar", axes)
 
     @classmethod
     def cartesian(
@@ -220,19 +219,6 @@ class Mesh:
         return cls("cartesian", axes)
 
     # ---------- pure transforms ----------
-    def with_vertical(
-        self,
-        z_centers: Quantity
-    ) -> "Mesh":
-        """
-        Docstring
-        """
-        if self.coord_system != "cylindrical":
-            raise ValueError("with_vertical is intended for cylindrical workflows")
-        new_axes = dict(self.axes)
-        new_axes["z"] = Axis(centers=z_centers)
-        return Mesh("cylindrical", new_axes)
-
     def to_spherical_by_scale_height(
         self,
         ncol: int,

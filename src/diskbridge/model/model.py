@@ -10,7 +10,7 @@ from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
-from .utils import validate_field_against_mesh, _interp_cyl_to_sph
+from .utils import validate_field_against_mesh
 
 
 class Model:
@@ -460,10 +460,10 @@ class Model:
 
     def puff_up_model(
         self, n: int, 
-        coordinates: str = "cylindrical", 
         zmax_over_H: float = 5.0
     ) -> "Model":
-        self.disk.puff_up_disk(n=n, coordinates=coordinates, zmax_over_H=zmax_over_H)
+        """Puff 2D polar model to 3D spherical coordinates."""
+        self.disk.puff_up_disk(n=n, zmax_over_H=zmax_over_H)
         return self
         
 
@@ -622,292 +622,122 @@ class Disk(SubModel):
             is_disk_region=self.is_disk_region,
         )
 
-    def _puff_density(self, nz: int = 64, zmax_scale: float = 5.0):
-        """
-        Puff 2D surface density to 3D volume density in cylindrical coordinates.
-        
-        Follows fargo2radmc3d's approach with proper normalization including
-        the radial coordinate factor for cylindrical geometry and mass conservation.
-        """
-        if "surface_density" not in self.parent.gas:
-            raise KeyError("Missing gas field 'surface_density'")
-
-        Sigma = self.parent.gas["surface_density"].data  # Quantity (nrad, nsec)
-        r     = self.parent.mesh.centers("r")            # Quantity (nrad,)
-
-        h0 = self.parameters["aspectratio"]
-        fl = self.parameters["flaringindex"]
-        r0 = self.parameters["r0"]
-
-        # Compute dimensionless aspect ratio h(r) = h₀ * (r/r₀)^β
-        h = h0 * (r / r0) ** fl  # dimensionless
-        
-        # Build vertical grid based on maximum scale height
-        H_max = np.max(h * r)  # maximum scale height with units
-        zmed = _build_z_grid(nz, zmax_scale, H_max)  # (nz,) with units
-        
-        # Puff using fargo2radmc3d gas formula (all Quantities)
-        rho3d = _puff_gaussian(Sigma, r, h, zmed)  # (nz, nrad, nsec) Quantity
-
-        # 3D cylindrical mesh: reuse r/phi, add z centers
-        new_mesh = self.parent.mesh.with_vertical(zmed)
-        
-        # Mass conservation renormalization
-        rho3d = _renormalize_mass_conservation(rho3d, Sigma, new_mesh)
-
-        # Return density (meshless Field) and new mesh
-        dens_field = Field(
-            data=rho3d,
-            quantity="density",
-            axis_order=("z", "r", "phi"),
-        )
-        return dens_field, new_mesh
-
-    def _puff_velocity(self, nz: int = 64, zmed=None):
-        vr2d   = self.parent.gas['vr'].data   # (nrad, nsec) Quantity
-        vphi2d = self.parent.gas['vphi'].data # (nrad, nsec) Quantity
-
-        if zmed is None:
-            h0 = self.parameters["aspectratio"]
-            fl = self.parameters["flaringindex"]
-            r0 = self.parameters["r0"]
-            H  = _scale_height(self.parent.mesh.centers("r"), h0, fl, r0)
-            zmed = _build_z_grid(nz, 5.0, H)
-
-        nrad = vr2d.shape[0]
-        nsec = vr2d.shape[1]
-
-        ones  = np.ones((len(zmed), 1, 1))
-        vr3d   = vr2d.reshape(1, nrad, nsec)  * ones
-        vphi3d = vphi2d.reshape(1, nrad, nsec) * ones
-
-        return {"vr3d_cyl": vr3d, "vphi3d_cyl": vphi3d, "zmed": zmed}
-    
     def puff_up_disk(
         self,
         n: int,
-        coordinates: str = "spherical",
         zmax_over_H: float = 5.0,
     ) -> "Model":
-        r  = self.parent.mesh.centers("r")
+        """Puff 2D surface density directly to 3D spherical coordinates.
+        
+        Computes the Gaussian vertical profile directly in spherical coordinates
+        without intermediate cylindrical conversion, ensuring mass conservation.
+        """
+
+        r = self.parent.mesh.centers("r")
         h0 = self.parameters["aspectratio"]
         fl = self.parameters["flaringindex"]
         r0 = self.parameters["r0"]
-
-        if coordinates == "spherical":
-            # Puff in cylindrical coordinates first, then interpolate to spherical
-            # This matches fargo2radmc3d's approach (gas_density.py lines 130-207)
-            nz_cyl = max(3, int(0.5 * n))
-            dens_field_cyl, cyl_mesh = self._puff_density(nz=nz_cyl, zmax_scale=zmax_over_H)
-            vel = self._puff_velocity(nz=nz_cyl, zmed=cyl_mesh.centers("z"))
-            zmed = cyl_mesh.centers("z")
-
-            # Build spherical mesh with n polar cells
-            sph_mesh = cyl_mesh.to_spherical_by_scale_height(
-                ncol=n, aspect_ratio=h0, zmax_over_H=zmax_over_H
-            )
-
-            # Interpolate cyl -> sph on centers
-            r_cyl = cyl_mesh.centers("r")
-            r_sph = sph_mesh.centers("r")
-            t_sph = sph_mesh.centers("theta")
-
-            # Extract units before interpolation and reattach after
-            rho_units = getattr(dens_field_cyl.data, "units", None)
-            vr_units = getattr(vel["vr3d_cyl"], "units", None) if "vr" in self.parent.gas else None
-            vphi_units = getattr(vel["vphi3d_cyl"], "units", None) if "vphi" in self.parent.gas else None
-
-            rho_sph_raw = _interp_cyl_to_sph(dens_field_cyl.data, r_cyl, zmed, r_sph, t_sph)
-            vr_sph_raw = _interp_cyl_to_sph(vel["vr3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vr" in self.parent.gas else None
-            vphi_sph_raw = _interp_cyl_to_sph(vel["vphi3d_cyl"], r_cyl, zmed, r_sph, t_sph) if "vphi" in self.parent.gas else None
-
-            # Reattach units
-            rho_sph = rho_sph_raw * rho_units if rho_units else rho_sph_raw
-            vr_sph = vr_sph_raw * vr_units if vr_units and vr_sph_raw is not None else None
-            vphi_sph = vphi_sph_raw * vphi_units if vphi_units and vphi_sph_raw is not None else None
-
-            
-            # vtheta = 0 with proper unit
-            vunit = (getattr(self.parent.gas["vr"].data, "units", None)
-                    if "vr" in self.parent.gas else
-                    getattr(self.parent.gas["vphi"].data, "units", None) if "vphi" in self.parent.gas else None)
-            ntheta = int(sph_mesh.ncell("theta") or 0)
-            nr = int(sph_mesh.ncell("r") or 0)
-            nphi = int(sph_mesh.ncell("phi") or 0)
-            vtheta = np.zeros((ntheta, nr, nphi))
-            if vunit is not None:
-                vtheta = vtheta * vunit
-
-            # Commit spherical mesh + fields
-            self.parent.mesh = sph_mesh
-            self.mesh = sph_mesh
-            if hasattr(self.parent, "gas") and self.parent.gas is not None:
-                self.parent.gas.mesh = sph_mesh
-            self.coord_system = "spherical"
-
-            self.parent.gas.clear()
-            self.parent.gas_register("density", Field(quantity="density", data=rho_sph, axis_order=("theta","r","phi")))
-            if vr_sph is not None:
-                self.parent.gas_register("vr", Field(quantity="vr", data=vr_sph, axis_order=("theta","r","phi")))
-            if vphi_sph is not None:
-                self.parent.gas_register("vphi", Field(quantity="vphi", data=vphi_sph, axis_order=("theta","r","phi")))
-            self.parent.gas_register("vtheta", Field(quantity="vtheta", data=vtheta, axis_order=("theta","r","phi")))
-            return self
-
-        else:
-            raise ValueError(f"coordinates must be 'spherical', got '{coordinates}'")
-
-
-def _build_z_grid(nver: int, zmax_scale: float, H_max: Quantity) -> Quantity:
-    """
-    Build vertical grid for cylindrical coordinates.
-    
-    Parameters
-    ----------
-    nver : int
-        Number of vertical cells
-    zmax_scale : float
-        Vertical extent in units of scale height
-    H_max : Quantity
-        Maximum scale height with units
         
-    Returns
-    -------
-    z : Quantity array (nver,)
-        Vertical grid centers with same units as H_max
-    """
-    zmax = float(zmax_scale) * H_max
-    z_mag = np.linspace(-zmax.magnitude, zmax.magnitude, int(nver))
-    return z_mag * H_max.units
-
-
-def _puff_gaussian(Sigma: Quantity, r: Quantity, h: Quantity, zmed: Quantity) -> Quantity:
-    """
-    Gaussian vertical puffing matching fargo2radmc3d's gas formula.
-    
-    Formula: rho(z) = Sigma / (sqrt(2π) * r * h) * exp(-0.5*(z/(h*r))²)
-    
-    Parameters
-    ----------
-    Sigma : Quantity (nrad, nsec)
-        Surface density
-    r : Quantity (nrad,)
-        Radial centers
-    h : Quantity (nrad,)
-        Dimensionless aspect ratio h(r)
-    zmed : Quantity (nver,)
-        Vertical grid centers
+        # Get 2D surface density
+        if "surface_density" not in self.parent.gas:
+            raise KeyError("Missing gas field 'surface_density'")
+        Sigma = self.parent.gas["surface_density"].data  # (nrad, nsec)
         
-    Returns
-    -------
-    rho : Quantity (nver, nrad, nsec)
-        3D volume density
-    """
-    nrad, nsec = Sigma.shape
-    nver = len(zmed)
-    
-    # Work directly with Quantities - Pint will handle unit conversions
-    # Broadcast arrays: z(nver,1,1), r(1,nrad,1), h(1,nrad,1), Sigma(1,nrad,nsec)
-    Z = zmed.magnitude.reshape(nver, 1, 1)
-    R = r.magnitude.reshape(1, nrad, 1)
-    H = h.magnitude.reshape(1, nrad, 1)
-    S = Sigma.magnitude.reshape(1, nrad, nsec)
-    
-    # Exponential factor: exp(-0.5 * (z/(h*r))²) - dimensionless
-    expo = np.exp(-0.5 * (Z / (H * R)) ** 2)
-    
-    # Normalization: 1 / (sqrt(2π) * r * h) - units: 1/length
-    norm = 1.0 / (np.sqrt(2.0 * np.pi) * R * H)
-    
-    # Calculate density magnitude
-    rho_mag = S * norm * expo
-    
-    # Reattach units: Sigma/r = surface_density/length = volume_density
-    rho = rho_mag * (Sigma.units / r.units)
-    
-    return rho
-
-
-def _renormalize_mass_conservation(rho3d: Quantity, Sigma: Quantity, mesh: Mesh) -> Quantity:
-    """
-    Renormalize 3D density to conserve mass, following fargo2radmc3d's approach.
-    
-    Parameters
-    ----------
-    rho3d : Quantity (nz, nrad, nsec)
-        3D volume density
-    Sigma : Quantity (nrad, nsec)
-        2D surface density
-    mesh : Mesh
-        Cylindrical mesh with z, r, phi axes
+        # Build spherical mesh
+        sph_mesh = self.parent.mesh.to_spherical_by_scale_height(
+            ncol=n, aspect_ratio=h0, zmax_over_H=zmax_over_H
+        )
         
-    Returns
-    -------
-    rho3d_norm : Quantity (nz, nrad, nsec)
-        Renormalized 3D volume density
-    """
-    # Get mesh edges  
-    redge = mesh.edges('r')
-    zedge = mesh.edges('z')
-    phiedge = mesh.edges('phi')
-    
-    # Build meshgrid for cell edges (z, r, phi) - work with magnitudes
-    Zedge, Redge, Phiedge = np.meshgrid(zedge.magnitude, redge.magnitude, phiedge.magnitude, indexing='ij')
-    
-    # Cell dimensions
-    dz = Zedge[1:, :-1, :-1] - Zedge[:-1, :-1, :-1]
-    dr = Redge[:-1, 1:, :-1] - Redge[:-1, :-1, :-1]
-    dphi = Phiedge[:-1, :-1, 1:] - Phiedge[:-1, :-1, :-1]
-    
-    # Cell volumes in cylindrical coords: dV = R * dR * dphi * dz  
-    R_centers = Redge[:-1, :-1, :-1] + 0.5 * dr
-    cell_vol = R_centers * dr * dphi * dz  # dimensionless magnitude
-    cell_vol_units = redge.units ** 2 * zedge.units  # r² * z
-    
-    # Total mass in 3D grid
-    total_mass_3d = np.sum(rho3d.magnitude * cell_vol) * (rho3d.units * cell_vol_units)
-    
-    # Expected mass from 2D surface density (cell areas: dA = R * dR * dphi)
-    Redge_2d, Phiedge_2d = np.meshgrid(redge.magnitude, phiedge.magnitude, indexing='ij')
-    dr_2d = Redge_2d[1:, :-1] - Redge_2d[:-1, :-1]
-    dphi_2d = Phiedge_2d[:-1, 1:] - Phiedge_2d[:-1, :-1]
-    R_centers_2d = Redge_2d[:-1, :-1] + 0.5 * dr_2d
-    cell_area = R_centers_2d * dr_2d * dphi_2d  # dimensionless magnitude  
-    cell_area_units = redge.units ** 2
-    
-    expected_mass = np.sum(Sigma.magnitude * cell_area) * (Sigma.units * cell_area_units)
-    
-    # Normalization factor (dimensionless)
-    norm_factor = (expected_mass / total_mass_3d).to_base_units().magnitude
-    
-    return rho3d * norm_factor
-
-
+        r_sph = sph_mesh.centers("r")
+        theta_sph = sph_mesh.centers("theta")
+        phi_sph = sph_mesh.centers("phi")
+        
+        # Create 3D grids
+        r_mag = r_sph.magnitude
+        theta_mag = theta_sph.magnitude
+        phi_mag = phi_sph.magnitude
+        r_units = r_sph.units
+        
+        # Shape: (n_r, n_phi, n_theta) matching typical axis order
+        r_grid, phi_grid, theta_grid = np.meshgrid(r_mag, phi_mag, theta_mag, indexing='ij')
+        r_grid = r_grid * r_units
+        
+        # Compute z = r * cos(theta) for each spherical cell
+        z_cyl = r_grid * np.cos(theta_grid)
+        
+        # Scale height H(r) = h(r) * r where h(r) = h0 * (r/r0)^fl
+        h_r = h0 * (r_sph / r0) ** fl  # dimensionless
+        H = h_r * r_sph  # scale height with units
+        H_3d = H[:, None, None] * np.ones_like(theta_grid)  # broadcast to 3D
+        
+        # Expand Sigma to 3D: (nrad, nsec) -> (nrad, nsec, ntheta)
+        # Note: Sigma is (r, phi), we need (r, phi, theta)
+        Sigma_3d = Sigma[:, :, None] * np.ones(len(theta_sph))
+        
+        # Compute Gaussian density: rho = Sigma / (sqrt(2*pi) * H) * exp(-z^2 / (2*H^2))
+        rho_3d = Sigma_3d / (np.sqrt(2 * np.pi) * H_3d) * np.exp(-z_cyl**2 / (2 * H_3d**2))
+        
+        # Handle velocities - expand 2D to 3D (constant in theta)
+        ntheta = len(theta_sph)
+        nr = len(r_sph)
+        nphi = len(phi_sph)
+        
+        vr_sph = None
+        vphi_sph = None
+        if "vr" in self.parent.gas:
+            vr_2d = self.parent.gas["vr"].data
+            vr_sph = vr_2d[:, :, None] * np.ones(ntheta)
+        if "vphi" in self.parent.gas:
+            vphi_2d = self.parent.gas["vphi"].data
+            vphi_sph = vphi_2d[:, :, None] * np.ones(ntheta)
+        
+        # vtheta = 0
+        vunit = None
+        if "vr" in self.parent.gas:
+            vunit = getattr(self.parent.gas["vr"].data, "units", None)
+        elif "vphi" in self.parent.gas:
+            vunit = getattr(self.parent.gas["vphi"].data, "units", None)
+        vtheta = np.zeros((nr, nphi, ntheta))
+        if vunit is not None:
+            vtheta = vtheta * vunit
+        
+        # Commit spherical mesh + fields
+        self.parent.mesh = sph_mesh
+        self.mesh = sph_mesh
+        if hasattr(self.parent, "gas") and self.parent.gas is not None:
+            self.parent.gas.mesh = sph_mesh
+        self.coord_system = "spherical"
+        
+        self.parent.gas.clear()
+        self.parent.gas_register("density", Field(quantity="density", data=rho_3d, axis_order=("r", "phi", "theta")))
+        if vr_sph is not None:
+            self.parent.gas_register("vr", Field(quantity="vr", data=vr_sph, axis_order=("r", "phi", "theta")))
+        if vphi_sph is not None:
+            self.parent.gas_register("vphi", Field(quantity="vphi", data=vphi_sph, axis_order=("r", "phi", "theta")))
+        self.parent.gas_register("vtheta", Field(quantity="vtheta", data=vtheta, axis_order=("r", "phi", "theta")))
+        return self
 
 
 def puff_up_model(
     model: "Model",
     n: int,
-    coordinates: str = "spherical",
     zmax_over_H: float = 5.0,
 ) -> "Model":
-
+    """Puff a 2D polar model to 3D spherical coordinates."""
     new = Model()
-    new.coord_system    = model.mesh.coord_system  # type: ignore[union-attr]
-    new.variables       = dict(model.variables)
+    new.coord_system = model.mesh.coord_system
+    new.variables = dict(model.variables)
     new.compile_options = dict(model.compile_options)
-    new.macros          = dict(model.macros)
+    new.macros = dict(model.macros)
 
-    cs = model.mesh.coord_system  # type: ignore[union-attr]
+    cs = model.mesh.coord_system
 
-    if cs == "cylindrical":
-        # clone ONLY r/phi; z will be added by the puff step
-        new.mesh = Mesh.cylindrical(
-            r=Axis(edges=model.mesh.edges("r"),   centers=model.mesh.centers("r")),
+    if cs == "polar":
+        new.mesh = Mesh.polar(
+            r=Axis(edges=model.mesh.edges("r"), centers=model.mesh.centers("r")),
             phi=Axis(edges=model.mesh.edges("phi"), centers=model.mesh.centers("phi")),
         )
     elif cs == "spherical":
-        # clone r/(theta?)/phi exactly as present
         new.mesh = Mesh.spherical(
             r=Axis(edges=model.mesh.edges("r"), centers=model.mesh.centers("r")),
             theta=(
@@ -917,22 +747,19 @@ def puff_up_model(
             phi=Axis(edges=model.mesh.edges("phi"), centers=model.mesh.centers("phi")),
         )
     else:
-        raise ValueError("Cartesian meshes are not supported for puffing.")
+        raise ValueError(f"Unsupported coordinate system for puffing: {cs}")
 
     new.file_units = model.file_units
-    new.directory  = model.directory
-    new.n_file     = model.n_file
-    new.filename   = model.filename
+    new.directory = model.directory
+    new.n_file = model.n_file
+    new.filename = model.filename
 
-    # submodels
-    new.gas  = SubModel(new)
+    new.gas = SubModel(new)
     if getattr(model, "disk", None) is not None:
         new.disk = Disk(new, model.disk.parameters)
 
-    # copy gas fields (mesh-less Fields; share data)
     for name, f in model.gas.items():
         new.gas_register(name, Field(data=f.data, quantity=f.quantity, axis_order=f.axis_order))
 
-    # perform the puff on the clone
-    new.disk.puff_up_disk(n, coordinates=coordinates, zmax_over_H=zmax_over_H)
+    new.disk.puff_up_disk(n, zmax_over_H=zmax_over_H)
     return new

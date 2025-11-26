@@ -703,8 +703,7 @@ class RadWriter:
         output_dir.mkdir(parents=True, exist_ok=True)
         fpath = output_dir / 'gas_temperature.inp'
         
-        # Convert to K and CGS
-        temp = self._to_cgs(temperature.to('K'))
+        temp = temperature.to('K')
         
         # Transpose from DiskBridge order to RADMC-3D order
         # This matches the approach used in write_dust_density and write_gas_velocity

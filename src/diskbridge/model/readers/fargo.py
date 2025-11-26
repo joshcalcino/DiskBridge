@@ -288,9 +288,9 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         # Azimuth edges
         pedge = _build_pedge(nsec) * units('radians')
 
-        mesh = Mesh.cylindrical(r=Axis(edges=redge), 
-                                phi=Axis(edges=pedge))
-        coord_system = "cylindrical"
+        mesh = Mesh.polar(r=Axis(edges=redge), 
+                          phi=Axis(edges=pedge))
+        coord_system = "polar"
         ncol = 1
     else:
         # For 3D, prefer edges from domain files (FARGO3D)

@@ -13,7 +13,6 @@ from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge._params import params, canonicalize_dust_params
-from .utils import _interp_sph_to_cyl, _interp_cyl_to_sph
 from .mesh import Mesh, Axis
 
 if TYPE_CHECKING:
@@ -223,8 +222,6 @@ class DustComponent:
         mean_molecular_weight: float = 2.3,
         species_base: str = "dust",
         component_index: int = 0,
-        spherical_interp_r_factor: Optional[float] = None,
-        spherical_interp_z_factor: Optional[float] = None,
     ):
         """Initialize a dust component.
         
@@ -238,8 +235,6 @@ class DustComponent:
             mean_molecular_weight: Mean molecular weight
             species_base: Base name for opacity files
             component_index: Component index (for naming)
-            spherical_interp_r_factor: Spherical interpolation factor (r)
-            spherical_interp_z_factor: Spherical interpolation factor (z)
         """
         self.distribution = distribution
         self.dust_to_gas_ratio = dust_to_gas_ratio
@@ -250,8 +245,6 @@ class DustComponent:
         self.mean_molecular_weight = mean_molecular_weight
         self.species_base = species_base
         self.component_index = component_index
-        self.spherical_interp_r_factor = spherical_interp_r_factor
-        self.spherical_interp_z_factor = spherical_interp_z_factor
         
     def __repr__(self) -> str:
         return (
@@ -307,9 +300,6 @@ class Dust(SubModel):
         self.delta: Optional[float] = None  # Turbulent diffusion parameter (default: = alpha)
         self.mean_molecular_weight: float = 2.3  # Mean molecular weight (for H2)
         
-        # Spherical interpolation factors (legacy)
-        self.spherical_interp_r_factor: Optional[float] = None
-        self.spherical_interp_z_factor: Optional[float] = None
         
     def set_distribution(
         self,
@@ -323,8 +313,6 @@ class Dust(SubModel):
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
         mean_molecular_weight: float = 2.3,
-        spherical_interp_r_factor: Optional[float] = None,
-        spherical_interp_z_factor: Optional[float] = None,
     ) -> None:
         """Set dust grain size distribution.
         
@@ -341,12 +329,6 @@ class Dust(SubModel):
             alpha: Turbulent viscosity parameter (required for 'settling' mode)
             delta: Turbulent diffusion parameter (default: = alpha, assumes Sc ~ 1)
             mean_molecular_weight: Mean molecular weight for gas (default: 2.3 for H2)
-            spherical_interp_r_factor: Resolution multiplier for radial direction when 
-                converting from spherical to cylindrical coordinates. If None (default),
-                automatically determined based on mesh resolution. Typical range: 1-3.
-            spherical_interp_z_factor: Resolution multiplier for vertical direction when
-                converting from spherical to cylindrical coordinates. If None (default),
-                automatically determined based on mesh resolution. Typical range: 1-5.
         """
         # Pull defaults from params if not provided
         if amin is None:
@@ -394,8 +376,6 @@ class Dust(SubModel):
             mean_molecular_weight=mean_molecular_weight,
             species_base=species_base,
             component_index=0,
-            spherical_interp_r_factor=spherical_interp_r_factor,
-            spherical_interp_z_factor=spherical_interp_z_factor,
         )
         
         # Set as the only component
@@ -429,8 +409,6 @@ class Dust(SubModel):
         self.alpha = alpha
         self.delta = delta if delta is not None else alpha
         self.mean_molecular_weight = mean_molecular_weight
-        self.spherical_interp_r_factor = spherical_interp_r_factor
-        self.spherical_interp_z_factor = spherical_interp_z_factor
         
         logger.info(
             f"Dust distribution set: {nbin} bins from {amin.to('um')} to {amax.to('um')}, "
@@ -450,8 +428,6 @@ class Dust(SubModel):
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
         mean_molecular_weight: float = 2.3,
-        spherical_interp_r_factor: Optional[float] = None,
-        spherical_interp_z_factor: Optional[float] = None,
     ) -> None:
         """Add a new dust component with specific mask and mode.
         
@@ -469,8 +445,6 @@ class Dust(SubModel):
             alpha: Turbulent viscosity parameter (for settling)
             delta: Turbulent diffusion parameter (default: = alpha)
             mean_molecular_weight: Mean molecular weight (default: 2.3)
-            spherical_interp_r_factor: Resolution multiplier for radial direction
-            spherical_interp_z_factor: Resolution multiplier for vertical direction
         """
         # Determine this component's index
         component_index = len(self._components)
@@ -532,8 +506,6 @@ class Dust(SubModel):
             mean_molecular_weight=mean_molecular_weight,
             species_base=species_base,
             component_index=component_index,
-            spherical_interp_r_factor=spherical_interp_r_factor,
-            spherical_interp_z_factor=spherical_interp_z_factor,
         )
         
         # Add to components list
@@ -681,77 +653,18 @@ class Dust(SubModel):
             mu = self.mean_molecular_weight
             c_s = np.sqrt(k_B * temp / (mu * m_H))
             
-            # Broadcast Omega_K to match c_s shape
-            if mesh.coord_system == 'cylindrical':
-                phi = mesh.centers('phi')
-                z = mesh.centers('z')
-                Omega_K = np.meshgrid(Omega_K_1d, phi, z, indexing='ij')[0]
-            elif mesh.coord_system == 'spherical':
-                phi = mesh.centers('phi')
-                theta = mesh.centers('theta')
-                Omega_K = np.meshgrid(Omega_K_1d, phi, theta, indexing='ij')[0]
-            else:
-                raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+            # Broadcast Omega_K to match c_s shape (spherical coordinates only)
+            if mesh.coord_system != 'spherical':
+                raise ValueError(f"Only spherical coordinates supported, got: {mesh.coord_system}")
+            phi = mesh.centers('phi')
+            theta = mesh.centers('theta')
+            Omega_K = np.meshgrid(Omega_K_1d, phi, theta, indexing='ij')[0]
             
             # Scale height (3D array)
             H = c_s / Omega_K
             return H
             
         raise ValueError("Cannot compute scale height: no disk parameters or temperature")
-        
-    def _get_spherical_interp_factors(self, component: DustComponent) -> tuple[float, float]:
-        """Determine resolution factors for spherical to cylindrical interpolation.
-        
-        The factors are automatically determined based on current mesh resolution:
-        - Low resolution meshes (<30 cells): Use higher factors (2-3×)
-        - Medium resolution meshes (30-60 cells): Use moderate factors (1.5-2×)
-        - High resolution meshes (>60 cells): Use minimal factors (1-1.5×)
-        
-        Args:
-            component: DustComponent to get interpolation factors from
-        
-        Returns:
-            Tuple of (r_factor, z_factor) for radial and vertical resolution
-        """
-        # Use user-provided factors if available
-        if component.spherical_interp_r_factor is not None and component.spherical_interp_z_factor is not None:
-            return component.spherical_interp_r_factor, component.spherical_interp_z_factor
-        
-        mesh = self.parent.mesh
-        
-        # Get current mesh resolution
-        n_r = mesh.ncell('r')
-        n_theta = mesh.ncell('theta') if mesh.coord_system == 'spherical' else mesh.ncell('z')
-        
-        # Determine radial factor
-        if component.spherical_interp_r_factor is not None:
-            r_factor = component.spherical_interp_r_factor
-        else:
-            if n_r < 30:
-                r_factor = 2.5
-            elif n_r < 60:
-                r_factor = 1.5
-            else:
-                r_factor = 1.0
-        
-        # Determine vertical factor (typically needs higher resolution than radial)
-        if component.spherical_interp_z_factor is not None:
-            z_factor = component.spherical_interp_z_factor
-        else:
-            if n_theta < 30:
-                z_factor = 3.5
-            elif n_theta < 60:
-                z_factor = 2.0
-            else:
-                z_factor = 1.5
-        
-        logger.debug(
-            f"Spherical interpolation factors (adaptive): "
-            f"r_factor={r_factor:.1f}, z_factor={z_factor:.1f} "
-            f"(mesh: {n_r}×{n_theta} cells)"
-        )
-        
-        return r_factor, z_factor
     
     def _get_keplerian_frequency(self) -> Quantity:
         """Get Keplerian frequency Omega_K = sqrt(GM/r^3).
@@ -855,11 +768,14 @@ class Dust(SubModel):
             raise ValueError(f"Unknown mode: {component.mode}")
             
     def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust density with settling-diffusion vertical structure.
+        """Compute dust settling-diffusion equilibrium density for a component bin.
         
-        For spherical coordinate systems, this method converts to cylindrical coordinates,
-        performs the settling calculation in cylindrical coordinates (where the physics
-        naturally applies), and then interpolates back to spherical coordinates.
+        Implements the settling-diffusion equilibrium model where dust settles
+        toward the midplane with a scale height H_d that depends on the Stokes number:
+        
+            H_d / H_g = sqrt(delta / (St + delta))
+        
+        where St is the Stokes number and delta is the turbulent diffusion parameter.
         
         Args:
             component: DustComponent instance
@@ -871,21 +787,23 @@ class Dust(SubModel):
         """
         mesh = self.parent.mesh
         
-        # For spherical coordinates, use the conversion method
-        if mesh.coord_system == 'spherical':
-            return self._compute_settling_density_spherical(component, local_bin_idx, gas_density)
-        elif mesh.coord_system == 'cylindrical':
-            return self._compute_settling_density_cylindrical(component, local_bin_idx, gas_density)
-        else:
-            raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+        if mesh.coord_system != 'spherical':
+            raise ValueError(f"Settling only supports spherical coordinates, got: {mesh.coord_system}")
+        
+        return self._compute_settling_density_spherical(component, local_bin_idx, gas_density)
     
-    def _compute_settling_density_cylindrical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust settling in cylindrical coordinates (native implementation).
+    def _compute_settling_density_spherical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
+        """Compute dust settling in spherical coordinates with mass conservation.
+        
+        Computes settled dust density directly in spherical coordinates by:
+        1. Computing z = r*cos(theta) for each spherical cell
+        2. Evaluating the Gaussian vertical profile at that height
+        3. Normalizing each radial column to conserve surface density
         
         Args:
             component: DustComponent instance
             local_bin_idx: Dust bin index within component
-            gas_density: Gas density field
+            gas_density: Gas density field in spherical coordinates
             
         Returns:
             Dust density field with vertical settling profile
@@ -899,30 +817,53 @@ class Dust(SubModel):
             raise ValueError("Settling mode requires temperature field")
         gas_temp = self.parent.gas['temperature'].data
         
-        # Get cylindrical coordinates
+        logger.debug(
+            f"Computing dust settling directly in spherical coordinates for "
+            f"component {component.component_index} bin {local_bin_idx} (mass-conserving)"
+        )
+        
+        # Get spherical grid coordinates
         r = mesh.centers('r')
+        theta = mesh.centers('theta')
         phi = mesh.centers('phi')
-        z = mesh.centers('z')
         
-        r_grid, phi_grid, z_grid = np.meshgrid(r, phi, z, indexing='ij')
+        r_edges = mesh.edges('r')
+        theta_edges = mesh.edges('theta')
         
-        # Compute Keplerian frequency (function of r only)
+        # Create 3D grids - use magnitudes to avoid pint meshgrid issues, then add units
+        # Use indexing='ij' to get shape (n_r, n_phi, n_theta)
+        r_mag = r.magnitude
+        phi_mag = phi.magnitude
+        theta_mag = theta.magnitude
+        r_units = r.units
+        
+        r_grid_mag, phi_grid_mag, theta_grid_mag = np.meshgrid(r_mag, phi_mag, theta_mag, indexing='ij')
+        r_grid = r_grid_mag * r_units
+        
+        # Compute cylindrical coordinates for each spherical cell
+        # z inherits units from r_grid
+        z_cyl = r_grid * np.cos(theta_grid_mag)  # Height above midplane
+        
+        # Find midplane index (theta closest to pi/2)
+        theta_mid_idx = np.argmin(np.abs(theta_mag - np.pi/2))
+        
+        # Get midplane properties
+        rho_g0 = gas_density.data[:, :, theta_mid_idx]
+        T0 = gas_temp[:, :, theta_mid_idx]
+        
+        # Compute Keplerian frequency at r (same as cylindrical method)
         Omega_K_1d = self._get_keplerian_frequency()
         Omega_K = Omega_K_1d[:, None]
-
-        # Midplane index (closest to z = 0)
-        k0 = int(np.argmin(np.abs(z.magnitude)))
-
-        # Midplane gas density and temperature
-        rho_g0 = gas_density.data[:, :, k0]
-        T0 = gas_temp[:, :, k0]
-
-        # Midplane sound speed and gas scale height
+        
+        # Sound speed at midplane
         mu = component.mean_molecular_weight
         c_s0 = np.sqrt(k_B * T0 / (mu * m_H))
-        H_g0 = c_s0 / Omega_K
-
-        # Stokes number at midplane only (one value per column)
+        
+        # Gas scale height at midplane: H_g = c_s / Omega_K
+        # Convert to same units as r for consistent length units
+        H_g0 = (c_s0 / Omega_K).to(r_units)
+        
+        # Stokes number at midplane
         St0 = self._compute_stokes_number(
             grain_size=grain_size,
             gas_density=rho_g0,
@@ -931,35 +872,69 @@ class Dust(SubModel):
             grain_density=component.distribution.grain_density,
             mean_molecular_weight=component.mean_molecular_weight,
         )
-        St0 = St0[:, :, None]
-
+        
         # Dust scale height from midplane Stokes number
         delta = component.delta
-        H_d = H_g0[:, :, None] * np.sqrt(delta / (St0 + delta))
+        H_d0 = H_g0 * np.sqrt(delta / (St0 + delta))
+        
+        # Expand to 3D (H_d is function of r only, constant in theta)
+        n_theta = len(theta)
+        H_d0_mag = H_d0.magnitude
+        H_d_mag = np.broadcast_to(H_d0_mag[:, :, None], (*H_d0_mag.shape, n_theta))
+        H_d = H_d_mag * H_d0.units
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
-        vertical_profile = np.exp(-z_grid**2 / (2 * H_d**2))
+        # Now z_cyl and H_d have the same units (r_units), so z^2/H_d^2 is dimensionless
+        vertical_profile = np.exp(-(z_cyl**2 / (2 * H_d**2)).to('dimensionless').magnitude)
         
-        # Normalize to preserve column density
-        # The midplane density enhancement factor ensures that
-        # integrating rho_d over z gives the desired surface density
+        # Compute dust density
         dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
+        
+        # Dust density: rho_d = dust_to_gas * rho_g0 * (H_g/H_d) * exp(-z^2/(2*H_d^2))
+        # The (H_g/H_d) factor ensures correct normalization for the narrower Gaussian
         prefactor = dust_to_gas_local * (H_g0[:, :, None] / H_d)
-
-        # Final dust density
-        dust_density_data = rho_g0[:, :, None] * prefactor * vertical_profile
-
-        # Ensure numerical stability: clamp NaNs and negative values to zero
+        dust_density_raw = rho_g0[:, :, None] * prefactor * vertical_profile
+        
+        # === MASS CONSERVATION STEP ===
+        # Renormalize each column to conserve the expected dust surface density
+        # Expected: Sigma_dust = dust_to_gas * mass_fraction * Sigma_gas
+        # where Sigma_gas = sqrt(2*pi) * H_g * rho_g0 for a Gaussian
+        
+        Sigma_gas = np.sqrt(2 * np.pi) * H_g0 * rho_g0
+        Sigma_dust_expected = dust_to_gas_local * Sigma_gas
+        
+        # Compute actual column integral in spherical coordinates
+        # Column integral: integral of rho * r * dtheta along theta
+        n_r, n_phi, n_theta = dust_density_raw.shape
+        
+        # Initialize with correct units
+        Sigma_dust_actual = 0.0 * dust_density_raw[:, :, 0] * r[0]
+        
+        for i_theta in range(n_theta):
+            dtheta = (theta_edges[i_theta + 1] - theta_edges[i_theta]).magnitude
+            Sigma_dust_actual = Sigma_dust_actual + dust_density_raw[:, :, i_theta] * r[:, None] * dtheta
+        
+        # Compute renormalization factor
+        with np.errstate(divide='ignore', invalid='ignore'):
+            renorm_factor = Sigma_dust_expected / Sigma_dust_actual
+            renorm_mag = renorm_factor.magnitude
+            renorm_mag[~np.isfinite(renorm_mag)] = 1.0
+            renorm_mag = np.clip(renorm_mag, 0.01, 100.0)  # Cap extreme factors
+        
+        # Apply renormalization (renorm_factor should be dimensionless)
+        dust_density_data = dust_density_raw * renorm_mag[:, :, None]
+        
+        # Ensure numerical stability
         dust_density_mag = dust_density_data.magnitude
         dust_density_mag[~np.isfinite(dust_density_mag)] = 0.0
         dust_density_mag[dust_density_mag < 0.0] = 0.0
         dust_density_data = dust_density_mag * dust_density_data.units
-
+        
         # Apply mask if set
         if component.mask is not None:
             mask_array = component.mask.data.magnitude.astype(bool)
             dust_density_data = dust_density_data * mask_array
-            
+        
         axis_order = gas_density.axis_order
         
         dust_field = Field(
@@ -968,198 +943,9 @@ class Dust(SubModel):
             axis_order=axis_order,
         )
         
-        return dust_field
-    
-    def _compute_settling_density_spherical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust settling for spherical coordinates via cylindrical conversion.
-        
-        This method:
-        1. Converts gas properties from spherical to cylindrical coordinates
-        2. Performs settling calculation in cylindrical coordinates
-        3. Interpolates the result back to spherical coordinates
-        
-        Args:
-            component: DustComponent instance
-            local_bin_idx: Dust bin index within component
-            gas_density: Gas density field in spherical coordinates
-            
-        Returns:
-            Dust density field with vertical settling profile in spherical coordinates
-        """
-
-        
-        mesh_sph = self.parent.mesh
-        grain_size = component.distribution.bin_centers[local_bin_idx]
-        mass_fraction = component.distribution.mass_fractions[local_bin_idx]
-        
-        # Need temperature to compute Stokes number
-        if 'temperature' not in self.parent.gas:
-            raise ValueError("Settling mode requires temperature field")
-        gas_temp_sph = self.parent.gas['temperature'].data
-        
-        logger.debug(f"Computing dust settling in spherical coordinates for component {component.component_index} bin {local_bin_idx} (converting to cylindrical)")
-        
-        # Get spherical grid coordinates
-        r_sph = mesh_sph.centers('r')
-        theta_sph = mesh_sph.centers('theta')
-        phi_sph = mesh_sph.centers('phi')
-        
-        # Get resolution factors (adaptive or user-specified)
-        r_factor, z_factor = self._get_spherical_interp_factors(component)
-        
-        # Create cylindrical mesh covering the same domain
-        # Use higher resolution to reduce interpolation smoothing
-        r_sph_min = r_sph.magnitude.min()
-        r_sph_max = r_sph.magnitude.max()
-        theta_range = theta_sph.magnitude
-        
-        # Calculate exact extent needed in cylindrical coordinates
-        # For spherical (r, theta), cylindrical coords are:
-        #   R = r * sin(theta)
-        #   Z = r * cos(theta)
-        
-        # Cylindrical r: maximum occurs at largest r and theta closest to pi/2
-        r_cyl_max = r_sph_max * np.sin(theta_range).max()
-        n_r_cyl = int(len(r_sph) * r_factor)
-        r_cyl_edges = np.linspace(r_sph_min * 0.1, r_cyl_max, n_r_cyl + 1) * r_sph.units
-        
-        # Cylindrical z: maximum |z| occurs at largest r and theta at extremes
-        # Calculate the actual max and min z values from spherical grid corners
-        z_at_max_r_min_theta = r_sph_max * np.cos(theta_range.min())  # Upper hemisphere
-        z_at_max_r_max_theta = r_sph_max * np.cos(theta_range.max())  # Lower hemisphere
-        
-        # Take the maximum absolute value to ensure full coverage
-        z_max = max(abs(z_at_max_r_min_theta), abs(z_at_max_r_max_theta))
-        
-        # Add small buffer (5%) to avoid edge effects
-        z_max = z_max * 1.05
-        
-        n_z = int(len(theta_sph) * z_factor)
-        z_edges = np.linspace(-z_max, z_max, n_z + 1) * r_sph.units
-        
-        # Phi: same as spherical
-        phi_edges = mesh_sph.edges('phi')
-        
-        mesh_cyl = Mesh.cylindrical(
-            r=Axis(edges=r_cyl_edges),
-            phi=Axis(edges=phi_edges),
-            z=Axis(edges=z_edges)
-        )
-        
-        r_cyl = mesh_cyl.centers('r')
-        phi_cyl = mesh_cyl.centers('phi')
-        z_cyl = mesh_cyl.centers('z')
-        
-        # Transpose arrays to match utils format
-        # From (r, phi, theta) to (theta, r, phi) for spherical
-        gas_dens_sph_transposed = np.transpose(gas_density.data.magnitude, (2, 0, 1))
-        gas_temp_sph_transposed = np.transpose(gas_temp_sph.magnitude, (2, 0, 1))
-        
-        # Interpolate to cylindrical coordinates
-        # utils expect: sph (ntheta, nrad, nsec), output cyl (nz, nrad, nsec)
-        gas_dens_cyl_transposed = _interp_sph_to_cyl(
-            gas_dens_sph_transposed,
-            r_sph.magnitude, theta_sph.magnitude,
-            r_cyl.magnitude, z_cyl.magnitude
-        )
-        gas_temp_cyl_transposed = _interp_sph_to_cyl(
-            gas_temp_sph_transposed,
-            r_sph.magnitude, theta_sph.magnitude,
-            r_cyl.magnitude, z_cyl.magnitude
-        )
-        
-        # Transpose back to (r, phi, z) format
-        gas_dens_cyl = np.transpose(gas_dens_cyl_transposed, (1, 2, 0)) * gas_density.data.units
-        gas_temp_cyl = np.transpose(gas_temp_cyl_transposed, (1, 2, 0)) * gas_temp_sph.units
-        
-        # Create grids for cylindrical coordinates
-        r_cyl_grid, phi_cyl_grid, z_cyl_grid = np.meshgrid(r_cyl, phi_cyl, z_cyl, indexing='ij')
-        
-        # Get stellar mass
-        M_star = 1.0 * 1.989e33 * units('g')  # Default: 1 M_sun
-        if hasattr(self.parent, 'variables'):
-            if 'mstar' in self.parent.variables:
-                M_star = self.parent.variables['mstar']
-        
-        # Compute Keplerian frequency in cylindrical coordinates
-        G = 6.674e-8 * units('cm^3 / (g * s^2)')
-        Omega_K_1d_cyl = np.sqrt(G * M_star / r_cyl**3)
-        Omega_K = Omega_K_1d_cyl[:, None]
-
-        # Midplane index (closest to z = 0 in cylindrical grid)
-        k0_cyl = int(np.argmin(np.abs(z_cyl.magnitude)))
-
-        # Midplane gas density and temperature in cylindrical coordinates
-        rho_g0_cyl = gas_dens_cyl[:, :, k0_cyl]
-        T0_cyl = gas_temp_cyl[:, :, k0_cyl]
-
-        # Midplane sound speed and gas scale height
-        mu = component.mean_molecular_weight
-        c_s0_cyl = np.sqrt(k_B * T0_cyl / (mu * m_H))
-        H_g0_cyl = c_s0_cyl / Omega_K
-
-        # Stokes number at midplane only (one value per cylindrical column)
-        St0_cyl = self._compute_stokes_number(
-            grain_size=grain_size,
-            gas_density=rho_g0_cyl,
-            gas_temperature=T0_cyl,
-            keplerian_frequency=Omega_K,
-            grain_density=component.distribution.grain_density,
-            mean_molecular_weight=component.mean_molecular_weight,
-        )
-        St0_cyl = St0_cyl[:, :, None]
-
-        # Dust scale height from midplane Stokes number
-        delta = component.delta
-        H_d_cyl = H_g0_cyl[:, :, None] * np.sqrt(delta / (St0_cyl + delta))
-
-        # Compute vertical profile: single Gaussian with scale height H_d_cyl
-        vertical_profile_cyl = np.exp(-z_cyl_grid**2 / (2 * H_d_cyl**2))
-
-        # Prefactor ensures desired dust surface density per bin
-        dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
-        prefactor_cyl = dust_to_gas_local * (H_g0_cyl[:, :, None] / H_d_cyl)
-
-        # Final dust density in cylindrical coordinates
-        dust_dens_cyl = rho_g0_cyl[:, :, None] * prefactor_cyl * vertical_profile_cyl
-
-        # Ensure numerical stability: clamp NaNs and negative values to zero
-        dust_dens_cyl_mag = dust_dens_cyl.magnitude
-        dust_dens_cyl_mag[~np.isfinite(dust_dens_cyl_mag)] = 0.0
-        dust_dens_cyl_mag[dust_dens_cyl_mag < 0.0] = 0.0
-        dust_dens_cyl = dust_dens_cyl_mag * dust_dens_cyl.units
-
-        # Transpose for interpolation back to spherical
-        # From (r, phi, z) to (z, r, phi) for cylindrical
-        dust_dens_cyl_transposed = np.transpose(dust_dens_cyl.magnitude, (2, 0, 1))
-        
-        # Interpolate back to spherical coordinates
-        # utils expect: cyl (nz, nrad, nsec), output sph (ntheta, nrad, nsec)
-        dust_dens_sph_transposed = _interp_cyl_to_sph(
-            dust_dens_cyl_transposed,
-            r_cyl.magnitude, z_cyl.magnitude,
-            r_sph.magnitude, theta_sph.magnitude
-        )
-        
-        # Transpose back to (r, phi, theta) format
-        dust_dens_sph = np.transpose(dust_dens_sph_transposed, (1, 2, 0)) * dust_dens_cyl.units
-        
-        # Apply mask if set
-        if component.mask is not None:
-            mask_array = component.mask.data.magnitude.astype(bool)
-            dust_dens_sph = dust_dens_sph * mask_array
-        
-        axis_order = gas_density.axis_order
-        
-        dust_field = Field(
-            data=dust_dens_sph,
-            quantity=gas_density.quantity,
-            axis_order=axis_order,
-        )
-        
         logger.debug(
-            f"Dust settling calculation completed for component {component.component_index} "
-            f"bin {local_bin_idx} in spherical coordinates"
+            f"Dust settling (direct spherical) completed for component {component.component_index} "
+            f"bin {local_bin_idx}"
         )
         
         return dust_field
