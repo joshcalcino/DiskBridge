@@ -775,8 +775,9 @@ class RadModel:
                 lam_cm = C_LIGHT / freq_hz
                 
                 # Read mean intensity values
+                # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
                 j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-                j_lambda = j_flat.reshape((nrcells, nwav))
+                j_lambda = j_flat.reshape((nwav, nrcells)).T  # Transpose to get (nrcells, nwav)
             
             nx, ny, nz = self.data._getMeshShape()
             self.mean_intensity = j_lambda
@@ -907,11 +908,11 @@ class RadModel:
             lam_cm = C_LIGHT / freq_hz
             
             # Read mean intensity values (nwav * nrcells values, one per line)
-            # Data is ordered: all wavelengths for cell 0, then all for cell 1, etc.
+            # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
             j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
             
-            # Reshape to (nrcells, nwav)
-            j_lambda = j_flat.reshape((nrcells, nwav))
+            # Reshape to (nrcells, nwav) - data is wavelength-major, so reshape and transpose
+            j_lambda = j_flat.reshape((nwav, nrcells)).T
         
         # Store wavelengths and mean intensity
         nx, ny, nz = self.data._getMeshShape()
