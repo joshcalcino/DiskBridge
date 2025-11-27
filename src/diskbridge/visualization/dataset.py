@@ -33,7 +33,7 @@ from diskbridge._logging import logger
 import yt
 from yt.loaders import load_uniform_grid
 
-from .units import pint_to_unyt_cgs, check_unyt_available
+from .units import pint_to_unyt_cgs
 
 
 class DiskBridgeDataset:
@@ -91,7 +91,6 @@ class DiskBridgeDataset:
         include_dust: bool = True,
         length_unit: str = 'au',
     ):
-        check_unyt_available()
         
         self.model = model
         self.radmodel = radmodel

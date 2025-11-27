@@ -62,23 +62,19 @@ from .profiles import (
     ProfilePlotter,
 )
 
- # Unit conversion utilities
+# Unit conversion utilities
 from .units import (
     pint_to_unyt,
     pint_to_unyt_cgs,
     unyt_to_pint,
-    HAS_UNYT,
 )
 
 # yt backend (assumed available; yt is a hard dependency)
 from .yt_backend import (
     Visualizer,
-    YTBackend,  # Backwards compatibility alias
     quick_slice,
     quick_projection,
 )
-
-HAS_YT = True
 
 
 __all__ = [
@@ -88,7 +84,6 @@ __all__ = [
     'create_dataset',
     # Main visualizer
     'Visualizer',
-    'YTBackend',  # Backwards compatibility
     # Profiles
     'azimuthal_average',
     'compute_radial_profile',
@@ -103,8 +98,5 @@ __all__ = [
     # Unit conversion
     'pint_to_unyt',
     'pint_to_unyt_cgs',
-    'unyt_to_pint',
-    # Availability flags
-    'HAS_YT',
-    'HAS_UNYT',
+    'unyt_to_pint'
 ]

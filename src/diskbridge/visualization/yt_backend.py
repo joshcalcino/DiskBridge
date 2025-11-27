@@ -507,7 +507,3 @@ def quick_projection(
     """
     viz = Visualizer(model, radmodel)
     return viz.projection(field, axis=axis, output=output, **kwargs)
-
-
-# Backwards compatibility alias
-YTBackend = Visualizer

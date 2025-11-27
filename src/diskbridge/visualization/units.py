@@ -20,11 +20,6 @@ if TYPE_CHECKING:
 import unyt
 from unyt import unyt_array, unyt_quantity
 
-HAS_UNYT = True
-
-def check_unyt_available() -> None:
-    return None
-
 # Import pint from diskbridge
 from diskbridge._units import units as pint_units, Quantity as PintQuantity
 
