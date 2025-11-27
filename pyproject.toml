@@ -17,6 +17,7 @@ dependencies = [
   "astropy>=5.0",
   "pint>=0.21",
   "numba>=0.56",
+   "healpy"
 ]
 
 [project.urls]

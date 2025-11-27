@@ -419,14 +419,21 @@ class RadModel:
         photodissociation: Optional[bool] = None,
         freezeout: Optional[bool] = None,
         photodesorption: Optional[bool] = None,
+        self_shielding: bool = False,
+        nside: int = 4,
+        b_kms: float = 0.3,
+        XH2_guess: float = 0.5,
+        margin_dex: float = 1.0,
+        max_cells: Optional[int] = None,
         write_output: bool = True,
     ) -> Tuple[Quantity, Quantity]:
         """Compute molecular abundance with photochemistry (Pinte et al. 2018).
         
-        Applies three processes:
-        1. Photodissociation: X = 0 where log10(chi/nH) > -6
-        2. Freeze-out: X *= eps where T < Tfrz
-        3. Photodesorption (optional): skip freeze-out where log10(chi/nH) > -7
+        Applies up to four processes:
+        1. Self-shielding (optional): compute effective chi using Visser+09 tables
+        2. Photodissociation: X = 0 where log10(chi_eff/nH) > -6
+        3. Freeze-out: X *= eps where T < Tfrz
+        4. Photodesorption (optional): skip freeze-out where log10(chi_eff/nH) > -7
         
         Parameters
         ----------
@@ -439,11 +446,26 @@ class RadModel:
         Tfrz : Quantity, optional
             Freeze-out temperature (default: 21 K)
         photodissociation : bool, optional
-            Apply photodissociation (default: True)
+            Apply photodissociation (default: from params)
         freezeout : bool, optional
-            Apply freeze-out (default: True)
+            Apply freeze-out (default: from params)
         photodesorption : bool, optional
-            Apply photodesorption (default: False)
+            Apply photodesorption (default: from params)
+        self_shielding : bool, optional
+            Apply CO self-shielding via Visser+09 tables and HEALPix ray 
+            tracing (default: False). When enabled, chi is replaced by
+            chi_eff = chi * theta_CO for photodissociation/photodesorption.
+        nside : int, optional
+            HEALPix Nside for self-shielding (npix = 12 * nside^2, default: 4)
+        b_kms : float, optional
+            Doppler b parameter for Visser tables (default: 0.3 km/s)
+        XH2_guess : float, optional
+            Assumed H2 fraction for self-shielding when nH2 not provided
+            (default: 0.5, i.e., fully molecular)
+        margin_dex : float, optional
+            Extra dex below threshold to include in candidate mask (default: 1.0)
+        max_cells : int, optional
+            Limit HEALPix ray tracing to this many cells (for testing)
         write_output : bool, optional
             Write numberdens file (default: True)
             
@@ -457,6 +479,8 @@ class RadModel:
         References
         ----------
         Pinte et al. (2018), A&A 609, A47
+        Visser et al. (2009), A&A 503, 323 (CO shielding functions)
+        Heays et al. (2017), A&A 602, A105 (photodissociation rates)
         """
         # Resolve photochemistry flags from params if not explicitly set
         if photodissociation is None:
@@ -475,9 +499,8 @@ class RadModel:
             self.compute_nH_from_model()
         
         # Ensure we have chi from mcmono only if needed
-        # chi is required for photodissociation and photodesorption,
-        # but not for pure freeze-out cases.
-        if photodissociation or photodesorption:
+        # chi is required for photodissociation, photodesorption, and self-shielding
+        if photodissociation or photodesorption or self_shielding:
             if self.chi is None:
                 self.compute_mcmono()
         
@@ -486,12 +509,37 @@ class RadModel:
         nH = self.nH.to('cm^-3')
         Tfrz_K = Tfrz.to('K') if isinstance(Tfrz, Quantity) else Quantity(Tfrz, 'K')
         
+        # Compute effective chi (with self-shielding if enabled)
+        if self_shielding and (photodissociation or photodesorption):
+            from .healpix_columns import compute_co_shielding_healpix
+            from .visser_shielding import VisserShielding
+            
+            logger.info(f"Computing CO self-shielding (nside={nside}, b={b_kms} km/s)...")
+            visser = VisserShielding(b_kms=b_kms)
+            theta_co, chi_eff = compute_co_shielding_healpix(
+                mesh=self.model.mesh,
+                nH=nH,
+                chi=self.chi,
+                visser=visser,
+                nCO=None,  # Will use X0 * nH as guess
+                nH2=None,  # Will use XH2_guess * nH / 2
+                nside=nside,
+                b_kms=b_kms,
+                Xco_guess=float(X0),
+                XH2_guess=XH2_guess,
+                margin_dex=margin_dex,
+                max_cells=max_cells,
+            )
+            logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")
+        else:
+            chi_eff = self.chi
+        
         # Initialize abundance (dimensionless Quantity)
         X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
         
         # 1. Photodissociation (kill molecule)
         if photodissociation:
-            chi_over_nH = np.log10((self.chi / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
             mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
@@ -499,7 +547,7 @@ class RadModel:
         
         # 2. Photodesorption escape (optional)
         if photodesorption:
-            chi_over_nH = np.log10((self.chi / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
             mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
             n_pdes = np.sum(mask_pdes)
             logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
