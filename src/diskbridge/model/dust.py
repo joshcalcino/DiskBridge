@@ -288,6 +288,7 @@ class Dust(SubModel):
         # Multi-component support
         self._components: List[DustComponent] = []
         self._global_bins: Dict[str, tuple[int, int]] = {}  # bin_name -> (comp_idx, local_bin_idx)
+        self._has_region_components: bool = False
         
         # Legacy single-component attributes (for backward compatibility)
         # These now proxy to the first component when available
@@ -330,6 +331,12 @@ class Dust(SubModel):
             delta: Turbulent diffusion parameter (default: = alpha, assumes Sc ~ 1)
             mean_molecular_weight: Mean molecular weight for gas (default: 2.3 for H2)
         """
+        if getattr(self, "_has_region_components", False) and self._components:
+            raise ValueError(
+                "Cannot use global dust.set_distribution after region-based dust components "
+                "have been configured. Use region.dust.set_distribution() instead."
+            )
+
         # Pull defaults from params if not provided
         if amin is None:
             # params stores in microns, convert to meters
@@ -447,6 +454,7 @@ class Dust(SubModel):
             mean_molecular_weight: Mean molecular weight (default: 2.3)
         """
         # Determine this component's index
+        self._has_region_components = True
         component_index = len(self._components)
 
         # Pull canonical dust parameters from global params
