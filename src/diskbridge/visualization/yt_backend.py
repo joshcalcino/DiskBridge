@@ -28,15 +28,10 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 
 from .backend import VisualizationBackend
-from .dataset import DiskBridgeDataset, check_yt_available
+from .dataset import DiskBridgeDataset
 
-# Check for yt
-try:
-    import yt
-    HAS_YT = True
-except ImportError:
-    HAS_YT = False
-    yt = None
+# yt is a hard dependency; import directly
+import yt
 
 
 class Visualizer(VisualizationBackend):
@@ -84,8 +79,6 @@ class Visualizer(VisualizationBackend):
         radmodel: Optional["RadModel"] = None,
         include_dust: bool = True,
     ):
-        check_yt_available()
-        
         self.model = model
         self.radmodel = radmodel
         

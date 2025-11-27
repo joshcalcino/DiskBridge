@@ -62,7 +62,7 @@ from .profiles import (
     ProfilePlotter,
 )
 
-# Unit conversion utilities
+ # Unit conversion utilities
 from .units import (
     pint_to_unyt,
     pint_to_unyt_cgs,
@@ -70,21 +70,15 @@ from .units import (
     HAS_UNYT,
 )
 
-# yt backend (may not be available if yt not installed)
-try:
-    from .yt_backend import (
-        Visualizer,
-        YTBackend,  # Backwards compatibility alias
-        quick_slice,
-        quick_projection,
-    )
-    HAS_YT = True
-except ImportError:
-    Visualizer = None
-    YTBackend = None
-    quick_slice = None
-    quick_projection = None
-    HAS_YT = False
+# yt backend (assumed available; yt is a hard dependency)
+from .yt_backend import (
+    Visualizer,
+    YTBackend,  # Backwards compatibility alias
+    quick_slice,
+    quick_projection,
+)
+
+HAS_YT = True
 
 
 __all__ = [

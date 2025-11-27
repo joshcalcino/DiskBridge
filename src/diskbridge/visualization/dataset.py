@@ -29,26 +29,11 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 
-# Check for yt availability
-try:
-    import yt
-    from yt.loaders import load_uniform_grid
-    HAS_YT = True
-except ImportError:
-    HAS_YT = False
-    yt = None
-    load_uniform_grid = None
+# yt is a hard dependency; import directly
+import yt
+from yt.loaders import load_uniform_grid
 
 from .units import pint_to_unyt_cgs, check_unyt_available
-
-
-def check_yt_available() -> None:
-    """Raise ImportError if yt is not available."""
-    if not HAS_YT:
-        raise ImportError(
-            "yt is required for visualization. "
-            "Install it with: pip install yt"
-        )
 
 
 class DiskBridgeDataset:
@@ -106,7 +91,6 @@ class DiskBridgeDataset:
         include_dust: bool = True,
         length_unit: str = 'au',
     ):
-        check_yt_available()
         check_unyt_available()
         
         self.model = model
