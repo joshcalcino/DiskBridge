@@ -687,7 +687,7 @@ def compute_co_shielding_healpix(
     -----
     - Math-heavy sections use plain numpy arrays for numba compatibility.
     - Geometry / ray marching is delegated to SphericalHealpixRayTracer or
-      CartesianHealpixRayTracer depending on mesh.coord_system.
+    -      CartesianHealpixRayTracer depending on mesh.coord_system.
     """
 
     # Convert inputs to plain ndarrays in CGS units
@@ -794,11 +794,10 @@ def compute_co_shielding_healpix(
     logger.info("Ray integration complete. Computing shielding factors...")
 
     # Evaluate Visser shielding for all cells (vectorized over rays)
+    theta_rays_all = visser.theta("co", Nco_all, Nh2_all, b_kms=b_kms)
+    theta_mean = theta_rays_all.mean(axis=1)
     for k, idx in enumerate(candidate_idx):
-        Nco_rays = Nco_all[k, :]
-        Nh2_rays = Nh2_all[k, :]
-        theta_rays = visser.theta("co", Nco_rays, Nh2_rays, b_kms=b_kms)
-        theta_co[tuple(idx)] = float(theta_rays.mean())
+        theta_co[tuple(idx)] = float(theta_mean[k])
 
     chi_eff = chi_arr * theta_co
     
