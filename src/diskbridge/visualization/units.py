@@ -17,27 +17,11 @@ import numpy as np
 if TYPE_CHECKING:
     from diskbridge._units import Quantity
 
-# Import unyt - yt's unit system
-try:
-    import unyt
-    from unyt import unyt_array, unyt_quantity
-    HAS_UNYT = True
-except ImportError:
-    HAS_UNYT = False
-    unyt_array = None
-    unyt_quantity = None
+import unyt
+from unyt import unyt_array, unyt_quantity
 
 # Import pint from diskbridge
 from diskbridge._units import units as pint_units, Quantity as PintQuantity
-
-
-def check_unyt_available() -> None:
-    """Raise ImportError if unyt is not available."""
-    if not HAS_UNYT:
-        raise ImportError(
-            "unyt is required for visualization. "
-            "Install it with: pip install unyt"
-        )
 
 
 def pint_to_unyt(quantity: "Quantity") -> "unyt_array":
@@ -66,7 +50,6 @@ def pint_to_unyt(quantity: "Quantity") -> "unyt_array":
     >>> print(u.units)
     AU
     """
-    check_unyt_available()
     
     # Convert to base units first to ensure clean conversion
     q_base = quantity.to_base_units()
@@ -90,7 +73,6 @@ def pint_to_unyt_cgs(quantity: "Quantity") -> "unyt_array":
     unyt_array
         The equivalent unyt array in CGS units.
     """
-    check_unyt_available()
     
     # Get the magnitude in CGS
     try:
@@ -130,7 +112,6 @@ def unyt_to_pint(arr: "unyt_array", target_units: str = None) -> "Quantity":
     >>> print(q.units)
     astronomical_unit
     """
-    check_unyt_available()
     
     # Use unyt's to_pint method
     pint_q = arr.to_pint()
@@ -155,7 +136,6 @@ def get_unyt_unit(unit_str: str) -> "unyt.Unit":
     unyt.Unit
         The unyt Unit object.
     """
-    check_unyt_available()
     return unyt.Unit(unit_str)
 
 

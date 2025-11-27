@@ -18,8 +18,9 @@ from diskbridge._units import Quantity, units
 import diskbridge
 from .opacities import DustOpacityCalculator
 
-G_CGS = 6.67430e-8
-SIGMA_SB = 5.670374419e-5
+# Physical constants from config
+G_CGS = units('G')
+SIGMA_SB = units('sigma_SB')
 
 
 class RadWriter:
@@ -55,7 +56,7 @@ class RadWriter:
         
         # Track written files for symlink management
         self.written_files = {}
-        
+    
     def _get_output_dir(self, base_dir: Path, file_type: str) -> Path:
         """Get output directory for a file type.
         
@@ -74,16 +75,6 @@ class RadWriter:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
     
-    def _to_cgs(self, quantity: Quantity) -> np.ndarray:
-        """Convert Pint Quantity to CGS magnitude array.
-        
-        Args:
-            quantity: Pint Quantity to convert
-            
-        Returns:
-            NumPy array of CGS values
-        """
-        return quantity.to_base_units().magnitude
     
     def write_amr_grid(
         self,
@@ -148,13 +139,13 @@ class RadWriter:
             for name in axis_names:
                 edges = mesh.edges(name)
                 if edges is not None:
-                    edges_cgs = self._to_cgs(edges)
+                    edges_cgs = edges.to_base_units()
                     
                     # RADMC-3D expects phi from 0 to 2π
                     # FARGO uses -π to +π, so we create a uniform grid for RADMC-3D
                     if name == 'phi':
                         nphi = len(edges_cgs)
-                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi)
+                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi) * units('rad')
                     
                     for val in edges_cgs:
                         f.write(f'{val:13.6e} ')
@@ -169,28 +160,31 @@ class RadWriter:
     def write_wavelength_grid(
         self,
         output_dir: str | Path = '.',
-        wmin_micron: float = 0.1,
-        wmax_micron: float = 10000.0,
-        nwav: int = 150,
     ) -> None:
         """Write wavelength_micron.inp file.
         
         Args:
             output_dir: Directory to write the file
-            wmin_micron: Minimum wavelength in microns
-            wmax_micron: Maximum wavelength in microns
-            nwav: Number of wavelength points
         """
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'grid')
         filepath = output_dir / 'wavelength_micron.inp'
         
+        # Get parameters from params
+        wmin_micron = self.params.lambda_min_micron
+        wmax_micron = self.params.lambda_max_micron
+        nwav = self.params.n_lambda
+        
+        # Convert to microns
+        wmin = wmin_micron.to('micron').magnitude
+        wmax = wmax_micron.to('micron').magnitude
+        
         # Create logarithmically spaced wavelength grid
-        Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
+        Pw = (wmax / wmin) ** (1.0 / (nwav - 1))
         waves = np.zeros(nwav)
-        waves[0] = wmin_micron
+        waves[0] = wmin
         for i in range(1, nwav):
-            waves[i] = wmin_micron * Pw ** i
+            waves[i] = wmin * Pw ** i
         
         with open(filepath, 'w') as f:
             f.write(f'{nwav}\n')
@@ -203,55 +197,48 @@ class RadWriter:
     def write_stars(
         self,
         output_dir: str | Path = '.',
-        rstar: Optional[float] = 2.0,
-        tstar: Optional[float] = 4000.0,
-        mstar: Optional[float] = 1.0,
-        position: Tuple[float, float, float] = (0., 0., 0.),
-        wmin_micron: float = 0.1,
-        wmax_micron: float = 10000.0,
-        nwav: int = 150,
     ) -> None:
         """Write stars.inp file for stellar radiation source.
         
-        This uses format 2 with wavelength-dependent spectrum (blackbody).
-        
         Args:
             output_dir: Directory to write the file
-            rstar: Stellar radius in solar radii (default: 2.0)
-            tstar: Stellar effective temperature in K (default: 4000.0)
-            mstar: Stellar mass in solar masses (default: 1.0)
-            position: (x, y, z) position in AU (default: origin)
-            wmin_micron: Minimum wavelength in microns
-            wmax_micron: Maximum wavelength in microns
-            nwav: Number of wavelength points
         """
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'star')
         filepath = output_dir / 'stars.inp'
         
-        # Convert to CGS using Pint constants
-        rstar_cgs = (rstar * units('solar_radius')).to_base_units().magnitude
-        mstar_cgs = (mstar * units('solar_mass')).to_base_units().magnitude
-        pos_cgs = [(p * units('astronomical_unit')).to_base_units().magnitude for p in position]
-
+        # Get parameters from params and convert to CGS / microns
+        rstar_cgs = self.params.rstar_rsun.to('cm').magnitude
+        mstar_cgs = self.params.mstar_msun.to('g').magnitude
+        tstar_K = self.params.teff_K.to('K').magnitude
+        pos0 = Quantity(0.0, 'au').to('cm').magnitude
+        pos_cgs = [pos0, pos0, pos0]  # Always at origin
+        wmin = self.params.lambda_min_micron.to('micron').magnitude
+        wmax = self.params.lambda_max_micron.to('micron').magnitude
+        nwav = self.params.n_lambda
+        
         # Build wavelength grid (matches wavelength_micron.inp)
-        Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
-        waves_micron = wmin_micron * Pw ** np.arange(nwav)
+        Pw = (wmax / wmin) ** (1.0 / (nwav - 1))
+        waves_micron = wmin * Pw ** np.arange(nwav)
 
         stars = []
-        stars.append({'R_cm': rstar_cgs, 'M_g': mstar_cgs, 'T_K': float(tstar)})
+        stars.append({'R_cm': rstar_cgs, 'M_g': mstar_cgs, 'T_K': tstar_K})
 
         mdot_msun_per_yr = getattr(self.params, 'mdot', 0.0)
         if mdot_msun_per_yr > 0.0:
             f_fill = getattr(self.params, 'accretion_fill_factor', 0.01)
             f_fill = max(min(f_fill, 1.0), 1e-6)
-            m_sun_cgs = (1.0 * units('solar_mass')).to_base_units().magnitude
-            mdot_g_per_s = mdot_msun_per_yr * m_sun_cgs / (365.25 * 24.0 * 3600.0)
-            Lacc = G_CGS * mstar_cgs * mdot_g_per_s / rstar_cgs
-            r_acc = (f_fill ** 0.5) * rstar_cgs
-            Tacc = (Lacc / (4.0 * np.pi * SIGMA_SB * r_acc * r_acc)) ** 0.25
-            if Tacc > 0.0:
-                stars.append({'R_cm': r_acc, 'M_g': mstar_cgs, 'T_K': float(Tacc)})
+            # Convert constants to CGS
+            g_cgs = G_CGS.to_base_units().magnitude
+            sigma_cgs = SIGMA_SB.to_base_units().magnitude
+            m_sun_g = units('solar_mass').to('g').magnitude
+            # Compute accretion luminosity
+            mdot_cgs = mdot_msun_per_yr * m_sun_g / (365.25 * 24.0 * 3600.0)
+            Lacc_cgs = g_cgs * mstar_cgs * mdot_cgs / rstar_cgs
+            r_acc_cgs = (f_fill ** 0.5) * rstar_cgs
+            Tacc_K = (Lacc_cgs / (4.0 * np.pi * sigma_cgs * r_acc_cgs * r_acc_cgs)) ** 0.25
+            if Tacc_K > 0.0:
+                stars.append({'R_cm': r_acc_cgs, 'M_g': mstar_cgs, 'T_K': Tacc_K})
 
         with open(filepath, 'w') as f:
             f.write('2\n')
@@ -381,7 +368,7 @@ class RadWriter:
             for ibin in range(nbin):
                 bin_data = self.model.dust.bins[f"bin_{ibin}"]
                 rho_field = bin_data['density']  # Field object
-                rho_cgs = self._to_cgs(rho_field.data)
+                rho_cgs = rho_field.data.to_base_units()
                 
                 # Transpose from DiskBridge order (nrad, nsec, ncol) 
                 # to RADMC-3D order (nsec, ncol, nrad)
@@ -412,7 +399,7 @@ class RadWriter:
             for ibin in range(nbin):
                 bin_data = self.model.dust.bins[f"bin_{ibin}"]
                 rho_field = bin_data['density']  # Field object
-                rho_cgs = self._to_cgs(rho_field.data)
+                rho_cgs = rho_field.data.to_base_units()
                 
                 # Transpose from DiskBridge order (nrad, nsec, ncol) 
                 # to RADMC-3D order (nsec, ncol, nrad)
@@ -470,12 +457,9 @@ class RadWriter:
     
     def compute_and_write_dust_opacities(
         self,
-        output_dir: str | Path = '.',
+        output_dir: str | Path,
         optconst_file: Optional[str | Path] = None,
         grain_density: Optional[float] = None,
-        wmin_micron: float = 0.1,
-        wmax_micron: float = 10000.0,
-        nwav: int = 200,
         ntheta: int = 181,
         scattering_mode: Optional[int] = None,
         logawidth: float = 0.05,
@@ -492,9 +476,6 @@ class RadWriter:
             output_dir: Directory to write files
             optconst_file: Path to optical constants file (.lnk format)
             grain_density: Grain material density in g/cm^3 (default: species-dependent)
-            wmin_micron: Minimum wavelength in microns
-            wmax_micron: Maximum wavelength in microns
-            nwav: Number of wavelength points
             ntheta: Number of scattering angles
             scattering_mode: Scattering mode (>=3 for full matrix)
             logawidth: Width parameter for size distribution smoothing (default: 0.05)
@@ -536,6 +517,11 @@ class RadWriter:
         
         species_base = species
         
+        # Get wavelength parameters from params
+        wmin_micron = self.params.lambda_min_micron.to('micron').magnitude
+        wmax_micron = self.params.lambda_max_micron.to('micron').magnitude
+        nwav = self.params.n_lambda
+        
         # Create wavelength grid in cm
         Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
         waves_micron = wmin_micron * Pw ** np.arange(nwav)
@@ -553,7 +539,7 @@ class RadWriter:
             bin_data = self.model.dust.bins[f"bin_{ibin}"]
             
             # Get grain size in CGS
-            grain_size_cgs = self._to_cgs(bin_data.size_min)
+            grain_size_cgs = bin_data.size_min.to_base_units().magnitude
             
             logger.debug(f"Computing opacity for bin {ibin}: "
                          f"size = {grain_size_cgs:.6e} cm")
@@ -635,21 +621,12 @@ class RadWriter:
         if setthreads is None:
             setthreads = self.params.nbcores
         
-        # Determine wavelength grid from kwargs or global parameters
-        wmin = kwargs.get('wmin_micron', self.params.lambda_min_micron)
-        wmax = kwargs.get('wmax_micron', self.params.lambda_max_micron)
-        nwav = kwargs.get('nwav', self.params.n_lambda)
-
         # Write grid files
         self.write_amr_grid(output_dir)
-        self.write_wavelength_grid(output_dir, wmin_micron=wmin, wmax_micron=wmax, nwav=nwav)
+        self.write_wavelength_grid(output_dir)
         
         # Write stellar source
-        wmin = wmin
-        wmax = wmax
-        nwav = nwav
-        self.write_stars(output_dir, rstar=rstar, tstar=tstar, mstar=mstar,
-                        wmin_micron=wmin, wmax_micron=wmax, nwav=nwav)
+        self.write_stars(output_dir)
         
         # Write dust data
         if self.model.dust is not None and self.model.dust.nbin > 0:
@@ -658,9 +635,7 @@ class RadWriter:
             
             if optconst_file is not None:
                 op_kwargs = {k: v for k, v in kwargs.items() 
-                             if k in ['wmin_micron', 'wmax_micron', 'nwav', 'ntheta', 'logawidth', 'na']}
-                op_kwargs.setdefault('wmin_micron', wmin)
-                op_kwargs.setdefault('wmax_micron', wmax)
+                             if k in ['ntheta', 'logawidth', 'na']}
                 self.compute_and_write_dust_opacities(
                     output_dir,
                     optconst_file=optconst_file,
@@ -767,9 +742,9 @@ class RadWriter:
         output_dir = self._get_output_dir(base_dir, 'gas')
         
         # Convert to cm/s
-        vr_cgs = self._to_cgs(vr.to('cm/s'))
-        vtheta_cgs = self._to_cgs(vtheta.to('cm/s'))
-        vphi_cgs = self._to_cgs(vphi.to('cm/s'))
+        vr_cgs = vr.to('cm/s')
+        vtheta_cgs = vtheta.to('cm/s')
+        vphi_cgs = vphi.to('cm/s')
         
         # Transpose from DiskBridge order to RADMC-3D order
         # This matches the approach used in write_dust_density

@@ -102,21 +102,6 @@ class RadData:
         self.vturb: Optional[Quantity] = None
         self.ndens_mol: Optional[Quantity] = None
         self.mean_intensity: Optional[Quantity] = None
-        
-    def _to_cgs(self, quantity: Quantity) -> np.ndarray:
-        """Convert Pint Quantity to CGS magnitude array.
-        
-        Parameters
-        ----------
-        quantity : Quantity
-            Pint Quantity to convert
-            
-        Returns
-        -------
-        np.ndarray
-            NumPy array of CGS values
-        """
-        return quantity.to_base_units().magnitude
     
     def _isBinary(self, fname: str | Path) -> bool:
         """Check if a file is in binary format.

@@ -18,11 +18,12 @@ from pathlib import Path
 import numpy as np
 
 from diskbridge._logging import logger
+from diskbridge._units import units, Quantity
 
-# Physical constants (CGS)
-H_PLANCK = 6.62607015e-27  # erg s
-C_LIGHT = 2.99792458e10    # cm/s
-K_BOLTZMANN = 1.380649e-16  # erg/K
+# Physical constants from config
+H_PLANCK = units('h')
+C_LIGHT = units('c')
+K_BOLTZMANN = units('k_B')
 
 
 class RadMolecule:

@@ -28,18 +28,19 @@ from .data import RadData
 from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks, run_radmc3d_command
 import diskbridge 
 
-# Physical constants (CGS)
-C_LIGHT = 2.99792458e10  # cm/s
-M_H = 1.6735575e-24  # g
-MU_H = 2.3  # mean molecular weight for H2 + He (protoplanetary disk standard)
-SIGMA_SB = 5.670374419e-5  # Stefan-Boltzmann constant (erg cm^-2 s^-1 K^-4)
-U_DRAINE = 9.0e-14
+# Physical constants from config
+C_LIGHT = units('c')  # Speed of light
+M_H = units('m_H')  # Hydrogen mass
+SIGMA_SB = units('sigma_SB')  # Stefan-Boltzmann constant
 
-# Default Pinte+18 thresholds
-T_FRZ_DEFAULT = 21.0  # K
-EPS_DEFAULT = 8e-5  # freeze-out survival fraction
-LOG_CHI_OVER_NH_PDISS = -6.0  # photodissociation threshold
-LOG_CHI_OVER_NH_PDES = -7.0  # photodesorption threshold
+# Draine (1978) UV field constant
+U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
+
+# Default Pinte+18 thresholds (model-specific, as Quantities)
+T_FRZ_DEFAULT = Quantity(21.0, 'K')  # freeze-out temperature
+EPS_DEFAULT = Quantity(8e-5, 'dimensionless')  # freeze-out survival fraction
+LOG_CHI_OVER_NH_PDISS = Quantity(-6.0, 'dimensionless')  # photodissociation threshold
+LOG_CHI_OVER_NH_PDES = Quantity(-7.0, 'dimensionless')  # photodesorption threshold
 
 
 class RadModel:
@@ -128,21 +129,6 @@ class RadModel:
         
         # Track active symlinks for cleanup
         self._active_symlinks: list[Path] = []
-        
-    def _to_cgs(self, quantity: Quantity) -> np.ndarray:
-        """Convert Pint Quantity to CGS magnitude array.
-        
-        Parameters
-        ----------
-        quantity : Quantity
-            Pint Quantity to convert
-            
-        Returns
-        -------
-        np.ndarray
-            NumPy array of CGS values
-        """
-        return quantity.to_base_units().magnitude
     
     def create_symlinks(self) -> None:
         """Create symlinks to organized input files in the model directory.
@@ -398,10 +384,13 @@ class RadModel:
         if 'density' not in self.model.gas:
             raise KeyError("Model has no gas density field")
         
-        # Get gas density in CGS
+        # Get gas density
         rho_gas = self.model.gas['density'].data.to('g/cm^3')
+        # Mass per H nucleus including He - should be read from simulation data
+        # For now using typical protoplanetary disk value
+        # TODO: Read from simulation data or params
         MU_HNUC = 1.4  # mass per H nucleus including He
-        nH_cgs = rho_gas.magnitude / (MU_HNUC * M_H)
+        nH = rho_gas / (MU_HNUC * M_H)
         
         # Model gas density has axis_order ('r', 'phi', 'theta') for spherical coords
         # but RADMC-3D/RadData uses ('r', 'theta', 'phi')
@@ -411,12 +400,13 @@ class RadModel:
             axis_order = field.axis_order
             # For spherical: convert (r, phi, theta) -> (r, theta, phi)
             if axis_order == ('r', 'phi', 'theta'):
-                nH_cgs = np.transpose(nH_cgs, (0, 2, 1))  # (r, phi, theta) -> (r, theta, phi)
+                # Transpose - pint quantities can be transposed directly
+                nH = np.transpose(nH, (0, 2, 1))  # (r, phi, theta) -> (r, theta, phi)
         
-        self.nH = Quantity(nH_cgs, 'cm^-3')
+        self.nH = nH.to('cm^-3')
         
         logger.info(f"Computed nH from gas density: "
-                   f"min={np.min(nH_cgs):.2e} cm^-3, max={np.max(nH_cgs):.2e} cm^-3")
+                   f"min={np.min(self.nH):.2e}, max={np.max(self.nH):.2e}")
         
         return self.nH
     
@@ -425,7 +415,7 @@ class RadModel:
         molecule: str = 'co',
         X0: float = 5e-5,
         eps: float = EPS_DEFAULT,
-        Tfrz: float = T_FRZ_DEFAULT,
+        Tfrz: Quantity = T_FRZ_DEFAULT,
         photodissociation: Optional[bool] = None,
         freezeout: Optional[bool] = None,
         photodesorption: Optional[bool] = None,
@@ -446,8 +436,8 @@ class RadModel:
             Initial abundance X/nH (default: 5e-5)
         eps : float, optional
             Depletion factor for freeze-out (default: 1e-3)
-        Tfrz : float, optional
-            Freeze-out temperature in K (default: 20 K)
+        Tfrz : Quantity, optional
+            Freeze-out temperature (default: 21 K)
         photodissociation : bool, optional
             Apply photodissociation (default: True)
         freezeout : bool, optional
@@ -487,29 +477,30 @@ class RadModel:
         # Ensure we have chi from mcmono only if needed
         # chi is required for photodissociation and photodesorption,
         # but not for pure freeze-out cases.
-        chi = None
         if photodissociation or photodesorption:
             if self.chi is None:
                 self.compute_mcmono()
-            chi = self.chi.magnitude
         
-        # Get arrays in correct units
-        T = self.temperature.to('K').magnitude
-        nH = self.nH.to('cm^-3').magnitude
+        # Get temperature and nH as Quantities
+        T = self.temperature.to('K')
+        nH = self.nH.to('cm^-3')
+        Tfrz_K = Tfrz.to('K') if isinstance(Tfrz, Quantity) else Quantity(Tfrz, 'K')
         
-        # Initialize abundance
-        X = np.full_like(T, float(X0), dtype=float)
+        # Initialize abundance (dimensionless Quantity)
+        X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
         
         # 1. Photodissociation (kill molecule)
         if photodissociation:
-            mask_pdiss = (np.log10(chi / (nH + 1e-99)) > LOG_CHI_OVER_NH_PDISS)
+            chi_over_nH = np.log10((self.chi / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
             logger.info(f"Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)")
         
         # 2. Photodesorption escape (optional)
         if photodesorption:
-            mask_pdes = (np.log10(chi / (nH + 1e-99)) > LOG_CHI_OVER_NH_PDES)
+            chi_over_nH = np.log10((self.chi / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
             n_pdes = np.sum(mask_pdes)
             logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
         else:
@@ -517,26 +508,22 @@ class RadModel:
         
         # 3. Freeze-out (reduce abundance)
         if freezeout:
-            mask_frz = (T < Tfrz) & ~mask_pdes  # Don't freeze where photodesorption occurs
-            X[mask_frz] *= eps
+            mask_frz = (T < Tfrz_K) & ~mask_pdes  # Don't freeze where photodesorption occurs
+            X[mask_frz] *= EPS_DEFAULT
             n_frz = np.sum(mask_frz)
             logger.info(f"Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)")
         
         # Compute number density
         n_mol = X * nH
         
-        # Store as Quantities
-        X_qty = Quantity(X, 'dimensionless')
-        n_mol_qty = Quantity(n_mol, 'cm^-3')
-        
         logger.info(f"Computed {molecule} abundance: "
-                   f"X_mean={np.mean(X):.2e}, n_mean={np.mean(n_mol):.2e} cm^-3")
+                   f"X_mean={np.mean(X):.2e}, n_mean={np.mean(n_mol):.2e}")
         
         # Write output file
         if write_output:
-            self.write_numberdens(molecule, n_mol_qty)
+            self.write_numberdens(molecule, n_mol)
         
-        return X_qty, n_mol_qty
+        return X, n_mol
     
     def write_numberdens(
         self,
@@ -557,8 +544,8 @@ class RadModel:
         """
         mol_lower = molecule.lower()
         
-        # Convert to CGS
-        n_cgs = number_density.to('cm^-3').magnitude
+        # Get number density in cm^-3 (pint will handle units)
+        n_dens = number_density.to('cm^-3')
         
         # Get mesh shape
         mesh = self.model.mesh
@@ -576,7 +563,8 @@ class RadModel:
         # Create inputs_dir if it doesn't exist
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
         
-        n_radmc = np.transpose(n_cgs, (2, 1, 0))
+        # Transpose for RADMC-3D order and write magnitudes to file
+        n_radmc = np.transpose(n_dens, (2, 1, 0))
         if binary:
             filepath = self.inputs_dir / f'numberdens_{mol_lower}.binp'
             
@@ -746,8 +734,6 @@ class RadModel:
             n_wavelengths = self.params.uv_n_wavelengths
         
         # Validate UV range
-        uv_min_cm = uv_min_nm * 1e-7
-        uv_max_cm = uv_max_nm * 1e-7
         u_draine = U_DRAINE
         
         logger.info(f"UV field configuration: {uv_min_nm:.1f}-{uv_max_nm:.1f} nm, {n_wavelengths} wavelengths")
@@ -769,38 +755,40 @@ class RadModel:
                 nwav = int(f.readline().strip())
                 
                 # Read wavelengths (all on one line, space-separated, in Hz)
-                freq_hz = np.array([float(x) for x in f.readline().split()])
+                freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
                 
-                # Convert frequency (Hz) to wavelength (cm): lambda = c / nu
-                lam_cm = C_LIGHT / freq_hz
+                # Convert frequency to wavelength: lambda = c / nu
+                lam = C_LIGHT / freq_hz
                 
                 # Read mean intensity values
                 # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
                 j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-                j_lambda = j_flat.reshape((nwav, nrcells)).T  # Transpose to get (nrcells, nwav)
+                j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')  # Attach units
             
             nx, ny, nz = self.data._getMeshShape()
             self.mean_intensity = j_lambda
             
             # Compute chi by integrating over UV band in frequency space
-            uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
+            uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
             if not np.any(uv_mask):
                 raise ValueError(
                     f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) in existing mean intensity file. '
-                    f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
+                    f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
                 )
             
             j_uv = j_lambda[:, uv_mask]
-
             nu_uv = freq_hz[uv_mask]
-            u_nu = 4.0 * np.pi * j_uv / C_LIGHT
+            u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
+            # Sort by frequency for integration
             sort_idx = np.argsort(nu_uv)
             nu_sorted = nu_uv[sort_idx]
             u_nu_sorted = u_nu[:, sort_idx]
+            # Integrate energy density over frequency
             u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
-            chi_flat = u_band / u_draine
+            # Compute chi (dimensionless)
+            chi_flat = (u_band / u_draine).to('dimensionless')
             chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
-            self.chi = Quantity(chi_3d, 'dimensionless')
+            self.chi = chi_3d
             
             logger.info(f"Loaded chi from {np.sum(uv_mask)} UV wavelengths: "
                        f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")
@@ -811,8 +799,8 @@ class RadModel:
         
         # Create mcmono_wavelength_micron.inp with UV wavelength range
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
-        uv_lam_nm = np.linspace(uv_min_nm, uv_max_nm, n_wavelengths)
-        uv_lam_micron = uv_lam_nm / 1000.0  # Convert to microns
+        uv_lam = np.linspace(uv_min_nm, uv_max_nm, n_wavelengths)
+        uv_lam_micron = uv_lam.to('micron')  # Convert to microns for file writing
         
         with open(mcmono_wav_file, 'w') as f:
             f.write(f'{len(uv_lam_micron)}\n')  # Number of wavelengths
@@ -902,17 +890,17 @@ class RadModel:
             nwav = int(f.readline().strip())
             
             # Read wavelengths (all on one line, space-separated, in Hz)
-            freq_hz = np.array([float(x) for x in f.readline().split()])
+            freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
             
-            # Convert frequency (Hz) to wavelength (cm): lambda = c / nu
-            lam_cm = C_LIGHT / freq_hz
+            # Convert frequency to wavelength: lambda = c / nu
+            lam = C_LIGHT / freq_hz
             
             # Read mean intensity values (nwav * nrcells values, one per line)
             # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
             j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
             
             # Reshape to (nrcells, nwav) - data is wavelength-major, so reshape and transpose
-            j_lambda = j_flat.reshape((nwav, nrcells)).T
+            j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')  # Attach units
         
         # Store wavelengths and mean intensity
         nx, ny, nz = self.data._getMeshShape()
@@ -920,27 +908,30 @@ class RadModel:
         
         # Compute chi by integrating over UV band in frequency space
         # Following Pinte et al. 2018 and fargo2radmc3d implementation
-        uv_mask = (lam_cm >= uv_min_cm) & (lam_cm <= uv_max_cm)
+        uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
         
         if not np.any(uv_mask):
             raise ValueError(
                 f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) found in mean intensity file. '
-                f'Wavelength range: {lam_cm.min()*1e7:.1f}-{lam_cm.max()*1e7:.1f} nm'
+                f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
             )
         
         j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
 
         nu_uv = freq_hz[uv_mask]
-        u_nu = 4.0 * np.pi * j_uv / C_LIGHT
+        u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
+        # Sort by frequency for integration
         sort_idx = np.argsort(nu_uv)
         nu_sorted = nu_uv[sort_idx]
         u_nu_sorted = u_nu[:, sort_idx]
+        # Integrate energy density over frequency
         u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
-        chi_flat = u_band / u_draine  # Shape: (nrcells,)
+        # Compute chi (dimensionless)
+        chi_flat = (u_band / u_draine).to('dimensionless')
         
         # Reshape to 3D grid
         chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
-        self.chi = Quantity(chi_3d, 'dimensionless')
+        self.chi = chi_3d
         
         logger.info(f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm): "
                    f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")

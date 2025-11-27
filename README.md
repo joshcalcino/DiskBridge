@@ -80,3 +80,10 @@ DiskBridge was not written from scratch. It builds on and borrows ideas
 from the following public code bases:
 - `fargo2radmc3d`: https://github.com/charango/fargo2radmc3d
 - `radmc3d-2.0` (including `radmc3dPy`): https://github.com/dullemond/radmc3d-2.0
+
+
+## TODO:
+
+- make units in parameter file more consistent (e.g. dust size, wavelengths, all in um)
+- make radmc3d submodule use pint quantities 
+- mu_h should be read from simulation data

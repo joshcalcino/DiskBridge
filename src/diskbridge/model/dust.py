@@ -339,17 +339,18 @@ class Dust(SubModel):
 
         # Pull defaults from params if not provided
         if amin is None:
-            # params stores in microns, convert to meters
-            amin = params.amin * units('micron')
+            # params.amin is already a Quantity in microns
+            amin = params.amin
         if amax is None:
-            # params stores in microns, convert to meters
-            amax = params.amax * units('micron')
+            # params.amax is already a Quantity in microns
+            amax = params.amax
         if nbin is None:
             nbin = params.nbins
         if power_index is None:
             power_index = params.pindex
         if grain_density is None:
-            grain_density = params.grain_density * units('g/cm^3')
+            # params.grain_density is already a Quantity in g/cm^3
+            grain_density = params.grain_density
         if dust_to_gas_ratio is None:
             dust_to_gas_ratio = params.dust_to_gas_ratio
         
@@ -468,15 +469,15 @@ class Dust(SubModel):
 
         # Use canonical per-component values if not explicitly provided
         if amin is None:
-            amin = canon['amin'][component_index] * units('micron')
+            amin = canon['amin'][component_index]
         if amax is None:
-            amax = canon['amax'][component_index] * units('micron')
+            amax = canon['amax'][component_index]
         if nbin is None:
             nbin = int(canon['nbins'][component_index])
         if power_index is None:
             power_index = float(canon['pindex'][component_index])
         if grain_density is None:
-            grain_density = canon['grain_density'][component_index] * units('g/cm^3')
+            grain_density = canon['grain_density'][component_index]
         if dust_to_gas_ratio is None:
             dust_to_gas_ratio = float(canon['dust_to_gas_ratio'][component_index])
         

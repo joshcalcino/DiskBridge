@@ -4,6 +4,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Union, List, Optional, Dict, get_origin, get_args, get_type_hints
 
+from ._units import Quantity, units
+
 
 # Default params file shipped with the package
 DEFAULT_PARAMS_FILE = Path(__file__).parent / "params.txt"
@@ -18,19 +20,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 class Params:
     # simulation / photons
     nbcores: int
-    nphot_thermal: float
-    nphot_scat: float
-    nphot_mono: float
+    nphot_thermal: int
+    nphot_scat: int
+    nphot_mono: int
 
     # wavelengths
     n_lambda: int
-    lambda_min_micron: float
-    lambda_max_micron: float
+    lambda_min_micron: Quantity
+    lambda_max_micron: Quantity
 
     # map
     nbpixels: int
-    size_au: float
-    distance_pc: float
+    size_au: Quantity
+    distance_pc: Quantity
     inclination: Union[float, List[float]]
     posangle: float
 
@@ -38,12 +40,12 @@ class Params:
     scat_mode: int
 
     # dust_sizes (can be scalar or list for multi-component dust)
-    amin: Union[float, List[float]]
-    amax: Union[float, List[float]]
+    amin: Union[Quantity, List[Quantity]]
+    amax: Union[Quantity, List[Quantity]]
     pindex: Union[float, List[float]]
     dust_to_gas_ratio: Union[float, List[float]]
     nbins: Union[int, List[int]]
-    grain_density: Union[float, List[float]]
+    grain_density: Union[Quantity, List[Quantity]]
 
     # opacity (can be scalar or list for multi-component dust)
     species: Union[str, List[str]]
@@ -53,20 +55,20 @@ class Params:
     gasspecies: str
     iline: int
     abundance: float
-    widthkms: float
+    widthkms: Quantity
     nline: int
-    turbvel_ms: float
+    turbvel_ms: Quantity
     photodissociation: bool
     freezeout: bool
     photodesorption: bool
-    uv_min_nm: float
-    uv_max_nm: float
+    uv_min_nm: Quantity
+    uv_max_nm: Quantity
     uv_n_wavelengths: int
 
     # star
-    rstar_rsun: float
-    teff_K: float
-    mstar_msun: float
+    rstar_rsun: Quantity
+    teff_K: Quantity
+    mstar_msun: Quantity
 
     mdot: float
     accretion_fill_factor: float
@@ -102,6 +104,28 @@ def _parse_param_file(path: Path) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Parameter to unit mapping
+# ---------------------------------------------------------------------------
+
+# Map parameter names to their expected units
+PARAM_UNITS = {
+    'lambda_min_micron': 'micron',
+    'lambda_max_micron': 'micron',
+    'size_au': 'astronomical_unit',
+    'distance_pc': 'pc',
+    'amin': 'micron',
+    'amax': 'micron',
+    'grain_density': 'g/cm^3',
+    'widthkms': 'km/s',
+    'turbvel_ms': 'm/s',
+    'uv_min_nm': 'nm',
+    'uv_max_nm': 'nm',
+    'rstar_rsun': 'solar_radius',
+    'teff_K': 'K',
+    'mstar_msun': 'solar_mass',
+}
+
+# ---------------------------------------------------------------------------
 # Type casting
 # ---------------------------------------------------------------------------
 
@@ -110,7 +134,7 @@ def _parse_bool(raw: str) -> bool:
     return raw in ("1", "true", "t", "yes", "y")
 
 
-def _parse_scalar(raw: str, target_type):
+def _parse_scalar(raw: str, target_type, param_name: str = ''):
     raw = raw.strip()
     if target_type is bool:
         return _parse_bool(raw)
@@ -120,14 +144,20 @@ def _parse_scalar(raw: str, target_type):
         return float(raw)
     if target_type is str:
         return raw
+    # Handle Quantity type
+    if target_type is Quantity or (hasattr(target_type, '__origin__') and target_type.__origin__ is Quantity):
+        # Get the unit for this parameter
+        unit_str = PARAM_UNITS.get(param_name, 'dimensionless')
+        value = float(raw)
+        return Quantity(value, unit_str)
     return raw
 
 
-def _parse_value(raw: str, target_type):
+def _parse_value(raw: str, target_type, param_name: str = ''):
     raw = raw.split("#", 1)[0].strip()
     origin = get_origin(target_type)
 
-    # Union[T, List[T]] support (e.g. Union[float, List[float]] or Union[str, List[str]])
+    # Union[T, List[T]] support (e.g. Union[Quantity, List[Quantity]])
     if origin is Union:
         args = get_args(target_type)
         list_type = next((t for t in args if get_origin(t) is list or t is list), None)
@@ -145,12 +175,12 @@ def _parse_value(raw: str, target_type):
                 vals = raw.strip("[]")
                 if not vals:
                     return []
-                return [_parse_scalar(part.strip(), inner) for part in vals.split(",")]
+                return [_parse_scalar(part.strip(), inner, param_name) for part in vals.split(",")]
             else:
                 # Parse as scalar - find the non-list type in the Union
                 scalar_type = next((t for t in args if get_origin(t) is not list and t is not list), None)
                 if scalar_type:
-                    return _parse_scalar(raw, scalar_type)
+                    return _parse_scalar(raw, scalar_type, param_name)
                 # Fallback
                 return raw
 
@@ -160,9 +190,9 @@ def _parse_value(raw: str, target_type):
         vals = raw.strip("[]")
         if not vals:
             return []
-        return [_parse_scalar(part.strip(), inner) for part in vals.split(",")]
+        return [_parse_scalar(part.strip(), inner, param_name) for part in vals.split(",")]
 
-    return _parse_scalar(raw, target_type)
+    return _parse_scalar(raw, target_type, param_name)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +228,7 @@ def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
         raw = values[key]
         # Use the resolved type from type_hints, not field.type which may be a string
         field_type = type_hints[key]
-        parsed = _parse_value(raw, field_type)
+        parsed = _parse_value(raw, field_type, param_name=key)
         kwargs[key] = parsed
 
     params = Params(**kwargs)
@@ -261,5 +291,5 @@ def canonicalize_dust_params(params_obj: Params) -> dict:
     return canonical
 
 
-# Initialize once on import using only the defaults
-params = read_params(None)
+# Params will be initialized in __init__.py after add_units() is called
+params = None  # type: ignore
