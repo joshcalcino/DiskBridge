@@ -1,6 +1,6 @@
 """yt-based visualization backend for DiskBridge.
 
-This module provides the YTBackend class that implements visualization
+This module provides the Visualizer class that implements visualization
 methods using yt-project. It supports:
 
 - Slice plots (constant phi, theta, or r)
@@ -39,10 +39,10 @@ except ImportError:
     yt = None
 
 
-class YTBackend(VisualizationBackend):
-    """Visualization backend using yt-project.
+class Visualizer(VisualizationBackend):
+    """Main visualization class for DiskBridge using yt-project.
     
-    This backend creates visualizations from DiskBridge Model and RadModel
+    This class creates visualizations from DiskBridge Model and RadModel
     objects using yt's plotting infrastructure. It handles the complexity
     of spherical coordinates and data shape transformations.
     
@@ -64,18 +64,18 @@ class YTBackend(VisualizationBackend):
         
     Examples
     --------
-    >>> from diskbridge.visualization import YTBackend
+    >>> from diskbridge.visualization import Visualizer
     >>> 
-    >>> backend = YTBackend(model, radmodel)
+    >>> viz = Visualizer(model, radmodel)
     >>> 
     >>> # Midplane slice
-    >>> fig = backend.slice(('gas', 'density'), axis='phi')
+    >>> fig = viz.slice(('gas', 'density'), axis='phi')
     >>> 
     >>> # Face-on projection
-    >>> fig = backend.projection(('gas', 'density'), axis='theta')
+    >>> fig = viz.projection(('gas', 'density'), axis='theta')
     >>> 
     >>> # Half-disk R-z slice
-    >>> fig = backend.azimuthal_slice(('gas', 'temperature'), half_only=True)
+    >>> fig = viz.azimuthal_slice(('gas', 'temperature'), half_only=True)
     """
     
     def __init__(
@@ -481,8 +481,8 @@ def quick_slice(
     -------
     matplotlib.figure.Figure
     """
-    backend = YTBackend(model, radmodel)
-    return backend.slice(field, axis=axis, output=output, **kwargs)
+    viz = Visualizer(model, radmodel)
+    return viz.slice(field, axis=axis, output=output, **kwargs)
 
 
 def quick_projection(
@@ -512,5 +512,9 @@ def quick_projection(
     -------
     matplotlib.figure.Figure
     """
-    backend = YTBackend(model, radmodel)
-    return backend.projection(field, axis=axis, output=output, **kwargs)
+    viz = Visualizer(model, radmodel)
+    return viz.projection(field, axis=axis, output=output, **kwargs)
+
+
+# Backwards compatibility alias
+YTBackend = Visualizer

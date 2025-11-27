@@ -12,14 +12,14 @@ yt-project as the primary backend. It supports:
 Quick Start
 -----------
 >>> import diskbridge
->>> from diskbridge.visualization import YTBackend, create_dataset
+>>> from diskbridge.visualization import Visualizer, create_dataset
 >>> 
 >>> # Load model
 >>> model = diskbridge.load_model('data/', file_n=10)
 >>> model.puff_up_model(n=64)
 >>> 
->>> # Create visualization backend
->>> viz = YTBackend(model)
+>>> # Create visualizer
+>>> viz = Visualizer(model)
 >>> 
 >>> # Create plots
 >>> fig1 = viz.azimuthal_slice(('gas', 'density'), half_only=True)
@@ -32,7 +32,7 @@ With RADMC-3D Data
 >>> radmodel = RadModel(model, model_dir='radmc_output/')
 >>> radmodel.read_temperature()
 >>> 
->>> viz = YTBackend(model, radmodel)
+>>> viz = Visualizer(model, radmodel)
 >>> fig = viz.azimuthal_slice(('gas', 'temperature'))
 
 Using yt Directly
@@ -42,7 +42,6 @@ Using yt Directly
 >>> 
 >>> ds = create_dataset(model, radmodel)
 >>> slc = yt.SlicePlot(ds, 'phi', ('gas', 'density'))
->>> slc.set_xlim(0, None)  # Half-disk view
 >>> slc.save('density_slice.png')
 """
 
@@ -74,12 +73,14 @@ from .units import (
 # yt backend (may not be available if yt not installed)
 try:
     from .yt_backend import (
-        YTBackend,
+        Visualizer,
+        YTBackend,  # Backwards compatibility alias
         quick_slice,
         quick_projection,
     )
     HAS_YT = True
 except ImportError:
+    Visualizer = None
     YTBackend = None
     quick_slice = None
     quick_projection = None
@@ -91,8 +92,9 @@ __all__ = [
     'VisualizationBackend',
     'DiskBridgeDataset',
     'create_dataset',
-    # Backend
-    'YTBackend',
+    # Main visualizer
+    'Visualizer',
+    'YTBackend',  # Backwards compatibility
     # Profiles
     'azimuthal_average',
     'compute_radial_profile',
