@@ -263,31 +263,22 @@ class RadMolecule:
         """
         if temp is None:
             if tmin is None or tmax is None or ntemp is None:
-                raise ValueError(
-                    'Must provide either temp or (tmin, tmax, ntemp)'
-                )
-            
-            if tlog:
-                self.temp = tmin * (tmax / tmin) ** (np.arange(ntemp) / (ntemp - 1))
-            else:
-                self.temp = tmin + (tmax - tmin) * (np.arange(ntemp) / (ntemp - 1))
+                raise ValueError('Must provide either temp or (tmin, tmax, ntemp)')
+            grid = (tmin * (tmax / tmin) ** (np.arange(ntemp) / (ntemp - 1))
+                    if tlog else
+                    tmin + (tmax - tmin) * (np.arange(ntemp) / (ntemp - 1)))
+            self.temp = grid * units('K')
         else:
-            # Convert input to numpy array
-            if isinstance(temp, (float, int)):
-                self.temp = np.array([temp], dtype=np.float64)
-            elif isinstance(temp, (list, tuple)):
-                self.temp = np.array(temp, dtype=np.float64)
-            elif isinstance(temp, np.ndarray):
-                self.temp = temp.astype(np.float64)
+            if isinstance(temp, Quantity):
+                self.temp = temp.to('K')
             else:
-                raise TypeError(
-                    'temp must be a float, list, tuple, or numpy array'
-                )
+                arr = np.array([temp], dtype=np.float64) if isinstance(temp, (float, int)) else np.array(temp, dtype=np.float64)
+                self.temp = arr * units('K')
         
-        # Compute partition function
-        self.pfunc = np.zeros(self.temp.shape[0], dtype=np.float64)
-        for it, T in enumerate(self.temp):
-            x = (self.energy / (k_B * T)).to_base_units().magnitude
+        # Compute partition function (pfunc is dimensionless floats)
+        self.pfunc = np.zeros(len(self.temp), dtype=np.float64)
+        for it in range(len(self.temp)):
+            x = (self.energy / (k_B * self.temp[it])).to('dimensionless').magnitude
             self.pfunc[it] = np.sum(self.wgt * np.exp(-x))
         
         logger.info(f"Computed partition function for {len(self.temp)} temperatures: "
@@ -351,19 +342,19 @@ class RadMolecule:
             If neither frequency nor wavelength range is specified
         """
         if freq_min is not None or freq_max is not None:
-            # Use frequency range
+            # Use frequency range (inputs in Hz)
             mask = np.ones(self.nlin, dtype=bool)
             if freq_min is not None:
-                mask &= self.freq >= freq_min
+                mask &= self.freq >= freq_min * units('Hz')
             if freq_max is not None:
-                mask &= self.freq <= freq_max
+                mask &= self.freq <= freq_max * units('Hz')
         elif lam_min is not None or lam_max is not None:
-            # Use wavelength range
+            # Use wavelength range (inputs in microns)
             mask = np.ones(self.nlin, dtype=bool)
             if lam_min is not None:
-                mask &= self.lam >= lam_min
+                mask &= self.lam >= lam_min * units('micron')
             if lam_max is not None:
-                mask &= self.lam <= lam_max
+                mask &= self.lam <= lam_max * units('micron')
         else:
             raise ValueError('Must specify either frequency or wavelength range')
         
