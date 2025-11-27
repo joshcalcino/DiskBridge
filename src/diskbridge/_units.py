@@ -21,8 +21,15 @@ def add_units(config: Union[str, Path, None] = None) -> None:
         Path to a TOML config. If None, use the package default.
     """
     conf = read_config(filename=config)
-    for unit, definition in conf.get("units", {}).get("definitions", {}).items():
+    units_conf = conf.get("units", {})
+
+    # Custom unit definitions
+    for unit, definition in units_conf.get("definitions", {}).items():
         units.define(f"{unit} = {definition}")
+
+    # Dimensionful constants defined in config.toml under [units.constants]
+    for const, definition in units_conf.get("constants", {}).items():
+        units.define(f"{const} = {definition}")
 
 
 def array_units(config: Union[str, Path, None] = None) -> Dict[str, str]:

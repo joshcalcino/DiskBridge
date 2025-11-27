@@ -26,6 +26,16 @@ earth_mass = "5.979e24 kg"
 earth_radius = "6.371315e6 m"
 jupiter_mass = "1.89813e27 kg"
 jupiter_radius = "7.1492e7 m"
+pc = "3.08567758e16 m"
+au = "1.49597871e11 m"
+
+[units.constants]
+G = "6.67430e-8 cm**3 / (g s**2)"
+sigma_SB = "5.670374419e-5 erg / (cm**2 s K**4)"
+c = "2.99792458e10 cm/s"
+m_H = "1.6735575e-24 g"
+h = "6.62607015e-27 erg s"
+k_B = "1.380649e-16 erg/K"
 
 
 [arrays.dimensions]
@@ -55,7 +65,3 @@ pressure = "pascal"
 temperature = "kelvin"
 time = "s"
 velocity = "m / s"
-
-
-[dependencies]
-scipy = ">=1.8"
