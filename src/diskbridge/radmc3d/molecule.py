@@ -20,10 +20,8 @@ import numpy as np
 from diskbridge._logging import logger
 from diskbridge._units import units, Quantity
 
-# Physical constants from config
-H_PLANCK = units('h')
-C_LIGHT = units('c')
-K_BOLTZMANN = units('k_B')
+# Physical constants from config (Pint Quantities)
+h = units('h'); c = units('c'); k_B = units('k_B')
 
 
 class RadMolecule:
@@ -159,17 +157,18 @@ class RadMolecule:
             # Line 7: Comment
             _ = f.readline()
             
-            # Energy levels
-            self.energycminv = np.zeros(self.nlev, dtype=np.float64)
-            self.energy = np.zeros(self.nlev, dtype=np.float64)
+            # Energy levels (Pint Quantities)
+            self.energycminv = np.zeros(self.nlev) / units.cm
+            self.energy = np.zeros(self.nlev) * h * c / units.cm
             self.wgt = np.zeros(self.nlev, dtype=np.float64)
             self.jrot = np.zeros(self.nlev, dtype=np.float64)
             
             for i in range(self.nlev):
                 parts = f.readline().split()
                 # Format: level_index energy[cm^-1] weight J
-                self.energycminv[i] = float(parts[1])
-                self.energy[i] = float(parts[1]) * H_PLANCK * C_LIGHT
+                e = float(parts[1])
+                self.energycminv[i] = e / units.cm
+                self.energy[i] = e * h * c / units.cm
                 self.wgt[i] = float(parts[2])
                 self.jrot[i] = float(parts[3])
             
@@ -182,12 +181,12 @@ class RadMolecule:
             # Line: Comment
             _ = f.readline()
             
-            # Radiative transitions
+            # Radiative transitions (Pint Quantities for freq, lam)
             self.iup = np.zeros(self.nlin, dtype=np.int64)
             self.ilow = np.zeros(self.nlin, dtype=np.int64)
             self.aud = np.zeros(self.nlin, dtype=np.float64)
-            self.freq = np.zeros(self.nlin, dtype=np.float64)
-            self.lam = np.zeros(self.nlin, dtype=np.float64)
+            self.freq = np.zeros(self.nlin) * units('Hz')
+            self.lam = np.zeros(self.nlin) * units('micron')
             
             for i in range(self.nlin):
                 parts = f.readline().split()
@@ -195,8 +194,8 @@ class RadMolecule:
                 self.iup[i] = int(parts[1])    # Note: 1-indexed in file
                 self.ilow[i] = int(parts[2])   # Note: 1-indexed in file
                 self.aud[i] = float(parts[3])
-                self.freq[i] = float(parts[4]) * 1e9  # GHz to Hz
-                self.lam[i] = C_LIGHT / self.freq[i] * 1e4  # cm to micron
+                self.freq[i] = float(parts[4]) * 1e9 * units('Hz')
+                self.lam[i] = (c / self.freq[i]).to('micron')
             
             # The rest of the file contains collision partner data
             # We read it but don't use it extensively yet
@@ -287,11 +286,9 @@ class RadMolecule:
         
         # Compute partition function
         self.pfunc = np.zeros(self.temp.shape[0], dtype=np.float64)
-        
         for it, T in enumerate(self.temp):
-            self.pfunc[it] = np.sum(
-                self.wgt * np.exp(-self.energy / (K_BOLTZMANN * T))
-            )
+            x = (self.energy / (k_B * T)).to_base_units().magnitude
+            self.pfunc[it] = np.sum(self.wgt * np.exp(-x))
         
         logger.info(f"Computed partition function for {len(self.temp)} temperatures: "
                    f"T=[{self.temp.min():.1f}, {self.temp.max():.1f}] K")
@@ -311,15 +308,16 @@ class RadMolecule:
         """
         if iline < 0 or iline >= self.nlin:
             raise ValueError(f"Line index {iline} out of range [0, {self.nlin})")
+        eup_K = (self.energy[self.iup[iline] - 1] / k_B).to('K').magnitude
         
         return {
             'iline': iline,
             'iup': self.iup[iline],
             'ilow': self.ilow[iline],
-            'frequency_Hz': self.freq[iline],
-            'wavelength_micron': self.lam[iline],
+            'frequency_Hz': self.freq[iline].to('Hz').magnitude,
+            'wavelength_micron': self.lam[iline].to('micron').magnitude,
             'Aul_Hz': self.aud[iline],
-            'Eup_K': self.energycminv[self.iup[iline] - 1] * H_PLANCK * C_LIGHT / K_BOLTZMANN
+            'Eup_K': eup_K
         }
     
     def getLinesInRange(
@@ -443,7 +441,7 @@ class RadMolecule:
         >>> freq = mol.getRestFrequency(3)  # CO J=3-2 at 345.796 GHz
         """
         iline = self.getTransitionIndex(J_upper, J_lower)
-        return self.freq[iline]
+        return self.freq[iline].to('Hz').magnitude
     
     def getTransitionLabel(self, iline: int) -> str:
         """Get a human-readable label for a transition.

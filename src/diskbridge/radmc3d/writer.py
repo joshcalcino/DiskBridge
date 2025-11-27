@@ -135,17 +135,18 @@ class RadWriter:
             f.write(f'{active_dims[0]} {active_dims[1]} {active_dims[2]}\n')
             f.write(f'{dims[0]} {dims[1]} {dims[2]}\n')
             
-            # Write grid edges for each dimension (in cm or radians)
+            # Write grid edges for each dimension (in cm or radians) as plain floats
             for name in axis_names:
                 edges = mesh.edges(name)
                 if edges is not None:
-                    edges_cgs = edges.to_base_units()
+                    # Convert to base units and drop units so we write pure numbers
+                    edges_cgs = edges.to_base_units().magnitude
                     
                     # RADMC-3D expects phi from 0 to 2π
                     # FARGO uses -π to +π, so we create a uniform grid for RADMC-3D
                     if name == 'phi':
                         nphi = len(edges_cgs)
-                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi) * units('rad')
+                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi)
                     
                     for val in edges_cgs:
                         f.write(f'{val:13.6e} ')
@@ -732,10 +733,10 @@ class RadWriter:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'gas')
         
-        # Convert to cm/s
-        vr_cgs = vr.to('cm/s')
-        vtheta_cgs = vtheta.to('cm/s')
-        vphi_cgs = vphi.to('cm/s')
+        # Convert to cm/s and drop units so we work with plain floats
+        vr_cgs = vr.to('cm/s').magnitude
+        vtheta_cgs = vtheta.to('cm/s').magnitude
+        vphi_cgs = vphi.to('cm/s').magnitude
         
         # Transpose from DiskBridge order to RADMC-3D order
         # This matches the approach used in write_dust_density

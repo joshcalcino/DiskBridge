@@ -961,11 +961,23 @@ class RadImage:
             # Always clean up symlinks
             self.cleanup_symlinks()
         
+        # Append image run output to radmc3d.out (for debugging, like mctherm)
+        log_path = self.model_dir / 'radmc3d.out'
+        try:
+            with open(log_path, 'a') as f:
+                f.write('\n--- image ---\n')
+                f.write(f'command = {cmd_str}\n')
+                if stdout:
+                    f.write(stdout)
+                if stderr:
+                    f.write('\n[stderr]\n')
+                    f.write(stderr)
+        except Exception:
+            # Logging to file is best-effort only
+            pass
+        
         if returncode != 0:
-            logger.error(f"RADMC-3D failed with exit code {returncode}")
-            logger.error(f"stdout: {stdout}")
-            logger.error(f"stderr: {stderr}")
-            log_path = self.model_dir / 'radmc3d.out'
+            logger.error(f"RADMC-3D image failed (see {log_path})")
             errors = _extract_radmc_errors(log_path)
             if errors:
                 logger.error(f"RADMC-3D errors:\n{errors}")
@@ -974,7 +986,7 @@ class RadImage:
                 )
             raise RuntimeError(f"radmc3d image failed with exit code {returncode}")
         
-        logger.debug(f"RADMC-3D completed successfully")
+        logger.debug("RADMC-3D image completed successfully")
     
     def _get_iline(self, molecule: str, transition: int) -> int:
         """Get iline index from molecule and transition.
@@ -1259,7 +1271,20 @@ class RadImage:
         # Check if gas_velocity.binp already exists in inputs_dir
         vel_file = self.inputs_dir / 'gas_velocity.binp'
         if vel_file.exists():
-            return
+            # Sanity check: verify file is complete (header + 3*ncells values)
+            try:
+                with open(vel_file, 'rb') as f:
+                    header = np.fromfile(f, dtype=np.int64, count=3)
+                if header.size == 3:
+                    ncells = int(header[2])
+                    expected_bytes = 3 * 8 + 3 * ncells * 8
+                    actual_bytes = vel_file.stat().st_size
+                    if actual_bytes == expected_bytes:
+                        return
+            except Exception:
+                # If anything goes wrong, fall through and regenerate
+                pass
+            logger.info("Existing gas_velocity.binp is invalid or incomplete; regenerating from model...")
         
         if self.model is None:
             raise RuntimeError(
