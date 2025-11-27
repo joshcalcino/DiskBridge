@@ -3,59 +3,58 @@
 ##############################
 
 # Simulation 
-nbcores          = 12
+nbcores          = 12       # number of cores to run radmc3d or multithreaded python code on (blank lets the code determine automatically)
 
 # Photons 
-nphot_thermal    = 1e7
-nphot_scat       = 1e5
-nphot_mono       = 1e7
+nphot_thermal    = 1e7       # number of photons used to run mctherm 
+nphot_scat       = 1e5       # number of photons used to run ray tracing (I think) 
+nphot_mono       = 1e7       # number of photons used to run mcmono 
 
 # Wavelengths 
-n_lambda          = 150
-lambda_min_micron = 0.1
-lambda_max_micron = 3000.0
+n_lambda          = 150       # number of wavelengths in the wavelegnth grid (used for temperature and stars)
+lambda_min        = 0.1       # min wavelength in micron 
+lambda_max        = 3000.0    # max wavelength in micron 
 
 # Map 
-nbpixels         = 1024
-size_au          = 400.0
-
-distance_pc      = 140.0
-inclination      = 45.0
-posangle         = 0.0
+nbpixels         = 1024      # number of pixels in the map 
+mapsize          = 400.0     # size of the map in au 
+distance         = 140.0     # distance to the source in pc 
+inclination      = 45.0      # inclination of the source in degrees 
+posangle         = 0.0       # position angle of the source in degrees
 
 # Dust RT 
-scat_mode        = 0
+scat_mode        = 0           # radmc3d scattering mode 
 
 # Dust sizes 
-amin             = 0.01
-amax             = 100.0
-pindex           = 3.0
-dust_to_gas_ratio = 1e-2
-nbins            = 10
-grain_density    = 1.26
+amin             = 0.01        # min grain size in micron 
+amax             = 100.0       # max grain size in micron 
+pindex           = 3.0         # slope of the power law size distribution 
+dust_to_gas_ratio = 1e-2      # dust to gas ratio 
+nbins            = 10         # number of dust bins in the distribution 
+grain_density    = 1.26       # density of the grains in g/cm^3 (may be overwritten)
 
 # Opacity 
 species          = mix_2species_ice70
 opacity_dir      = data/opac
 
 # Gas RT 
-gasspecies       = co
-iline            = 3
-abundance        = 5e-5
-widthkms         = 2.0
-nline            = 40
-turbvel_ms       = 0.0
-photodissociation = F
-freezeout        = F
-photodesorption  = F
-uv_min_nm        = 91.2
-uv_max_nm        = 205.0
-uv_n_wavelengths = 10
+gasspecies       = co              # the gas species (co, 13co, c18o, etc)
+iline            = 3               # transition number (iline3 = J 3-2)
+abundance        = 1e-4            # abundance of the gasspecies 
+width            = 2.0             # width around los_v = 0 to compute the channel maps (km/s) 
+nline            = 40              # number of lines 
+turbvel          = 0.0             # turbulent velocity in m/s 
+photodissociation = F              # turn on photodissocaiton 
+freezeout        = F              # turn on freeze-out 
+photodesorption  = F               # Turn on photodesorption 
+uv_min           = 91.2            # min uv wavelength in nano meters   
+uv_max           = 205.0           # max uv wavelength in nanometers 
+uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
 
 # Star 
-rstar_rsun       = 2.0
-teff_K           = 6130.0
-mstar_msun       = 1.0
+rstar       = 2.0                 # Radius of the star in solar radii
+teff        = 6130.0              # Temperature of the star in kelvin
+mstar       = 1.0                  # Mass of the star in solar masses
 
 mdot             = 0.0
 accretion_fill_factor = 0.01

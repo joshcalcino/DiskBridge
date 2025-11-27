@@ -26,13 +26,13 @@ class Params:
 
     # wavelengths
     n_lambda: int
-    lambda_min_micron: Quantity
-    lambda_max_micron: Quantity
+    lambda_min: Quantity
+    lambda_max: Quantity
 
     # map
     nbpixels: int
-    size_au: Quantity
-    distance_pc: Quantity
+    mapsize: Quantity
+    distance: Quantity
     inclination: Union[float, List[float]]
     posangle: float
 
@@ -55,20 +55,20 @@ class Params:
     gasspecies: str
     iline: int
     abundance: float
-    widthkms: Quantity
+    width: Quantity
     nline: int
-    turbvel_ms: Quantity
+    turbvel: Quantity
     photodissociation: bool
     freezeout: bool
     photodesorption: bool
-    uv_min_nm: Quantity
-    uv_max_nm: Quantity
+    uv_min: Quantity
+    uv_max: Quantity
     uv_n_wavelengths: int
 
     # star
-    rstar_rsun: Quantity
-    teff_K: Quantity
-    mstar_msun: Quantity
+    rstar: Quantity
+    teff: Quantity
+    mstar: Quantity
 
     mdot: float
     accretion_fill_factor: float
@@ -109,20 +109,20 @@ def _parse_param_file(path: Path) -> Dict[str, str]:
 
 # Map parameter names to their expected units
 PARAM_UNITS = {
-    'lambda_min_micron': 'micron',
-    'lambda_max_micron': 'micron',
-    'size_au': 'astronomical_unit',
-    'distance_pc': 'pc',
+    'lambda_min': 'micron',
+    'lambda_max': 'micron',
+    'mapsize': 'au',
+    'distance': 'pc',
     'amin': 'micron',
     'amax': 'micron',
     'grain_density': 'g/cm^3',
-    'widthkms': 'km/s',
-    'turbvel_ms': 'm/s',
-    'uv_min_nm': 'nm',
-    'uv_max_nm': 'nm',
-    'rstar_rsun': 'solar_radius',
-    'teff_K': 'K',
-    'mstar_msun': 'solar_mass',
+    'width': 'km/s',
+    'turbvel': 'm/s',
+    'uv_min': 'nm',
+    'uv_max': 'nm',
+    'rstar': 'solar_radius',
+    'teff': 'K',
+    'mstar': 'solar_mass',
 }
 
 # ---------------------------------------------------------------------------

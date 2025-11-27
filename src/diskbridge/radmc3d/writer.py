@@ -171,8 +171,8 @@ class RadWriter:
         filepath = output_dir / 'wavelength_micron.inp'
         
         # Get parameters from params
-        wmin_micron = self.params.lambda_min_micron
-        wmax_micron = self.params.lambda_max_micron
+        wmin_micron = self.params.lambda_min
+        wmax_micron = self.params.lambda_max
         nwav = self.params.n_lambda
         
         # Convert to microns
@@ -208,13 +208,13 @@ class RadWriter:
         filepath = output_dir / 'stars.inp'
         
         # Get parameters from params and convert to CGS / microns
-        rstar_cgs = self.params.rstar_rsun.to('cm').magnitude
-        mstar_cgs = self.params.mstar_msun.to('g').magnitude
-        tstar_K = self.params.teff_K.to('K').magnitude
+        rstar_cgs = self.params.rstar.to('cm').magnitude
+        mstar_cgs = self.params.mstar.to('g').magnitude
+        tstar_K = self.params.teff.to('K').magnitude
         pos0 = Quantity(0.0, 'au').to('cm').magnitude
         pos_cgs = [pos0, pos0, pos0]  # Always at origin
-        wmin = self.params.lambda_min_micron.to('micron').magnitude
-        wmax = self.params.lambda_max_micron.to('micron').magnitude
+        wmin = self.params.lambda_min.to('micron').magnitude
+        wmax = self.params.lambda_max.to('micron').magnitude
         nwav = self.params.n_lambda
         
         # Build wavelength grid (matches wavelength_micron.inp)
@@ -518,8 +518,8 @@ class RadWriter:
         species_base = species
         
         # Get wavelength parameters from params
-        wmin_micron = self.params.lambda_min_micron.to('micron').magnitude
-        wmax_micron = self.params.lambda_max_micron.to('micron').magnitude
+        wmin_micron = self.params.lambda_min.to('micron').magnitude
+        wmax_micron = self.params.lambda_max.to('micron').magnitude
         nwav = self.params.n_lambda
         
         # Create wavelength grid in cm
@@ -577,9 +577,6 @@ class RadWriter:
         output_dir: str | Path = '.',
         optconst_file: Optional[str | Path] = None,
         grain_density: Optional[float] = None,
-        rstar: Optional[float] = None,
-        tstar: Optional[float] = None,
-        mstar: Optional[float] = None,
         scattering_mode: Optional[int] = None,
         nphot: Optional[int] = None,
         nphot_scat: Optional[int] = None,
@@ -606,12 +603,6 @@ class RadWriter:
         # Fill defaults from global parameter set if not explicitly given
         if grain_density is None:
             grain_density = self.params.grain_density
-        if rstar is None:
-            rstar = self.params.rstar_rsun
-        if tstar is None:
-            tstar = self.params.teff_K
-        if mstar is None:
-            mstar = self.params.mstar_msun
         if scattering_mode is None:
             scattering_mode = self.params.scat_mode
         if nphot is None:

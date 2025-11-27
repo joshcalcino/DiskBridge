@@ -82,8 +82,9 @@ from the following public code bases:
 - `radmc3d-2.0` (including `radmc3dPy`): https://github.com/dullemond/radmc3d-2.0
 
 
-## TODO:
+## TODO/broken:
 
 - make units in parameter file more consistent (e.g. dust size, wavelengths, all in um)
 - make radmc3d submodule use pint quantities 
 - mu_h should be read from simulation data
+- hydro temperature probably is broken when we rescale the disc, likely affects the dust settling 

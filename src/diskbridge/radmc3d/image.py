@@ -548,13 +548,13 @@ class RadImage:
         if npix is None:
             npix = self.params.nbpixels
         if sizeau is None:
-            sizeau = self.params.size_au
+            sizeau = self.params.mapsize.to('au').magnitude
         if widthkms is None:
-            widthkms = self.params.widthkms
+            widthkms = self.params.width.to('km/s').magnitude
         if linenlam is None:
             linenlam = self.params.nline
         if distance is None:
-            distance = self.params.distance_pc
+            distance = self.params.distance.to('pc').magnitude
         if coord is None:
             coord = '0h0m0s 0d0m0s'  # Use hardcoded default
         
@@ -725,9 +725,9 @@ class RadImage:
         if npix is None:
             npix = self.params.nbpixels
         if sizeau is None:
-            sizeau = self.params.size_au
+            sizeau = self.params.mapsize.to('au').magnitude
         if distance is None:
-            distance = self.params.distance_pc
+            distance = self.params.distance.to('pc').magnitude
         if coord is None:
             coord = '0h0m0s 0d0m0s'
         if output_dir is None:

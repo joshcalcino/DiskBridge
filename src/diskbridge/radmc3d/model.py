@@ -727,9 +727,9 @@ class RadModel:
         if nphot is None:
             nphot = self.params.nphot_mono
         if uv_min_nm is None:
-            uv_min_nm = self.params.uv_min_nm
+            uv_min_nm = self.params.uv_min
         if uv_max_nm is None:
-            uv_max_nm = self.params.uv_max_nm
+            uv_max_nm = self.params.uv_max
         if n_wavelengths is None:
             n_wavelengths = self.params.uv_n_wavelengths
         
