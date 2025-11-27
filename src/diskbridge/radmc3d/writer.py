@@ -8,7 +8,10 @@ from Pint Quantities to CGS units.
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, List, Tuple
 from pathlib import Path
+import os
 import numpy as np
+from shutil import which
+import urllib.request
 
 if TYPE_CHECKING:
     from diskbridge.model.model import Model
@@ -645,7 +648,148 @@ class RadWriter:
             setthreads=setthreads,
         )
         
+        if getattr(self.params, 'external_uv', False):
+            self.write_external_source(output_dir)
+        
         logger.info("All RADMC-3D input files written successfully")
+    
+    def _ensure_isrf_file(self, path: Path, url: str) -> Path:
+        if path.is_file():
+            return path
+        if which('curl') is None:
+            try:
+                urllib.request.urlretrieve(url, str(path))
+                return path
+            except Exception as e:
+                raise RuntimeError(f"Failed to download ISRF file without curl: {e}")
+        cmd = f"curl -k -L -o {path} {url}"
+        os.system(cmd)
+        if not path.is_file():
+            raise RuntimeError("Failed to download ISRF.dat")
+        return path
+    
+    def _parse_isrf_table(self, path: Path, quantity: str = 'auto') -> tuple[np.ndarray, np.ndarray, str]:
+        lam = []
+        val = []
+        header = []
+        with open(path, 'r') as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                if s[0] in ('#', '!', '%') or any(c.isalpha() for c in s.split()[0]):
+                    header.append(s.lower())
+                    continue
+                parts = s.split()
+                try:
+                    x = float(parts[0])
+                    y = float(parts[1])
+                    lam.append(x)
+                    val.append(y)
+                except Exception:
+                    continue
+        lam_arr = np.array(lam, dtype=float)
+        val_arr = np.array(val, dtype=float)
+        if lam_arr.size == 0:
+            raise RuntimeError("ISRF file could not be parsed")
+        if quantity is None or str(quantity).lower() == 'auto':
+            q = 'j_lambda'
+            joined = ' '.join(header)
+            if 'u_lambda' in joined:
+                q = 'u_lambda'
+            elif 'i_lambda' in joined:
+                q = 'i_lambda'
+            elif 'j_lambda' in joined:
+                q = 'j_lambda'
+        else:
+            q = str(quantity).lower()
+        joined = ' '.join(header)
+        if 'angstrom' in joined or 'ang' in joined:
+            lam_cm = lam_arr * 1e-8
+        elif 'micron' in joined or 'um' in joined:
+            lam_cm = lam_arr * 1e-4
+        elif 'nm' in joined:
+            lam_cm = lam_arr * 1e-7
+        else:
+            a = float(np.median(lam_arr))
+            if a > 50.0:
+                lam_cm = lam_arr * 1e-8
+            elif a < 1e-2:
+                lam_cm = lam_arr
+            else:
+                lam_cm = lam_arr * 1e-4
+        return lam_cm, val_arr, q
+    
+    def _to_i_nu_from_table(self, lam_cm: np.ndarray, values: np.ndarray, quantity: str) -> np.ndarray:
+        c = 2.99792458e10
+        pi = np.pi
+        q = quantity.lower()
+        if q == 'u_lambda':
+            return (lam_cm ** 2 / (4.0 * pi)) * values
+        if q == 'j_lambda':
+            return values * (lam_cm ** 2 / c)
+        if q == 'i_lambda':
+            return values * (lam_cm ** 2 / c)
+        return values * (lam_cm ** 2 / c)
+    
+    def _read_wavelength_grid_from_file(self, filepath: Path) -> np.ndarray:
+        if not filepath.is_file():
+            raise FileNotFoundError(f"wavelength grid file not found: {filepath}")
+        with open(filepath, 'r') as f:
+            first = f.readline().strip()
+            try:
+                n = int(first)
+                vals = [float(f.readline().strip()) for _ in range(n)]
+            except ValueError:
+                raise RuntimeError("Invalid wavelength_micron.inp format")
+        return np.array(vals, dtype=float)
+    
+    def write_external_source(
+        self,
+        output_dir: str | Path = '.',
+        chi: Optional[float] = None,
+        isrf_path: str | Path = 'ISRF.dat',
+        quantity: str = 'auto',
+    ) -> None:
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'external')
+        url = "https://home.strw.leidenuniv.nl/~ewine/photo/data/photo_data/radiation_fields/ISRF.dat"
+        isrf_target = output_dir / Path(isrf_path).name
+        isrf_file = self._ensure_isrf_file(isrf_target, url)
+        lam_tab_cm, values, q = self._parse_isrf_table(isrf_file, quantity)
+        i_nu_tab = self._to_i_nu_from_table(lam_tab_cm, values, q)
+        wav_file = output_dir / 'wavelength_micron.inp'
+        lam_um = self._read_wavelength_grid_from_file(wav_file)
+        lam_cm = lam_um * 1e-4
+        x = np.array(lam_tab_cm, dtype=float)
+        y = np.array(i_nu_tab, dtype=float)
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
+        y = np.where(y > 0.0, y, np.nan)
+        i_nu_model = np.zeros_like(lam_cm)
+        m = (lam_cm >= x[0]) & (lam_cm <= x[-1])
+        if np.any(m):
+            finite = np.isfinite(y)
+            i_nu_model[m] = np.exp(
+                np.interp(
+                    np.log(lam_cm[m]),
+                    np.log(x[finite]),
+                    np.log(y[finite]),
+                )
+            )
+        if chi is None:
+            chi = float(getattr(self.params, 'external_uv_chi', 1.0))
+        scale = float(chi)
+        i_nu_scaled = scale * i_nu_model
+        filepath = output_dir / 'external_source.inp'
+        with open(filepath, 'w') as f:
+            f.write('2\n')
+            f.write(f"{lam_um.size}\n")
+            for val in i_nu_scaled:
+                f.write(f"{val:13.6e}\n")
+        self.written_files['external_source.inp'] = filepath
+        logger.info(f"Wrote external_source.inp file: {filepath}")
     
     def write_gas_temperature(self, temperature: Quantity, output_dir: str | Path = '.') -> None:
         """Write gas temperature to gas_temperature.inp.

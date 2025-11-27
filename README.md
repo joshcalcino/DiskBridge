@@ -84,7 +84,7 @@ from the following public code bases:
 
 ## TODO/broken:
 
-- make units in parameter file more consistent (e.g. dust size, wavelengths, all in um)
-- make radmc3d submodule use pint quantities 
+- make units in parameter file more consistent (e.g. dust size, wavelengths, all in um) (should be implemented correctly)
+- make radmc3d submodule use pint quantities (implemented, not fully tested)
 - mu_h should be read from simulation data
 - hydro temperature probably is broken when we rescale the disc, likely affects the dust settling 

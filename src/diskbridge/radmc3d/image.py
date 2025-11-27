@@ -133,7 +133,8 @@ class RadImage:
             'dust_density.binp', 'dust_density.inp',
             'gas_velocity.binp', 'gas_velocity.inp',
             'numberdens_*.binp', 'numberdens_*.inp',
-            'radmc3d.inp', 'lines.inp', 'molecule_*.inp'
+            'radmc3d.inp', 'lines.inp', 'molecule_*.inp',
+            'external_source.inp'
         ]
         
         # All output files from radmc3d_outputs

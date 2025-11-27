@@ -65,6 +65,9 @@ class Params:
     uv_max: Quantity
     uv_n_wavelengths: int
 
+    external_uv: bool
+    external_uv_chi: float
+
     # star
     rstar: Quantity
     teff: Quantity

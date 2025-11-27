@@ -50,6 +50,8 @@ photodesorption  = F               # Turn on photodesorption
 uv_min           = 91.2            # min uv wavelength in nano meters   
 uv_max           = 205.0           # max uv wavelength in nanometers 
 uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
+external_uv      = F               # include external uv photons 
+external_uv_chi  = 1.0             # uv field strength in Draine units 
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii

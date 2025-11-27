@@ -143,7 +143,7 @@ class RadModel:
             'stars.inp', 'dustopac.inp',
             'dust_density.binp', 'dust_density.inp',
             'gas_velocity.binp', 'gas_velocity.inp',
-            'radmc3d.inp'
+            'radmc3d.inp', 'external_source.inp'
         ]
         
         file_map = {self.inputs_dir: input_files}
