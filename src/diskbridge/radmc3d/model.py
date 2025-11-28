@@ -419,13 +419,15 @@ class RadModel:
         photodissociation: Optional[bool] = None,
         freezeout: Optional[bool] = None,
         photodesorption: Optional[bool] = None,
-        self_shielding: bool = False,
+        self_shielding: Optional[bool] = None,
+        shield_method: Optional[str] = None,
         nside: int = 4,
         b_kms: float = 0.3,
         XH2_guess: float = 0.5,
         margin_dex: float = 1.0,
         max_cells: Optional[int] = None,
         write_output: bool = True,
+        progress_chunks: Optional[int] = None,
     ) -> Tuple[Quantity, Quantity]:
         """Compute molecular abundance with photochemistry (Pinte et al. 2018).
         
@@ -466,6 +468,11 @@ class RadModel:
             Extra dex below threshold to include in candidate mask (default: 1.0)
         max_cells : int, optional
             Limit HEALPix ray tracing to this many cells (for testing)
+        progress_chunks : int, optional
+            If set to a positive integer, split HEALPix candidate cells into
+            this many chunks when computing self-shielding, logging progress
+            after each chunk. None (default) keeps a single fast call for
+            maximum performance.
         write_output : bool, optional
             Write numberdens file (default: True)
             
@@ -490,6 +497,18 @@ class RadModel:
         if photodesorption is None:
             photodesorption = self.params.photodesorption
 
+        # Resolve self-shielding flags (params provide defaults, function args override)
+        if molecule.lower() == "co":
+            if self_shielding is None:
+                self_shielding_flag = bool(getattr(self.params, "co_self_shielding", False))
+            else:
+                self_shielding_flag = bool(self_shielding)
+
+            if shield_method is None:
+                shield_method = getattr(self.params, "co_self_shielding_method", "uniform")
+        else:
+            self_shielding_flag = bool(self_shielding) if self_shielding is not None else False
+
         # Ensure we have temperature
         if self.temperature is None:
             self.read_temperature()
@@ -500,7 +519,7 @@ class RadModel:
         
         # Ensure we have chi from mcmono only if needed
         # chi is required for photodissociation, photodesorption, and self-shielding
-        if photodissociation or photodesorption or self_shielding:
+        if photodissociation or photodesorption or self_shielding_flag:
             if self.chi is None:
                 self.compute_mcmono()
         
@@ -510,7 +529,7 @@ class RadModel:
         Tfrz_K = Tfrz.to('K') if isinstance(Tfrz, Quantity) else Quantity(Tfrz, 'K')
         
         # Compute effective chi (with self-shielding if enabled)
-        if self_shielding and (photodissociation or photodesorption):
+        if self_shielding_flag and (photodissociation or photodesorption):
             from .healpix_columns import compute_co_shielding_healpix
             from .visser_shielding import VisserShielding
             
@@ -529,6 +548,8 @@ class RadModel:
                 XH2_guess=XH2_guess,
                 margin_dex=margin_dex,
                 max_cells=max_cells,
+                method=shield_method,
+                progress_chunks=progress_chunks,
             )
             logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")
         else:
@@ -537,29 +558,33 @@ class RadModel:
         # Initialize abundance (dimensionless Quantity)
         X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
         
-        # 1. Photodissociation (kill molecule)
+        # 1. Freeze-out (reduce abundance)
+        mask_frz = np.zeros_like(T, dtype=bool)
+        if freezeout:
+            mask_frz = T < Tfrz_K
+            X[mask_frz] *= EPS_DEFAULT
+            n_frz = np.sum(mask_frz)
+            logger.info(f"Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)")
+        
+        # 2. Photodesorption escape (optional)
+        mask_pdes = np.zeros_like(T, dtype=bool)
+        if photodesorption:
+            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
+            if freezeout:
+                # Undo freeze-out where both low temperature and strong radiation
+                unfreeze_mask = mask_pdes & mask_frz
+                X[unfreeze_mask] = float(X0)
+            n_pdes = np.sum(mask_pdes)
+            logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
+        
+        # 3. Photodissociation (kill molecule)
         if photodissociation:
             chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
             mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
             logger.info(f"Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)")
-        
-        # 2. Photodesorption escape (optional)
-        if photodesorption:
-            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
-            mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
-            n_pdes = np.sum(mask_pdes)
-            logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
-        else:
-            mask_pdes = np.zeros_like(T, dtype=bool)
-        
-        # 3. Freeze-out (reduce abundance)
-        if freezeout:
-            mask_frz = (T < Tfrz_K) & ~mask_pdes  # Don't freeze where photodesorption occurs
-            X[mask_frz] *= EPS_DEFAULT
-            n_frz = np.sum(mask_frz)
-            logger.info(f"Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)")
         
         # Compute number density
         n_mol = X * nH

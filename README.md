@@ -16,7 +16,7 @@ synthetic observations.
 - Optionally runs RADMC-3D to compute dust temperatures and line
   emission
 - Converts RADMC-3D outputs into FITS images and data cubes
-- CO self-shielding using HEALpix, ray-tracing, and Visser et al. 2009 self-shielding tables
+- CO self-shielding using HEALpix, ray-tracing, and Visser et al. 2009 self-shielding tables, with selectable 'uniform' (fast) or 'sortedsearch' (reference) ray integration methods
 
 ## Typical workflow
 

@@ -28,6 +28,10 @@ Dependencies
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time as _time
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -50,7 +54,211 @@ def _get_log_chi_over_nH_pdiss() -> float:
     if _LOG_CHI_OVER_NH_PDISS is None:
         from .model import LOG_CHI_OVER_NH_PDISS
         _LOG_CHI_OVER_NH_PDISS = float(LOG_CHI_OVER_NH_PDISS.magnitude)
-    return _LOG_CHI_OVER_NH_PDISS  
+    return _LOG_CHI_OVER_NH_PDISS
+
+
+# =============================================================================
+# HEALPIX CACHE UTILITIES
+# =============================================================================
+
+def _compute_field_hash(arr: np.ndarray, precision: int = 6) -> str:
+    """Compute a hash of a numpy array for cache keying.
+    
+    Parameters
+    ----------
+    arr : ndarray
+        Array to hash.
+    precision : int
+        Number of decimal places to round to before hashing.
+        This allows minor floating point differences to still match.
+    
+    Returns
+    -------
+    str
+        MD5 hash of the rounded array.
+    """
+    rounded = np.round(arr.flatten(), precision)
+    return hashlib.md5(rounded.tobytes()).hexdigest()[:16]
+
+
+def _compute_cache_key(
+    mesh,
+    nside: int,
+    nH_cgs: np.ndarray,
+    chi_arr: np.ndarray,
+    Xco_guess: float,
+    XH2_guess: float,
+    margin_dex: float,
+    log_chi_over_nH_pdiss: float,
+) -> str:
+    """Compute a unique cache key for healpix column computation.
+    
+    The key incorporates:
+    - Mesh shape and coordinate system
+    - HEALPix nside
+    - Hash of nH field (density structure)
+    - Hash of chi field (UV field)
+    - Abundance guesses and threshold parameters
+    
+    Returns
+    -------
+    str
+        Cache key string.
+    """
+    # Mesh parameters
+    if mesh.coord_system == "cartesian":
+        mesh_info = {
+            "coord": "cartesian",
+            "shape": list(nH_cgs.shape),
+            "xmin": float(mesh.edges("x").to("cm").magnitude[0]),
+            "xmax": float(mesh.edges("x").to("cm").magnitude[-1]),
+            "ymin": float(mesh.edges("y").to("cm").magnitude[0]),
+            "ymax": float(mesh.edges("y").to("cm").magnitude[-1]),
+            "zmin": float(mesh.edges("z").to("cm").magnitude[0]),
+            "zmax": float(mesh.edges("z").to("cm").magnitude[-1]),
+        }
+    elif mesh.coord_system == "spherical":
+        mesh_info = {
+            "coord": "spherical",
+            "shape": list(nH_cgs.shape),
+            "rmin": float(mesh.edges("r").to("cm").magnitude[0]),
+            "rmax": float(mesh.edges("r").to("cm").magnitude[-1]),
+            "thmin": float(mesh.edges("theta").to("rad").magnitude[0]),
+            "thmax": float(mesh.edges("theta").to("rad").magnitude[-1]),
+            "phmin": float(mesh.edges("phi").to("rad").magnitude[0]),
+            "phmax": float(mesh.edges("phi").to("rad").magnitude[-1]),
+        }
+    else:
+        mesh_info = {"coord": mesh.coord_system, "shape": list(nH_cgs.shape)}
+    
+    params = {
+        "mesh": mesh_info,
+        "nside": nside,
+        "nH_hash": _compute_field_hash(nH_cgs),
+        "chi_hash": _compute_field_hash(chi_arr),
+        "Xco_guess": Xco_guess,
+        "XH2_guess": XH2_guess,
+        "margin_dex": margin_dex,
+        "log_threshold": log_chi_over_nH_pdiss,
+    }
+    
+    # Create deterministic JSON string and hash it
+    params_str = json.dumps(params, sort_keys=True)
+    return hashlib.md5(params_str.encode()).hexdigest()
+
+
+def save_healpix_cache(
+    cache_dir: Path | str,
+    cache_key: str,
+    theta_co: np.ndarray,
+    chi_eff: np.ndarray,
+    metadata: dict | None = None,
+) -> Path:
+    """Save healpix computation results to cache.
+    
+    Parameters
+    ----------
+    cache_dir : Path or str
+        Directory to save cache files.
+    cache_key : str
+        Unique cache key from _compute_cache_key.
+    theta_co : ndarray
+        CO shielding factor array.
+    chi_eff : ndarray
+        Effective UV field array.
+    metadata : dict, optional
+        Additional metadata to save (e.g., timing info).
+    
+    Returns
+    -------
+    Path
+        Path to saved cache file.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    cache_file = cache_dir / f"healpix_cache_{cache_key}.npz"
+    
+    save_dict = {
+        "theta_co": theta_co,
+        "chi_eff": chi_eff,
+    }
+    
+    if metadata is not None:
+        # Store metadata as a JSON string
+        save_dict["metadata_json"] = np.array([json.dumps(metadata)])
+    
+    np.savez_compressed(cache_file, **save_dict)
+    logger.info(f"Saved healpix cache to: {cache_file}")
+    return cache_file
+
+
+def load_healpix_cache(
+    cache_dir: Path | str,
+    cache_key: str,
+) -> tuple[np.ndarray, np.ndarray, dict | None] | None:
+    """Load healpix computation results from cache.
+    
+    Parameters
+    ----------
+    cache_dir : Path or str
+        Directory containing cache files.
+    cache_key : str
+        Unique cache key from _compute_cache_key.
+    
+    Returns
+    -------
+    tuple or None
+        (theta_co, chi_eff, metadata) if cache exists, None otherwise.
+    """
+    cache_dir = Path(cache_dir)
+    cache_file = cache_dir / f"healpix_cache_{cache_key}.npz"
+    
+    if not cache_file.exists():
+        return None
+    
+    try:
+        data = np.load(cache_file)
+        theta_co = data["theta_co"]
+        chi_eff = data["chi_eff"]
+        
+        metadata = None
+        if "metadata_json" in data:
+            metadata = json.loads(str(data["metadata_json"][0]))
+        
+        logger.info(f"Loaded healpix cache from: {cache_file}")
+        return theta_co, chi_eff, metadata
+    except Exception as e:
+        logger.warning(f"Failed to load healpix cache: {e}")
+        return None
+
+
+def find_compatible_cache(
+    cache_dir: Path | str,
+    mesh,
+    nside: int,
+    nH_cgs: np.ndarray,
+    chi_arr: np.ndarray,
+    Xco_guess: float,
+    XH2_guess: float,
+    margin_dex: float,
+    log_chi_over_nH_pdiss: float,
+) -> tuple[np.ndarray, np.ndarray, dict | None] | None:
+    """Find and load a compatible cache file if one exists.
+    
+    This is a convenience function that computes the cache key and
+    attempts to load the corresponding cache.
+    
+    Returns
+    -------
+    tuple or None
+        (theta_co, chi_eff, metadata) if cache exists, None otherwise.
+    """
+    cache_key = _compute_cache_key(
+        mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
+        margin_dex, log_chi_over_nH_pdiss,
+    )
+    return load_healpix_cache(cache_dir, cache_key)  
 
 
 def _to_ndarray_cgs(x, target_unit: str) -> np.ndarray:
@@ -285,6 +493,9 @@ def compute_co_shielding_healpix(
     Xco_guess: float = 5e-5,
     XH2_guess: float = 0.5,
     max_cells: Optional[int] = None,
+    method: str = "uniform",
+    progress_chunks: Optional[int] = None,
+    cache_dir: Optional[Path | str] = None,
 ) -> Tuple[Quantity, Quantity]:
     """
     Compute CO self-shielding using HEALPix rays + Visser+09 tables.
@@ -319,6 +530,19 @@ def compute_co_shielding_healpix(
         Fraction of H nuclei in H2 when nH2 is not supplied.
     max_cells : int, optional
         Limit processed cells (useful for quick tests).
+    method : str, optional
+        Ray integration method passed to integrate_rays. Allowed values:
+        - 'uniform' (default): fast arithmetic indexing
+        - 'sortedsearch': reference searchsorted-based kernels.
+    progress_chunks : int, optional
+        If set to a positive integer, split candidate cells into this many
+        chunks, calling integrate_rays on each chunk and logging progress
+        after each chunk. None (default) keeps a single fast integrate_rays
+        call for maximum performance.
+    cache_dir : Path or str, optional
+        Directory to cache/load healpix computation results. If provided and
+        a matching cache exists, the cached results will be loaded instead of
+        recomputing. New results will be saved to cache after computation.
 
     Returns
     -------
@@ -359,6 +583,25 @@ def compute_co_shielding_healpix(
     # Threshold for "interesting" cells (where simple Pinte would photodissociate)
     if log_chi_over_nH_pdiss is None:
         log_chi_over_nH_pdiss = _get_log_chi_over_nH_pdiss()
+
+    # Check for cached results
+    cache_key = None
+    if cache_dir is not None:
+        cache_key = _compute_cache_key(
+            mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
+            margin_dex, log_chi_over_nH_pdiss,
+        )
+        cached = load_healpix_cache(cache_dir, cache_key)
+        if cached is not None:
+            theta_co_cached, chi_eff_cached, metadata = cached
+            logger.info(
+                f"Loaded healpix results from cache "
+                f"(computed in {metadata.get('compute_time_s', '?')}s)"
+                if metadata else "Loaded healpix results from cache"
+            )
+            theta_co_q = Quantity(theta_co_cached, "dimensionless")
+            chi_eff_q = Quantity(chi_eff_cached, "dimensionless")
+            return theta_co_q, chi_eff_q
 
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
@@ -410,17 +653,78 @@ def compute_co_shielding_healpix(
     for k, idx in enumerate(candidate_idx):
         cell_centers[k] = tracer.cell_center_xyz(*idx)
 
+    # Track computation time for cache metadata
+    _t_start = _time.time()
+
     # Use Numba-optimized ray integration
     logger.info(f"Running Numba-optimized ray integration ({n_candidates} cells x {npix} directions)...")
     
-    if use_fast_abundance_scaling:
-        # Single-field integration, then scale to get CO and H2
-        Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs)
-        Nco_all = (Xco_guess * Nref_all).astype(np.float64)
-        Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
+    method = (method or "uniform").lower()
+
+    if progress_chunks is None or progress_chunks <= 1:
+        if use_fast_abundance_scaling:
+            # Single-field integration, then scale to get CO and H2
+            Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs, method=method)
+            Nco_all = (Xco_guess * Nref_all).astype(np.float64)
+            Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
+        else:
+            # Double-field integration for explicit CO and H2 densities
+            Nco_all, Nh2_all = integrate_rays(tracer, cell_centers, dirs, nCO_cgs, nH2_cgs, method=method)
     else:
-        # Double-field integration for explicit CO and H2 densities
-        Nco_all, Nh2_all = integrate_rays(tracer, cell_centers, dirs, nCO_cgs, nH2_cgs)
+        # Chunked integration with progress logging
+        n_chunks = int(progress_chunks)
+        if n_chunks <= 0:
+            n_chunks = 1
+        chunk_size = max(1, n_candidates // n_chunks)
+
+        logger.info(
+            f"HEALPix ray tracing progress enabled: {n_candidates} cells "
+            f"in {n_chunks} chunks (chunk_size={chunk_size})."
+        )
+
+        if use_fast_abundance_scaling:
+            Nref_all = np.empty((n_candidates, npix), dtype=np.float64)
+            for start in range(0, n_candidates, chunk_size):
+                end = min(start + chunk_size, n_candidates)
+                Nref_chunk = integrate_rays(
+                    tracer,
+                    cell_centers[start:end],
+                    dirs,
+                    nH_cgs,
+                    method=method,
+                )
+                Nref_all[start:end] = Nref_chunk
+
+                frac = end / n_candidates
+                logger.info(
+                    f"HEALPix rays: {end}/{n_candidates} cells "
+                    f"({100.0 * frac:.1f}%) done."
+                )
+
+            Nco_all = (Xco_guess * Nref_all).astype(np.float64)
+            Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
+        else:
+            Nco_all = np.empty((n_candidates, npix), dtype=np.float64)
+            Nh2_all = np.empty((n_candidates, npix), dtype=np.float64)
+
+            for start in range(0, n_candidates, chunk_size):
+                end = min(start + chunk_size, n_candidates)
+                Nco_chunk, Nh2_chunk = integrate_rays(
+                    tracer,
+                    cell_centers[start:end],
+                    dirs,
+                    nCO_cgs,
+                    nH2_cgs,
+                    method=method,
+                )
+                Nco_all[start:end] = Nco_chunk
+                Nh2_all[start:end] = Nh2_chunk
+
+                frac = end / n_candidates
+                logger.info(
+                    f"HEALPix rays: {end}/{n_candidates} cells "
+                    f"({100.0 * frac:.1f}%) done."
+                )
 
     logger.info("Ray integration complete. Computing shielding factors...")
 
@@ -431,6 +735,17 @@ def compute_co_shielding_healpix(
         theta_co[tuple(idx)] = float(theta_mean[k])
 
     chi_eff = chi_arr * theta_co
+    _t_elapsed = _time.time() - _t_start
+    
+    # Save to cache if cache_dir is specified
+    if cache_dir is not None and cache_key is not None:
+        metadata = {
+            "compute_time_s": round(_t_elapsed, 2),
+            "n_candidates": n_candidates,
+            "nside": nside,
+            "npix": npix,
+        }
+        save_healpix_cache(cache_dir, cache_key, theta_co, chi_eff, metadata)
     
     # Wrap outputs as Quantities
     theta_co_q = Quantity(theta_co, "dimensionless")

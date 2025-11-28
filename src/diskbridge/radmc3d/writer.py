@@ -461,7 +461,7 @@ class RadWriter:
     
     def compute_and_write_dust_opacities(
         self,
-        output_dir: str | Path,
+        output_dir: str | Path = '.',
         optconst_file: Optional[str | Path] = None,
         grain_density: Optional[float] = None,
         ntheta: int = 181,

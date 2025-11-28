@@ -1065,6 +1065,7 @@ def integrate_rays(
     directions: np.ndarray,
     *fields: np.ndarray,
     max_steps: int = 10000,
+    method: str = "uniform",
 ) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
     """
     Unified ray integration dispatcher.
@@ -1087,6 +1088,13 @@ def integrate_rays(
         - Two fields (nCO, nH2): returns (Nco_all, Nh2_all)
     max_steps : int, optional
         Maximum integration steps per ray.
+    method : str, optional
+        Integration method. Allowed values are:
+        - 'uniform' (default): fast arithmetic indexing
+          * Cartesian: uniform-grid kernels
+          * Spherical: log-uniform spherical kernels
+        - 'sortedsearch': reference searchsorted-based kernels
+          for both Cartesian and spherical grids.
         
     Returns
     -------
@@ -1117,12 +1125,32 @@ def integrate_rays(
         )
     
     ds = float(tracer.ds)
-    
+    method = (method or "uniform").lower()
+
     if len(fields) == 1:
         # Single field integration
         n_field = fields[0].astype(np.float64)
-        
+
         if is_cartesian:
+            if method == "uniform":
+                x_edges = tracer.x_edges.astype(np.float64)
+                y_edges = tracer.y_edges.astype(np.float64)
+                z_edges = tracer.z_edges.astype(np.float64)
+                xmin, xmax = float(tracer._xmin), float(tracer._xmax)
+                ymin, ymax = float(tracer._ymin), float(tracer._ymax)
+                zmin, zmax = float(tracer._zmin), float(tracer._zmax)
+                dx = float(x_edges[1] - x_edges[0])
+                dy = float(y_edges[1] - y_edges[0])
+                dz = float(z_edges[1] - z_edges[0])
+                inv_dx = 1.0 / dx
+                inv_dy = 1.0 / dy
+                inv_dz = 1.0 / dz
+                return _integrate_all_rays_cartesian_single_uniform(
+                    cell_centers, directions, ds, n_field,
+                    xmin, xmax, ymin, ymax, zmin, zmax,
+                    inv_dx, inv_dy, inv_dz,
+                    max_steps,
+                )
             return _integrate_all_rays_cartesian_single_v1_inline(
                 cell_centers, directions, ds, n_field,
                 tracer.x_edges.astype(np.float64),
@@ -1133,7 +1161,16 @@ def integrate_rays(
                 tracer._zmin, tracer._zmax,
                 max_steps,
             )
-        else:  # spherical - use fast loguniform indexing
+        else:
+            if method == "sortedsearch":
+                return _integrate_all_rays_spherical_single(
+                    cell_centers, directions, ds, n_field,
+                    tracer.r_edges.astype(np.float64),
+                    tracer.theta_edges.astype(np.float64),
+                    tracer.phi_edges.astype(np.float64),
+                    tracer.r_edges[0], tracer.r_edges[-1],
+                    max_steps,
+                )
             return _integrate_all_rays_spherical_single_loguniform(
                 cell_centers, directions, ds, n_field,
                 tracer.r_edges[0], tracer.r_edges[-1],
@@ -1146,8 +1183,27 @@ def integrate_rays(
         # Double field integration (nCO, nH2)
         nCO_field = fields[0].astype(np.float64)
         nH2_field = fields[1].astype(np.float64)
-        
+
         if is_cartesian:
+            if method == "uniform":
+                x_edges = tracer.x_edges.astype(np.float64)
+                y_edges = tracer.y_edges.astype(np.float64)
+                z_edges = tracer.z_edges.astype(np.float64)
+                xmin, xmax = float(tracer._xmin), float(tracer._xmax)
+                ymin, ymax = float(tracer._ymin), float(tracer._ymax)
+                zmin, zmax = float(tracer._zmin), float(tracer._zmax)
+                dx = float(x_edges[1] - x_edges[0])
+                dy = float(y_edges[1] - y_edges[0])
+                dz = float(z_edges[1] - z_edges[0])
+                inv_dx = 1.0 / dx
+                inv_dy = 1.0 / dy
+                inv_dz = 1.0 / dz
+                return _integrate_all_rays_cartesian_uniform(
+                    cell_centers, directions, ds, nCO_field, nH2_field,
+                    xmin, xmax, ymin, ymax, zmin, zmax,
+                    inv_dx, inv_dy, inv_dz,
+                    max_steps,
+                )
             return _integrate_all_rays_cartesian(
                 cell_centers, directions, ds, nCO_field, nH2_field,
                 tracer.x_edges.astype(np.float64),
@@ -1158,7 +1214,16 @@ def integrate_rays(
                 tracer._zmin, tracer._zmax,
                 max_steps,
             )
-        else:  # spherical - use fast loguniform indexing
+        else:
+            if method == "sortedsearch":
+                return _integrate_all_rays_spherical(
+                    cell_centers, directions, ds, nCO_field, nH2_field,
+                    tracer.r_edges.astype(np.float64),
+                    tracer.theta_edges.astype(np.float64),
+                    tracer.phi_edges.astype(np.float64),
+                    tracer.r_edges[0], tracer.r_edges[-1],
+                    max_steps,
+                )
             return _integrate_all_rays_spherical_loguniform(
                 cell_centers, directions, ds, nCO_field, nH2_field,
                 tracer.r_edges[0], tracer.r_edges[-1],
