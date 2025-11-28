@@ -31,223 +31,13 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import numpy as np
-from numba import njit, prange
-
 import healpy as hp
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .visser_shielding import VisserShielding
+from .healpix_utils import integrate_rays
 
-
-# =============================================================================
-# Numba JIT-compiled ray integration kernels
-# =============================================================================
-
-@njit(cache=True)
-def _integrate_ray_cartesian(
-    x0: float, y0: float, z0: float,
-    dx: float, dy: float, dz: float,
-    ds: float,
-    n_field: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
-    z_edges: np.ndarray,
-    xmin: float, xmax: float,
-    ymin: float, ymax: float,
-    zmin: float, zmax: float,
-    max_steps: int = 10000,
-) -> float:
-    """
-    Numba-compiled ray integration for Cartesian mesh.
-    
-    Integrates n_field along a ray starting at (x0, y0, z0) in direction (dx, dy, dz).
-    Returns column density in same units as n_field * ds.
-    """
-    x, y, z = x0, y0, z0
-    N = 0.0
-    nx = n_field.shape[0]
-    ny = n_field.shape[1]
-    nz = n_field.shape[2]
-    
-    for i in range(max_steps):
-        # Check domain bounds
-        if x <= xmin or x >= xmax or y <= ymin or y >= ymax or z <= zmin or z >= zmax:
-            break
-        
-        # Find cell indices using binary search
-        ix = np.searchsorted(x_edges, x) - 1
-        iy = np.searchsorted(y_edges, y) - 1
-        iz = np.searchsorted(z_edges, z) - 1
-        
-        # Check valid index range
-        if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
-            break
-        
-        # Accumulate column density
-        N += n_field[ix, iy, iz] * ds
-        
-        # Step along ray
-        x += dx * ds
-        y += dy * ds
-        z += dz * ds
-        if i >= max_steps:
-            print('not good bro')
-    
-    return N
-
-
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_cartesian(
-    cell_centers: np.ndarray,  # (n_cells, 3)
-    directions: np.ndarray,    # (n_dirs, 3)
-    ds: float,
-    nCO_field: np.ndarray,
-    nH2_field: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
-    z_edges: np.ndarray,
-    xmin: float, xmax: float,
-    ymin: float, ymax: float,
-    zmin: float, zmax: float,
-    max_steps: int = 10000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Numba-parallel integration of CO and H2 columns for all cells and directions.
-    
-    Returns
-    -------
-    Nco_all : ndarray, shape (n_cells, n_dirs)
-        CO column densities for each cell and direction.
-    Nh2_all : ndarray, shape (n_cells, n_dirs)
-        H2 column densities for each cell and direction.
-    """
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-    
-    Nco_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    Nh2_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    
-    for i in prange(n_cells):
-        x0, y0, z0 = cell_centers[i, 0], cell_centers[i, 1], cell_centers[i, 2]
-        
-        for j in range(n_dirs):
-            dx, dy, dz = directions[j, 0], directions[j, 1], directions[j, 2]
-            
-            Nco_all[i, j] = _integrate_ray_cartesian(
-                x0, y0, z0, dx, dy, dz, ds,
-                nCO_field, x_edges, y_edges, z_edges,
-                xmin, xmax, ymin, ymax, zmin, zmax, max_steps
-            )
-            Nh2_all[i, j] = _integrate_ray_cartesian(
-                x0, y0, z0, dx, dy, dz, ds,
-                nH2_field, x_edges, y_edges, z_edges,
-                xmin, xmax, ymin, ymax, zmin, zmax, max_steps
-            )
-    
-    return Nco_all, Nh2_all
-
-
-@njit(cache=True)
-def _integrate_ray_spherical(
-    x0: float, y0: float, z0: float,
-    dx: float, dy: float, dz: float,
-    ds: float,
-    n_field: np.ndarray,
-    r_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    phi_edges: np.ndarray,
-    rmin: float, rmax: float,
-    max_steps: int = 10000,
-) -> float:
-    """
-    Numba-compiled ray integration for spherical mesh.
-    """
-    x, y, z = x0, y0, z0
-    N = 0.0
-    nr = n_field.shape[0]
-    nt = n_field.shape[1]
-    np_ = n_field.shape[2]
-    
-    two_pi = 2.0 * np.pi
-    
-    for i in range(max_steps):
-        # Convert to spherical
-        r = np.sqrt(x*x + y*y + z*z)
-        if r < rmin or r > rmax:
-            break
-        
-        th = np.arccos(z / (r + 1e-99))
-        ph = np.arctan2(y, x)
-        if ph < 0:
-            ph += two_pi
-        
-        # Find indices
-        ir = np.searchsorted(r_edges, r) - 1
-        it = np.searchsorted(theta_edges, th) - 1
-        ip = np.searchsorted(phi_edges, ph) - 1
-        
-        # Handle phi wraparound
-        if ip < 0:
-            ip = np_ - 1
-        elif ip >= np_:
-            ip = 0
-        
-        if ir < 0 or ir >= nr or it < 0 or it >= nt:
-            break
-        
-        N += n_field[ir, it, ip] * ds
-        
-        x += dx * ds
-        y += dy * ds
-        z += dz * ds
-        
-        if i >= max_steps:
-            print('not good bro')
-    
-    return N
-
-
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_spherical(
-    cell_centers: np.ndarray,  # (n_cells, 3) in Cartesian
-    directions: np.ndarray,    # (n_dirs, 3)
-    ds: float,
-    nCO_field: np.ndarray,
-    nH2_field: np.ndarray,
-    r_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    phi_edges: np.ndarray,
-    rmin: float, rmax: float,
-    max_steps: int = 10000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Numba-parallel integration for spherical mesh.
-    """
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-    
-    Nco_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    Nh2_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    
-    for i in prange(n_cells):
-        x0, y0, z0 = cell_centers[i, 0], cell_centers[i, 1], cell_centers[i, 2]
-        
-        for j in range(n_dirs):
-            dx, dy, dz = directions[j, 0], directions[j, 1], directions[j, 2]
-            
-            Nco_all[i, j] = _integrate_ray_spherical(
-                x0, y0, z0, dx, dy, dz, ds,
-                nCO_field, r_edges, theta_edges, phi_edges,
-                rmin, rmax, max_steps
-            )
-            Nh2_all[i, j] = _integrate_ray_spherical(
-                x0, y0, z0, dx, dy, dz, ds,
-                nH2_field, r_edges, theta_edges, phi_edges,
-                rmin, rmax, max_steps
-            )
-    
-    return Nco_all, Nh2_all
 
 # Import threshold constant from model module
 # Deferred import to avoid circular dependency
@@ -350,6 +140,21 @@ class SphericalHealpixRayTracer:
         self._phi0 = self.phi_edges[0]
         self._phi_period = self.phi_edges[-1] - self.phi_edges[0]
 
+        # Precompute parameters for analytic (log-uniform) indexing
+        # r is log-uniform: r_edges = exp(ln_rmin + dlnr * i)
+        self._ln_rmin = float(np.log(self.r_edges[0]))
+        ln_rmax = float(np.log(self.r_edges[-1]))
+        dlnr = (ln_rmax - self._ln_rmin) / self.nr
+        self._inv_dlnr = 1.0 / dlnr
+
+        # theta is uniform in [0, pi]
+        dtheta = np.pi / self.nt
+        self._inv_dtheta = 1.0 / dtheta
+
+        # phi is uniform in [0, 2*pi)
+        dphi = 2.0 * np.pi / self.np
+        self._inv_dphi = 1.0 / dphi
+
         logger.info(
             f"Initialized SphericalHealpixRayTracer: "
             f"nr={self.nr}, ntheta={self.nt}, nphi={self.np}, "
@@ -370,87 +175,8 @@ class SphericalHealpixRayTracer:
         z = r * np.cos(th)
         return float(x), float(y), float(z)
 
-    def _xyz_to_indices(self, x: float, y: float, z: float) -> Optional[Tuple[int, int, int]]:
-        """
-        Map a Cartesian point to (ir, it, ip) cell indices.
 
-        Returns None if the point lies outside the mesh.
-        """
-        r = np.sqrt(x * x + y * y + z * z)
-        if r <= self.r_edges[0] or r >= self.r_edges[-1]:
-            return None
 
-        # polar angle theta ∈ [0, π]
-        th = np.arccos(np.clip(z / r, -1.0, 1.0))
-        if th <= self.theta_edges[0] or th >= self.theta_edges[-1]:
-            return None
-
-        # azimuth phi, wrap into [phi0, phi0 + period)
-        ph = np.arctan2(y, x)
-        ph = ((ph - self._phi0) % self._phi_period) + self._phi0
-        if ph < self.phi_edges[0] or ph >= self.phi_edges[-1]:
-            return None
-
-        ir = int(np.searchsorted(self.r_edges, r, side="right") - 1)
-        it = int(np.searchsorted(self.theta_edges, th, side="right") - 1)
-        ip = int(np.searchsorted(self.phi_edges, ph, side="right") - 1)
-
-        if not (0 <= ir < self.nr and 0 <= it < self.nt and 0 <= ip < self.np):
-            return None
-        return ir, it, ip
-
-    # ------------- ray integration -------------
-
-    def integrate_column_along_ray(
-        self,
-        x0: float,
-        y0: float,
-        z0: float,
-        direction: np.ndarray,
-        n_field: np.ndarray,
-        max_steps: int = 10000,
-    ) -> float:
-        """
-        Integrate column density along a single ray from a starting point.
-
-        Parameters
-        ----------
-        x0, y0, z0 : float
-            Starting position (cm), typically a cell center.
-        direction : ndarray, shape (3,)
-            Unit vector giving ray direction.
-        n_field : ndarray, shape (nr, ntheta, nphi)
-            Number density field in cm^-3.
-        max_steps : int
-            Safety limit on the number of marching steps.
-
-        Returns
-        -------
-        float
-            Column density in cm^-2 along this ray until the ray leaves
-            the computational domain.
-        """
-        ds = self.ds
-        dx, dy, dz = map(float, direction / np.linalg.norm(direction))
-
-        x, y, z = x0, y0, z0
-        N = 0.0
-
-        for i in range(max_steps):
-            idx = self._xyz_to_indices(x, y, z)
-            if idx is None:
-                break
-            ir, it, ip = idx
-            n_local = float(n_field[ir, it, ip])
-            N += n_local * ds
-
-            x += dx * ds
-            y += dy * ds
-            z += dz * ds
-            if i>= max_steps:
-                print('Not good bro.')
-
-        return N
 
 
 class CartesianHealpixRayTracer:
@@ -539,90 +265,8 @@ class CartesianHealpixRayTracer:
         z = self.z_centers[iz]
         return float(x), float(y), float(z)
 
-    def _xyz_to_indices(
-        self, x: float, y: float, z: float
-    ) -> Optional[Tuple[int, int, int]]:
-        """
-        Convert Cartesian (x, y, z) in cm to (ix, iy, iz) indices.
 
-        Returns None if (x, y, z) is outside the mesh domain.
-        """
-        # Quick domain check
-        if (
-            x <= self._xmin
-            or x >= self._xmax
-            or y <= self._ymin
-            or y >= self._ymax
-            or z <= self._zmin
-            or z >= self._zmax
-        ):
-            return None
 
-        ix = int(np.searchsorted(self.x_edges, x, side="right") - 1)
-        iy = int(np.searchsorted(self.y_edges, y, side="right") - 1)
-        iz = int(np.searchsorted(self.z_edges, z, side="right") - 1)
-
-        if not (0 <= ix < self.nx and 0 <= iy < self.ny and 0 <= iz < self.nz):
-            return None
-
-        return ix, iy, iz
-
-    # ------------- ray integration -------------
-
-    def integrate_column_along_ray(
-        self,
-        x0: float,
-        y0: float,
-        z0: float,
-        direction: np.ndarray,
-        n_field: np.ndarray,
-        max_steps: int = 10000,
-    ) -> float:
-        """
-        Integrate column density along a single ray from a starting point.
-
-        Parameters
-        ----------
-        x0, y0, z0 : float
-            Starting position (cm), typically a cell center.
-        direction : ndarray, shape (3,)
-            Unit vector giving ray direction.
-        n_field : ndarray, shape (nx, ny, nz)
-            Number density field in cm^-3.
-        max_steps : int
-            Safety limit on the number of marching steps.
-
-        Returns
-        -------
-        float
-            Column density in cm^-2 along this ray until the ray leaves
-            the computational domain.
-        """
-        ds = self.ds
-        dvec = np.asarray(direction, dtype=float)
-        dvec /= np.linalg.norm(dvec)
-        dx, dy, dz = map(float, dvec)
-
-        x, y, z = float(x0), float(y0), float(z0)
-        N = 0.0
-
-        for i in range(max_steps):
-            idx = self._xyz_to_indices(x, y, z)
-            if idx is None:
-                break
-            ix, iy, iz = idx
-            n_local = float(n_field[ix, iy, iz])
-            N += n_local * ds
-
-            x += dx * ds
-            y += dy * ds
-            z += dz * ds
-
-            if i >= max_steps - 1:
-                print(f'Warning: reached max_steps {max_steps} at ray step {i}')
-                break
-
-        return N
 
 
 def compute_co_shielding_healpix(
@@ -701,7 +345,6 @@ def compute_co_shielding_healpix(
         nCO_cgs = _to_ndarray_cgs(nCO, "cm^-3")
 
     if nH2 is None:
-        # nH counts nuclei; H2 has 2 H nuclei per molecule
         nH2_cgs = 0.5 * XH2_guess * nH_cgs
     else:
         nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
@@ -710,6 +353,8 @@ def compute_co_shielding_healpix(
         raise ValueError(f"nH and chi must have same shape, got {nH_cgs.shape} vs {chi_arr.shape}")
     if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
         raise ValueError("nCO and nH2 must match nH shape.")
+
+    use_fast_abundance_scaling = (nCO is None and nH2 is None)
 
     # Threshold for "interesting" cells (where simple Pinte would photodissociate)
     if log_chi_over_nH_pdiss is None:
@@ -768,28 +413,14 @@ def compute_co_shielding_healpix(
     # Use Numba-optimized ray integration
     logger.info(f"Running Numba-optimized ray integration ({n_candidates} cells x {npix} directions)...")
     
-    if mesh.coord_system == "cartesian":
-        Nco_all, Nh2_all = _integrate_all_rays_cartesian(
-            cell_centers, dirs, tracer.ds,
-            nCO_cgs.astype(np.float64),
-            nH2_cgs.astype(np.float64),
-            tracer.x_edges.astype(np.float64),
-            tracer.y_edges.astype(np.float64),
-            tracer.z_edges.astype(np.float64),
-            tracer._xmin, tracer._xmax,
-            tracer._ymin, tracer._ymax,
-            tracer._zmin, tracer._zmax,
-        )
-    else:  # spherical
-        Nco_all, Nh2_all = _integrate_all_rays_spherical(
-            cell_centers, dirs, tracer.ds,
-            nCO_cgs.astype(np.float64),
-            nH2_cgs.astype(np.float64),
-            tracer.r_edges.astype(np.float64),
-            tracer.theta_edges.astype(np.float64),
-            tracer.phi_edges.astype(np.float64),
-            tracer.r_edges[0], tracer.r_edges[-1],
-        )
+    if use_fast_abundance_scaling:
+        # Single-field integration, then scale to get CO and H2
+        Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs)
+        Nco_all = (Xco_guess * Nref_all).astype(np.float64)
+        Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
+    else:
+        # Double-field integration for explicit CO and H2 densities
+        Nco_all, Nh2_all = integrate_rays(tracer, cell_centers, dirs, nCO_cgs, nH2_cgs)
 
     logger.info("Ray integration complete. Computing shielding factors...")
 
