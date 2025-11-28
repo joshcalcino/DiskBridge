@@ -16,6 +16,7 @@ synthetic observations.
 - Optionally runs RADMC-3D to compute dust temperatures and line
   emission
 - Converts RADMC-3D outputs into FITS images and data cubes
+- CO self-shielding using HEALpix, ray-tracing, and Visser et al. 2009 self-shielding tables
 
 ## Typical workflow
 
@@ -88,3 +89,5 @@ from the following public code bases:
 - make radmc3d submodule use pint quantities (implemented, not fully tested)
 - mu_h should be read from simulation data
 - hydro temperature probably is broken when we rescale the disc, likely affects the dust settling 
+- HEALpix with numpy searchsorted works fine, but I am not 100% sure about the cartesian uniform and spherical loguniform. 
+- API for HEALpix stuff should probably get refined
