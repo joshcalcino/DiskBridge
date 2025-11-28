@@ -569,7 +569,7 @@ class RadModel:
         # 2. Photodesorption escape (optional)
         mask_pdes = np.zeros_like(T, dtype=bool)
         if photodesorption:
-            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + 1e-99))
             mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
             if freezeout:
                 # Undo freeze-out where both low temperature and strong radiation
@@ -580,7 +580,7 @@ class RadModel:
         
         # 3. Photodissociation (kill molecule)
         if photodissociation:
-            chi_over_nH = np.log10((chi_eff / (nH + Quantity(1e-99, 'cm^-3'))).to('dimensionless'))
+            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + 1e-99))
             mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
