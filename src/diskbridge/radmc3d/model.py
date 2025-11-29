@@ -13,7 +13,7 @@ input (writer) and output (data, model) functionality.
 """
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple, Sequence
 from pathlib import Path
 import numpy as np
 import shutil
@@ -25,7 +25,14 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .data import RadData
-from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks, run_radmc3d_command
+from .utils import (
+    _extract_radmc_errors,
+    create_symlinks_for_file_map,
+    cleanup_symlinks,
+    run_radmc3d_command,
+    _read_params_snapshot,
+    _params_signature,
+)
 import diskbridge 
 
 # Physical constants from config
@@ -41,6 +48,40 @@ T_FRZ_DEFAULT = Quantity(21.0, 'K')  # freeze-out temperature
 EPS_DEFAULT = Quantity(8e-5, 'dimensionless')  # freeze-out survival fraction
 LOG_CHI_OVER_NH_PDISS = Quantity(-6.0, 'dimensionless')  # photodissociation threshold
 LOG_CHI_OVER_NH_PDES = Quantity(-7.0, 'dimensionless')  # photodesorption threshold
+eps_chi = 1.0e-99
+
+_MCTHERM_PARAM_KEYS = (
+    'nphot_thermal',
+    'n_lambda',
+    'lambda_min',
+    'lambda_max',
+    'scat_mode',
+    'amin',
+    'amax',
+    'pindex',
+    'dust_to_gas_ratio',
+    'nbins',
+    'grain_density',
+    'species',
+    'opacity_dir',
+    'rstar',
+    'teff',
+    'mstar',
+    'mdot',
+    'accretion_fill_factor',
+    'secondorder',
+    'external_uv',
+    'external_uv_chi',
+)
+
+_MCMONO_EXTRA_PARAM_KEYS = (
+    'nphot_mono',
+    'uv_min',
+    'uv_max',
+    'uv_n_wavelengths',
+    'external_uv',
+    'external_uv_chi',
+)
 
 
 class RadModel:
@@ -410,6 +451,67 @@ class RadModel:
         
         return self.nH
     
+    def summarize_chi_over_nH(
+        self,
+        log_min: float = -10.0,
+        log_max: float = -4.0,
+        nbins: int = 50,
+        margins: Optional[Sequence[float]] = None,
+    ) -> dict:
+        if margins is None:
+            margins = (0.0, 0.5, 1.0, 2.0)
+
+        if self.nH is None:
+            self.compute_nH_from_model()
+        if self.chi is None:
+            raise RuntimeError(
+                "chi field is not computed; run compute_mcmono() before "
+                "summarize_chi_over_nH()."
+            )
+
+        nH = self.nH.to('cm^-3').magnitude
+        chi = self.chi.to('dimensionless').magnitude
+
+        ratio = chi / (nH + eps_chi)
+        log_ratio = np.log10(np.maximum(ratio, eps_chi))
+
+        hist, edges = np.histogram(log_ratio, bins=nbins, range=(log_min, log_max))
+        total = log_ratio.size
+
+        logger.info(
+            "log10(chi/nH): min=%.2f, max=%.2f, median=%.2f"
+            % (
+                float(log_ratio.min()),
+                float(log_ratio.max()),
+                float(np.median(log_ratio)),
+            )
+        )
+
+        log_thr = float(LOG_CHI_OVER_NH_PDISS.magnitude)
+        candidate_counts = []
+        candidate_fractions = []
+
+        for margin in margins:
+            threshold = log_thr - float(margin)
+            mask = log_ratio > threshold
+            n_cand = int(mask.sum())
+            frac = 100.0 * n_cand / total if total > 0 else 0.0
+            candidate_counts.append(n_cand)
+            candidate_fractions.append(frac)
+            logger.info(
+                "margin_dex=%.2f: candidates=%d (%.2f%%) for log10(chi/nH) > %.2f"
+                % (float(margin), n_cand, frac, threshold)
+            )
+
+        return {
+            "bin_edges": edges,
+            "hist": hist,
+            "total_cells": int(total),
+            "margins": tuple(float(m) for m in margins),
+            "candidate_counts": np.array(candidate_counts, dtype=int),
+            "candidate_fractions": np.array(candidate_fractions, dtype=float),
+        }
+
     def compute_abundance(
         self,
         molecule: str = 'co',
@@ -569,7 +671,7 @@ class RadModel:
         # 2. Photodesorption escape (optional)
         mask_pdes = np.zeros_like(T, dtype=bool)
         if photodesorption:
-            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + 1e-99))
+            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
             mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
             if freezeout:
                 # Undo freeze-out where both low temperature and strong radiation
@@ -580,7 +682,7 @@ class RadModel:
         
         # 3. Photodissociation (kill molecule)
         if photodissociation:
-            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + 1e-99))
+            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
             mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
             X[mask_pdiss] = 0.0
             n_pdiss = np.sum(mask_pdiss)
@@ -687,6 +789,7 @@ class RadModel:
         >>> temperature = rad.compute_temperature()  # Uses params defaults
         >>> temperature = rad.compute_temperature(nphot=1000000, force=True)
         """
+        use_params_nphot = nphot is None
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
         
@@ -695,16 +798,40 @@ class RadModel:
             output_dir = self.outputs_dir
         else:
             output_dir = Path(output_dir)
-        
+
         # Check if already computed (check for any temperature file)
-        temp_files = [output_dir / 'dust_temperature.dat', 
+        temp_files = [output_dir / 'dust_temperature.dat',
                      output_dir / 'dust_temperature.bdat',
                      output_dir / 'dust_temperature.binp']
         existing_file = next((f for f in temp_files if f.exists()), None)
         if existing_file is not None and not force:
-            logger.info(f"Temperature already computed at {existing_file}")
-            self.read_dust_temperature(fname=str(existing_file))
-            return self.temperature
+            use_cache = False
+            params_path_current = self.model_dir / 'params.txt'
+            params_path_saved = output_dir / 'params.txt'
+            if (
+                use_params_nphot
+                and params_path_current.exists()
+                and params_path_saved.exists()
+            ):
+                try:
+                    params_current = _read_params_snapshot(params_path_current)
+                    params_saved = _read_params_snapshot(params_path_saved)
+                    sig_current = _params_signature(params_current, _MCTHERM_PARAM_KEYS)
+                    sig_saved = _params_signature(params_saved, _MCTHERM_PARAM_KEYS)
+                    if sig_current == sig_saved:
+                        use_cache = True
+                except Exception:
+                    use_cache = False
+
+            if use_cache:
+                logger.info(f"Temperature already computed at {existing_file}")
+                self.read_dust_temperature(fname=str(existing_file))
+                return self.temperature
+            else:
+                logger.info(
+                    "Existing dust_temperature output found but parameters "
+                    "have changed or nphot override used; recomputing mctherm."
+                )
         
         # Create output directory
         output_dir.mkdir(exist_ok=True)
@@ -797,6 +924,11 @@ class RadModel:
         >>> rad = RadModel(model)
         >>> chi = rad.compute_mcmono()
         """
+        use_params_nphot = nphot is None
+        use_params_uv_min = uv_min_nm is None
+        use_params_uv_max = uv_max_nm is None
+        use_params_nw = n_wavelengths is None
+
         if nphot is None:
             nphot = self.params.nphot_mono
         if uv_min_nm is None:
@@ -816,56 +948,95 @@ class RadModel:
             output_dir = self.outputs_dir
         else:
             output_dir = Path(output_dir)
-        
+
         # Check if already computed
         mean_intensity_file = output_dir / 'mean_intensity.out'
         if mean_intensity_file.exists() and not force:
-            logger.info(f"Mean intensity already computed at {mean_intensity_file}")
-            # Parse the existing file with multi-wavelength format
-            with open(mean_intensity_file, 'r') as f:
-                iformat = int(f.readline().strip())
-                nrcells = int(f.readline().strip())
-                nwav = int(f.readline().strip())
-                
-                # Read wavelengths (all on one line, space-separated, in Hz)
-                freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
-                
-                # Convert frequency to wavelength: lambda = c / nu
-                lam = C_LIGHT / freq_hz
-                
-                # Read mean intensity values
-                # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
-                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-                j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')  # Attach units
-            
-            nx, ny, nz = self.data._getMeshShape()
-            self.mean_intensity = j_lambda
-            
-            # Compute chi by integrating over UV band in frequency space
-            uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
-            if not np.any(uv_mask):
-                raise ValueError(
-                    f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) in existing mean intensity file. '
-                    f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
+            use_cache = False
+            params_path_current = self.model_dir / 'params.txt'
+            params_path_saved = output_dir / 'params.txt'
+            overrides = not (
+                use_params_nphot
+                and use_params_uv_min
+                and use_params_uv_max
+                and use_params_nw
+            )
+            if (
+                not overrides
+                and params_path_current.exists()
+                and params_path_saved.exists()
+            ):
+                try:
+                    params_current = _read_params_snapshot(params_path_current)
+                    params_saved = _read_params_snapshot(params_path_saved)
+                    names = _MCTHERM_PARAM_KEYS + _MCMONO_EXTRA_PARAM_KEYS
+                    sig_current = _params_signature(params_current, names)
+                    sig_saved = _params_signature(params_saved, names)
+                    if sig_current == sig_saved:
+                        use_cache = True
+                except Exception:
+                    use_cache = False
+
+            if use_cache:
+                logger.info(f"Mean intensity already computed at {mean_intensity_file}")
+                # Parse the existing file with multi-wavelength format
+                with open(mean_intensity_file, 'r') as f:
+                    iformat = int(f.readline().strip())
+                    nrcells = int(f.readline().strip())
+                    nwav = int(f.readline().strip())
+
+                    # Read wavelengths (all on one line, space-separated, in Hz)
+                    freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
+
+                    # Convert frequency to wavelength: lambda = c / nu
+                    lam = C_LIGHT / freq_hz
+
+                    # Read mean intensity values
+                    # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
+                    j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+                    j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+
+                nx, ny, nz = self.data._getMeshShape()
+                self.mean_intensity = j_lambda
+
+                # Compute chi by integrating over UV band in frequency space
+                uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
+                if not np.any(uv_mask):
+                    raise ValueError(
+                        f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) in existing mean intensity file. '
+                        f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
+                    )
+
+                j_uv = j_lambda[:, uv_mask]
+                nu_uv = freq_hz[uv_mask]
+                u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
+                # Sort by frequency for integration
+                sort_idx = np.argsort(nu_uv)
+                nu_sorted = nu_uv[sort_idx]
+                u_nu_sorted = u_nu[:, sort_idx]
+                # Integrate energy density over frequency
+                u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
+                # Compute chi (dimensionless)
+                chi_flat = (u_band / u_draine).to('dimensionless')
+                chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
+                self.chi = chi_3d
+
+                logger.info(
+                    f"Loaded chi from {np.sum(uv_mask)} UV wavelengths: "
+                    f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
                 )
-            
-            j_uv = j_lambda[:, uv_mask]
-            nu_uv = freq_hz[uv_mask]
-            u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
-            # Sort by frequency for integration
-            sort_idx = np.argsort(nu_uv)
-            nu_sorted = nu_uv[sort_idx]
-            u_nu_sorted = u_nu[:, sort_idx]
-            # Integrate energy density over frequency
-            u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
-            # Compute chi (dimensionless)
-            chi_flat = (u_band / u_draine).to('dimensionless')
-            chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
-            self.chi = chi_3d
-            
-            logger.info(f"Loaded chi from {np.sum(uv_mask)} UV wavelengths: "
-                       f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")
-            return self.chi
+
+                try:
+                    self.summarize_chi_over_nH()
+                except Exception as e:
+                    logger.warning(f"summarize_chi_over_nH failed after loading chi: {e}")
+
+                return self.chi
+            else:
+                logger.info(
+                    "Existing mean_intensity output found but parameters "
+                    "have changed or mcmono overrides used; recomputing mcmono."
+                )
         
         # Create output directory
         output_dir.mkdir(exist_ok=True)
@@ -1001,13 +1172,19 @@ class RadModel:
         u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
         # Compute chi (dimensionless)
         chi_flat = (u_band / u_draine).to('dimensionless')
-        
         # Reshape to 3D grid
         chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
         self.chi = chi_3d
         
-        logger.info(f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm): "
-                   f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}")
+        logger.info(
+            f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm): "
+            f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
+        )
+
+        try:
+            self.summarize_chi_over_nH()
+        except Exception as e:
+            logger.warning(f"summarize_chi_over_nH failed after computing chi: {e}")
         
         return self.chi
     

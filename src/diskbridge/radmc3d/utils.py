@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, get_type_hints
+from dataclasses import fields
 import subprocess
 
 from diskbridge._logging import logger
+from diskbridge._units import Quantity
+from diskbridge._params import (
+    Params,
+    DEFAULT_PARAMS_FILE,
+    _parse_param_file,
+    _parse_value,
+)
 
 
 def _extract_radmc_errors(log_path: Path) -> str:
@@ -96,3 +104,40 @@ def cleanup_symlinks(active_symlinks: List[Path]) -> None:
     active_symlinks.clear()
     logger.info(f"Cleaned up {removed_count} symlinks")
 
+
+def _read_params_snapshot(params_path: Path) -> Params:
+    values = _parse_param_file(DEFAULT_PARAMS_FILE)
+    user_vals = _parse_param_file(params_path)
+    values.update(user_vals)
+
+    type_hints = get_type_hints(Params)
+    kwargs = {}
+    for field in fields(Params):
+        key = field.name
+        if key not in values:
+            raise KeyError(
+                f"Missing required parameter '{key}' in params.txt (no default provided)."
+            )
+        raw = values[key]
+        field_type = type_hints[key]
+        parsed = _parse_value(raw, field_type, param_name=key)
+        kwargs[key] = parsed
+
+    return Params(**kwargs)
+
+
+def _normalize_param_value(val):
+    if isinstance(val, Quantity):
+        base = val.to_base_units()
+        return float(base.magnitude), str(base.units)
+    if isinstance(val, list):
+        return tuple(_normalize_param_value(v) for v in val)
+    return val
+
+
+def _params_signature(params_obj: Params, names: tuple[str, ...]) -> tuple:
+    items = []
+    for name in names:
+        value = getattr(params_obj, name)
+        items.append((name, _normalize_param_value(value)))
+    return tuple(items)
