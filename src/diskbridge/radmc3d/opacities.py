@@ -11,18 +11,8 @@ import numpy as np
 import math
 from scipy.interpolate import interp1d
 
-try:
-    from numba import njit
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-    # Define a no-op decorator if numba is not available
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]):
-            return args[0]
-        return decorator
+
+from numba import njit 
 
 if TYPE_CHECKING:
     from diskbridge.model.dust import DustBin
@@ -154,135 +144,6 @@ def bhmie_numba(x: float, refrel: complex, theta: np.ndarray) -> Tuple[np.ndarra
     return S1, S2, Qext, Qabs, Qsca, Qback, gsca
 
 
-def bhmie(x: float, refrel: complex, theta: np.ndarray) -> Tuple[np.ndarray, ...]:
-    """Bohren and Huffman Mie scattering calculation.
-    
-    This is a direct port from the fargo2radmc3d/dust/bhmie.py module,
-    originally from Bruce Draine's f77 code.
-    
-    Args:
-        x: Size parameter (2*pi*radius_grain/lambda)
-        refrel: Complex index of refraction (e.g., 1.5 + 0.01j)
-        theta: Array of scattering angles between 0 and 180 degrees
-        
-    Returns:
-        Tuple of (S1, S2, Qext, Qabs, Qsca, Qback, gsca):
-            S1: Complex phase function (E perp to scattering plane)
-            S2: Complex phase function (E para to scattering plane)
-            Qext: Efficiency factor for extinction
-            Qabs: Efficiency factor for absorption
-            Qsca: Efficiency factor for scattering
-            Qback: Backscattering efficiency
-            gsca: <cos(theta)> for scattering
-    """
-    # Check theta array orientation
-    nang = len(theta)
-    if theta[0] == 0.0:
-        assert theta[nang-1] == 180, "Angle grid must extend from 0 to 180 degrees."
-        iang0 = 0
-        iang180 = nang - 1
-    else:
-        assert theta[0] == 180, "Angle grid must extend from 0 to 180 degrees."
-        assert theta[nang-1] == 0, "Angle grid must extend from 0 to 180 degrees."
-        iang0 = nang - 1
-        iang180 = 0
-    
-    # Allocate complex phase functions
-    S1 = np.zeros(nang, dtype=np.complex128)
-    S2 = np.zeros(nang, dtype=np.complex128)
-    
-    # Initialize arrays for series expansion
-    pi = np.zeros(nang, dtype=np.float64)
-    pi0 = np.zeros(nang, dtype=np.float64)
-    pi1 = np.zeros(nang, dtype=np.float64) + 1.0
-    tau = np.zeros(nang, dtype=np.float64)
-    
-    # Compute alternative to x
-    y = x * refrel
-    
-    # Determine termination point for series expansion
-    xstop = x + 4 * x**0.3333 + 2.0
-    nstop = int(math.floor(xstop))
-    
-    # Start of logarithmic derivatives iteration
-    nmx = int(math.floor(np.max([xstop, abs(y)])) + 15)
-    
-    # Compute mu = cos(theta)
-    mu = np.cos(theta * math.pi / 180.)
-    
-    # Calculate logarithmic derivative by downward recurrence
-    dlog = np.zeros(nmx, dtype=np.complex128)
-    for n in range(nmx - 1):
-        en = float(nmx - n)
-        dlog[nmx - n - 2] = en / y - 1.0 / (dlog[nmx - n - 1] + en / y)
-    
-    # Prepare for series expansion
-    psi0 = math.cos(x)
-    psi1 = math.sin(x)
-    chi0 = -math.sin(x)
-    chi1 = math.cos(x)
-    xi1 = psi1 - chi1 * 1j
-    p = -1.0
-    Qsca = 0.0
-    gsca = 0.0
-    an = 0j
-    bn = 0j
-    
-    # Riccati-Bessel functions - series expansion
-    for n in range(nstop):
-        en = float(n + 1)
-        fn = (2 * en + 1.0) / (en * (en + 1.0))
-        psi = (2 * en - 1.0) * psi1 / x - psi0
-        chi = (2 * en - 1.0) * chi1 / x - chi0
-        xi = psi - chi * 1j
-        an1 = an
-        bn1 = bn
-        dum = dlog[n] / refrel + en / x
-        an = (dum * psi - psi1) / (dum * xi - xi1)
-        dum = dlog[n] * refrel + en / x
-        bn = (dum * psi - psi1) / (dum * xi - xi1)
-        
-        # Add contributions to Qsca and gsca
-        Qsca += (2 * en + 1.0) * (abs(an)**2 + abs(bn)**2)
-        dum = (2 * en + 1.0) / (en * (en + 1.0))
-        gsca += dum * (an.real * bn.real + an.imag * bn.imag)
-        dum = (en - 1.0) * (en + 1.0) / en
-        gsca += dum * (an1.real * an.real + an1.imag * an.imag +
-                       bn1.real * bn.real + bn1.imag * bn.imag)
-        
-        # Contribute to scattering intensity pattern
-        pi[:] = pi1[:]
-        tau[:] = en * np.abs(mu[:]) * pi[:] - (en + 1.0) * pi0[:]
-        
-        # For mu >= 0
-        idx = mu >= 0
-        S1[idx] += fn * (an * pi[idx] + bn * tau[idx])
-        S2[idx] += fn * (an * tau[idx] + bn * pi[idx])
-        
-        # For mu < 0
-        p = -p
-        idx = mu < 0
-        S1[idx] += fn * p * (an * pi[idx] - bn * tau[idx])
-        S2[idx] += fn * p * (bn * pi[idx] - an * tau[idx])
-        
-        # Prepare for next iteration
-        psi0 = psi1
-        psi1 = psi
-        chi0 = chi1
-        chi1 = chi
-        xi1 = psi1 - chi1 * 1j
-        pi1[:] = ((2 * en + 1.0) * np.abs(mu[:]) * pi[:] - (en + 1.0) * pi0[:]) / en
-        pi0[:] = pi[:]
-    
-    # Final calculations
-    gsca = 2 * gsca / Qsca
-    Qsca = (2.0 / (x * x)) * Qsca
-    Qext = (4.0 / (x * x)) * S1[iang0].real
-    Qback = (abs(S1[iang180]) / x)**2 / math.pi
-    Qabs = Qext - Qsca
-    
-    return S1, S2, Qext, Qabs, Qsca, Qback, gsca
-
 
 class DustOpacityCalculator:
     """Calculate dust opacities using Mie scattering theory.
@@ -307,10 +168,7 @@ class DustOpacityCalculator:
             use_numba: If True and numba is available, use JIT-compiled functions
         """
         self.verbose = False
-        self.use_numba = use_numba and NUMBA_AVAILABLE
-        if use_numba and not NUMBA_AVAILABLE:
-            logger.warning("Numba not available, falling back to pure Python implementation")
-        
+
     def compute_opacity(
         self,
         optconst_file: str | Path,
@@ -437,9 +295,6 @@ class DustOpacityCalculator:
             S33 = np.zeros(nang)
             S34 = np.zeros(nang)
         
-        # Choose implementation: always prefer the numba-optimized version when available. It should reproduce the reference bhmie results
-        bhmie_func = bhmie_numba if self.use_numba else bhmie
-        
         # Loop over wavelengths
         for i in range(nlam):
             if self.verbose:
@@ -448,7 +303,7 @@ class DustOpacityCalculator:
             # Loop over grain sizes
             for l in range(nagr):
                 x = 2 * math.pi * agr[l] / wavelengths[i]
-                S1, S2, Qext, Qabs, Qsca, Qback, gsca = bhmie_func(x, refidx[i], angles)
+                S1, S2, Qext, Qabs, Qsca, Qback, gsca = bhmie_numba(x, refidx[i], angles)
                 
                 # Average over size distribution
                 kabs[i] += wgt[l] * Qabs * siggeom[l] / mgrain[l]
