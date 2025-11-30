@@ -896,53 +896,25 @@ class Dust(SubModel):
         # Now z_cyl and H_d have the same units (r_units), so z^2/H_d^2 is dimensionless
         vertical_profile = np.exp(-(z_cyl**2 / (2 * H_d**2)).to('dimensionless').magnitude)
         
-        # Compute dust density
+        # Compute dust density directly from analytic settling profile, without
+        # additional column renormalization. This makes the dust density a
+        # simple function of local gas density, dtg, and the vertical settling
+        # profile, and is useful for inspecting the raw behaviour.
+
         dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
-        
-        # Dust density: rho_d = dust_to_gas * rho_g0 * (H_g/H_d) * exp(-z^2/(2*H_d^2))
-        # The (H_g/H_d) factor ensures correct normalization for the narrower Gaussian
         prefactor = dust_to_gas_local * (H_g0[:, :, None] / H_d)
-        dust_density_raw = rho_g0[:, :, None] * prefactor * vertical_profile
-        
-        # === MASS CONSERVATION STEP ===
-        # Renormalize each column to conserve the expected dust surface density
-        # Expected: Sigma_dust = dust_to_gas * mass_fraction * Sigma_gas
-        # where Sigma_gas = sqrt(2*pi) * H_g * rho_g0 for a Gaussian
-        
-        Sigma_gas = np.sqrt(2 * np.pi) * H_g0 * rho_g0
-        Sigma_dust_expected = dust_to_gas_local * Sigma_gas
-        
-        # Compute actual column integral in spherical coordinates
-        # Column integral: integral of rho * r * dtheta along theta
-        n_r, n_phi, n_theta = dust_density_raw.shape
-        
-        # Initialize with correct units
-        Sigma_dust_actual = 0.0 * dust_density_raw[:, :, 0] * r[0]
-        
-        for i_theta in range(n_theta):
-            dtheta = (theta_edges[i_theta + 1] - theta_edges[i_theta]).magnitude
-            Sigma_dust_actual = Sigma_dust_actual + dust_density_raw[:, :, i_theta] * r[:, None] * dtheta
-        
-        # Compute renormalization factor
-        with np.errstate(divide='ignore', invalid='ignore'):
-            renorm_factor = Sigma_dust_expected / Sigma_dust_actual
-            renorm_mag = renorm_factor.magnitude
-            renorm_mag[~np.isfinite(renorm_mag)] = 1.0
-            renorm_mag = np.clip(renorm_mag, 0.01, 100.0)  # Cap extreme factors
-        
-        # Apply renormalization (renorm_factor should be dimensionless)
-        dust_density_data = dust_density_raw * renorm_mag[:, :, None]
-        
+        dust_density_data = rho_g0[:, :, None] * prefactor * vertical_profile
+
+        # Apply mask if set
+        if component.mask is not None:
+            mask_array = component.mask.data.magnitude.astype(bool)
+            dust_density_data = dust_density_data * mask_array
+
         # Ensure numerical stability
         dust_density_mag = dust_density_data.magnitude
         dust_density_mag[~np.isfinite(dust_density_mag)] = 0.0
         dust_density_mag[dust_density_mag < 0.0] = 0.0
         dust_density_data = dust_density_mag * dust_density_data.units
-        
-        # Apply mask if set
-        if component.mask is not None:
-            mask_array = component.mask.data.magnitude.astype(bool)
-            dust_density_data = dust_density_data * mask_array
         
         axis_order = gas_density.axis_order
         

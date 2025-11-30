@@ -61,7 +61,7 @@ teff        = 6130.0              # Temperature of the star in kelvin
 mstar       = 1.0                  # Mass of the star in solar masses
 
 mdot             = 0.0
-accretion_fill_factor = 0.01
+accretion_fill_factor = 0.05
 
 # RADMC 
 secondorder      = F

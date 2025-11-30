@@ -59,6 +59,11 @@ from .profiles import (
     compute_vertical_profile,
     compute_column_density,
     compute_surface_density_from_3d,
+    register_small_dust_density_field,
+    compute_small_dust_midplane_profile,
+    plot_small_dust_midplane_profile,
+    plot_small_dust_midplane_map,
+    plot_small_dust_rz_slice,
     ProfilePlotter,
 )
 
@@ -91,6 +96,11 @@ __all__ = [
     'compute_vertical_profile',
     'compute_column_density',
     'compute_surface_density_from_3d',
+    'register_small_dust_density_field',
+    'compute_small_dust_midplane_profile',
+    'plot_small_dust_midplane_profile',
+    'plot_small_dust_midplane_map',
+    'plot_small_dust_rz_slice',
     'ProfilePlotter',
     # Quick functions
     'quick_slice',

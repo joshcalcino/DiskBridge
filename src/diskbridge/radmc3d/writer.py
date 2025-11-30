@@ -647,10 +647,7 @@ class RadWriter:
             nphot_scat=nphot_scat,
             setthreads=setthreads,
         )
-        
-        if getattr(self.params, 'external_uv', False):
-            self.write_external_source(output_dir)
-        
+
         logger.info("All RADMC-3D input files written successfully")
     
     def _ensure_isrf_file(self, path: Path, url: str) -> Path:

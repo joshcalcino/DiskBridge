@@ -17,9 +17,12 @@ import numpy as np
 if TYPE_CHECKING:
     from diskbridge.model.model import Model
     from diskbridge.radmc3d.model import RadModel
+    from diskbridge.model.field import Field
     import yt
 
 from diskbridge._logging import logger
+from diskbridge.model.field import Field
+import matplotlib.pyplot as plt
 
 
 def azimuthal_average(
@@ -258,7 +261,178 @@ def compute_column_density(
         return r_au, sigma_avg
     
     else:
-        raise NotImplementedError(f"Integration axis '{integrate_axis}' not yet supported")
+        raise ValueError(f"Unsupported integrate_axis: {integrate_axis}")
+
+
+def register_small_dust_density_field(
+    model: "Model",
+    amax_um: float = 1.0,
+    field_name: str = "dust_density_small",
+) -> Optional["Field"]:
+    dust = getattr(model, "dust", None)
+    if dust is None or not getattr(dust, "bins", None):
+        logger.warning("No dust distribution available on model; cannot build small-dust field")
+        return None
+
+    small_total = None
+    sample_field: Optional[Field] = None
+
+    for _, dust_bin in dust.bins.items():
+        size_um = dust_bin.size.to("um").magnitude
+        if size_um > amax_um:
+            continue
+        global_idx = dust_bin.bin_index
+        bin_field = dust._compute_bin_density(global_idx)
+        if small_total is None:
+            small_total = bin_field.data.copy()
+            sample_field = bin_field
+        else:
+            small_total = small_total + bin_field.data
+
+    if small_total is None or sample_field is None:
+        logger.warning("No dust bins found with size < %.3g um", amax_um)
+        return None
+
+    field = Field(
+        data=small_total,
+        quantity=sample_field.quantity,
+        axis_order=sample_field.axis_order,
+    )
+    model.gas_register(field_name, field)
+    logger.info("Registered small-dust field '%s' with amax=%.3g um", field_name, amax_um)
+    return field
+
+
+def compute_small_dust_midplane_profile(
+    model: "Model",
+    amax_um: float = 1.0,
+    field_name: str = "dust_density_small",
+) -> Tuple[np.ndarray, np.ndarray]:
+    if field_name not in model.gas:
+        reg_field = register_small_dust_density_field(model, amax_um=amax_um, field_name=field_name)
+        if reg_field is None:
+            raise ValueError("Could not construct small-dust field; check dust configuration")
+    return compute_midplane_profile(model, field_name)
+
+
+def plot_small_dust_midplane_profile(
+    model: "Model",
+    amax_um: float = 1.0,
+    output: Union[str, "Path"] = "small_dust_radial_profile.png",
+    field_name: str = "dust_density_small",
+):
+    r_au, profile = compute_small_dust_midplane_profile(model, amax_um=amax_um, field_name=field_name)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(r_au, profile)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("r [au]")
+    ax.set_ylabel("rho_dust(<%.3g um) [g/cm^3]" % amax_um)
+    ax.set_title("Midplane small-grain dust density")
+    fig.tight_layout()
+    fig.savefig(str(output), dpi=200)
+    plt.close(fig)
+    return fig
+
+
+def plot_small_dust_rz_slice(
+    model: "Model",
+    amax_um: float = 1.0,
+    output: Union[str, "Path"] = "small_dust_rz_slice.png",
+    field_name: str = "dust_density_small",
+):
+    """Plot a phi-averaged R–z slice of small-grain dust density.
+
+    The slice is constructed in cylindrical coordinates (R, z) by
+    averaging the small-dust density over azimuth and mapping the
+    spherical (r, theta) grid to (R = r sin(theta), z = r cos(theta)).
+    """
+    if field_name not in model.gas:
+        reg_field = register_small_dust_density_field(model, amax_um=amax_um, field_name=field_name)
+        if reg_field is None:
+            raise ValueError("Could not construct small-dust field; check dust configuration")
+
+    mesh = model.mesh
+    r = mesh.centers("r").to("au").magnitude
+    theta = mesh.centers("theta").magnitude
+
+    field = model.gas[field_name]
+    data = field.data
+    if hasattr(data, "to"):
+        data = data.to("g/cm**3").magnitude
+    elif hasattr(data, "magnitude"):
+        data = data.magnitude
+
+    # data is (r, phi, theta); average over phi for an axisymmetric slice
+    rho_phi_avg = np.mean(data, axis=1)  # (nr, ntheta)
+
+    # Prepare spherical axes (1D): r has length nr, theta has length ntheta
+    r_au = r  # already in au, shape (nr,)
+    theta_rad = theta  # shape (ntheta,)
+
+    z_val = np.log10(rho_phi_avg + 1e-99)  # (nr, ntheta)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    # Use 1D axes: X length N (nr), Y length M (ntheta), C shape (M, N) -> transpose
+    pc = ax.pcolormesh(r_au, theta_rad, z_val.T, shading="auto")
+    ax.set_xscale("log")
+    ax.set_xlabel("r [au]")
+    ax.set_ylabel("theta [rad]")
+    cb = fig.colorbar(pc, ax=ax)
+    cb.set_label("log10 rho_dust(<%.3g um) [g/cm^3]" % amax_um)
+    ax.set_title("Phi-averaged small-grain dust density (R–z slice)")
+    fig.tight_layout()
+    fig.savefig(str(output), dpi=200)
+    plt.close(fig)
+    return fig
+
+
+def plot_small_dust_midplane_map(
+    model: "Model",
+    amax_um: float = 1.0,
+    output: Union[str, "Path"] = "small_dust_midplane_map.png",
+    field_name: str = "dust_density_small",
+):
+    if field_name not in model.gas:
+        reg_field = register_small_dust_density_field(model, amax_um=amax_um, field_name=field_name)
+        if reg_field is None:
+            raise ValueError("Could not construct small-dust field; check dust configuration")
+
+    mesh = model.mesh
+    r = mesh.centers('r').to('au').magnitude
+    phi = mesh.centers('phi').magnitude
+    theta = mesh.centers('theta').magnitude
+
+    theta_mid_idx = int(np.argmin(np.abs(theta - np.pi / 2.0)))
+
+    field = model.gas[field_name]
+    data = field.data
+    if hasattr(data, 'to'):
+        data = data.to('g/cm**3').magnitude
+    elif hasattr(data, 'magnitude'):
+        data = data.magnitude
+
+    # data is (r, phi, theta); extract midplane slice -> (nr, nphi)
+    slice_mid = data[:, :, theta_mid_idx]
+
+    r_edges = mesh.edges('r').to('au').magnitude
+    phi_edges = mesh.edges('phi').magnitude
+
+    z = np.log10(slice_mid + 1e-99)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    pc = ax.pcolormesh(r_edges, phi_edges, z.T, shading='auto')
+    ax.set_xscale('log')
+    ax.set_xlabel('r [au]')
+    ax.set_ylabel('phi [rad]')
+    cb = fig.colorbar(pc, ax=ax)
+    cb.set_label("log10 rho_dust(<%.3g um) [g/cm^3]" % amax_um)
+    ax.set_title('Midplane small-grain dust density')
+    fig.tight_layout()
+    fig.savefig(str(output), dpi=200)
+    plt.close(fig)
+    return fig
 
 
 def compute_surface_density_from_3d(

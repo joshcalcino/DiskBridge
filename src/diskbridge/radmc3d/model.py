@@ -1055,6 +1055,12 @@ class RadModel:
         # Create symlinks to input files
         self.create_symlinks()
         
+        # If an external UV field is requested, ensure external_source.inp exists
+        if getattr(self.params, 'external_uv', False):
+            from .writer import RadWriter
+            writer = RadWriter(self.model, organize_files=True)
+            writer.write_external_source(self.model_dir)
+
         # RADMC-3D mcmono also needs temperature file - create symlink if it exists in outputs subdirectory
         for suffix in ['.bdat', '.dat', '.binp']:
             src_temp = self.outputs_dir / f'dust_temperature{suffix}'
