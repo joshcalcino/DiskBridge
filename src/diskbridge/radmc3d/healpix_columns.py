@@ -686,7 +686,8 @@ def compute_co_shielding_healpix(
 
         if use_fast_abundance_scaling:
             Nref_all = np.empty((n_candidates, npix), dtype=np.float64)
-            for start in range(0, n_candidates, chunk_size):
+            _t_chunk_start = _time.time()
+            for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
                 end = min(start + chunk_size, n_candidates)
                 Nref_chunk = integrate_rays(
                     tracer,
@@ -698,9 +699,17 @@ def compute_co_shielding_healpix(
                 Nref_all[start:end] = Nref_chunk
 
                 frac = end / n_candidates
+                t_now = _time.time()
+                dt = t_now - _t_chunk_start
+                _t_chunk_start = t_now
+                n_cells_chunk = end - start
+                cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
+                rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
                 logger.info(
                     f"HEALPix rays: {end}/{n_candidates} cells "
-                    f"({100.0 * frac:.1f}%) done."
+                    f"({100.0 * frac:.1f}%) done. "
+                    f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
+                    f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
                 )
 
             Nco_all = (Xco_guess * Nref_all).astype(np.float64)

@@ -453,8 +453,8 @@ class RadModel:
     
     def summarize_chi_over_nH(
         self,
-        log_min: float = -10.0,
-        log_max: float = -4.0,
+        log_min: float = -8.0,
+        log_max: float =  0.0,
         nbins: int = 50,
         margins: Optional[Sequence[float]] = None,
     ) -> dict:
@@ -526,7 +526,7 @@ class RadModel:
         nside: int = 4,
         b_kms: float = 0.3,
         XH2_guess: float = 0.5,
-        margin_dex: float = 1.0,
+        margin_dex: float = 1.5,
         max_cells: Optional[int] = None,
         write_output: bool = True,
         progress_chunks: Optional[int] = None,
