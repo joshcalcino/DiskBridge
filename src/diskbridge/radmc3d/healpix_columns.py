@@ -606,7 +606,9 @@ def compute_co_shielding_healpix(
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
         log_ratio = np.log10(np.maximum(ratio, 1e-99))
-        candidate_mask = log_ratio > (log_chi_over_nH_pdiss - margin_dex)
+        lower = log_chi_over_nH_pdiss
+        upper = log_chi_over_nH_pdiss + margin_dex
+        candidate_mask = (log_ratio > lower) & (log_ratio <= upper)
 
     candidate_idx = np.argwhere(candidate_mask)
     n_candidates = candidate_idx.shape[0]

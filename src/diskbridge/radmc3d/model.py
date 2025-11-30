@@ -492,15 +492,15 @@ class RadModel:
         candidate_fractions = []
 
         for margin in margins:
-            threshold = log_thr - float(margin)
-            mask = log_ratio > threshold
+            upper = log_thr + float(margin)
+            mask = (log_ratio > log_thr) & (log_ratio <= upper)
             n_cand = int(mask.sum())
             frac = 100.0 * n_cand / total if total > 0 else 0.0
             candidate_counts.append(n_cand)
             candidate_fractions.append(frac)
             logger.info(
-                "margin_dex=%.2f: candidates=%d (%.2f%%) for log10(chi/nH) > %.2f"
-                % (float(margin), n_cand, frac, threshold)
+                "margin_dex=%.2f: candidates=%d (%.2f%%) for %.2f < log10(chi/nH) <= %.2f"
+                % (float(margin), n_cand, frac, log_thr, upper)
             )
 
         return {
