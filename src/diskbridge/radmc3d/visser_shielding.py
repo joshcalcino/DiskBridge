@@ -157,7 +157,7 @@ class VisserShielding:
         if not self.filepath.exists():
             raise FileNotFoundError(f"Shielding file not found: {self.filepath}")
 
-        self.b_kms = self._parse_b_from_name(filename)
+        self.b_kms = self._parse_co_b_from_file(self.filepath)
         self._grids: Dict[str, ShieldingGrid2D] = self._parse_visser_file(self.filepath)
 
     # --------- public API ----------
@@ -220,12 +220,32 @@ class VisserShielding:
             return np.nan
         return float(m.group(1))
 
+    @staticmethod
+    def _parse_co_b_from_file(path: Path) -> float:
+        text = path.read_text()
+        for line in text.splitlines():
+            if "b(CO,H2,H)" in line:
+                m = re.search(r"=\s*([0-9.]+)", line)
+                if m:
+                    return float(m.group(1))
+                break
+        return np.nan
+
     def _select_nearest_b_file(self, b_kms: float) -> str:
         files = self.available_files()
         if not files:
             raise FileNotFoundError(f"No shield.*.dat files found in {self.data_dir}")
 
-        bvals = np.array([self._parse_b_from_name(f) for f in files], float)
+        bvals_list: list[float] = []
+        for fname in files:
+            path = self.data_dir / fname
+            try:
+                val = self._parse_co_b_from_file(path)
+            except Exception:
+                val = np.nan
+            bvals_list.append(val)
+
+        bvals = np.array(bvals_list, float)
         j = np.nanargmin(np.abs(bvals - b_kms))
         return files[j]
 
