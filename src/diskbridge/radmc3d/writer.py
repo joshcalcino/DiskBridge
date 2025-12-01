@@ -25,6 +25,12 @@ from .opacities import DustOpacityCalculator
 G_CGS = units('G')
 SIGMA_SB = units('sigma_SB')
 
+# Local physical constants (cgs)
+H_CGS = 6.62607015e-27
+C_CGS = 2.99792458e10
+K_B_CGS = 1.380649e-16
+T_CMB = 2.725
+
 
 class RadWriter:
     """Write RADMC-3D input files from a DiskBridge Model.
@@ -729,6 +735,57 @@ class RadWriter:
             return values * (lam_cm ** 2 / c)
         return values * (lam_cm ** 2 / c)
     
+    def _planck_B_lambda(self, lam_cm: np.ndarray, T: float) -> np.ndarray:
+        lam = np.asarray(lam_cm, dtype=float)
+        lam = np.clip(lam, 1.0e-12, None)
+        x = H_CGS * C_CGS / (lam * K_B_CGS * T)
+        x = np.clip(x, 1.0e-10, 1.0e3)
+        prefac = 2.0 * H_CGS * (C_CGS ** 2) / (lam ** 5)
+        return prefac / np.expm1(x)
+
+    def _load_leiden_draine_isrf(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
+        data = np.loadtxt(str(path), comments="#")
+        lam_nm = data[:, 0]
+        j_phot_nm = data[:, 1]
+        lam_cm = lam_nm * 1.0e-7
+        e_ph = H_CGS * C_CGS / lam_cm
+        j_lambda = j_phot_nm * e_ph / 1.0e-7
+        return lam_cm, j_lambda
+
+    def _make_ism_background_lambda(
+        self,
+        lam_cm: np.ndarray,
+        chi: float,
+        isrf_path: Path,
+        include_ir_dust: bool = True,
+        T_dust: float = 18.0,
+        beta_dust: float = 1.7,
+        dust_norm: float = 1.0,
+        include_cmb: bool = True,
+    ) -> np.ndarray:
+        lam_cm = np.asarray(lam_cm, dtype=float)
+        lam_tab_cm, j_draine_tab = self._load_leiden_draine_isrf(isrf_path)
+        j_draine = np.zeros_like(lam_cm)
+        m = (lam_cm >= np.min(lam_tab_cm)) & (lam_cm <= np.max(lam_tab_cm))
+        if np.any(m):
+            log_lam_tab = np.log(lam_tab_cm)
+            log_j_tab = np.log(j_draine_tab)
+            j_draine[m] = np.exp(
+                np.interp(np.log(lam_cm[m]), log_lam_tab, log_j_tab)
+            )
+        j_total = float(chi) * j_draine
+        if include_ir_dust:
+            nu = C_CGS / lam_cm
+            b_nu = (2.0 * H_CGS * (nu ** 3) / (C_CGS ** 2)) / np.expm1(
+                H_CGS * nu / (K_B_CGS * T_dust)
+            )
+            j_ir_lambda = (nu ** beta_dust) * b_nu * (C_CGS / (nu ** 2))
+            j_total += float(dust_norm) * j_ir_lambda
+        if include_cmb:
+            j_cmb = self._planck_B_lambda(lam_cm, T_CMB)
+            j_total += j_cmb
+        return j_total
+
     def _read_wavelength_grid_from_file(self, filepath: Path) -> np.ndarray:
         if not filepath.is_file():
             raise FileNotFoundError(f"wavelength grid file not found: {filepath}")
@@ -740,7 +797,7 @@ class RadWriter:
             except ValueError:
                 raise RuntimeError("Invalid wavelength_micron.inp format")
         return np.array(vals, dtype=float)
-    
+
     def write_external_source(
         self,
         output_dir: str | Path = '.',
@@ -753,32 +810,24 @@ class RadWriter:
         url = "https://home.strw.leidenuniv.nl/~ewine/photo/data/photo_data/radiation_fields/ISRF.dat"
         isrf_target = output_dir / Path(isrf_path).name
         isrf_file = self._ensure_isrf_file(isrf_target, url)
-        lam_tab_cm, values, q = self._parse_isrf_table(isrf_file, quantity)
-        i_nu_tab = self._to_i_nu_from_table(lam_tab_cm, values, q)
         wav_file = output_dir / 'wavelength_micron.inp'
         lam_um = self._read_wavelength_grid_from_file(wav_file)
-        lam_cm = lam_um * 1e-4
-        x = np.array(lam_tab_cm, dtype=float)
-        y = np.array(i_nu_tab, dtype=float)
-        order = np.argsort(x)
-        x = x[order]
-        y = y[order]
-        y = np.where(y > 0.0, y, np.nan)
-        i_nu_model = np.zeros_like(lam_cm)
-        m = (lam_cm >= x[0]) & (lam_cm <= x[-1])
-        if np.any(m):
-            finite = np.isfinite(y)
-            i_nu_model[m] = np.exp(
-                np.interp(
-                    np.log(lam_cm[m]),
-                    np.log(x[finite]),
-                    np.log(y[finite]),
-                )
-            )
+        lam_cm = lam_um * 1.0e-4
         if chi is None:
-            chi = float(getattr(self.params, 'external_uv_chi', 1.0))
-        scale = float(chi)
-        i_nu_scaled = scale * i_nu_model
+            chi_val = float(getattr(self.params, 'external_uv_chi', 1.0))
+        else:
+            chi_val = float(chi)
+        j_lambda = self._make_ism_background_lambda(
+            lam_cm,
+            chi=chi_val,
+            isrf_path=isrf_file,
+            include_ir_dust=True,
+            T_dust=18.0,
+            beta_dust=1.7,
+            dust_norm=1.0,
+            include_cmb=True,
+        )
+        i_nu_scaled = (lam_cm * lam_cm / C_CGS) * j_lambda
         filepath = output_dir / 'external_source.inp'
         with open(filepath, 'w') as f:
             # RADMC-3D manual (sec-ext-src-inp): format 2, then nlam, then
@@ -792,7 +841,6 @@ class RadWriter:
                 f.write(f"{val:13.6e}\n")
         self.written_files['external_source.inp'] = filepath
         logger.info(f"Wrote external_source.inp file: {filepath}")
-    
     def write_gas_temperature(self, temperature: Quantity, output_dir: str | Path = '.') -> None:
         """Write gas temperature to gas_temperature.inp.
         
