@@ -836,6 +836,14 @@ class RadModel:
         # Create output directory
         output_dir.mkdir(exist_ok=True)
         
+        # If an external UV field is requested, ensure external_source.inp
+        # is (re)generated on the current continuum wavelength grid before
+        # creating symlinks and running mctherm.
+        if getattr(self.params, 'external_uv', False):
+            from .writer import RadWriter
+            writer = RadWriter(self.model, organize_files=True)
+            writer.write_external_source(self.model_dir)
+        
         # Create symlinks to input files
         self.create_symlinks()
         

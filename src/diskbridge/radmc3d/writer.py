@@ -781,8 +781,13 @@ class RadWriter:
         i_nu_scaled = scale * i_nu_model
         filepath = output_dir / 'external_source.inp'
         with open(filepath, 'w') as f:
+            # RADMC-3D manual (sec-ext-src-inp): format 2, then nlam, then
+            # lambda[i] in micron (identical to wavelength_micron.inp), then
+            # intensity[i] in erg/cm^2/s/Hz/sr.
             f.write('2\n')
             f.write(f"{lam_um.size}\n")
+            for w in lam_um:
+                f.write(f"{w:13.6e}\n")
             for val in i_nu_scaled:
                 f.write(f"{val:13.6e}\n")
         self.written_files['external_source.inp'] = filepath
