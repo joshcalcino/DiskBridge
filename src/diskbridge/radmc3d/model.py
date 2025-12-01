@@ -84,6 +84,11 @@ _MCMONO_EXTRA_PARAM_KEYS = (
 )
 
 
+def _smoothstep01(x: np.ndarray) -> np.ndarray:
+    x_clipped = np.clip(x, 0.0, 1.0)
+    return x_clipped * x_clipped * (3.0 - 2.0 * x_clipped)
+
+
 class RadModel:
     """High-level wrapper for RADMC-3D molecular line radiative transfer.
     
@@ -530,6 +535,8 @@ class RadModel:
         max_cells: Optional[int] = None,
         write_output: bool = True,
         progress_chunks: Optional[int] = None,
+        smooth_log_chi_nH_dex: float = 0.0,
+        smooth_Tfrz_K: float = 0.0,
     ) -> Tuple[Quantity, Quantity]:
         """Compute molecular abundance with photochemistry (Pinte et al. 2018).
         
@@ -629,6 +636,15 @@ class RadModel:
         T = self.temperature.to('K')
         nH = self.nH.to('cm^-3')
         Tfrz_K = Tfrz.to('K') if isinstance(Tfrz, Quantity) else Quantity(Tfrz, 'K')
+
+        T_vals = T.to('K').magnitude
+        Tfrz_val = float(Tfrz_K.magnitude)
+
+        if isinstance(eps, Quantity):
+            eps_q = eps.to('dimensionless')
+        else:
+            eps_q = Quantity(eps, 'dimensionless')
+        eps_val = float(eps_q.magnitude)
         
         # Compute effective chi (with self-shielding if enabled)
         if self_shielding_flag and (photodissociation or photodesorption):
@@ -660,32 +676,100 @@ class RadModel:
         # Initialize abundance (dimensionless Quantity)
         X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
         
-        # 1. Freeze-out (reduce abundance)
-        mask_frz = np.zeros_like(T, dtype=bool)
+        # 1. Freeze-out (reduce abundance) with optional smooth transition
+        freeze_factor = np.ones_like(T_vals, dtype=float)
+        mask_frz = np.zeros_like(T_vals, dtype=bool)
         if freezeout:
-            mask_frz = T < Tfrz_K
-            X[mask_frz] *= EPS_DEFAULT
-            n_frz = np.sum(mask_frz)
+            if smooth_Tfrz_K > 0.0:
+                half_T = 0.5 * smooth_Tfrz_K
+                T_low = Tfrz_val - half_T
+                T_high = Tfrz_val + half_T
+
+                mask_cold = T_vals <= T_low
+                mask_warm = T_vals >= T_high
+                mask_mid = (~mask_cold) & (~mask_warm)
+
+                freeze_factor[mask_cold] = eps_val
+                freeze_factor[mask_warm] = 1.0
+                if np.any(mask_mid):
+                    t_mid = (T_vals[mask_mid] - T_low) / (2.0 * half_T)
+                    s_mid = _smoothstep01(t_mid)
+                    freeze_factor[mask_mid] = eps_val + (1.0 - eps_val) * s_mid
+            else:
+                mask_frz = T_vals < Tfrz_val
+                freeze_factor[mask_frz] = eps_val
+
+            if smooth_Tfrz_K > 0.0:
+                mask_frz = freeze_factor < 1.0 - 1e-12
+
+            X *= freeze_factor
+            n_frz = int(np.sum(mask_frz))
             logger.info(f"Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)")
+        else:
+            mask_frz = np.zeros_like(T_vals, dtype=bool)
+        
+        # Precompute log10(chi_eff / nH) if needed
+        chi_over_nH = None
+        if photodissociation or photodesorption:
+            chi_vals = chi_eff.magnitude
+            nH_vals = nH.magnitude
+            ratio = chi_vals / (nH_vals + eps_chi)
+            chi_over_nH = np.log10(np.maximum(ratio, eps_chi))
         
         # 2. Photodesorption escape (optional)
-        mask_pdes = np.zeros_like(T, dtype=bool)
-        if photodesorption:
-            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
-            mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
-            if freezeout:
-                # Undo freeze-out where both low temperature and strong radiation
-                unfreeze_mask = mask_pdes & mask_frz
-                X[unfreeze_mask] = float(X0)
-            n_pdes = np.sum(mask_pdes)
+        mask_pdes = np.zeros_like(T_vals, dtype=bool)
+        if photodesorption and chi_over_nH is not None:
+            log_thr_pdes = float(LOG_CHI_OVER_NH_PDES.magnitude)
+            if smooth_log_chi_nH_dex > 0.0:
+                half_dex = 0.5 * smooth_log_chi_nH_dex
+                lower = log_thr_pdes - half_dex
+                upper = log_thr_pdes + half_dex
+                width = max(smooth_log_chi_nH_dex, 1e-30)
+                t = (chi_over_nH - lower) / width
+                w = _smoothstep01(t)
+
+                if freezeout:
+                    has_freeze = freeze_factor < 1.0 - 1e-12
+                    if np.any(has_freeze):
+                        w_eff = w * has_freeze
+                        F = freeze_factor
+                        F_new = F + w_eff * (1.0 - F)
+                        ratio_F = np.ones_like(F, dtype=float)
+                        positive = F > 0.0
+                        ratio_F[positive] = F_new[positive] / F[positive]
+                        X *= ratio_F
+
+                mask_pdes = chi_over_nH > log_thr_pdes
+            else:
+                chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
+                mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
+                if freezeout:
+                    # Undo freeze-out where both low temperature and strong radiation
+                    unfreeze_mask = mask_pdes & mask_frz
+                    X[unfreeze_mask] = float(X0)
+
+            n_pdes = int(np.sum(mask_pdes))
             logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
         
-        # 3. Photodissociation (kill molecule)
-        if photodissociation:
-            chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
-            mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
-            X[mask_pdiss] = 0.0
-            n_pdiss = np.sum(mask_pdiss)
+        # 3. Photodissociation (kill molecule) with optional smooth transition
+        if photodissociation and chi_over_nH is not None:
+            log_thr_pdiss = float(LOG_CHI_OVER_NH_PDISS.magnitude)
+            if smooth_log_chi_nH_dex > 0.0:
+                half_dex = 0.5 * smooth_log_chi_nH_dex
+                lower = log_thr_pdiss - half_dex
+                upper = log_thr_pdiss + half_dex
+                width = max(smooth_log_chi_nH_dex, 1e-30)
+                t = (chi_over_nH - lower) / width
+                w_pdiss = _smoothstep01(t)
+                kill_factor = 1.0 - w_pdiss
+                X *= kill_factor
+                mask_pdiss = chi_over_nH > log_thr_pdiss
+            else:
+                chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
+                mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
+                X[mask_pdiss] = 0.0
+
+            n_pdiss = int(np.sum(mask_pdiss))
             logger.info(f"Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)")
         
         # Compute number density
