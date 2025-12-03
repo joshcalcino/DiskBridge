@@ -573,7 +573,7 @@ class RadModel:
             Assumed H2 fraction for self-shielding when nH2 not provided
             (default: 0.5, i.e., fully molecular)
         margin_dex : float, optional
-            Extra dex below threshold to include in candidate mask (default: 1.0)
+            Extra dex below threshold to include in candidate mask (default: 1.5)
         progress_chunks : int, optional
             If set to a positive integer, split HEALPix candidate cells into
             this many chunks when computing self-shielding, logging progress
@@ -667,6 +667,7 @@ class RadModel:
             )
             logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")
             logger.info(f"Self-shielding: max(theta_CO)={float(theta_co.magnitude.max()):.3f}")
+            logger.info(f"Self-shielding: min(theta_CO)={float(theta_co.magnitude.min()):.3f}")
         else:
             chi_eff = self.chi
         

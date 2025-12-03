@@ -80,6 +80,7 @@ class Params:
 
     # radmc
     secondorder: bool
+    noscat: bool
 
     # naming
     prepend_name: str

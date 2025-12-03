@@ -925,6 +925,10 @@ class RadImage:
         if secondorder_flag:
             cmd.append('secondorder')
         
+        noscat_flag = getattr(self.params, 'noscat', False)
+        if noscat_flag:
+            cmd.append('noscat')
+        
         # Wavelength or line parameters
         if wavelength is not None:
             cmd += ['lambda', str(wavelength)]
