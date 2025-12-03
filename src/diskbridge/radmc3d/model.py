@@ -532,7 +532,6 @@ class RadModel:
         b_kms: float = 0.3,
         XH2_guess: float = 0.5,
         margin_dex: float = 1.5,
-        max_cells: Optional[int] = None,
         write_output: bool = True,
         progress_chunks: Optional[int] = None,
         smooth_log_chi_nH_dex: float = 0.0,
@@ -575,8 +574,6 @@ class RadModel:
             (default: 0.5, i.e., fully molecular)
         margin_dex : float, optional
             Extra dex below threshold to include in candidate mask (default: 1.0)
-        max_cells : int, optional
-            Limit HEALPix ray tracing to this many cells (for testing)
         progress_chunks : int, optional
             If set to a positive integer, split HEALPix candidate cells into
             this many chunks when computing self-shielding, logging progress
@@ -665,7 +662,6 @@ class RadModel:
                 Xco_guess=float(X0),
                 XH2_guess=XH2_guess,
                 margin_dex=margin_dex,
-                max_cells=max_cells,
                 method=shield_method,
                 progress_chunks=progress_chunks,
             )
