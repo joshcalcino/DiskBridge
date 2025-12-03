@@ -10,6 +10,9 @@ nphot_thermal    = 1e7       # number of photons used to run mctherm
 nphot_scat       = 1e5       # number of photons used to run ray tracing (I think) 
 nphot_mono       = 1e7       # number of photons used to run mcmono 
 
+length_scale     = 1.0
+mass_scale       = 1.0
+
 # Wavelengths 
 n_lambda          = 150       # number of wavelengths in the wavelegnth grid (used for temperature and stars)
 lambda_min        = 0.1       # min wavelength in micron 

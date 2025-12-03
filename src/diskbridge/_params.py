@@ -24,6 +24,10 @@ class Params:
     nphot_scat: int
     nphot_mono: int
 
+    # global rescaling (dimensionless)
+    length_scale: float
+    mass_scale: float
+
     # wavelengths
     n_lambda: int
     lambda_min: Quantity

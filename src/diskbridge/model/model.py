@@ -165,6 +165,16 @@ class Model:
         - Velocities scale by sqrt(mass_scale/length_scale)
         - Densities scale by mass_scale/length_scale³
         """
+        if length_scale is None or mass_scale is None:
+            try:
+                from diskbridge import params as _global_params
+            except Exception:
+                _global_params = None
+            if _global_params is not None:
+                if length_scale is None and hasattr(_global_params, "length_scale"):
+                    length_scale = float(_global_params.length_scale)
+                if mass_scale is None and hasattr(_global_params, "mass_scale"):
+                    mass_scale = float(_global_params.mass_scale)
         p = Path(path)
         if reader.lower() == "fargo":
             from .readers.fargo import read_fargo_snapshot

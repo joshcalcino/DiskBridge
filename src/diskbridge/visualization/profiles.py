@@ -566,3 +566,95 @@ class ProfilePlotter:
             profile = np.mean(temp_avg, axis=1)
         
         return self.r, profile
+    
+    def chi_profile(
+        self,
+        at_midplane: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get chi (UV field) radial profile from RadModel.
+        
+        Parameters
+        ----------
+        at_midplane : bool, optional
+            If True, extract at midplane.
+            
+        Returns
+        -------
+        r, chi : tuple of ndarray
+        """
+        if self.radmodel is None or self.radmodel.chi is None:
+            raise ValueError("No chi data available (radmodel not set or chi not loaded)")
+        
+        chi = self.radmodel.chi
+        if hasattr(chi, 'magnitude'):
+            chi = chi.magnitude
+        
+        # RadModel data is in (r, theta, phi) order
+        # Average over phi
+        chi_avg = np.mean(chi, axis=2)  # (nr, ntheta)
+        
+        if at_midplane:
+            midplane_idx = np.argmin(np.abs(self.theta - np.pi / 2))
+            profile = chi_avg[:, midplane_idx]
+        else:
+            profile = np.mean(chi_avg, axis=1)
+        
+        return self.r, profile
+    
+    def get_rz_slice(
+        self,
+        field_source: str,
+        field_name: str = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get azimuthally-averaged R-z slice of a field.
+        
+        Parameters
+        ----------
+        field_source : str
+            'temperature', 'chi', or a field name from model.gas
+        field_name : str, optional
+            Field name if field_source is 'gas'
+            
+        Returns
+        -------
+        R : ndarray
+            Cylindrical radius in AU, shape (nr, ntheta)
+        z : ndarray
+            Height above midplane in AU, shape (nr, ntheta)
+        data : ndarray
+            Azimuthally-averaged data, shape (nr, ntheta)
+        """
+        # Get data based on source
+        if field_source == 'temperature':
+            if self.radmodel is None or self.radmodel.temperature is None:
+                raise ValueError("No temperature data available")
+            data = self.radmodel.temperature
+            if hasattr(data, 'magnitude'):
+                data = data.magnitude
+            # RadModel data is (r, theta, phi) - average over phi
+            data_avg = np.mean(data, axis=2)
+        elif field_source == 'chi':
+            if self.radmodel is None or self.radmodel.chi is None:
+                raise ValueError("No chi data available")
+            data = self.radmodel.chi
+            if hasattr(data, 'magnitude'):
+                data = data.magnitude
+            # RadModel data is (r, theta, phi) - average over phi
+            data_avg = np.mean(data, axis=2)
+        else:
+            # Assume it's a gas field from model
+            fname = field_name if field_name else field_source
+            if fname not in self.model.gas:
+                raise KeyError(f"Field '{fname}' not found in model.gas")
+            data = self.model.gas[fname].data
+            if hasattr(data, 'magnitude'):
+                data = data.magnitude
+            # Model data is (r, phi, theta) - average over phi, then transpose
+            data_avg = np.mean(data, axis=1)  # (nr, ntheta)
+        
+        # Compute R and z grids
+        r_grid, theta_grid = np.meshgrid(self.r, self.theta, indexing='ij')
+        R = r_grid * np.sin(theta_grid)
+        z = r_grid * np.cos(theta_grid)
+        
+        return R, z, data_avg
