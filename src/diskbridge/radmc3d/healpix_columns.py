@@ -492,7 +492,6 @@ def compute_co_shielding_healpix(
     margin_dex: float = 1.0,
     Xco_guess: float = 5e-5,
     XH2_guess: float = 0.5,
-    max_cells: Optional[int] = None,
     method: str = "uniform",
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
@@ -528,8 +527,6 @@ def compute_co_shielding_healpix(
         Default CO abundance relative to nH when nCO is not supplied.
     XH2_guess : float, optional
         Fraction of H nuclei in H2 when nH2 is not supplied.
-    max_cells : int, optional
-        Limit processed cells (useful for quick tests).
     method : str, optional
         Ray integration method passed to integrate_rays. Allowed values:
         - 'uniform' (default): fast arithmetic indexing
@@ -612,14 +609,6 @@ def compute_co_shielding_healpix(
 
     candidate_idx = np.argwhere(candidate_mask)
     n_candidates = candidate_idx.shape[0]
-
-    if max_cells is not None and n_candidates > max_cells:
-        logger.warning(
-            f"Limiting HEALPix shielding to first {max_cells} of {n_candidates} "
-            f"candidate cells."
-        )
-        candidate_idx = candidate_idx[:max_cells]
-        n_candidates = max_cells
 
     logger.info(
         f"compute_co_shielding_healpix: {n_candidates} candidate cells "

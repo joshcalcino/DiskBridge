@@ -670,6 +670,7 @@ class RadModel:
                 progress_chunks=progress_chunks,
             )
             logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")
+            logger.info(f"Self-shielding: max(theta_CO)={float(theta_co.magnitude.max()):.3f}")
         else:
             chi_eff = self.chi
         
