@@ -527,7 +527,6 @@ class RadModel:
         freezeout: Optional[bool] = None,
         photodesorption: Optional[bool] = None,
         self_shielding: Optional[bool] = None,
-        shield_method: Optional[str] = None,
         nside: int = 4,
         b_kms: float = 0.3,
         XH2_guess: float = 0.5,
@@ -609,9 +608,6 @@ class RadModel:
                 self_shielding_flag = bool(getattr(self.params, "co_self_shielding", False))
             else:
                 self_shielding_flag = bool(self_shielding)
-
-            if shield_method is None:
-                shield_method = getattr(self.params, "co_self_shielding_method", "uniform")
         else:
             self_shielding_flag = bool(self_shielding) if self_shielding is not None else False
 
@@ -662,7 +658,6 @@ class RadModel:
                 Xco_guess=float(X0),
                 XH2_guess=XH2_guess,
                 margin_dex=margin_dex,
-                method=shield_method,
                 progress_chunks=progress_chunks,
             )
             logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")

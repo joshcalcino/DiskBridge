@@ -492,7 +492,6 @@ def compute_co_shielding_healpix(
     margin_dex: float = 1.0,
     Xco_guess: float = 5e-5,
     XH2_guess: float = 0.5,
-    method: str = "uniform",
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
 ) -> Tuple[Quantity, Quantity]:
@@ -527,10 +526,6 @@ def compute_co_shielding_healpix(
         Default CO abundance relative to nH when nCO is not supplied.
     XH2_guess : float, optional
         Fraction of H nuclei in H2 when nH2 is not supplied.
-    method : str, optional
-        Ray integration method passed to integrate_rays. Allowed values:
-        - 'uniform' (default): fast arithmetic indexing
-        - 'sortedsearch': reference searchsorted-based kernels.
     progress_chunks : int, optional
         If set to a positive integer, split candidate cells into this many
         chunks, calling integrate_rays on each chunk and logging progress
@@ -575,7 +570,8 @@ def compute_co_shielding_healpix(
     if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
         raise ValueError("nCO and nH2 must match nH shape.")
 
-    use_fast_abundance_scaling = (nCO is None and nH2 is None)
+    Xco_field = nCO_cgs / (nH_cgs + 1.0e-99)
+    XH2_field = 2.0 * nH2_cgs / (nH_cgs + 1.0e-99)
 
     # Threshold for "interesting" cells (where simple Pinte would photodissociate)
     if log_chi_over_nH_pdiss is None:
@@ -649,20 +645,10 @@ def compute_co_shielding_healpix(
 
     # Use Numba-optimized ray integration
     logger.info(f"Running Numba-optimized ray integration ({n_candidates} cells x {npix} directions)...")
-    
-    method = (method or "uniform").lower()
 
     if progress_chunks is None or progress_chunks <= 1:
-        if use_fast_abundance_scaling:
-            # Single-field integration, then scale to get CO and H2
-            Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs, method=method)
-            Nco_all = (Xco_guess * Nref_all).astype(np.float64)
-            Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
-        else:
-            # Double-field integration for explicit CO and H2 densities
-            Nco_all, Nh2_all = integrate_rays(tracer, cell_centers, dirs, nCO_cgs, nH2_cgs, method=method)
+        Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs)
     else:
-        # Chunked integration with progress logging
         n_chunks = int(progress_chunks)
         if n_chunks <= 0:
             n_chunks = 1
@@ -673,58 +659,40 @@ def compute_co_shielding_healpix(
             f"in {n_chunks} chunks (chunk_size={chunk_size})."
         )
 
-        if use_fast_abundance_scaling:
-            Nref_all = np.empty((n_candidates, npix), dtype=np.float64)
-            _t_chunk_start = _time.time()
-            for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
-                end = min(start + chunk_size, n_candidates)
-                Nref_chunk = integrate_rays(
-                    tracer,
-                    cell_centers[start:end],
-                    dirs,
-                    nH_cgs,
-                    method=method,
-                )
-                Nref_all[start:end] = Nref_chunk
+        Nref_all = np.empty((n_candidates, npix), dtype=np.float64)
+        _t_chunk_start = _time.time()
+        for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
+            end = min(start + chunk_size, n_candidates)
+            Nref_chunk = integrate_rays(
+                tracer,
+                cell_centers[start:end],
+                dirs,
+                nH_cgs,
+            )
+            Nref_all[start:end] = Nref_chunk
 
-                frac = end / n_candidates
-                t_now = _time.time()
-                dt = t_now - _t_chunk_start
-                _t_chunk_start = t_now
-                n_cells_chunk = end - start
-                cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
-                rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
-                logger.info(
-                    f"HEALPix rays: {end}/{n_candidates} cells "
-                    f"({100.0 * frac:.1f}%) done. "
-                    f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
-                    f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
-                )
+            frac = end / n_candidates
+            t_now = _time.time()
+            dt = t_now - _t_chunk_start
+            _t_chunk_start = t_now
+            n_cells_chunk = end - start
+            cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
+            rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
+            logger.info(
+                f"HEALPix rays: {end}/{n_candidates} cells "
+                f"({100.0 * frac:.1f}%) done. "
+                f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
+                f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
+            )
 
-            Nco_all = (Xco_guess * Nref_all).astype(np.float64)
-            Nh2_all = (0.5 * XH2_guess * Nref_all).astype(np.float64)
-        else:
-            Nco_all = np.empty((n_candidates, npix), dtype=np.float64)
-            Nh2_all = np.empty((n_candidates, npix), dtype=np.float64)
+    ci = candidate_idx[:, 0]
+    cj = candidate_idx[:, 1]
+    ck = candidate_idx[:, 2]
+    Xco_cand = Xco_field[ci, cj, ck]
+    XH2_cand = XH2_field[ci, cj, ck]
 
-            for start in range(0, n_candidates, chunk_size):
-                end = min(start + chunk_size, n_candidates)
-                Nco_chunk, Nh2_chunk = integrate_rays(
-                    tracer,
-                    cell_centers[start:end],
-                    dirs,
-                    nCO_cgs,
-                    nH2_cgs,
-                    method=method,
-                )
-                Nco_all[start:end] = Nco_chunk
-                Nh2_all[start:end] = Nh2_chunk
-
-                frac = end / n_candidates
-                logger.info(
-                    f"HEALPix rays: {end}/{n_candidates} cells "
-                    f"({100.0 * frac:.1f}%) done."
-                )
+    Nco_all = (Xco_cand[:, None] * Nref_all).astype(np.float64)
+    Nh2_all = (0.5 * XH2_cand[:, None] * Nref_all).astype(np.float64)
 
     logger.info("Ray integration complete. Computing shielding factors...")
 
