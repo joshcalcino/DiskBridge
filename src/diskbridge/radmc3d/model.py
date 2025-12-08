@@ -928,7 +928,7 @@ class RadModel:
         try:
             # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
             logger.info(f"Running RADMC-3D mctherm with {nphot} photons (countwrite={countwrite})...")
-            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite)]
+            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite), 'countdump', str(countwrite)]
             
             returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
             

@@ -56,7 +56,6 @@ uv_n_wavelengths = 10              # Number of wavelengths in the uv grid
 external_uv      = F               # include external uv photons 
 external_uv_chi  = 1.0             # uv field strength in Draine units 
 co_self_shielding = F              # enable CO self-shielding via HEALPix rays (T/F)
-co_self_shielding_method = uniform # self-shielding integrator: 'uniform' (fast) or 'sortedsearch' (reference)
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii
