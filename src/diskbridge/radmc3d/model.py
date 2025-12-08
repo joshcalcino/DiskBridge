@@ -870,6 +870,7 @@ class RadModel:
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
         countwrite = max(1, int(nphot // 100))
+        countwrite = min(countwrite, 100000)
         
         # Set output directory
         if output_dir is None:
@@ -928,7 +929,7 @@ class RadModel:
         try:
             # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
             logger.info(f"Running RADMC-3D mctherm with {nphot} photons (countwrite={countwrite})...")
-            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite), 'cntdump', str(countwrite)]
+            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite)]
             
             returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
             
@@ -1018,6 +1019,7 @@ class RadModel:
         if nphot is None:
             nphot = self.params.nphot_mono
         countwrite = max(1, int(nphot // 100))
+        countwrite = min(countwrite, 100000)
 
         if uv_min_nm is None:
             uv_min_nm = self.params.uv_min
@@ -1168,7 +1170,7 @@ class RadModel:
                 f"({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) with {nphot} photons "
                 f"(countwrite={countwrite})..."
             )
-            cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite), 'cntdump', str(countwrite)]
+            cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)]
 
             # Preserve any existing radmc3d.out log (e.g. from mctherm)
             log_path = self.model_dir / 'radmc3d.out'
