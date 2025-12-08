@@ -928,7 +928,7 @@ class RadModel:
         try:
             # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
             logger.info(f"Running RADMC-3D mctherm with {nphot} photons (countwrite={countwrite})...")
-            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite), 'countdump', str(countwrite)]
+            cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite), 'cntdump', str(countwrite)]
             
             returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
             
@@ -1168,7 +1168,7 @@ class RadModel:
                 f"({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) with {nphot} photons "
                 f"(countwrite={countwrite})..."
             )
-            cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)]
+            cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite), 'cntdump', str(countwrite)]
 
             # Preserve any existing radmc3d.out log (e.g. from mctherm)
             log_path = self.model_dir / 'radmc3d.out'
