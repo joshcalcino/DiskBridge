@@ -14,7 +14,15 @@ from diskbridge import units
 # helpers
 # -----------------
 
-FARGO_DEFAULT_MU = 2.31
+R_UNIVERSAL_MKS = 8.314462618  # J / (mol K)
+
+# FARGO3D defines R_MU = R / mu (specific gas constant).
+# We store MU as the dimensionless mean molecular weight in amu, numerically equal to mu in g/mol.
+R_MU_CGS = 36149835.0  # erg / (g K)
+
+MU_FARGO_CGS = (R_UNIVERSAL_MKS * 1.0e7) / R_MU_CGS  # (erg/mol/K) / (erg/g/K) = g/mol
+
+FARGO_DEFAULT_MU = MU_FARGO_CGS
 
 G_phys = Quantity(6.674e-11, "m^3 / (kg s^2)")
 
@@ -242,6 +250,15 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
 
     variables = _read_variables_par(directory)
     compile_options, macros = _read_summary(directory, file_n)
+
+    norm_units = (file_units or "code").lower()
+    if "MU" not in variables:
+        if norm_units == "cgs":
+            variables["MU"] = float(MU_FARGO_CGS)
+        elif compile_options.get("CGS", False):
+            variables["MU"] = float(MU_FARGO_CGS)
+        else:
+            variables["MU"] = float(FARGO_DEFAULT_MU)
 
     # Auto-detect dimensionality
     nz_val = variables.get("NZ", None)
@@ -564,15 +581,12 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
             # Note: This uses the BASE code units (1 AU, 1 M_sun)
             # Any length_scale/mass_scale rescaling is handled in Model._apply_rescaling()
             
-            if file_units.lower() == "code":
+            if norm_units == "code":
                 # For base code units: 1 code_length = 1 AU, 1 code_mass = 1 M_sun
                 code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
                 code_length_m = (1.0 * au).to('m').magnitude
-                mu = FARGO_DEFAULT_MU  # mean molecular weight
+                mu = float(variables["MU"])
                 cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
-
-                if "MU" not in variables:
-                    variables["MU"] = mu
             else:
                 # For CGS or SI units, cutemp is different but we assume already in K
                 cutemp = 1.0
@@ -596,7 +610,6 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     disk_parameters["gamma"] = variables.get("GAMMA") * units('dimensionless')
     disk_parameters["cs"] = variables.get("CS") * unit_dict['unit_velocity']
 
-    norm_units = (file_units or "code").lower()
     if norm_units in ("cgs", "kms"):
         disk_parameters["r0"] = 5.2 * units('au')
     else:

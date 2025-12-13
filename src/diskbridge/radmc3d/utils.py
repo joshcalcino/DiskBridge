@@ -76,11 +76,14 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
         bufsize=1,
     )
     stdout_lines: list[str] = []
+    saw_error = False
     try:
         if process.stdout is not None:
             for line in process.stdout:
                 logger.info(line.rstrip())
                 stdout_lines.append(line)
+                if "error:" in line.lower():
+                    saw_error = True
         process.wait()
         stderr_text = ""
         if process.stderr is not None:
@@ -90,7 +93,10 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
             process.stdout.close()
         if process.stderr is not None:
             process.stderr.close()
-    return process.returncode, "".join(stdout_lines), stderr_text
+    returncode = process.returncode
+    if returncode == 0 and saw_error:
+        returncode = 1
+    return returncode, "".join(stdout_lines), stderr_text
 
 
 def cleanup_symlinks(active_symlinks: List[Path]) -> None:
