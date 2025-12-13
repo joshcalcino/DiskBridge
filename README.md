@@ -82,6 +82,11 @@ from the following public code bases:
 - `fargo2radmc3d`: https://github.com/charango/fargo2radmc3d
 - `radmc3d-2.0` (including `radmc3dPy`): https://github.com/dullemond/radmc3d-2.0
 
+## Implemented:
+
+- Proper efficient ray tracing using algorithm from Lile Wang's Kratos code
+- Visser+09 self-shielding per cell in the simulation. We compute the Visser+09 factor per ray, then average f per cell to update the CO numberdensity 
+
 
 ## TODO/broken:
 
@@ -89,5 +94,3 @@ from the following public code bases:
 - make radmc3d submodule use pint quantities (implemented, not fully tested)
 - mu_h should be read from simulation data
 - hydro temperature probably is broken when we rescale the disc, likely affects the dust settling 
-- HEALpix with numpy searchsorted works fine, but I am not 100% sure about the cartesian uniform and spherical loguniform. 
-- API for HEALpix stuff should probably get refined

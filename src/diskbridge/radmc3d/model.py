@@ -6,10 +6,6 @@ and provides high-level operations for RADMC-3D workflows:
 - Computing UV fields and photochemistry
 - Computing molecular abundances with photodissociation/freeze-out
 - Writing molecular number density files
-
-This class does NOT handle model building or writing RADMC-3D input files -
-those are handled by RADMC3DWriter. This maintains clean separation between
-input (writer) and output (data, model) functionality.
 """
 
 from __future__ import annotations
@@ -50,6 +46,18 @@ LOG_CHI_OVER_NH_PDISS = Quantity(-6.0, 'dimensionless')  # photodissociation thr
 LOG_CHI_OVER_NH_PDES = Quantity(-7.0, 'dimensionless')  # photodesorption threshold
 eps_chi = 1.0e-99
 
+# --- Two-phase CO chemistry defaults (Heays+2017, Visser+2009 style) ---
+# These can be overridden via method arguments
+XCO_TOT_DEFAULT = 1.0e-4           # total CO abundance if all CO is present (per H)
+TAU_CO_FORM_DEFAULT = Quantity(1.0e5, "yr")   # CO formation timescale
+E_BIND_CO_DEFAULT = 855.0          # binding energy in K
+NU0_CO_DEFAULT = 1.0e12            # vibrational frequency [1/s] for thermal desorption
+SIGMA_D_PER_H_DEFAULT = 1.0e-21    # grain cross-section per H [cm^2 per H]
+ALPHA_PD_ICE_DEFAULT = 1.0e-12     # photodesorption rate per chi=1 [1/s]
+K0_CO_DEFAULT = Quantity(2.0e-10, "1/s")  # unshielded Heays rate for chi=1 Draine
+M_CO_CGS = 28.0 * 1.6726e-24       # CO mass in g (28 * m_H)
+K_BOLTZ_CGS = 1.3807e-16           # Boltzmann constant in erg/K
+ 
 _MCTHERM_PARAM_KEYS = (
     'nphot_thermal',
     'n_lambda',
@@ -87,6 +95,146 @@ _MCMONO_EXTRA_PARAM_KEYS = (
 def _smoothstep01(x: np.ndarray) -> np.ndarray:
     x_clipped = np.clip(x, 0.0, 1.0)
     return x_clipped * x_clipped * (3.0 - 2.0 * x_clipped)
+
+
+def compute_co_photodissociation_rate(
+    chi,
+    theta_co,
+    k0_co,
+    candidate_mask=None,
+    min_rate: float = 1.0e-30,
+):
+    if isinstance(chi, Quantity):
+        chi_arr = chi.to("dimensionless").magnitude
+    else:
+        chi_arr = np.asarray(chi, dtype=float)
+
+    if theta_co is None:
+        theta_arr = np.ones_like(chi_arr, dtype=float)
+    elif isinstance(theta_co, Quantity):
+        theta_arr = theta_co.to("dimensionless").magnitude
+    else:
+        theta_arr = np.asarray(theta_co, dtype=float)
+
+    if candidate_mask is not None:
+        mask = np.asarray(candidate_mask, dtype=bool)
+        if mask.shape != theta_arr.shape:
+            raise ValueError(
+                f"candidate_mask shape {mask.shape} does not match theta_co shape {theta_arr.shape}"
+            )
+        theta_arr = np.where(mask, theta_arr, 1.0)
+
+    theta_arr = np.clip(theta_arr, 0.0, 1.0)
+
+    if isinstance(k0_co, Quantity):
+        k0_val = k0_co.to("1/s").magnitude
+    else:
+        k0_val = float(k0_co)
+
+    k_diss_arr = k0_val * chi_arr * theta_arr
+    k_diss_co = Quantity(k_diss_arr, "1/s")
+
+    tau_diss_co = None
+    if min_rate is not None:
+        rate_floor = float(min_rate)
+        if rate_floor > 0.0:
+            k_safe = np.maximum(k_diss_arr, rate_floor)
+            tau_arr = 1.0 / k_safe
+            tau_diss_co = Quantity(tau_arr, "s")
+
+    return k_diss_co, tau_diss_co
+
+
+def co_freezeout_rate(
+    T: Quantity,
+    nH: Quantity,
+    sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
+) -> Quantity:
+    """
+    Compute CO freeze-out rate coefficient k_fo [1/s] for each cell.
+    
+    Uses k_fo = S * (sigma_d_per_H * nH) * v_th where S ~ 1 (sticking coefficient).
+    
+    Parameters
+    ----------
+    T : Quantity
+        Gas temperature in K
+    nH : Quantity
+        H nuclei number density in cm^-3
+    sigma_d_per_H : float
+        Grain cross-section per H atom [cm^2 per H]
+        
+    Returns
+    -------
+    Quantity
+        Freeze-out rate coefficient [1/s]
+    """
+    T_K = T.to("K").magnitude
+    nH_cm3 = nH.to("cm^-3").magnitude
+    
+    # thermal speed of CO: v_th = sqrt(8 k_B T / (pi m_CO))
+    v_th = np.sqrt(8.0 * K_BOLTZ_CGS * T_K / (np.pi * M_CO_CGS))  # cm/s
+    
+    sigma_nd = sigma_d_per_H * nH_cm3  # cm^-1
+    S = 1.0  # sticking coefficient (constant for simplicity)
+    
+    k_fo = S * sigma_nd * v_th  # s^-1
+    return Quantity(k_fo, "1/s")
+
+
+def co_thermal_desorption_rate(
+    T_d: Quantity,
+    E_bind: float = E_BIND_CO_DEFAULT,
+    nu0: float = NU0_CO_DEFAULT,
+) -> Quantity:
+    """
+    Compute thermal desorption rate coefficient k_td [1/s].
+    
+    Uses Arrhenius form: k_td = nu0 * exp(-E_bind / T_d)
+    
+    Parameters
+    ----------
+    T_d : Quantity
+        Dust temperature in K
+    E_bind : float
+        Binding energy in K
+    nu0 : float
+        Vibrational frequency [1/s]
+        
+    Returns
+    -------
+    Quantity
+        Thermal desorption rate coefficient [1/s]
+    """
+    T_K = T_d.to("K").magnitude
+    k_td = nu0 * np.exp(-E_bind / np.maximum(T_K, 1e-6))
+    return Quantity(k_td, "1/s")
+
+
+def co_photodesorption_rate(
+    chi: Quantity,
+    alpha_pd: float = ALPHA_PD_ICE_DEFAULT,
+) -> Quantity:
+    """
+    Compute photodesorption rate coefficient from ice k_pd_ice [1/s].
+    
+    Simple linear scaling: k_pd_ice = alpha_pd * chi
+    
+    Parameters
+    ----------
+    chi : Quantity
+        UV field in Draine units (dimensionless)
+    alpha_pd : float
+        Photodesorption rate per chi=1 [1/s]
+        
+    Returns
+    -------
+    Quantity
+        Photodesorption rate coefficient [1/s]
+    """
+    chi_val = chi.to("dimensionless").magnitude
+    k_pd_ice = alpha_pd * chi_val
+    return Quantity(k_pd_ice, "1/s")
 
 
 class RadModel:
@@ -139,8 +287,8 @@ class RadModel:
     >>> # Read temperature from RADMC-3D output
     >>> radmc.read_temperature()
     >>> 
-    >>> # Apply Pinte 2018 photodissociation for CO
-    >>> radmc.compute_pinte2018_abundance(
+    >>> # Apply Pinte 2018-style photochemistry for CO
+    >>> radmc.compute_abundance(
     ...     molecule='co',
     ...     X0=5e-5,
     ...     write_output=True
@@ -168,6 +316,14 @@ class RadModel:
         self.temperature: Optional[Quantity] = None
         self.chi: Optional[Quantity] = None  # UV field in Draine units
         self.nH: Optional[Quantity] = None  # H nuclei number density
+        self.theta_co: Optional[Quantity] = None
+        self.chi_eff: Optional[Quantity] = None
+        self.k_diss_co: Optional[Quantity] = None
+        self.tau_diss_co: Optional[Quantity] = None
+        
+        # Two-phase CO chemistry fields
+        self.nco_gas: Optional[Quantity] = None  # Gas-phase CO number density [cm^-3]
+        self.nco_ice: Optional[Quantity] = None  # CO ice number density [cm^-3]
         
         # Subdirectory paths for organized file storage
         self.inputs_dir = self.model_dir / 'radmc3d_inputs'
@@ -663,8 +819,12 @@ class RadModel:
             logger.info(f"Self-shielding: mean(theta_CO)={float(theta_co.magnitude.mean()):.3f}")
             logger.info(f"Self-shielding: max(theta_CO)={float(theta_co.magnitude.max()):.3f}")
             logger.info(f"Self-shielding: min(theta_CO)={float(theta_co.magnitude.min()):.3f}")
+            self.theta_co = theta_co
+            self.chi_eff = chi_eff
         else:
             chi_eff = self.chi
+            self.theta_co = None
+            self.chi_eff = chi_eff
         
         # Initialize abundance (dimensionless Quantity)
         X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
@@ -776,6 +936,29 @@ class RadModel:
             self.write_numberdens(molecule, n_mol)
         
         return X, n_mol
+
+    def compute_co_photodissociation_rate_field(
+        self,
+        k0_co,
+        candidate_mask: Optional[np.ndarray] = None,
+        min_rate: float = 1.0e-30,
+    ) -> Quantity:
+        if self.chi is None:
+            self.compute_mcmono()
+
+        theta = self.theta_co
+        k_diss_co, tau_diss_co = compute_co_photodissociation_rate(
+            self.chi,
+            theta,
+            k0_co,
+            candidate_mask=candidate_mask,
+            min_rate=min_rate,
+        )
+
+        self.k_diss_co = k_diss_co
+        self.tau_diss_co = tau_diss_co
+
+        return self.k_diss_co
     
     def write_numberdens(
         self,
@@ -870,7 +1053,6 @@ class RadModel:
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
         countwrite = max(1, int(nphot // 100))
-        countwrite = min(countwrite, 100000)
         
         # Set output directory
         if output_dir is None:
@@ -1019,8 +1201,6 @@ class RadModel:
         if nphot is None:
             nphot = self.params.nphot_mono
         countwrite = max(1, int(nphot // 100))
-        countwrite = min(countwrite, 100000)
-
         if uv_min_nm is None:
             uv_min_nm = self.params.uv_min
         if uv_max_nm is None:
@@ -1326,3 +1506,438 @@ class RadModel:
                 f.write(f'radmc3d_command = {command}\n')
             
             logger.debug(f"Copied params.txt -> {output_dir}")
+    
+    def compute_co_steady_state(
+        self,
+        Xco_tot: float = XCO_TOT_DEFAULT,
+        tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+        k0_co: Quantity = K0_CO_DEFAULT,
+        sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
+        E_bind: float = E_BIND_CO_DEFAULT,
+        nu0: float = NU0_CO_DEFAULT,
+        alpha_pd_ice: float = ALPHA_PD_ICE_DEFAULT,
+        use_dust_temp: bool = True,
+        write_output: bool = True,
+        skip_shielding: bool = False,
+        nside: int = 4,
+        b_kms: float = 0.3,
+        margin_dex: float = 1.5,
+    ) -> Tuple[Quantity, Quantity, Quantity]:
+        """
+        Solve two-phase CO chemistry in steady state using the analytic solution.
+        
+        This method computes the steady-state gas-phase and ice CO densities by
+        solving the rate equations analytically. It uses:
+        - Photodissociation from Heays+2017 with optional Visser+2009 shielding
+        - Freeze-out onto grains
+        - Thermal desorption from ice
+        - Photodesorption from ice
+        - Formation with a characteristic timescale
+        
+        This method does NOT use the Pinte chi/nH threshold switches from
+        compute_abundance(). It is a separate, rate-based chemistry approach.
+        
+        Parameters
+        ----------
+        Xco_tot : float
+            Total CO abundance if all CO is present (per H)
+        tau_form : Quantity
+            CO formation timescale
+        k0_co : Quantity
+            Unshielded photodissociation rate for chi=1 Draine field [1/s]
+        sigma_d_per_H : float
+            Grain cross-section per H atom [cm^2 per H]
+        E_bind : float
+            CO binding energy in K
+        nu0 : float
+            Vibrational frequency for thermal desorption [1/s]
+        alpha_pd_ice : float
+            Photodesorption rate per chi=1 [1/s]
+        use_dust_temp : bool
+            If True, use dust temperature for freeze-out/desorption. If False,
+            use gas temperature.
+        write_output : bool
+            If True, write numberdens_co.inp file
+        skip_shielding : bool
+            If True, skip CO self-shielding calculation (theta_co = 1)
+        nside : int
+            HEALPix resolution for shielding calculation
+        b_kms : float
+            Doppler b parameter for Visser shielding [km/s]
+        margin_dex : float
+            Margin in dex for candidate cell selection in shielding calc
+            
+        Returns
+        -------
+        X_co : Quantity
+            Gas-phase CO abundance (dimensionless)
+        nco_gas : Quantity
+            Gas-phase CO number density [cm^-3]
+        nco_ice : Quantity
+            CO ice number density [cm^-3]
+        """
+        # Ensure required fields exist
+        if self.temperature is None:
+            logger.info("Temperature not loaded, attempting to read from file...")
+            try:
+                self.read_temperature()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "Temperature field required. Run mctherm or load temperature first."
+                )
+        
+        if self.nH is None:
+            logger.info("nH not computed, computing from gas density...")
+            self.compute_nH_from_model()
+        
+        if self.chi is None:
+            logger.info("chi not computed, attempting to compute from mcmono output...")
+            try:
+                self.compute_mcmono()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "chi field required. Run compute_mcmono() first."
+                )
+        
+        # Compute CO self-shielding if not skipped
+        if skip_shielding:
+            theta_co = Quantity(np.ones_like(self.chi.magnitude), "dimensionless")
+            logger.info("Skipping CO self-shielding (theta_co = 1)")
+        elif self.theta_co is not None:
+            theta_co = self.theta_co
+            logger.info("Using existing theta_co from previous calculation")
+        else:
+            # Import shielding machinery
+            from .healpix_columns import compute_co_shielding_healpix
+            from .visser_shielding import VisserShielding
+            
+            logger.info("Computing CO self-shielding with HEALPix rays...")
+            visser = VisserShielding(b_kms=b_kms)
+            theta_co, chi_eff = compute_co_shielding_healpix(
+                mesh=self.model.mesh,
+                nH=self.nH,
+                chi=self.chi,
+                visser=visser,
+                nside=nside,
+                b_kms=b_kms,
+                margin_dex=margin_dex,
+            )
+            self.theta_co = theta_co
+            self.chi_eff = chi_eff
+        
+        # Compute photodissociation rate
+        k_pd, tau_pd = compute_co_photodissociation_rate(
+            chi=self.chi,
+            theta_co=theta_co,
+            k0_co=k0_co,
+            candidate_mask=None,
+            min_rate=1.0e-30,
+        )
+        self.k_diss_co = k_pd
+        self.tau_diss_co = tau_pd
+        
+        # Choose temperature for freeze-out/desorption
+        T = self.temperature
+        
+        # Compute rate coefficients
+        k_fo = co_freezeout_rate(T, self.nH, sigma_d_per_H)
+        k_td = co_thermal_desorption_rate(T, E_bind, nu0)
+        k_pd_ice = co_photodesorption_rate(self.chi, alpha_pd_ice)
+        
+        # Compute eta = k_fo / (k_td + k_pd_ice)
+        k_td_plus = k_td.to("1/s").magnitude + k_pd_ice.to("1/s").magnitude
+        k_td_plus_safe = np.maximum(k_td_plus, 1e-60)
+        eta = k_fo.to("1/s").magnitude / k_td_plus_safe
+        
+        # Compute nco_max and tau_form in consistent units
+        nH_cm3 = self.nH.to("cm^-3").magnitude
+        nco_max = Xco_tot * nH_cm3  # cm^-3
+        tau_s = tau_form.to("s").magnitude
+        
+        # Compute steady-state solution:
+        # nco_gas = nco_max / ((1 + eta) + k_pd * tau_form)
+        k_pd_s = k_pd.to("1/s").magnitude
+        denom = (1.0 + eta) + k_pd_s * tau_s
+        nco_gas_arr = nco_max / denom
+        nco_ice_arr = eta * nco_gas_arr
+        
+        # Wrap as Quantities
+        self.nco_gas = Quantity(nco_gas_arr, "cm^-3")
+        self.nco_ice = Quantity(nco_ice_arr, "cm^-3")
+        
+        # Compute gas-phase abundance
+        X_co = Quantity(nco_gas_arr / (nH_cm3 + 1e-99), "dimensionless")
+        
+        # Log summary
+        logger.info(
+            f"CO steady-state: nco_gas min={np.min(nco_gas_arr):.2e}, "
+            f"max={np.max(nco_gas_arr):.2e} cm^-3"
+        )
+        logger.info(
+            f"CO steady-state: nco_ice min={np.min(nco_ice_arr):.2e}, "
+            f"max={np.max(nco_ice_arr):.2e} cm^-3"
+        )
+        ice_frac = np.sum(nco_ice_arr) / (np.sum(nco_gas_arr) + np.sum(nco_ice_arr) + 1e-99)
+        logger.info(f"CO ice fraction (by number): {ice_frac:.3f}")
+        
+        # Write output if requested
+        if write_output:
+            self.data.write_numberdens('co', self.nco_gas)
+            logger.info("Wrote numberdens_co.inp")
+        
+        return X_co, self.nco_gas, self.nco_ice
+    
+    def evolve_co_time_dependent(
+        self,
+        t_end: Quantity,
+        dt: Optional[Quantity] = None,
+        Xco_tot: float = XCO_TOT_DEFAULT,
+        tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+        k0_co: Quantity = K0_CO_DEFAULT,
+        sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
+        E_bind: float = E_BIND_CO_DEFAULT,
+        nu0: float = NU0_CO_DEFAULT,
+        alpha_pd_ice: float = ALPHA_PD_ICE_DEFAULT,
+        Xco_gas_init: Optional[float] = None,
+        Xco_ice_init: Optional[float] = None,
+        use_dust_temp: bool = True,
+        write_output: bool = True,
+        skip_shielding: bool = False,
+        nside: int = 4,
+        b_kms: float = 0.3,
+        margin_dex: float = 1.5,
+    ) -> Tuple[Quantity, Quantity, Quantity]:
+        """
+        Time-dependent evolution of two-phase CO chemistry up to t_end.
+        
+        Integrates the coupled ODEs for gas-phase and ice CO densities:
+        
+        dnCO_gas/dt = R_form + k_td*nCO_ice + k_pd_ice*nCO_ice 
+                      - k_fo*nCO_gas - k_pd*nCO_gas
+        dnCO_ice/dt = k_fo*nCO_gas - k_td*nCO_ice - k_pd_ice*nCO_ice
+        
+        where R_form = (nCO_max - nCO_gas - nCO_ice) / tau_form
+        
+        This method does NOT use the Pinte chi/nH threshold switches.
+        
+        Parameters
+        ----------
+        t_end : Quantity
+            Total evolution time
+        dt : Quantity, optional
+            Timestep. If None, automatically chosen based on rate timescales.
+        Xco_tot : float
+            Total CO abundance if all CO is present (per H)
+        tau_form : Quantity
+            CO formation timescale
+        k0_co : Quantity
+            Unshielded photodissociation rate for chi=1 Draine field [1/s]
+        sigma_d_per_H : float
+            Grain cross-section per H atom [cm^2 per H]
+        E_bind : float
+            CO binding energy in K
+        nu0 : float
+            Vibrational frequency for thermal desorption [1/s]
+        alpha_pd_ice : float
+            Photodesorption rate per chi=1 [1/s]
+        Xco_gas_init : float, optional
+            Initial gas-phase CO abundance. If None, starts with all CO in gas.
+        Xco_ice_init : float, optional
+            Initial ice CO abundance. If None, starts with no ice.
+        use_dust_temp : bool
+            If True, use dust temperature for freeze-out/desorption.
+        write_output : bool
+            If True, write numberdens_co.inp file at the end
+        skip_shielding : bool
+            If True, skip CO self-shielding calculation (theta_co = 1)
+        nside : int
+            HEALPix resolution for shielding calculation
+        b_kms : float
+            Doppler b parameter for Visser shielding [km/s]
+        margin_dex : float
+            Margin in dex for candidate cell selection
+            
+        Returns
+        -------
+        X_co : Quantity
+            Final gas-phase CO abundance (dimensionless)
+        nco_gas : Quantity
+            Final gas-phase CO number density [cm^-3]
+        nco_ice : Quantity
+            Final CO ice number density [cm^-3]
+        """
+        # Ensure required fields exist (same as steady-state)
+        if self.temperature is None:
+            logger.info("Temperature not loaded, attempting to read from file...")
+            try:
+                self.read_temperature()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "Temperature field required. Run mctherm or load temperature first."
+                )
+        
+        if self.nH is None:
+            logger.info("nH not computed, computing from gas density...")
+            self.compute_nH_from_model()
+        
+        if self.chi is None:
+            logger.info("chi not computed, attempting to compute from mcmono output...")
+            try:
+                self.compute_mcmono()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "chi field required. Run compute_mcmono() first."
+                )
+        
+        # Compute CO self-shielding if not skipped
+        if skip_shielding:
+            theta_co = Quantity(np.ones_like(self.chi.magnitude), "dimensionless")
+            logger.info("Skipping CO self-shielding (theta_co = 1)")
+        elif self.theta_co is not None:
+            theta_co = self.theta_co
+            logger.info("Using existing theta_co from previous calculation")
+        else:
+            from .healpix_columns import compute_co_shielding_healpix
+            from .visser_shielding import VisserShielding
+            
+            logger.info("Computing CO self-shielding with HEALPix rays...")
+            visser = VisserShielding(b_kms=b_kms)
+            theta_co, chi_eff = compute_co_shielding_healpix(
+                mesh=self.model.mesh,
+                nH=self.nH,
+                chi=self.chi,
+                visser=visser,
+                nside=nside,
+                b_kms=b_kms,
+                margin_dex=margin_dex,
+            )
+            self.theta_co = theta_co
+            self.chi_eff = chi_eff
+        
+        # Compute photodissociation rate
+        k_pd, tau_pd = compute_co_photodissociation_rate(
+            chi=self.chi,
+            theta_co=theta_co,
+            k0_co=k0_co,
+            candidate_mask=None,
+            min_rate=1.0e-30,
+        )
+        self.k_diss_co = k_pd
+        self.tau_diss_co = tau_pd
+        
+        # Choose temperature
+        T = self.temperature
+        
+        # Compute rate coefficients (assumed constant during evolution)
+        k_fo = co_freezeout_rate(T, self.nH, sigma_d_per_H)
+        k_td = co_thermal_desorption_rate(T, E_bind, nu0)
+        k_pd_ice = co_photodesorption_rate(self.chi, alpha_pd_ice)
+        
+        # Extract magnitudes for fast array operations
+        k_fo_s = k_fo.to("1/s").magnitude
+        k_td_s = k_td.to("1/s").magnitude
+        k_pd_s = k_pd.to("1/s").magnitude
+        k_pd_ice_s = k_pd_ice.to("1/s").magnitude
+        tau_s = tau_form.to("s").magnitude
+        t_end_s = t_end.to("s").magnitude
+        
+        # Compute nco_max
+        nH_cm3 = self.nH.to("cm^-3").magnitude
+        nco_max = Xco_tot * nH_cm3
+        
+        # Initial conditions
+        if Xco_gas_init is None:
+            nco_gas = nco_max.copy()  # Start with all CO in gas phase
+        else:
+            nco_gas = Xco_gas_init * nH_cm3
+        
+        if Xco_ice_init is None:
+            nco_ice = np.zeros_like(nco_gas)  # Start with no ice
+        else:
+            nco_ice = Xco_ice_init * nH_cm3
+        
+        # Choose timestep if not provided
+        if dt is None:
+            # Estimate minimum timescale from all rates
+            # tau ~ 1 / sum_of_rates
+            total_rate = k_fo_s + k_td_s + k_pd_s + k_pd_ice_s + 1.0 / tau_s
+            min_timescale = 1.0 / np.maximum(total_rate, 1e-60)
+            dt_s = 0.1 * np.nanmin(min_timescale)
+            # Limit to reasonable range
+            dt_s = np.clip(dt_s, 1e-10 * t_end_s, 0.01 * t_end_s)
+            logger.info(f"Auto-selected timestep: dt = {dt_s:.2e} s")
+        else:
+            dt_s = dt.to("s").magnitude
+        
+        # Time integration (explicit Euler, vectorized over all cells)
+        t = 0.0
+        n_steps = 0
+        max_steps = int(1e8)  # Safety limit
+        
+        logger.info(
+            f"Starting time-dependent CO evolution: t_end={t_end_s:.2e} s, dt={dt_s:.2e} s"
+        )
+        
+        while t < t_end_s and n_steps < max_steps:
+            dt_step = min(dt_s, t_end_s - t)
+            
+            # Formation rate
+            R_form = (nco_max - nco_gas - nco_ice) / tau_s
+            
+            # Rate of change for gas-phase CO
+            dnco_gas_dt = (
+                R_form
+                + k_td_s * nco_ice
+                + k_pd_ice_s * nco_ice
+                - k_fo_s * nco_gas
+                - k_pd_s * nco_gas
+            )
+            
+            # Rate of change for ice CO
+            dnco_ice_dt = (
+                k_fo_s * nco_gas
+                - k_td_s * nco_ice
+                - k_pd_ice_s * nco_ice
+            )
+            
+            # Update
+            nco_gas = nco_gas + dt_step * dnco_gas_dt
+            nco_ice = nco_ice + dt_step * dnco_ice_dt
+            
+            # Ensure non-negative (numerical stability)
+            nco_gas = np.maximum(nco_gas, 0.0)
+            nco_ice = np.maximum(nco_ice, 0.0)
+            
+            t += dt_step
+            n_steps += 1
+        
+        if n_steps >= max_steps:
+            logger.warning(f"Time evolution reached max_steps={max_steps}")
+        
+        logger.info(f"Time evolution complete after {n_steps} steps")
+        
+        # Store results
+        self.nco_gas = Quantity(nco_gas, "cm^-3")
+        self.nco_ice = Quantity(nco_ice, "cm^-3")
+        
+        # Compute gas-phase abundance
+        X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), "dimensionless")
+        
+        # Log summary
+        logger.info(
+            f"CO time-dependent final: nco_gas min={np.min(nco_gas):.2e}, "
+            f"max={np.max(nco_gas):.2e} cm^-3"
+        )
+        logger.info(
+            f"CO time-dependent final: nco_ice min={np.min(nco_ice):.2e}, "
+            f"max={np.max(nco_ice):.2e} cm^-3"
+        )
+        ice_frac = np.sum(nco_ice) / (np.sum(nco_gas) + np.sum(nco_ice) + 1e-99)
+        logger.info(f"CO ice fraction (by number): {ice_frac:.3f}")
+        
+        # Write output if requested
+        if write_output:
+            self.data.write_numberdens('co', self.nco_gas)
+            logger.info("Wrote numberdens_co.inp")
+        
+        return X_co, self.nco_gas, self.nco_ice
