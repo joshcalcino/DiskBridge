@@ -6,8 +6,8 @@ This module provides:
 - compute_co_shielding_healpix: convenience wrapper that
     * takes n_H, chi, optional n_CO / n_H2
     * integrates N(CO), N(H2) along HEALPix rays from selected cells
-    * evaluates Visser+09 CO shielding factors Θ_CO
-    * returns Θ_CO and chi_eff = chi * Θ_CO
+    * evaluates Visser+09 CO shielding factors theta_CO
+    * returns theta_CO and chi_eff = chi * theta_CO
 
 The functions are independent of RadModel to avoid circular imports.
 You can call them from RadModel or from separate post-processing scripts.
@@ -23,7 +23,7 @@ Dependencies
 ------------
 - healpy for HEALPix directions (pip install healpy)
 - diskbridge._units for unit handling
-- diskbridge.radmc3d.visser_shielding for Θ_CO tables.
+- diskbridge.chemistry.shielding.visser_shielding for theta_CO tables.
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ import healpy as hp
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
-from .visser_shielding import VisserShielding
-from .healpix_utils import integrate_rays
+from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
 
 
 # Import threshold constant from model module
@@ -52,7 +52,7 @@ def _get_log_chi_over_nH_pdiss() -> float:
     """Get the photodissociation threshold, importing lazily to avoid circular imports."""
     global _LOG_CHI_OVER_NH_PDISS
     if _LOG_CHI_OVER_NH_PDISS is None:
-        from .model import LOG_CHI_OVER_NH_PDISS
+        from diskbridge.radmc3d.model import LOG_CHI_OVER_NH_PDISS
         _LOG_CHI_OVER_NH_PDISS = float(LOG_CHI_OVER_NH_PDISS.magnitude)
     return _LOG_CHI_OVER_NH_PDISS
 
@@ -295,7 +295,7 @@ class SphericalHealpixRayTracer:
     nside : int
         HEALPix Nside (npix = 12 * nside^2).
     ds_fraction : float, optional
-        Step size along rays = ds_fraction * min(Δr).
+        Step size along rays = ds_fraction * min(dr).
         Smaller ds -> more accurate, more expensive.
 
     Notes
@@ -329,7 +329,7 @@ class SphericalHealpixRayTracer:
         self.theta_centers = mesh.axes["theta"].centers.to("rad").magnitude
         self.phi_centers = mesh.axes["phi"].centers.to("rad").magnitude
 
-        # Step size: fraction of the minimum Δr
+        # Step size: fraction of the minimum dr
         dr = np.diff(self.r_edges)
         self.ds = float(ds_fraction * dr.min())
 
@@ -384,7 +384,7 @@ class SphericalHealpixRayTracer:
         return float(x), float(y), float(z)
 
 
-
+# =============================================================================
 
 
 class CartesianHealpixRayTracer:
@@ -401,7 +401,7 @@ class CartesianHealpixRayTracer:
     nside : int, optional
         HEALPix Nside (npix = 12 * nside^2).
     ds_fraction : float, optional
-        Step size along rays = ds_fraction * min(Δx, Δy, Δz).
+        Step size along rays = ds_fraction * min(dx, dy, dz).
         Smaller ds -> more accurate, more expensive.
 
     Notes

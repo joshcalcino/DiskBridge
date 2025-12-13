@@ -342,7 +342,7 @@ def plot_small_dust_rz_slice(
     output: Union[str, "Path"] = "small_dust_rz_slice.png",
     field_name: str = "dust_density_small",
 ):
-    """Plot a phi-averaged R–z slice of small-grain dust density.
+    """Plot a phi-averaged R-z slice of small-grain dust density.
 
     The slice is constructed in cylindrical coordinates (R, z) by
     averaging the small-dust density over azimuth and mapping the
@@ -381,7 +381,7 @@ def plot_small_dust_rz_slice(
     ax.set_ylabel("theta [rad]")
     cb = fig.colorbar(pc, ax=ax)
     cb.set_label("log10 rho_dust(<%.3g um) [g/cm^3]" % amax_um)
-    ax.set_title("Phi-averaged small-grain dust density (R–z slice)")
+    ax.set_title("Phi-averaged small-grain dust density (R-z slice)")
     fig.tight_layout()
     fig.savefig(str(output), dpi=200)
     plt.close(fig)

@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .data import RadData
+from diskbridge.chemistry.models.pinte_switches import (
+    apply_photodissociation,
+    apply_photodesorption_escape,
+    compute_freezeout_factor,
+)
 from .utils import (
     _extract_radmc_errors,
     create_symlinks_for_file_map,
@@ -90,11 +95,6 @@ _MCMONO_EXTRA_PARAM_KEYS = (
     'external_uv',
     'external_uv_chi',
 )
-
-
-def _smoothstep01(x: np.ndarray) -> np.ndarray:
-    x_clipped = np.clip(x, 0.0, 1.0)
-    return x_clipped * x_clipped * (3.0 - 2.0 * x_clipped)
 
 
 def compute_co_photodissociation_rate(
@@ -797,8 +797,8 @@ class RadModel:
         
         # Compute effective chi (with self-shielding if enabled)
         if self_shielding_flag and (photodissociation or photodesorption):
-            from .healpix_columns import compute_co_shielding_healpix
-            from .visser_shielding import VisserShielding
+            from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+            from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
             
             logger.info(f"Computing CO self-shielding (nside={nside}, b={b_kms} km/s)...")
             visser = VisserShielding(b_kms=b_kms)
@@ -830,35 +830,18 @@ class RadModel:
         X = Quantity(np.full_like(T, float(X0), dtype=float), 'dimensionless')
         
         # 1. Freeze-out (reduce abundance) with optional smooth transition
-        freeze_factor = np.ones_like(T_vals, dtype=float)
-        mask_frz = np.zeros_like(T_vals, dtype=bool)
         if freezeout:
-            if smooth_Tfrz_K > 0.0:
-                half_T = 0.5 * smooth_Tfrz_K
-                T_low = Tfrz_val - half_T
-                T_high = Tfrz_val + half_T
-
-                mask_cold = T_vals <= T_low
-                mask_warm = T_vals >= T_high
-                mask_mid = (~mask_cold) & (~mask_warm)
-
-                freeze_factor[mask_cold] = eps_val
-                freeze_factor[mask_warm] = 1.0
-                if np.any(mask_mid):
-                    t_mid = (T_vals[mask_mid] - T_low) / (2.0 * half_T)
-                    s_mid = _smoothstep01(t_mid)
-                    freeze_factor[mask_mid] = eps_val + (1.0 - eps_val) * s_mid
-            else:
-                mask_frz = T_vals < Tfrz_val
-                freeze_factor[mask_frz] = eps_val
-
-            if smooth_Tfrz_K > 0.0:
-                mask_frz = freeze_factor < 1.0 - 1e-12
-
+            freeze_factor, mask_frz = compute_freezeout_factor(
+                T_vals,
+                Tfrz_val,
+                eps_val,
+                smooth_Tfrz_K,
+            )
             X *= freeze_factor
             n_frz = int(np.sum(mask_frz))
             logger.info(f"Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)")
         else:
+            freeze_factor = np.ones_like(T_vals, dtype=float)
             mask_frz = np.zeros_like(T_vals, dtype=bool)
         
         # Precompute log10(chi_eff / nH) if needed
@@ -874,32 +857,28 @@ class RadModel:
         if photodesorption and chi_over_nH is not None:
             log_thr_pdes = float(LOG_CHI_OVER_NH_PDES.magnitude)
             if smooth_log_chi_nH_dex > 0.0:
-                half_dex = 0.5 * smooth_log_chi_nH_dex
-                lower = log_thr_pdes - half_dex
-                upper = log_thr_pdes + half_dex
-                width = max(smooth_log_chi_nH_dex, 1e-30)
-                t = (chi_over_nH - lower) / width
-                w = _smoothstep01(t)
-
-                if freezeout:
-                    has_freeze = freeze_factor < 1.0 - 1e-12
-                    if np.any(has_freeze):
-                        w_eff = w * has_freeze
-                        F = freeze_factor
-                        F_new = F + w_eff * (1.0 - F)
-                        ratio_F = np.ones_like(F, dtype=float)
-                        positive = F > 0.0
-                        ratio_F[positive] = F_new[positive] / F[positive]
-                        X *= ratio_F
-
-                mask_pdes = chi_over_nH > log_thr_pdes
+                X, mask_pdes = apply_photodesorption_escape(
+                    X,
+                    X0=float(X0),
+                    freezeout=bool(freezeout),
+                    freeze_factor=freeze_factor,
+                    mask_frz=mask_frz,
+                    chi_over_nH=chi_over_nH,
+                    log_thr_pdes=log_thr_pdes,
+                    smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
+                )
             else:
                 chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
-                mask_pdes = chi_over_nH > LOG_CHI_OVER_NH_PDES
-                if freezeout:
-                    # Undo freeze-out where both low temperature and strong radiation
-                    unfreeze_mask = mask_pdes & mask_frz
-                    X[unfreeze_mask] = float(X0)
+                X, mask_pdes = apply_photodesorption_escape(
+                    X,
+                    X0=float(X0),
+                    freezeout=bool(freezeout),
+                    freeze_factor=freeze_factor,
+                    mask_frz=mask_frz,
+                    chi_over_nH=chi_over_nH,
+                    log_thr_pdes=log_thr_pdes,
+                    smooth_log_chi_nH_dex=0.0,
+                )
 
             n_pdes = int(np.sum(mask_pdes))
             logger.info(f"Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)")
@@ -908,19 +887,20 @@ class RadModel:
         if photodissociation and chi_over_nH is not None:
             log_thr_pdiss = float(LOG_CHI_OVER_NH_PDISS.magnitude)
             if smooth_log_chi_nH_dex > 0.0:
-                half_dex = 0.5 * smooth_log_chi_nH_dex
-                lower = log_thr_pdiss - half_dex
-                upper = log_thr_pdiss + half_dex
-                width = max(smooth_log_chi_nH_dex, 1e-30)
-                t = (chi_over_nH - lower) / width
-                w_pdiss = _smoothstep01(t)
-                kill_factor = 1.0 - w_pdiss
-                X *= kill_factor
-                mask_pdiss = chi_over_nH > log_thr_pdiss
+                X, mask_pdiss = apply_photodissociation(
+                    X,
+                    chi_over_nH=chi_over_nH,
+                    log_thr_pdiss=log_thr_pdiss,
+                    smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
+                )
             else:
                 chi_over_nH = np.log10(chi_eff.magnitude / (nH.magnitude + eps_chi))
-                mask_pdiss = chi_over_nH > LOG_CHI_OVER_NH_PDISS
-                X[mask_pdiss] = 0.0
+                X, mask_pdiss = apply_photodissociation(
+                    X,
+                    chi_over_nH=chi_over_nH,
+                    log_thr_pdiss=log_thr_pdiss,
+                    smooth_log_chi_nH_dex=0.0,
+                )
 
             n_pdiss = int(np.sum(mask_pdiss))
             logger.info(f"Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)")
@@ -1608,8 +1588,8 @@ class RadModel:
             logger.info("Using existing theta_co from previous calculation")
         else:
             # Import shielding machinery
-            from .healpix_columns import compute_co_shielding_healpix
-            from .visser_shielding import VisserShielding
+            from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+            from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
             
             logger.info("Computing CO self-shielding with HEALPix rays...")
             visser = VisserShielding(b_kms=b_kms)
@@ -1797,8 +1777,8 @@ class RadModel:
             theta_co = self.theta_co
             logger.info("Using existing theta_co from previous calculation")
         else:
-            from .healpix_columns import compute_co_shielding_healpix
-            from .visser_shielding import VisserShielding
+            from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+            from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
             
             logger.info("Computing CO self-shielding with HEALPix rays...")
             visser = VisserShielding(b_kms=b_kms)

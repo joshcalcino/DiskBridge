@@ -186,7 +186,7 @@ class DustOpacityCalculator:
         """Compute dust opacity using Mie theory.
         
         Args:
-            optconst_file: Path to optical constants file (wavelength[μm], n, k)
+            optconst_file: Path to optical constants file (wavelength[um], n, k)
             grain_density: Material density in g/cm^3
             grain_size: Grain radius in cm
             wavelengths: Wavelength grid in cm

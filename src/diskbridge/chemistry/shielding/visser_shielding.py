@@ -28,7 +28,7 @@ import urllib.request
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE_ROOT.parent.parent
 DEFAULT_VISSER_DATA_DIR = REPO_ROOT / "data" / "visser"
 
@@ -174,7 +174,7 @@ class VisserShielding:
         log_floor: Tuple[float, float] = (8.0, 10.0),
     ) -> np.ndarray:
         """
-        Evaluate shielding Θ for one isotopologue.
+        Evaluate shielding theta for one isotopologue.
 
         Parameters
         ----------
@@ -190,7 +190,7 @@ class VisserShielding:
         Returns
         -------
         ndarray
-            Θ values.
+            theta values.
         """
         iso = isotop.lower()
         if iso not in self._grids:

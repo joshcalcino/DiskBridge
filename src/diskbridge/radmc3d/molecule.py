@@ -240,7 +240,7 @@ class RadMolecule:
     ) -> None:
         """Calculate partition function at a temperature grid.
         
-        Computes Q(T) = Σ_i g_i exp(-E_i / k_B T) where the sum is over
+        Computes Q(T) = sum_i g_i exp(-E_i / k_B T) where the sum is over
         all energy levels.
         
         Parameters

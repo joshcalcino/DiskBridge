@@ -70,10 +70,10 @@ class Model:
         mass_factor = float(mass_scale) if mass_scale is not None else 1.0
         
         # Derived scaling factors based on Keplerian dynamics
-        # Time: T² ∝ L³/M → time_factor = sqrt(length_factor³ / mass_factor)
+        # Time: T^2 ~ L^3/M -> time_factor = sqrt(length_factor^3 / mass_factor)
         time_factor = np.sqrt(length_factor**3 / mass_factor)
         
-        # Velocity: V = L/T → velocity_factor = length_factor / time_factor = sqrt(mass_factor / length_factor)
+        # Velocity: V = L/T -> velocity_factor = length_factor / time_factor = sqrt(mass_factor / length_factor)
         velocity_factor = np.sqrt(mass_factor / length_factor)
         
         # Apply rescaling only if at least one scale is provided
@@ -88,19 +88,19 @@ class Model:
                     new_data = field.data
                     
                     if 'density' in name or 'surface_density' in name:
-                        # Volume density: ρ = M/L³ → scale by mass_factor/length_factor³
-                        # Surface density: Σ = M/L² → scale by mass_factor/length_factor²
+                        # Volume density: rho = M/L^3 -> scale by mass_factor/length_factor^3
+                        # Surface density: Sigma = M/L^2 -> scale by mass_factor/length_factor^2
                         if 'surface' in name:
                             new_data = field.data * (mass_factor / length_factor**2)
                         else:
                             new_data = field.data * (mass_factor / length_factor**3)
                     
                     elif name in ['vr', 'vphi', 'vz', 'vtheta']:
-                        # Velocity: V = L/T → scale by sqrt(M/L)
+                        # Velocity: V = L/T -> scale by sqrt(M/L)
                         new_data = field.data * velocity_factor
                     
                     elif name == 'temperature':
-                        # Temperature: cutemp ∝ M/L, so T → T × (M/L)
+                        # Temperature: cutemp ~ M/L, so T -> T * (M/L)
                         # When length increases, temperature decreases
                         temp_factor = mass_factor / length_factor
                         new_data = field.data * temp_factor
@@ -158,12 +158,12 @@ class Model:
             
         Notes
         -----
-        Rescaling follows Keplerian dynamics where T² ∝ L³/M:
+        Rescaling follows Keplerian dynamics where T^2 ~ L^3/M:
         - Lengths scale by length_scale
         - Masses scale by mass_scale  
-        - Times scale by sqrt(length_scale³/mass_scale)
+        - Times scale by sqrt(length_scale^3/mass_scale)
         - Velocities scale by sqrt(mass_scale/length_scale)
-        - Densities scale by mass_scale/length_scale³
+        - Densities scale by mass_scale/length_scale^3
         """
         if length_scale is None or mass_scale is None:
             try:

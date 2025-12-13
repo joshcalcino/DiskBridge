@@ -599,8 +599,8 @@ class RadImage:
         saved_sizepix_y = None
         
         for incl, pa, phi in viewing_angles:
-            phi_str = f"{phi:.1f}°" if phi is not None else "None"
-            logger.info(f"  incl={incl:.1f}°, PA={pa:.1f}°, phi={phi_str}")
+            phi_str = f"{phi:.1f} deg" if phi is not None else "None"
+            logger.info(f"  incl={incl:.1f} deg, PA={pa:.1f} deg, phi={phi_str}")
             
             # Run radmc3d image
             self._run_radmc3d_image(
@@ -757,8 +757,8 @@ class RadImage:
         saved_sizepix_y = None
         
         for incl, pa, phi in viewing_angles:
-            phi_str = f"{phi:.1f}°" if phi is not None else "None"
-            logger.info(f"  incl={incl:.1f}°, PA={pa:.1f}°, phi={phi_str}")
+            phi_str = f"{phi:.1f} deg" if phi is not None else "None"
+            logger.info(f"  incl={incl:.1f} deg, PA={pa:.1f} deg, phi={phi_str}")
             
             # Run radmc3d image
             self._run_radmc3d_image(
@@ -1023,7 +1023,7 @@ class RadImage:
             iline = mol.getTransitionIndex(transition) + 1
             
             label = mol.getTransitionLabel(iline - 1)
-            logger.info(f"Transition {molecule} {label} → iline={iline}")
+            logger.info(f"Transition {molecule} {label} -> iline={iline}")
             
             return iline
             

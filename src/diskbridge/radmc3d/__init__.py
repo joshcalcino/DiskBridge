@@ -31,12 +31,6 @@ from .model import RadModel
 from .molecule import RadMolecule
 from .image import RadImage
 from .opacities import DustOpacityCalculator
-from .visser_shielding import VisserShielding
-from .healpix_columns import (
-    SphericalHealpixRayTracer,
-    CartesianHealpixRayTracer,
-    compute_co_shielding_healpix,
-)
 
 __all__ = [
     'RadWriter',
@@ -45,8 +39,4 @@ __all__ = [
     'RadMolecule',
     'RadImage',
     'DustOpacityCalculator',
-    'VisserShielding',
-    'SphericalHealpixRayTracer',
-    'CartesianHealpixRayTracer',
-    'compute_co_shielding_healpix',
 ]

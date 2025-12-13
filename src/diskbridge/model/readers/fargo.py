@@ -556,8 +556,8 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         
         if temp_data is not None:
             # Convert from FARGO code units to Kelvin
-            # Following fargo2radmc3d: cutemp = μ * 8.0841643e-15 * M / L
-            # where μ=2.35 (mean molecular weight), M in kg, L in m
+            # Following fargo2radmc3d: cutemp = mu * 8.0841643e-15 * M / L
+            # where mu=2.35 (mean molecular weight), M in kg, L in m
             # This factor converts v^2 (in code units) to K
             # Note: This uses the BASE code units (1 AU, 1 M_sun)
             # Any length_scale/mass_scale rescaling is handled in Model._apply_rescaling()

@@ -53,13 +53,13 @@ def load_model(
         
     Notes
     -----
-    Code units are already defined as 1 au, 1 M_sun, and code_time = sqrt(au³/(G*M_sun)).
-    Rescaling follows Keplerian dynamics where T² ∝ L³/M:
+    Code units are already defined as 1 au, 1 M_sun, and code_time = sqrt(au^3/(G*M_sun)).
+    Rescaling follows Keplerian dynamics where T^2 ~ L^3/M:
     - Lengths scale by length_scale
     - Masses scale by mass_scale
-    - Times scale by sqrt(length_scale³/mass_scale)
+    - Times scale by sqrt(length_scale^3/mass_scale)
     - Velocities scale by sqrt(mass_scale/length_scale)
-    - Densities scale by mass_scale/length_scale³
+    - Densities scale by mass_scale/length_scale^3
         
     Examples
     --------

@@ -237,7 +237,7 @@ class Mesh:
         # Create edges from thmin to thmax for half the grid
         ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
         # Transform to get lower hemisphere edges
-        ym_lower = -ymp + thmin + thmax  # = -ymp + π/2 + thmin
+        ym_lower = -ymp + thmin + thmax  # = -ymp + pi/2 + thmin
         # Mirror to upper hemisphere (skip first element to avoid duplication)
         ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
         # Concatenate: lower (reversed) + upper

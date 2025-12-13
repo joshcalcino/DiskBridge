@@ -151,8 +151,8 @@ class RadWriter:
                     # Convert to base units and drop units so we write pure numbers
                     edges_cgs = edges.to_base_units().magnitude
                     
-                    # RADMC-3D expects phi from 0 to 2π
-                    # FARGO uses -π to +π, so we create a uniform grid for RADMC-3D
+                    # RADMC-3D expects phi from 0 to 2*pi
+                    # FARGO uses -pi to +pi, so we create a uniform grid for RADMC-3D
                     if name == 'phi':
                         nphi = len(edges_cgs)
                         edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi)
@@ -507,16 +507,16 @@ class RadWriter:
         if grain_density is None:
             species_lower = species.lower()
             if 'ice70' in species_lower or species_lower == 'mix_2species_ice70':
-                grain_density = 1.26  # g/cm³ for mix_2species_ice70
+                grain_density = 1.26  # g/cm^3 for mix_2species_ice70
             elif 'porous' in species_lower:
-                grain_density = 0.1   # g/cm³ for porous species
+                grain_density = 0.1   # g/cm^3 for porous species
             elif species_lower in ['mix_2species', 'mix_2species_60silicates_40ice']:
-                grain_density = 1.7   # g/cm³
+                grain_density = 1.7   # g/cm^3
             elif '60silicates_40carbons' in species_lower:
-                grain_density = 2.7   # g/cm³
+                grain_density = 2.7   # g/cm^3
             else:
-                grain_density = 2.7   # g/cm³ default
-                logger.warning(f"Unknown species '{species}', using default grain_density = {grain_density} g/cm³")
+                grain_density = 2.7   # g/cm^3 default
+                logger.warning(f"Unknown species '{species}', using default grain_density = {grain_density} g/cm^3")
 
         # Default scattering mode from global parameters if not provided
         if scattering_mode is None:
