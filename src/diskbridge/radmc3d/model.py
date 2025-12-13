@@ -1142,8 +1142,8 @@ class RadModel:
         nphot: int = None,
         output_dir: Optional[str | Path] = None,
         force: bool = False,
-        uv_min_nm: float = None,
-        uv_max_nm: float = None,
+        uv_min: Quantity = None,
+        uv_max: Quantity = None,
         n_wavelengths: int = None
     ) -> Quantity:
         """Run RADMC-3D monochromatic Monte Carlo for UV field.
@@ -1156,10 +1156,10 @@ class RadModel:
             Output directory (default: 'mcmono/')
         force : bool, optional
             Force recomputation even if output exists (default: False)
-        uv_min_nm : float, optional
-            UV range lower bound in nm (default: 91.2 nm, from params)
-        uv_max_nm : float, optional
-            UV range upper bound in nm (default: 205.0 nm, from params)
+        uv_min : Quantity, optional
+            UV range lower bound (uses params if None)
+        uv_max : Quantity, optional
+            UV range upper bound (uses params if None)
         n_wavelengths : int, optional
             Number of wavelengths for integration (default: 10, from params)
             
@@ -1174,24 +1174,35 @@ class RadModel:
         >>> chi = rad.compute_mcmono()
         """
         use_params_nphot = nphot is None
-        use_params_uv_min = uv_min_nm is None
-        use_params_uv_max = uv_max_nm is None
+        use_params_uv_min = uv_min is None
+        use_params_uv_max = uv_max is None
         use_params_nw = n_wavelengths is None
 
         if nphot is None:
             nphot = self.params.nphot_mono
         countwrite = max(1, int(nphot // 100))
-        if uv_min_nm is None:
-            uv_min_nm = self.params.uv_min
-        if uv_max_nm is None:
-            uv_max_nm = self.params.uv_max
+        if uv_min is None:
+            uv_min = self.params.uv_min
+        if uv_max is None:
+            uv_max = self.params.uv_max
         if n_wavelengths is None:
             n_wavelengths = self.params.uv_n_wavelengths
+
+        if uv_min < self.params.lambda_min or uv_max > self.params.lambda_max:
+            raise ValueError(
+                "mcmono UV wavelength range is outside the global wavelength grid: "
+                f"uv=[{uv_min:~P},{uv_max:~P}], "
+                f"grid=[{self.params.lambda_min:~P},{self.params.lambda_max:~P}]"
+            )
         
         # Validate UV range
         u_draine = U_DRAINE
         
-        logger.info(f"UV field configuration: {uv_min_nm:.1f}-{uv_max_nm:.1f} nm, {n_wavelengths} wavelengths")
+        logger.info(
+            "UV field configuration: "
+            f"uv=[{uv_min:~P},{uv_max:~P}], "
+            f"n_wavelengths={n_wavelengths}"
+        )
         
         # Set output directory
         if output_dir is None:
@@ -1250,11 +1261,11 @@ class RadModel:
                 self.mean_intensity = j_lambda
 
                 # Compute chi by integrating over UV band in frequency space
-                uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
+                uv_mask = (lam >= uv_min) & (lam <= uv_max)
                 if not np.any(uv_mask):
                     raise ValueError(
-                        f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) in existing mean intensity file. '
-                        f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
+                        f"No UV wavelengths ({uv_min:~P}-{uv_max:~P}) in existing mean intensity file. "
+                        f"Wavelength range: {lam.min():~P}-{lam.max():~P}"
                     )
 
                 j_uv = j_lambda[:, uv_mask]
@@ -1293,14 +1304,13 @@ class RadModel:
         
         # Create mcmono_wavelength_micron.inp with UV wavelength range
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
-        uv_lam = np.linspace(uv_min_nm, uv_max_nm, n_wavelengths)
-        uv_lam_micron = uv_lam.to('micron')  # Convert to microns for file writing
+        uv_lam = np.linspace(uv_min, uv_max, n_wavelengths).to(self.params.lambda_min.units)
         
         with open(mcmono_wav_file, 'w') as f:
-            f.write(f'{len(uv_lam_micron)}\n')  # Number of wavelengths
-            for lam in uv_lam_micron:
+            f.write(f'{len(uv_lam)}\n')  # Number of wavelengths
+            for lam in uv_lam:
                 f.write(f'{lam:.6f}\n')
-        logger.debug(f"Wrote {mcmono_wav_file} with {len(uv_lam_micron)} UV wavelengths")
+        logger.debug(f"Wrote {mcmono_wav_file} with {len(uv_lam)} UV wavelengths")
         
         # Create symlinks to input files
         self.create_symlinks()
@@ -1327,7 +1337,7 @@ class RadModel:
             setthreads = self.params.nbcores
             logger.info(
                 f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths "
-                f"({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) with {nphot} photons "
+                f"({uv_min:~P}-{uv_max:~P}) with {nphot} photons "
                 f"(countwrite={countwrite})..."
             )
             cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)]
@@ -1358,6 +1368,12 @@ class RadModel:
                     f.write(combined_log)
             except Exception:
                 pass
+
+            mcmono_text = combined_log.split('--- mcmono ---', 1)[-1]
+            error_lines = [line.strip() for line in mcmono_text.splitlines() if 'ERROR' in line.upper()]
+            if error_lines:
+                errors = "\n".join(error_lines[-10:])
+                raise RuntimeError(f"mcmono failed with RADMC-3D errors:\n{errors}")
             
             if returncode != 0:
                 logger.error(f"RADMC-3D mcmono failed (see {log_path})")
@@ -1376,7 +1392,7 @@ class RadModel:
         self._organize_output(
             output_dir,
             ['mean_intensity.out', 'mcmono_wavelength_micron.inp'],
-            f'radmc3d mcmono UV_range_{uv_min_nm:.1f}-{uv_max_nm:.1f}nm_{n_wavelengths}wavelengths'
+            f'radmc3d mcmono UV_range_{uv_min:~P}-{uv_max:~P}_{n_wavelengths}wavelengths'
         )
         
         # Read mean intensity directly from the mcmono output directory
@@ -1412,12 +1428,12 @@ class RadModel:
         
         # Compute chi by integrating over UV band in frequency space
         # Following Pinte et al. 2018 and fargo2radmc3d implementation
-        uv_mask = (lam >= uv_min_nm.to('cm')) & (lam <= uv_max_nm.to('cm'))
+        uv_mask = (lam >= uv_min) & (lam <= uv_max)
         
         if not np.any(uv_mask):
             raise ValueError(
-                f'No UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm) found in mean intensity file. '
-                f'Wavelength range: {lam.min().to("nm"):.1f}-{lam.max().to("nm"):.1f}'
+                f"No UV wavelengths ({uv_min:~P}-{uv_max:~P}) found in mean intensity file. "
+                f"Wavelength range: {lam.min():~P}-{lam.max():~P}"
             )
         
         j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
@@ -1437,7 +1453,7 @@ class RadModel:
         self.chi = chi_3d
         
         logger.info(
-            f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min_nm:.1f}-{uv_max_nm:.1f} nm): "
+            f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min:~P}-{uv_max:~P}): "
             f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
         )
 
