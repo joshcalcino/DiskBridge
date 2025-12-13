@@ -60,8 +60,8 @@ NU0_CO_DEFAULT = 1.0e12            # vibrational frequency [1/s] for thermal des
 SIGMA_D_PER_H_DEFAULT = 1.0e-21    # grain cross-section per H [cm^2 per H]
 ALPHA_PD_ICE_DEFAULT = 1.0e-12     # photodesorption rate per chi=1 [1/s]
 K0_CO_DEFAULT = Quantity(2.0e-10, "1/s")  # unshielded Heays rate for chi=1 Draine
-M_CO_CGS = 28.0 * 1.6726e-24       # CO mass in g (28 * m_H)
-K_BOLTZ_CGS = 1.3807e-16           # Boltzmann constant in erg/K
+M_CO_CGS = (28.0 * units('m_H')).to('g').magnitude       # CO mass in g (28 * m_H)
+K_BOLTZ_CGS = units('k_B').to('erg/K').magnitude          # Boltzmann constant in erg/K
  
 _MCTHERM_PARAM_KEYS = (
     'nphot_thermal',

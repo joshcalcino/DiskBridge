@@ -21,8 +21,10 @@ if TYPE_CHECKING:
 # Import SubModel for inheritance
 from .model import SubModel
 
-k_B = 1.380649e-16 * units('erg/K')  # Boltzmann constant
-m_H = 1.6737236e-24 * units('g')      # Hydrogen mass
+k_B = units('k_B')  # Boltzmann constant
+m_H = units('m_H')  # Hydrogen mass
+G = units('G')      # Gravitational constant
+solar_mass = units('solar_mass')  # Solar mass
 
 class DustBin:
     """Represents a single dust size bin with properties and density field.
@@ -649,13 +651,13 @@ class Dust(SubModel):
             temp = self.parent.gas['temperature'].data
             
             # Get stellar mass (default 1 M_sun if not available)
-            M_star = 1.0 * 1.989e33 * units('g')  # Solar mass
+            M_star = units('solar_mass').to('g')
             if hasattr(self.parent, 'variables'):
                 if 'mstar' in self.parent.variables:
                     M_star = self.parent.variables['mstar']
                     
             # Keplerian frequency (1D array)
-            G = 6.674e-8 * units('cm^3 / (g * s^2)')
+            G = units('G')
             Omega_K_1d = np.sqrt(G * M_star / r**3)
             
             # Sound speed (3D array)
@@ -685,12 +687,12 @@ class Dust(SubModel):
         r = mesh.centers('r')
         
         # Get stellar mass
-        M_star = 1.0 * 1.989e33 * units('g')  # Default: 1 M_sun
+        M_star = units('solar_mass').to('g')
         if hasattr(self.parent, 'variables'):
             if 'mstar' in self.parent.variables:
                 M_star = self.parent.variables['mstar']
                 
-        G = 6.674e-8 * units('cm^3 / (g * s^2)')
+        G = units('G')
         Omega_K = np.sqrt(G * M_star / r**3)
         
         return Omega_K

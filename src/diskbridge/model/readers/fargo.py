@@ -14,17 +14,14 @@ from diskbridge import units
 # helpers
 # -----------------
 
-R_UNIVERSAL_MKS = 8.314462618  # J / (mol K)
+R_GAS = units('R_gas')  # J / (mol K)
+R_MU_FARGO_CGS = units('R_MU_FARGO_CGS')  # erg / (g K)
 
-# FARGO3D defines R_MU = R / mu (specific gas constant).
-# We store MU as the dimensionless mean molecular weight in amu, numerically equal to mu in g/mol.
-R_MU_CGS = 36149835.0  # erg / (g K)
+MU_FARGO_CGS = (R_GAS.to('erg/(mol*K)') / R_MU_FARGO_CGS).to('g/mol')
 
-MU_FARGO_CGS = (R_UNIVERSAL_MKS * 1.0e7) / R_MU_CGS  # (erg/mol/K) / (erg/g/K) = g/mol
+FARGO_DEFAULT_MU = float(MU_FARGO_CGS.magnitude)
 
-FARGO_DEFAULT_MU = MU_FARGO_CGS
-
-G_phys = Quantity(6.674e-11, "m^3 / (kg s^2)")
+G_phys = units('G').to("m^3 / (kg s^2)")
 
 au = 1.0*units('au')
 solar_mass = 1.0*units('solar_mass')
@@ -576,7 +573,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         if temp_data is not None:
             # Convert from FARGO code units to Kelvin
             # Following fargo2radmc3d: cutemp = mu * 8.0841643e-15 * M / L
-            # where mu=2.35 (mean molecular weight), M in kg, L in m
+            # where mu is mean molecular weight, M in kg, L in m
             # This factor converts v^2 (in code units) to K
             # Note: This uses the BASE code units (1 AU, 1 M_sun)
             # Any length_scale/mass_scale rescaling is handled in Model._apply_rescaling()

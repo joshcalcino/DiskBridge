@@ -26,10 +26,10 @@ G_CGS = units('G')
 SIGMA_SB = units('sigma_SB')
 
 # Local physical constants (cgs)
-H_CGS = 6.62607015e-27
-C_CGS = 2.99792458e10
-K_B_CGS = 1.380649e-16
-T_CMB = 2.725
+H_CGS = units('h').to('erg*s').magnitude
+C_CGS = units('c').to('cm/s').magnitude
+K_B_CGS = units('k_B').to('erg/K').magnitude
+T_CMB = units('T_CMB').to('K').magnitude
 
 
 class RadWriter:
@@ -724,7 +724,7 @@ class RadWriter:
         return lam_cm, val_arr, q
     
     def _to_i_nu_from_table(self, lam_cm: np.ndarray, values: np.ndarray, quantity: str) -> np.ndarray:
-        c = 2.99792458e10
+        c = C_CGS
         pi = np.pi
         q = quantity.lower()
         if q == 'u_lambda':

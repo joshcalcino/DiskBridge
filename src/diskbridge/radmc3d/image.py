@@ -23,9 +23,9 @@ import diskbridge
 from .molecule import RadMolecule
 
 # Physical constants (CGS)
-C_LIGHT = 2.99792458e10  # cm/s
-PC = 3.08567758e18  # cm
-AU = 1.49597871e13  # cm
+C_LIGHT = diskbridge.units('c').to('cm/s').magnitude
+PC = diskbridge.units('pc').to('cm').magnitude
+AU = diskbridge.units('au').to('cm').magnitude
 
 
 class RadImage:
