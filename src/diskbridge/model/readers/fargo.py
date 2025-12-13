@@ -14,6 +14,8 @@ from diskbridge import units
 # helpers
 # -----------------
 
+FARGO_DEFAULT_MU = 2.31
+
 G_phys = Quantity(6.674e-11, "m^3 / (kg s^2)")
 
 au = 1.0*units('au')
@@ -566,8 +568,11 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
                 # For base code units: 1 code_length = 1 AU, 1 code_mass = 1 M_sun
                 code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
                 code_length_m = (1.0 * au).to('m').magnitude
-                mu = 2.35  # mean molecular weight
+                mu = FARGO_DEFAULT_MU  # mean molecular weight
                 cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
+
+                if "MU" not in variables:
+                    variables["MU"] = mu
             else:
                 # For CGS or SI units, cutemp is different but we assume already in K
                 cutemp = 1.0

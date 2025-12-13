@@ -16,7 +16,7 @@ synthetic observations.
 - Optionally runs RADMC-3D to compute dust temperatures and line
   emission
 - Converts RADMC-3D outputs into FITS images and data cubes
-- CO self-shielding using HEALpix, ray-tracing, and Visser et al. 2009 self-shielding tables, with selectable 'uniform' (fast) or 'sortedsearch' (reference) ray integration methods
+- CO self-shielding using HEALpix, ray-tracing, and Visser et al. 2009 self-shielding tables
 
 ## Typical workflow
 
@@ -89,7 +89,7 @@ from the following public code bases:
 
 
 ## TODO/broken:
-
+- implement a simple chemistry network that solves CO, C, C+, O, O+, etc, abundances
 - make units in parameter file more consistent (e.g. dust size, wavelengths, all in um) (should be implemented correctly)
 - make radmc3d submodule use pint quantities (implemented, not fully tested)
 - mu_h should be read from simulation data

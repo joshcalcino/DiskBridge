@@ -9,7 +9,7 @@ import pickle
 from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
-from diskbridge._units import Quantity
+from diskbridge._units import Quantity, units
 from .utils import validate_field_against_mesh
 
 
@@ -328,81 +328,240 @@ class Model:
         
         return target_region
     
-    def set_mask_from_density(
+    def set_mask_from_joos_disk(
         self,
-        density_threshold: Quantity,
-        r_min: Optional[Quantity] = None,
+        rho_disk_min: Quantity,
+        *,
+        fthres: float = 2.0,
+        rho_core_min: Optional[Quantity] = None,
+        r_max_for_axis: Optional[Quantity] = None,
+        n_z_bins: Optional[int] = None,
         r_max: Optional[Quantity] = None,
-        is_a_disk: bool = False,
     ) -> SubModel:
-        """Define a masked region based on density threshold.
-        
-        Args:
-            density_threshold: Minimum density for inclusion
-            r_min: Optional minimum radius
-            r_max: Optional maximum radius
-            is_a_disk: Mark region as disk (enables settling mode)
-            
-        Returns:
-            SubModel (or Disk) with mask applied
+        """
+        Disk selection following Joos+2012 style criteria, but using mass density.
+
+        Summary:
+          1) Define disk frame axis from angular momentum of a dense-core mask.
+          2) Convert velocities into cylindrical components (R, phi, z) about that axis.
+          3) Bin cells into (R, z) rings; compute volume-weighted ring averages.
+          4) Apply Joos criteria on ring-averaged quantities + connectivity to z=0 plane.
+          5) Return a SubModel/Disk with the resulting mask.
+
+        Requirements (3D spherical mesh):
+          - gas['density']
+          - gas['vr'], gas['vphi'], gas['vtheta']
+          - either gas['pressure'] OR gas['temperature'] (to compute P_th)
         """
         mesh = self.mesh
-        if mesh is None:
-            raise ValueError("Model has no mesh")
-        
-        if mesh.coord_system != 'spherical':
+        if mesh.coord_system != "spherical":
             raise ValueError(
-                f"set_mask_from_density only supports spherical coordinates, "
-                f"got {mesh.coord_system}"
+                f"set_mask_from_joos_disk only supports spherical coordinates, got {mesh.coord_system}"
             )
-        
-        # Determine target region
-        if is_a_disk and self.disk is not None:
-            target_region = self.disk
+
+        r_c = mesh.centers("r")
+        theta_c = mesh.centers("theta")
+        phi_c = mesh.centers("phi")
+        r_e = mesh.edges("r")
+        theta_e = mesh.edges("theta")
+        phi_e = mesh.edges("phi")
+        if r_c is None or theta_c is None or phi_c is None:
+            raise ValueError("Mesh is missing one or more spherical center axes")
+        if r_e is None or theta_e is None or phi_e is None:
+            raise ValueError("Mesh is missing one or more spherical edge axes")
+
+        r3 = (r_e[1:] ** 3 - r_e[:-1] ** 3) / 3.0
+        theta_e_rad = theta_e.to("radian").magnitude
+        dcos = np.cos(theta_e_rad[:-1]) - np.cos(theta_e_rad[1:])
+        phi_e_rad = phi_e.to("radian").magnitude
+        dphi = phi_e_rad[1:] - phi_e_rad[:-1]
+        dV = r3[:, None, None] * dphi[None, :, None] * dcos[None, None, :]
+        dV_mag = dV.to_base_units().magnitude
+
+        rho = self.gas["density"].data.to_base_units()
+        vr = self.gas["vr"].data.to_base_units()
+        vphi = self.gas["vphi"].data.to_base_units()
+        vtheta = self.gas["vtheta"].data.to_base_units()
+
+        r_grid_mag, phi_grid_mag, theta_grid_mag = np.meshgrid(
+            r_c.to_base_units().magnitude,
+            phi_c.to("radian").magnitude,
+            theta_c.to("radian").magnitude,
+            indexing="ij",
+        )
+        r_grid = r_grid_mag * r_c.to_base_units().units
+
+        if rho_core_min is None:
+            rho_core_min = 10.0 * rho_disk_min
+
+        rho_core_thr = rho_core_min.to(rho.units).magnitude
+        core_mask = rho.magnitude >= rho_core_thr
+        if r_max_for_axis is not None:
+            core_mask &= (r_grid.magnitude <= r_max_for_axis.to(r_grid.units).magnitude)
+
+        sin_t = np.sin(theta_grid_mag)
+        cos_t = np.cos(theta_grid_mag)
+        cos_p = np.cos(phi_grid_mag)
+        sin_p = np.sin(phi_grid_mag)
+
+        er_x = sin_t * cos_p
+        er_y = sin_t * sin_p
+        er_z = cos_t
+
+        et_x = cos_t * cos_p
+        et_y = cos_t * sin_p
+        et_z = -sin_t
+
+        ep_x = -sin_p
+        ep_y = cos_p
+        ep_z = 0.0
+
+        r_base_mag = r_grid.to_base_units().magnitude
+        x = r_base_mag * er_x
+        y = r_base_mag * er_y
+        z = r_base_mag * er_z
+
+        vx = vr * er_x + vtheta * et_x + vphi * ep_x
+        vy = vr * er_y + vtheta * et_y + vphi * ep_y
+        vz = vr * er_z + vtheta * et_z + vphi * ep_z
+
+        mcell = (rho * dV).to_base_units().magnitude
+        if not np.any(core_mask):
+            rho_disk_thr = rho_disk_min.to(rho.units).magnitude
+            core_mask = rho.magnitude >= rho_disk_thr
+
+        w = mcell * core_mask
+        Lx = np.sum(w * (y * vz.magnitude - z * vy.magnitude))
+        Ly = np.sum(w * (z * vx.magnitude - x * vz.magnitude))
+        Lz = np.sum(w * (x * vy.magnitude - y * vx.magnitude))
+        Lnorm = float(np.sqrt(Lx * Lx + Ly * Ly + Lz * Lz))
+
+        if Lnorm == 0.0 or not np.isfinite(Lnorm):
+            k_hat = np.array([0.0, 0.0, 1.0], dtype=float)
         else:
-            target_region = SubModel(self)
-        
-        # Get density from gas
-        if 'density' not in self.gas:
-            raise KeyError("No density field found in gas")
-        
-        density = self.gas['density'].data
-        threshold_val = density_threshold.to(density.units).magnitude
-        mask = (density.magnitude >= threshold_val)
-        
-        # Apply radial constraints if given
-        if r_min is not None or r_max is not None:
-            r = mesh.centers('r')
-            phi = mesh.centers('phi')
-            theta = mesh.centers('theta')
-            r_grid, _, _ = np.meshgrid(r, phi, theta, indexing='ij')
-            
-            if r_min is not None:
-                mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
-            if r_max is not None:
-                mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-        
-        axis_order = ('r', 'phi', 'theta')
-        
-        mask_quantity = Quantity(mask, 'dimensionless')
-        mask_field = Field(
-            data=mask_quantity,
-            quantity='mask',
-            axis_order=axis_order,
-        )
-        
-        target_region.mask = mask_field
-        
-        # Mark as disk region if requested
-        if is_a_disk:
-            target_region.is_disk_region = True
-        
-        logger.info(
-            f"{target_region.__class__.__name__} mask set (density): {np.sum(mask)} / {mask.size} cells "
-            f"({100*np.sum(mask)/mask.size:.1f}%)"
-        )
-        
-        return target_region
+            k_hat = np.array([Lx / Lnorm, Ly / Lnorm, Lz / Lnorm], dtype=float)
+
+        z_d = x * k_hat[0] + y * k_hat[1] + z * k_hat[2]
+        rx = x - z_d * k_hat[0]
+        ry = y - z_d * k_hat[1]
+        rz = z - z_d * k_hat[2]
+        R_d = np.sqrt(rx * rx + ry * ry + rz * rz)
+
+        invR = np.zeros_like(R_d)
+        nz = R_d > 0.0
+        invR[nz] = 1.0 / R_d[nz]
+        rhatx = rx * invR
+        rhaty = ry * invR
+        rhatz = rz * invR
+
+        phix = k_hat[1] * rhatz - k_hat[2] * rhaty
+        phiy = k_hat[2] * rhatx - k_hat[0] * rhatz
+        phiz = k_hat[0] * rhaty - k_hat[1] * rhatx
+
+        vR_d = vx * rhatx + vy * rhaty + vz * rhatz
+        vphi_d = vx * phix + vy * phiy + vz * phiz
+        vz_d = vx * k_hat[0] + vy * k_hat[1] + vz * k_hat[2]
+
+        if "pressure" in self.gas:
+            Pth = self.gas["pressure"].data
+        elif "temperature" in self.gas:
+            if not hasattr(self, "variables") or "MU" not in self.variables:
+                raise ValueError(
+                    "Cannot compute thermal pressure from temperature without mean molecular weight. "
+                    "Provide gas['pressure'] or ensure the reader sets model.variables['MU']."
+                )
+            T = self.gas["temperature"].data
+            mu_val = float(getattr(self.variables["MU"], "magnitude", self.variables["MU"]))
+            Pth = rho.to("g/cm^3") * units("k_B") * T.to("K") / (mu_val * units("m_H"))
+        else:
+            raise KeyError("Need either gas['pressure'] or gas['temperature'] to evaluate thermal support")
+        Pth = Pth.to_base_units()
+
+        R_edges = mesh.edges("r")
+        if R_edges is None:
+            raise ValueError("Mesh is missing radial edges")
+        R_edges = R_edges.to_base_units()
+        if float(R_edges[0].magnitude) != 0.0:
+            R_edges = Quantity(np.concatenate(([0.0], R_edges.magnitude)), R_edges.units)
+
+        if r_max is not None:
+            r_max_base = r_max.to_base_units().magnitude
+            R_edges = R_edges[R_edges.magnitude <= r_max_base]
+            if len(R_edges) < 2:
+                raise ValueError("r_max is too small; no radial bins remain")
+
+        nR = len(R_edges) - 1
+        if n_z_bins is None:
+            n_z_bins = len(theta_c)
+
+        zmax = float(np.max(np.abs(z_d)))
+        if zmax == 0.0 or not np.isfinite(zmax):
+            raise ValueError("Invalid disk-frame z extent; cannot build z bins")
+        Z_edges = np.linspace(-zmax, zmax, n_z_bins + 1)
+
+        R_bin = np.digitize(R_d, R_edges.magnitude) - 1
+        Z_bin = np.digitize(z_d, Z_edges) - 1
+        valid = (R_bin >= 0) & (R_bin < nR) & (Z_bin >= 0) & (Z_bin < n_z_bins)
+
+        ring_index = (R_bin * n_z_bins + Z_bin).astype(np.int64)
+        ring_index_flat = ring_index[valid].ravel()
+
+        dV_w = dV_mag[valid].ravel()
+        if dV_w.size == 0:
+            raise ValueError("No valid cells for ring binning (check mesh/edges)")
+
+        nbins = nR * n_z_bins
+        sum_w = np.bincount(ring_index_flat, weights=dV_w, minlength=nbins)
+
+        def ring_avg(q_mag_flat: np.ndarray) -> np.ndarray:
+            num = np.bincount(ring_index_flat, weights=(q_mag_flat * dV_w), minlength=nbins)
+            out = np.zeros(nbins, dtype=float)
+            ok = sum_w > 0.0
+            out[ok] = num[ok] / sum_w[ok]
+            return out.reshape(nR, n_z_bins)
+
+        vphi_avg = ring_avg(np.abs(vphi_d.to_base_units().magnitude)[valid].ravel())
+        vR_avg = ring_avg(np.abs(vR_d.to_base_units().magnitude)[valid].ravel())
+        vz_avg = ring_avg(np.abs(vz_d.to_base_units().magnitude)[valid].ravel())
+
+        rho_avg = ring_avg(rho.magnitude[valid].ravel())
+        rho_thr = rho_disk_min.to(rho.units).magnitude
+
+        rot = (0.5 * rho * (vphi_d.to_base_units() ** 2)).to_base_units()
+        rot_avg = ring_avg(rot.magnitude[valid].ravel())
+        P_avg = ring_avg(Pth.magnitude[valid].ravel())
+
+        c1 = vphi_avg > (fthres * vR_avg)
+        c2 = vphi_avg > (fthres * vz_avg)
+        c3 = rot_avg > (fthres * P_avg)
+        c5 = rho_avg > rho_thr
+        ring_pass = c1 & c2 & c3 & c5
+
+        mid_z = np.searchsorted(Z_edges, 0.0, side="right") - 1
+        mid_z = int(np.clip(mid_z, 0, n_z_bins - 1))
+
+        connected = np.zeros_like(ring_pass, dtype=bool)
+        for i in range(nR):
+            if not ring_pass[i, mid_z]:
+                continue
+            j = mid_z
+            while j < n_z_bins and ring_pass[i, j]:
+                connected[i, j] = True
+                j += 1
+            j = mid_z - 1
+            while j >= 0 and ring_pass[i, j]:
+                connected[i, j] = True
+                j -= 1
+
+        connected_flat = connected.reshape(-1)
+        mask = np.zeros_like(R_d, dtype=bool)
+        mask_valid = connected_flat[ring_index_flat]
+        mask[valid] = mask_valid
+
+        if r_max is not None:
+            mask &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
+
+        return self.set_mask_from_array(mask, is_a_disk=True)
     
     def set_mask_from_array(
         self,
