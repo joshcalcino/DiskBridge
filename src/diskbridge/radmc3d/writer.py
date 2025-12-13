@@ -749,7 +749,7 @@ class RadWriter:
         j_phot_nm = data[:, 1]
         lam_cm = lam_nm * 1.0e-7
         e_ph = H_CGS * C_CGS / lam_cm
-        j_lambda = j_phot_nm * e_ph / 1.0e-7
+        j_lambda = j_phot_nm * e_ph / 1.0e-7 / (4.0 * np.pi)
         return lam_cm, j_lambda
 
     def _make_ism_background_lambda(
