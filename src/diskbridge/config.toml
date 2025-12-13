@@ -28,6 +28,7 @@ jupiter_mass = "1.89813e27 kg"
 jupiter_radius = "7.1492e7 m"
 pc = "3.08567758e16 m"
 au = "1.49597871e11 m"
+T_CMB = "2.725 K"
 
 [units.constants]
 G = "6.67430e-8 cm**3 / (g s**2)"
@@ -38,7 +39,7 @@ h = "6.62607015e-27 erg s"
 k_B = "1.380649e-16 erg/K"
 R_gas = "8.314462618 J / (mol K)"
 R_MU_FARGO_CGS = "36149835.0 erg / (g K)"
-T_CMB = "2.725 K"
+
 
 
 [arrays.dimensions]
