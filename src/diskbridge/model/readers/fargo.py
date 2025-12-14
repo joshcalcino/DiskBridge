@@ -251,9 +251,9 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     norm_units = (file_units or "code").lower()
     if "MU" not in variables:
         if norm_units == "cgs":
-            variables["MU"] = float(MU_FARGO_CGS)
+            variables["MU"] = float(MU_FARGO_CGS.to('g/mol').magnitude)
         elif compile_options.get("CGS", False):
-            variables["MU"] = float(MU_FARGO_CGS)
+            variables["MU"] = float(MU_FARGO_CGS.to('g/mol').magnitude)
         else:
             variables["MU"] = float(FARGO_DEFAULT_MU)
 
