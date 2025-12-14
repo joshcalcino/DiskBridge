@@ -617,8 +617,8 @@ def integrate_rays(
     N_all : ndarray
         Integrated column densities, shape (n_cells, n_dirs).
     """
-    if len(fields) != 1:
-        raise ValueError("integrate_rays currently supports exactly one density field")
+    if len(fields) not in (1, 2):
+        raise ValueError("integrate_rays supports one or two density fields")
     
     # Determine tracer type from attributes
     is_cartesian = hasattr(tracer, 'x_edges')
@@ -630,26 +630,57 @@ def integrate_rays(
             "Expected CartesianHealpixRayTracer or SphericalHealpixRayTracer."
         )
 
-    # Single field integration via DDA kernels
-    n_field = fields[0].astype(np.float64)
+    cell_centers = np.asarray(cell_centers, dtype=np.float64)
+    directions = np.asarray(directions, dtype=np.float64)
 
-    if is_cartesian:
-        return _integrate_all_rays_cartesian_single_dda(
+    if len(fields) == 1:
+        # Single field integration via DDA kernels
+        n_field = np.asarray(fields[0], dtype=np.float64)
+
+        if is_cartesian:
+            return _integrate_all_rays_cartesian_single_dda(
+                cell_centers,
+                directions,
+                n_field,
+                np.asarray(tracer.x_edges, dtype=np.float64),
+                np.asarray(tracer.y_edges, dtype=np.float64),
+                np.asarray(tracer.z_edges, dtype=np.float64),
+                max_steps,
+            )
+
+        return _integrate_all_rays_spherical_single_dda(
             cell_centers,
             directions,
             n_field,
-            tracer.x_edges.astype(np.float64),
-            tracer.y_edges.astype(np.float64),
-            tracer.z_edges.astype(np.float64),
+            np.asarray(tracer.r_edges, dtype=np.float64),
+            np.asarray(tracer.theta_edges, dtype=np.float64),
+            np.asarray(tracer.phi_edges, dtype=np.float64),
             max_steps,
         )
 
-    return _integrate_all_rays_spherical_single_dda(
+    # Two-field integration via DDA kernels
+    nco_field = np.asarray(fields[0], dtype=np.float64)
+    nh2_field = np.asarray(fields[1], dtype=np.float64)
+
+    if is_cartesian:
+        return _integrate_all_rays_cartesian_dda(
+            cell_centers,
+            directions,
+            nco_field,
+            nh2_field,
+            np.asarray(tracer.x_edges, dtype=np.float64),
+            np.asarray(tracer.y_edges, dtype=np.float64),
+            np.asarray(tracer.z_edges, dtype=np.float64),
+            max_steps,
+        )
+
+    return _integrate_all_rays_spherical_dda(
         cell_centers,
         directions,
-        n_field,
-        tracer.r_edges.astype(np.float64),
-        tracer.theta_edges.astype(np.float64),
-        tracer.phi_edges.astype(np.float64),
+        nco_field,
+        nh2_field,
+        np.asarray(tracer.r_edges, dtype=np.float64),
+        np.asarray(tracer.theta_edges, dtype=np.float64),
+        np.asarray(tracer.phi_edges, dtype=np.float64),
         max_steps,
     )
