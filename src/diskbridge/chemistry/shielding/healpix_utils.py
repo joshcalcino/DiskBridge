@@ -385,7 +385,7 @@ def integrate_ray_spherical_dda_3d(
 
 
 @njit(cache=True, parallel=True)
-def _integrate_all_rays_spherical_single_dda(
+def _integrate_all_rays_spherical_dda(
     cell_centers: np.ndarray,
     directions: np.ndarray,
     n_field: np.ndarray,
@@ -427,64 +427,7 @@ def _integrate_all_rays_spherical_single_dda(
 
 
 @njit(cache=True, parallel=True)
-def _integrate_all_rays_spherical_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    nCO_field: np.ndarray,
-    nH2_field: np.ndarray,
-    r_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    phi_edges: np.ndarray,
-    max_steps: int = 200000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-
-    Nco_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    Nh2_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            Nco_all[i, j] = integrate_ray_spherical_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                nCO_field,
-                r_edges,
-                theta_edges,
-                phi_edges,
-                max_steps,
-            )
-            Nh2_all[i, j] = integrate_ray_spherical_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                nH2_field,
-                r_edges,
-                theta_edges,
-                phi_edges,
-                max_steps,
-            )
-
-    return Nco_all, Nh2_all
-
-
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_cartesian_single_dda(
+def _integrate_all_rays_cartesian_dda(
     cell_centers: np.ndarray,
     directions: np.ndarray,
     n_field: np.ndarray,
@@ -525,70 +468,38 @@ def _integrate_all_rays_cartesian_single_dda(
     return N_all
 
 
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_cartesian_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    nCO_field: np.ndarray,
-    nH2_field: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
-    z_edges: np.ndarray,
-    max_steps: int = 100000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
+def _tracer_kind(tracer) -> str:
+    if hasattr(tracer, "x_edges"):
+        return "cartesian"
+    if hasattr(tracer, "r_edges"):
+        return "spherical"
+    raise TypeError(
+        f"Unknown tracer type: {type(tracer).__name__}. "
+        "Expected CartesianHealpixRayTracer or SphericalHealpixRayTracer."
+    )
 
-    Nco_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    Nh2_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
 
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            Nco_all[i, j] = integrate_ray_cartesian_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                nCO_field,
-                x_edges,
-                y_edges,
-                z_edges,
-                max_steps,
-            )
-            Nh2_all[i, j] = integrate_ray_cartesian_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                nH2_field,
-                x_edges,
-                y_edges,
-                z_edges,
-                max_steps,
-            )
-
-    return Nco_all, Nh2_all
+def _tracer_edges_float64(tracer, kind: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if kind == "cartesian":
+        return (
+            np.asarray(tracer.x_edges, dtype=np.float64),
+            np.asarray(tracer.y_edges, dtype=np.float64),
+            np.asarray(tracer.z_edges, dtype=np.float64),
+        )
+    return (
+        np.asarray(tracer.r_edges, dtype=np.float64),
+        np.asarray(tracer.theta_edges, dtype=np.float64),
+        np.asarray(tracer.phi_edges, dtype=np.float64),
+    )
 
 
 def integrate_rays(
 	tracer,
 	cell_centers: np.ndarray,
 	directions: np.ndarray,
-	*fields: np.ndarray,
+	n_field: np.ndarray,
 	max_steps: int = 10000,
-) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     """
     Unified ray integration dispatcher.
     
@@ -604,83 +515,22 @@ def integrate_rays(
         Starting positions in Cartesian (x, y, z) coordinates.
     directions : ndarray, shape (n_dirs, 3)
         Unit direction vectors.
-	    *fields : ndarray
-	        One or two density fields to integrate using the DDA kernels:
-	        - Single field: returns N_all of shape (n_cells, n_dirs)
-	        - Two fields (nCO, nH2): returns (Nco_all, Nh2_all)
+	    n_field : ndarray
+	        Density field to integrate.
 	    max_steps : int, optional
 	        Maximum integration steps per ray.
-    >>> Nco, Nh2 = integrate_rays(tracer, centers, dirs, nCO_field,	nH2_field)
     
     Returns
     -------
     N_all : ndarray
         Integrated column densities, shape (n_cells, n_dirs).
     """
-    if len(fields) not in (1, 2):
-        raise ValueError("integrate_rays supports one or two density fields")
-    
-    # Determine tracer type from attributes
-    is_cartesian = hasattr(tracer, 'x_edges')
-    is_spherical = hasattr(tracer, 'r_edges')
-
-    if not (is_cartesian or is_spherical):
-        raise TypeError(
-            f"Unknown tracer type: {type(tracer).__name__}. "
-            "Expected CartesianHealpixRayTracer or SphericalHealpixRayTracer."
-        )
-
+    kind = _tracer_kind(tracer)
     cell_centers = np.asarray(cell_centers, dtype=np.float64)
     directions = np.asarray(directions, dtype=np.float64)
+    n_field = np.asarray(n_field, dtype=np.float64)
+    edges = _tracer_edges_float64(tracer, kind)
 
-    if len(fields) == 1:
-        # Single field integration via DDA kernels
-        n_field = np.asarray(fields[0], dtype=np.float64)
-
-        if is_cartesian:
-            return _integrate_all_rays_cartesian_single_dda(
-                cell_centers,
-                directions,
-                n_field,
-                np.asarray(tracer.x_edges, dtype=np.float64),
-                np.asarray(tracer.y_edges, dtype=np.float64),
-                np.asarray(tracer.z_edges, dtype=np.float64),
-                max_steps,
-            )
-
-        return _integrate_all_rays_spherical_single_dda(
-            cell_centers,
-            directions,
-            n_field,
-            np.asarray(tracer.r_edges, dtype=np.float64),
-            np.asarray(tracer.theta_edges, dtype=np.float64),
-            np.asarray(tracer.phi_edges, dtype=np.float64),
-            max_steps,
-        )
-
-    # Two-field integration via DDA kernels
-    nco_field = np.asarray(fields[0], dtype=np.float64)
-    nh2_field = np.asarray(fields[1], dtype=np.float64)
-
-    if is_cartesian:
-        return _integrate_all_rays_cartesian_dda(
-            cell_centers,
-            directions,
-            nco_field,
-            nh2_field,
-            np.asarray(tracer.x_edges, dtype=np.float64),
-            np.asarray(tracer.y_edges, dtype=np.float64),
-            np.asarray(tracer.z_edges, dtype=np.float64),
-            max_steps,
-        )
-
-    return _integrate_all_rays_spherical_dda(
-        cell_centers,
-        directions,
-        nco_field,
-        nh2_field,
-        np.asarray(tracer.r_edges, dtype=np.float64),
-        np.asarray(tracer.theta_edges, dtype=np.float64),
-        np.asarray(tracer.phi_edges, dtype=np.float64),
-        max_steps,
-    )
+    if kind == "cartesian":
+        return _integrate_all_rays_cartesian_dda(cell_centers, directions, n_field, *edges, max_steps)
+    return _integrate_all_rays_spherical_dda(cell_centers, directions, n_field, *edges, max_steps)

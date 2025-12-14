@@ -650,14 +650,12 @@ class Dust(SubModel):
         if 'temperature' in self.parent.gas:
             temp = self.parent.gas['temperature'].data
             
-            # Get stellar mass (default 1 M_sun if not available)
-            M_star = units('solar_mass').to('g')
+            # Get stellar mass
             if hasattr(self.parent, 'variables'):
                 if 'mstar' in self.parent.variables:
                     M_star = self.parent.variables['mstar']
                     
             # Keplerian frequency (1D array)
-            G = units('G')
             Omega_K_1d = np.sqrt(G * M_star / r**3)
             
             # Sound speed (3D array)

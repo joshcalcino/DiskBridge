@@ -212,7 +212,21 @@ class RadModel:
                 "Generate RADMC-3D inputs (including radmc3d.inp) before running mctherm/mcmono."
             )
 
+        int32_max = int(np.iinfo(np.int32).max)
+
+        countwrite = int(countwrite)
+        if countwrite > int32_max:
+            logger.warning(
+                "countwrite too large; clamping to int32 max (%d)" % int32_max
+            )
+            countwrite = int32_max
+
         desired_cntdump = max(int(nphot), int(countwrite))
+        if desired_cntdump > int32_max:
+            logger.warning(
+                "cntdump too large; clamping to int32 max (%d)" % int32_max
+            )
+            desired_cntdump = int32_max
 
         try:
             lines = radmc_inp_path.read_text().splitlines(True)
@@ -241,7 +255,12 @@ class RadModel:
             except Exception:
                 current = None
 
-            if current is not None and current >= countwrite:
+            if current is not None and current > int32_max:
+                logger.warning(
+                    "cntdump too large; clamping to int32 max (%d)" % int32_max
+                )
+                updated_lines.append(f'cntdump = {int32_max}\n')
+            elif current is not None and current >= countwrite:
                 updated_lines.append(line)
             else:
                 updated_lines.append(f'cntdump = {desired_cntdump}\n')
