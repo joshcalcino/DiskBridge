@@ -97,7 +97,6 @@ class RadWriter:
             coordsys_code: RADMC-3D coordinate system code
                 - 0-99: Cartesian
                 - 100-199: Spherical
-                - 200-299: Cylindrical
                 Default: 101 (spherical)
         """
         base_dir = Path(output_dir)
@@ -113,10 +112,6 @@ class RadWriter:
             if coordsys_code < 100 or coordsys_code >= 200:
                 coordsys_code = 101
             axis_names = ('r', 'theta', 'phi')
-        elif mesh.coord_system == 'cylindrical':
-            if coordsys_code < 200 or coordsys_code >= 300:
-                coordsys_code = 201
-            axis_names = ('r', 'phi', 'z')
         elif mesh.coord_system == 'cartesian':
             if coordsys_code >= 100:
                 coordsys_code = 1
@@ -889,6 +884,47 @@ class RadWriter:
                 f.write(f'{T:.6e}\n')
                 
         logger.info(f"Wrote {fpath}")
+
+    def write_number_density(
+        self,
+        molecule: str,
+        number_density: Quantity,
+        output_dir: str | Path = '.',
+        binary: bool = True,
+    ) -> None:
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'molecule')
+
+        mol_lower = str(molecule).lower()
+        n_dens = number_density.to('cm^-3').magnitude
+
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
+
+        if mesh.coord_system == 'spherical':
+            n_dens = np.transpose(n_dens, (2, 1, 0))
+        elif mesh.coord_system != 'cartesian':
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
+
+        ncells = int(n_dens.size)
+
+        if binary:
+            fpath = output_dir / f'numberdens_{mol_lower}.binp'
+            with open(fpath, 'wb') as f:
+                header = np.array([1, 8, ncells], dtype=np.int64)
+                header.tofile(f)
+                n_dens.flatten().astype(np.float64).tofile(f)
+        else:
+            fpath = output_dir / f'numberdens_{mol_lower}.inp'
+            with open(fpath, 'w') as f:
+                f.write('1\n')
+                f.write(f'{ncells}\n')
+                n_dens.flatten().tofile(f, sep='\n')
+                f.write('\n')
+
+        self.written_files[fpath.name] = fpath
+        logger.info(f'Wrote {fpath}')
         
     def write_gas_velocity(
         self, 

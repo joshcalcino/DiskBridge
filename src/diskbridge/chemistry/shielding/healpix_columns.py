@@ -52,7 +52,7 @@ def _get_log_chi_over_nH_pdiss() -> float:
     """Get the photodissociation threshold, importing lazily to avoid circular imports."""
     global _LOG_CHI_OVER_NH_PDISS
     if _LOG_CHI_OVER_NH_PDISS is None:
-        from diskbridge.radmc3d.model import LOG_CHI_OVER_NH_PDISS
+        from diskbridge.chemistry.constants import LOG_CHI_OVER_NH_PDISS
         _LOG_CHI_OVER_NH_PDISS = float(LOG_CHI_OVER_NH_PDISS.magnitude)
     return _LOG_CHI_OVER_NH_PDISS
 

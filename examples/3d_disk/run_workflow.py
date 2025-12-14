@@ -10,6 +10,7 @@ This script:
 """
 
 import diskbridge
+import diskbridge.chemistry as chemistry
 from diskbridge.radmc3d import RadWriter, RadModel, RadImage
 
 
@@ -41,7 +42,8 @@ rad = RadModel(model)
 rad.compute_temperature(force=True)
 
 # Compute CO abundance using Pinte+2018 switches from params
-X_co, n_co = rad.compute_abundance(
+X_co, n_co = chemistry.compute_abundance(
+    rad,
     molecule="co",
     X0=p.abundance,
     write_output=True,
