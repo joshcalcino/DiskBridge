@@ -616,6 +616,12 @@ class RadModel:
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
         countwrite = max(1, int(nphot // 100))
+        int32_max = int(np.iinfo(np.int32).max)
+        if countwrite > int32_max:
+            logger.warning(
+                "countwrite too large; clamping to int32 max (%d)" % int32_max
+            )
+            countwrite = int32_max
         
         # Set output directory
         if output_dir is None:
@@ -807,6 +813,12 @@ class RadModel:
         if nphot is None:
             nphot = self.params.nphot_mono
         countwrite = max(1, int(nphot // 100))
+        int32_max = int(np.iinfo(np.int32).max)
+        if countwrite > int32_max:
+            logger.warning(
+                "countwrite too large; clamping to int32 max (%d)" % int32_max
+            )
+            countwrite = int32_max
         if uv_min is None:
             uv_min = self.params.uv_min
         if uv_max is None:
