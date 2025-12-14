@@ -178,6 +178,50 @@ class RadData:
             return (nx, ny, nz)
         else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+
+    def _resolve_data_file(
+        self,
+        fname: Optional[str | Path],
+        basename: str,
+        missing_message: str,
+    ) -> Path:
+        if fname is None:
+            fpath = self._findDataFile(basename)
+            if fpath is None:
+                raise FileNotFoundError(missing_message)
+            return fpath
+
+        fpath = Path(fname)
+        if not fpath.exists():
+            raise FileNotFoundError(f"File not found: {fpath}")
+        return fpath
+
+    def _read_scalar_data(self, fpath: Path) -> np.ndarray:
+        if self._isBinary(fpath):
+            return self._readScalarFieldBinary(fpath)
+        return self._readScalarFieldASCII(fpath)
+
+    def _read_vector_data(self, fpath: Path) -> np.ndarray:
+        if self._isBinary(fpath):
+            return self._readVectorFieldBinary(fpath)
+        return self._readVectorFieldASCII(fpath)
+
+    def _reshape_scalar_to_mesh(self, data: np.ndarray) -> np.ndarray:
+        nx, ny, nz = self._getMeshShape()
+        return data.reshape((nx, ny, nz), order='F')
+
+    def _reshape_vector_to_mesh(self, data: np.ndarray) -> np.ndarray:
+        nx, ny, nz = self._getMeshShape()
+        return data.reshape((nx, ny, nz, 3), order='F')
+
+    def _select_dust_species(self, data: np.ndarray, ispec: int, field_name: str) -> np.ndarray:
+        if data.ndim == 2:
+            if not isinstance(ispec, (int, np.integer)):
+                ispec = int(ispec)
+            return data[ispec, :]
+        if data.ndim == 1:
+            return data
+        raise ValueError(f"Unexpected {field_name} data shape: {data.shape}")
     
     def readDustTemp(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
         """Read dust temperature from RADMC-3D output.
@@ -201,38 +245,19 @@ class RadData:
         FileNotFoundError
             If no dust temperature file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('dust_temperature')
-            if fpath is None:
-                raise FileNotFoundError("No dust_temperature file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='dust_temperature',
+            missing_message="No dust_temperature file found",
+        )
+
+        data = self._read_scalar_data(fpath)
         
         # Extract the requested species
         logger.debug(f"Dust temperature data shape: {data.shape}, dtype: {data.dtype}, ispec: {ispec}, type(ispec): {type(ispec)}")
         
-        if len(data.shape) == 2:
-            # Multiple species: (nspec, ncells)
-            if not isinstance(ispec, (int, np.integer)):
-                ispec = int(ispec)
-            temp = data[ispec, :]
-        elif len(data.shape) == 1:
-            # Single species: just use the data directly
-            temp = data
-        else:
-            # Unexpected shape
-            raise ValueError(f"Unexpected dust temperature data shape: {data.shape}")
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        temp = temp.reshape((nx, ny, nz), order='F')  # Fortran order
+        temp_1d = self._select_dust_species(data, ispec=ispec, field_name='dust temperature')
+        temp = self._reshape_scalar_to_mesh(temp_1d)
         
         self.dusttemp = Quantity(temp, 'K')
         
@@ -259,23 +284,14 @@ class RadData:
         FileNotFoundError
             If no gas temperature file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('gas_temperature')
-            if fpath is None:
-                raise FileNotFoundError("No gas_temperature file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        temp = data.reshape((nx, ny, nz), order='F')  # Fortran order
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='gas_temperature',
+            missing_message="No gas_temperature file found",
+        )
+
+        data = self._read_scalar_data(fpath)
+        temp = self._reshape_scalar_to_mesh(data)
         
         self.gastemp = Quantity(temp, 'K')
         
@@ -304,31 +320,15 @@ class RadData:
         FileNotFoundError
             If no dust density file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('dust_density')
-            if fpath is None:
-                raise FileNotFoundError("No dust_density file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
-        
-        # Extract the requested species
-        if len(data.shape) == 2:
-            # Multiple species: (nspec, ncells)
-            dens = data[ispec, :]
-        else:
-            # Single species
-            dens = data
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        dens = dens.reshape((nx, ny, nz), order='F')  # Fortran order
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='dust_density',
+            missing_message="No dust_density file found",
+        )
+
+        data = self._read_scalar_data(fpath)
+        dens_1d = self._select_dust_species(data, ispec=ispec, field_name='dust density')
+        dens = self._reshape_scalar_to_mesh(dens_1d)
         
         self.rhodust = Quantity(dens, 'g/cm**3')
         
@@ -354,23 +354,14 @@ class RadData:
         FileNotFoundError
             If no gas velocity file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('gas_velocity')
-            if fpath is None:
-                raise FileNotFoundError("No gas_velocity file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readVectorFieldBinary(fpath)
-        else:
-            data = self._readVectorFieldASCII(fpath)
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        vel = data.reshape((nx, ny, nz, 3), order='F')  # Fortran order
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='gas_velocity',
+            missing_message="No gas_velocity file found",
+        )
+
+        data = self._read_vector_data(fpath)
+        vel = self._reshape_vector_to_mesh(data)
         
         self.gasvel = Quantity(vel, 'cm/s')
         
@@ -396,23 +387,14 @@ class RadData:
         FileNotFoundError
             If no turbulent velocity file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('microturbulence')
-            if fpath is None:
-                raise FileNotFoundError("No microturbulence file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        vturb = data.reshape((nx, ny, nz), order='F')  # Fortran order
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='microturbulence',
+            missing_message="No microturbulence file found",
+        )
+
+        data = self._read_scalar_data(fpath)
+        vturb = self._reshape_scalar_to_mesh(data)
         
         self.vturb = Quantity(vturb, 'cm/s')
         
@@ -440,24 +422,15 @@ class RadData:
         FileNotFoundError
             If no number density file is found
         """
-        if fname is None:
-            basename = f'numberdens_{ispec}' if ispec else 'numberdens'
-            fpath = self._findDataFile(basename)
-            if fpath is None:
-                raise FileNotFoundError(f"No {basename} file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        ndens = data.reshape((nx, ny, nz), order='F')  # Fortran order
+        basename = f'numberdens_{ispec}' if ispec else 'numberdens'
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename=basename,
+            missing_message=f"No {basename} file found",
+        )
+
+        data = self._read_scalar_data(fpath)
+        ndens = self._reshape_scalar_to_mesh(data)
         
         self.ndens_mol = Quantity(ndens, '1/cm**3')
         
@@ -483,23 +456,14 @@ class RadData:
         FileNotFoundError
             If no mean intensity file is found
         """
-        if fname is None:
-            fpath = self._findDataFile('mean_intensity')
-            if fpath is None:
-                raise FileNotFoundError("No mean_intensity file found")
-        else:
-            fpath = Path(fname)
-            if not fpath.exists():
-                raise FileNotFoundError(f"File not found: {fpath}")
-        
-        if self._isBinary(fpath):
-            data = self._readScalarFieldBinary(fpath)
-        else:
-            data = self._readScalarFieldASCII(fpath)
-        
-        # Reshape to mesh
-        nx, ny, nz = self._getMeshShape()
-        intensity = data.reshape((nx, ny, nz), order='F')  # Fortran order
+        fpath = self._resolve_data_file(
+            fname=fname,
+            basename='mean_intensity',
+            missing_message="No mean_intensity file found",
+        )
+
+        data = self._read_scalar_data(fpath)
+        intensity = self._reshape_scalar_to_mesh(data)
         
         self.mean_intensity = Quantity(intensity, 'erg/(s*cm**2*Hz*sr)')
         

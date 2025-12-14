@@ -66,6 +66,26 @@ def create_symlinks_for_file_map(
     logger.info(f"Created {len(active_symlinks)} symlinks to input files")
 
 
+def create_radmc3d_symlinks(
+    model_dir: Path,
+    inputs_dir: Path,
+    input_files: List[str],
+    active_symlinks: List[Path],
+    outputs_dir: Path | None = None,
+    output_files: List[str] | None = None,
+) -> None:
+    file_map: Dict[Path, List[str]] = {inputs_dir: list(input_files)}
+    if outputs_dir is not None and output_files is not None:
+        file_map[outputs_dir] = list(output_files)
+
+    if inputs_dir.exists():
+        opacity_files = list(inputs_dir.glob('dustkappa_*.inp'))
+        for opac_file in opacity_files:
+            file_map[inputs_dir].append(opac_file.name)
+
+    create_symlinks_for_file_map(model_dir, file_map, active_symlinks)
+
+
 def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]:
     process = subprocess.Popen(
         cmd,

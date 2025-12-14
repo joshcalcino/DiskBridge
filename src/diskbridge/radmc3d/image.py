@@ -18,7 +18,7 @@ REPO_ROOT = PACKAGE_ROOT.parent.parent
 
 from astropy.io import fits
 from diskbridge._logging import logger
-from .utils import _extract_radmc_errors, create_symlinks_for_file_map, cleanup_symlinks, run_radmc3d_command
+from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlinks, run_radmc3d_command
 import diskbridge
 from .molecule import RadMolecule
 
@@ -139,18 +139,15 @@ class RadImage:
         
         # All output files from radmc3d_outputs
         output_files = ['dust_temperature.*', 'mean_intensity.out']
-        
-        file_map = {
-            self.inputs_dir: input_files,
-            self.outputs_dir: output_files,
-        }
 
-        if self.inputs_dir.exists():
-            opacity_files = list(self.inputs_dir.glob('dustkappa_*.inp'))
-            for opac_file in opacity_files:
-                file_map[self.inputs_dir].append(opac_file.name)
-
-        create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
+        create_radmc3d_symlinks(
+            model_dir=self.model_dir,
+            inputs_dir=self.inputs_dir,
+            input_files=input_files,
+            active_symlinks=self._active_symlinks,
+            outputs_dir=self.outputs_dir,
+            output_files=output_files,
+        )
     
     def cleanup_symlinks(self) -> None:
         """Remove all symlinks created by create_symlinks().

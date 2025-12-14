@@ -23,7 +23,7 @@ from diskbridge._units import Quantity, units
 from .data import RadData
 from .utils import (
     _extract_radmc_errors,
-    create_symlinks_for_file_map,
+    create_radmc3d_symlinks,
     cleanup_symlinks,
     run_radmc3d_command,
     _read_params_snapshot,
@@ -188,15 +188,13 @@ class RadModel:
             'radmc3d.inp', 'external_source.inp',
             'numberdens_*.inp', 'numberdens_*.binp'
         ]
-        
-        file_map = {self.inputs_dir: input_files}
 
-        if self.inputs_dir.exists():
-            opacity_files = list(self.inputs_dir.glob('dustkappa_*.inp'))
-            for opac_file in opacity_files:
-                file_map[self.inputs_dir].append(opac_file.name)
-
-        create_symlinks_for_file_map(self.model_dir, file_map, self._active_symlinks)
+        create_radmc3d_symlinks(
+            model_dir=self.model_dir,
+            inputs_dir=self.inputs_dir,
+            input_files=input_files,
+            active_symlinks=self._active_symlinks,
+        )
     
     def cleanup_symlinks(self) -> None:
         """Remove all symlinks created by create_symlinks().
@@ -704,6 +702,47 @@ class RadModel:
                 break
         
         return self.temperature
+
+    def _compute_chi_from_mean_intensity(
+        self,
+        j_lambda: Quantity,
+        freq_hz: Quantity,
+        uv_min: Quantity,
+        uv_max: Quantity,
+        mesh_shape: tuple[int, int, int],
+        u_draine: Quantity,
+        source: str,
+    ) -> tuple[Quantity, int]:
+        # Convert frequency to wavelength: lambda = c / nu
+        lam = C_LIGHT / freq_hz
+
+        # Compute chi by integrating over UV band in frequency space
+        # Following Pinte et al. 2018 and fargo2radmc3d implementation
+        uv_mask = (lam >= uv_min) & (lam <= uv_max)
+        if not np.any(uv_mask):
+            raise ValueError(
+                f"No UV wavelengths ({uv_min:~P}-{uv_max:~P}) found in {source}. "
+                f"Wavelength range: {lam.min():~P}-{lam.max():~P}"
+            )
+
+        j_uv = j_lambda[:, uv_mask]
+        nu_uv = freq_hz[uv_mask]
+        u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
+
+        # Sort by frequency for integration
+        sort_idx = np.argsort(nu_uv)
+        nu_sorted = nu_uv[sort_idx]
+        u_nu_sorted = u_nu[:, sort_idx]
+
+        # Integrate energy density over frequency
+        u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
+
+        # Compute chi (dimensionless)
+        chi_flat = (u_band / u_draine).to('dimensionless')
+
+        # Reshape to 3D grid
+        chi_3d = chi_flat.reshape(mesh_shape, order='F')
+        return chi_3d, int(np.count_nonzero(uv_mask))
     
     def compute_mcmono(
         self,
@@ -817,9 +856,6 @@ class RadModel:
                     # Read wavelengths (all on one line, space-separated, in Hz)
                     freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
 
-                    # Convert frequency to wavelength: lambda = c / nu
-                    lam = C_LIGHT / freq_hz
-
                     # Read mean intensity values
                     # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
                     j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
@@ -828,30 +864,19 @@ class RadModel:
                 nx, ny, nz = self.data._getMeshShape()
                 self.mean_intensity = j_lambda
 
-                # Compute chi by integrating over UV band in frequency space
-                uv_mask = (lam >= uv_min) & (lam <= uv_max)
-                if not np.any(uv_mask):
-                    raise ValueError(
-                        f"No UV wavelengths ({uv_min:~P}-{uv_max:~P}) in existing mean intensity file. "
-                        f"Wavelength range: {lam.min():~P}-{lam.max():~P}"
-                    )
-
-                j_uv = j_lambda[:, uv_mask]
-                nu_uv = freq_hz[uv_mask]
-                u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
-                # Sort by frequency for integration
-                sort_idx = np.argsort(nu_uv)
-                nu_sorted = nu_uv[sort_idx]
-                u_nu_sorted = u_nu[:, sort_idx]
-                # Integrate energy density over frequency
-                u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
-                # Compute chi (dimensionless)
-                chi_flat = (u_band / u_draine).to('dimensionless')
-                chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
+                chi_3d, n_uv = self._compute_chi_from_mean_intensity(
+                    j_lambda=j_lambda,
+                    freq_hz=freq_hz,
+                    uv_min=uv_min,
+                    uv_max=uv_max,
+                    mesh_shape=(nx, ny, nz),
+                    u_draine=u_draine,
+                    source="existing mean_intensity file",
+                )
                 self.chi = chi_3d
 
                 logger.info(
-                    f"Loaded chi from {np.sum(uv_mask)} UV wavelengths: "
+                    f"Loaded chi from {n_uv} UV wavelengths: "
                     f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
                 )
 
@@ -982,9 +1007,6 @@ class RadModel:
             # Read wavelengths (all on one line, space-separated, in Hz)
             freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
             
-            # Convert frequency to wavelength: lambda = c / nu
-            lam = C_LIGHT / freq_hz
-            
             # Read mean intensity values (nwav * nrcells values, one per line)
             # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
             j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
@@ -995,35 +1017,20 @@ class RadModel:
         # Store wavelengths and mean intensity
         nx, ny, nz = self.data._getMeshShape()
         self.mean_intensity = j_lambda  # Keep full spectral dimension
-        
-        # Compute chi by integrating over UV band in frequency space
-        # Following Pinte et al. 2018 and fargo2radmc3d implementation
-        uv_mask = (lam >= uv_min) & (lam <= uv_max)
-        
-        if not np.any(uv_mask):
-            raise ValueError(
-                f"No UV wavelengths ({uv_min:~P}-{uv_max:~P}) found in mean intensity file. "
-                f"Wavelength range: {lam.min():~P}-{lam.max():~P}"
-            )
-        
-        j_uv = j_lambda[:, uv_mask]  # Shape: (nrcells, n_uv_wavelengths)
 
-        nu_uv = freq_hz[uv_mask]
-        u_nu = 4.0 * np.pi * j_uv / C_LIGHT.to_base_units()
-        # Sort by frequency for integration
-        sort_idx = np.argsort(nu_uv)
-        nu_sorted = nu_uv[sort_idx]
-        u_nu_sorted = u_nu[:, sort_idx]
-        # Integrate energy density over frequency
-        u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
-        # Compute chi (dimensionless)
-        chi_flat = (u_band / u_draine).to('dimensionless')
-        # Reshape to 3D grid
-        chi_3d = chi_flat.reshape((nx, ny, nz), order='F')
+        chi_3d, n_uv = self._compute_chi_from_mean_intensity(
+            j_lambda=j_lambda,
+            freq_hz=freq_hz,
+            uv_min=uv_min,
+            uv_max=uv_max,
+            mesh_shape=(nx, ny, nz),
+            u_draine=u_draine,
+            source="mean_intensity file",
+        )
         self.chi = chi_3d
         
         logger.info(
-            f"Computed chi from {np.sum(uv_mask)} UV wavelengths ({uv_min:~P}-{uv_max:~P}): "
+            f"Computed chi from {n_uv} UV wavelengths ({uv_min:~P}-{uv_max:~P}): "
             f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
         )
 
