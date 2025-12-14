@@ -364,6 +364,58 @@ class RadModel:
         Only removes symlinks that were tracked by this instance.
         """
         cleanup_symlinks(self._active_symlinks)
+
+    def _ensure_cntdump_ge_countwrite(self, countwrite: int, nphot: int) -> None:
+        radmc_inp_path = self.inputs_dir / 'radmc3d.inp'
+        if not radmc_inp_path.exists():
+            raise FileNotFoundError(
+                f"Missing required input file: {radmc_inp_path}. "
+                "Generate RADMC-3D inputs (including radmc3d.inp) before running mctherm/mcmono."
+            )
+
+        desired_cntdump = max(int(nphot), int(countwrite))
+
+        try:
+            lines = radmc_inp_path.read_text().splitlines(True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read {radmc_inp_path}: {e}")
+
+        updated_lines: list[str] = []
+        saw_cntdump = False
+
+        for line in lines:
+            stripped = line.strip()
+            if (not stripped) or stripped.startswith('#') or ('=' not in line):
+                updated_lines.append(line)
+                continue
+
+            name, value = line.split('=', 1)
+            key = name.strip()
+
+            if key != 'cntdump':
+                updated_lines.append(line)
+                continue
+
+            saw_cntdump = True
+            try:
+                current = int(float(value.strip()))
+            except Exception:
+                current = None
+
+            if current is not None and current >= countwrite:
+                updated_lines.append(line)
+            else:
+                updated_lines.append(f'cntdump = {desired_cntdump}\n')
+
+        if not saw_cntdump:
+            if updated_lines and not updated_lines[-1].endswith('\n'):
+                updated_lines[-1] = updated_lines[-1] + '\n'
+            updated_lines.append(f'cntdump = {desired_cntdump}\n')
+
+        try:
+            radmc_inp_path.write_text(''.join(updated_lines))
+        except Exception as e:
+            raise RuntimeError(f"Failed to update {radmc_inp_path}: {e}")
     
     def read_gas_temperature(self) -> Quantity:
         """Read gas_temperature file using radmc3dData.
@@ -1076,6 +1128,8 @@ class RadModel:
         
         # Create output directory
         output_dir.mkdir(exist_ok=True)
+
+        self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         # If an external UV field is requested, ensure external_source.inp
         # is (re)generated on the current continuum wavelength grid before
@@ -1301,6 +1355,8 @@ class RadModel:
         
         # Create output directory
         output_dir.mkdir(exist_ok=True)
+
+        self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         # Create mcmono_wavelength_micron.inp with UV wavelength range
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
