@@ -526,11 +526,8 @@ class RadModel:
         self,
         log_min: float = -8.0,
         log_max: float =  0.0,
-        nbins: int = 50,
-        margins: Optional[Sequence[float]] = None,
+        nbins: int = 50
     ) -> dict:
-        if margins is None:
-            margins = (0.0, 0.5, 1.0, 2.0)
 
         if self.nH is None:
             self.compute_nH_from_model()
@@ -562,23 +559,10 @@ class RadModel:
         candidate_counts = []
         candidate_fractions = []
 
-        for margin in margins:
-            upper = log_thr + float(margin)
-            mask = (log_ratio > log_thr) & (log_ratio <= upper)
-            n_cand = int(mask.sum())
-            frac = 100.0 * n_cand / total if total > 0 else 0.0
-            candidate_counts.append(n_cand)
-            candidate_fractions.append(frac)
-            logger.info(
-                "margin_dex=%.2f: candidates=%d (%.2f%%) for %.2f < log10(chi/nH) <= %.2f"
-                % (float(margin), n_cand, frac, log_thr, upper)
-            )
-
         return {
             "bin_edges": edges,
             "hist": hist,
             "total_cells": int(total),
-            "margins": tuple(float(m) for m in margins),
             "candidate_counts": np.array(candidate_counts, dtype=int),
             "candidate_fractions": np.array(candidate_fractions, dtype=float),
         }

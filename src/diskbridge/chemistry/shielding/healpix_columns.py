@@ -88,7 +88,6 @@ def _compute_cache_key(
     chi_arr: np.ndarray,
     Xco_guess: float,
     XH2_guess: float,
-    margin_dex: float,
     log_chi_over_nH_pdiss: float,
 ) -> str:
     """Compute a unique cache key for healpix column computation.
@@ -138,7 +137,6 @@ def _compute_cache_key(
         "chi_hash": _compute_field_hash(chi_arr),
         "Xco_guess": Xco_guess,
         "XH2_guess": XH2_guess,
-        "margin_dex": margin_dex,
         "log_threshold": log_chi_over_nH_pdiss,
     }
     
@@ -241,7 +239,6 @@ def find_compatible_cache(
     chi_arr: np.ndarray,
     Xco_guess: float,
     XH2_guess: float,
-    margin_dex: float,
     log_chi_over_nH_pdiss: float,
 ) -> tuple[np.ndarray, np.ndarray, dict | None] | None:
     """Find and load a compatible cache file if one exists.
@@ -256,7 +253,7 @@ def find_compatible_cache(
     """
     cache_key = _compute_cache_key(
         mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
-        margin_dex, log_chi_over_nH_pdiss,
+        log_chi_over_nH_pdiss,
     )
     return load_healpix_cache(cache_dir, cache_key)  
 
@@ -489,7 +486,6 @@ def compute_co_shielding_healpix(
     b_kms: Optional[float] = None,
     candidate_mask: Optional[np.ndarray] = None,
     log_chi_over_nH_pdiss: Optional[float] = None,
-    margin_dex: float = 1.0,
     Xco_guess: float = 5e-5,
     XH2_guess: float = 0.5,
     progress_chunks: Optional[int] = None,
@@ -520,8 +516,6 @@ def compute_co_shielding_healpix(
         Mask of cells to process. If None, constructed from chi/nH threshold.
     log_chi_over_nH_pdiss : float, optional
         Photodissociation threshold log10(chi/nH). Defaults to Pinte+18 value.
-    margin_dex : float, optional
-        Extra dex below the threshold to include in candidate mask.
     Xco_guess : float, optional
         Default CO abundance relative to nH when nCO is not supplied.
     XH2_guess : float, optional
@@ -582,7 +576,7 @@ def compute_co_shielding_healpix(
     if cache_dir is not None:
         cache_key = _compute_cache_key(
             mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
-            margin_dex, log_chi_over_nH_pdiss,
+            log_chi_over_nH_pdiss,
         )
         cached = load_healpix_cache(cache_dir, cache_key)
         if cached is not None:
@@ -599,16 +593,14 @@ def compute_co_shielding_healpix(
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
         log_ratio = np.log10(np.maximum(ratio, 1e-99))
-        lower = log_chi_over_nH_pdiss
-        upper = log_chi_over_nH_pdiss + margin_dex
-        candidate_mask = (log_ratio > lower) & (log_ratio <= upper)
+        candidate_mask = log_ratio > log_chi_over_nH_pdiss
 
     candidate_idx = np.argwhere(candidate_mask)
     n_candidates = candidate_idx.shape[0]
 
     logger.info(
         f"compute_co_shielding_healpix: {n_candidates} candidate cells "
-        f"(margin={margin_dex:.2f} dex around log10(chi/nH)={log_chi_over_nH_pdiss:.2f})."
+        f"(log10(chi/nH) > {log_chi_over_nH_pdiss:.2f})."
     )
 
     # Prepare ray tracer (spherical or cartesian)

@@ -52,7 +52,6 @@ def _ensure_co_shielding(
     *,
     nside: int,
     b_kms: float,
-    margin_dex: float,
     Xco_guess: float,
     XH2_guess: float,
     progress_chunks: Optional[int],
@@ -78,7 +77,6 @@ def _ensure_co_shielding(
         b_kms=b_kms,
         Xco_guess=float(Xco_guess),
         XH2_guess=float(XH2_guess),
-        margin_dex=margin_dex,
         progress_chunks=progress_chunks,
     )
 
@@ -105,7 +103,6 @@ def compute_abundance(
     nside: int = 4,
     b_kms: float = 0.3,
     XH2_guess: float = 0.5,
-    margin_dex: float = 1.5,
     write_output: bool = True,
     progress_chunks: Optional[int] = None,
     smooth_log_chi_nH_dex: float = 0.0,
@@ -124,7 +121,6 @@ def compute_abundance(
     _ = nside
     _ = b_kms
     _ = XH2_guess
-    _ = margin_dex
     _ = progress_chunks
 
     if photodissociation is None:
@@ -204,7 +200,6 @@ def compute_co_photodissociation_rate_field(
             rad,
             nside=4,
             b_kms=0.3,
-            margin_dex=1.5,
             Xco_guess=float(diskbridge.params.abundance),
             XH2_guess=0.5,
             progress_chunks=None,
@@ -231,7 +226,6 @@ def compute_co_steady_state(
     skip_shielding: bool = False,
     nside: int = 4,
     b_kms: float = 0.3,
-    margin_dex: float = 1.5,
     Xco_tot: float = 1.0e-4,
     tau_form: Quantity = TAU_CO_FORM_DEFAULT,
     k0_co: Quantity = K0_CO_DEFAULT,
@@ -249,7 +243,6 @@ def compute_co_steady_state(
             rad,
             nside=nside,
             b_kms=b_kms,
-            margin_dex=margin_dex,
             Xco_guess=float(diskbridge.params.abundance),
             XH2_guess=0.5,
             progress_chunks=None,
@@ -287,7 +280,6 @@ def evolve_co_time_dependent(
     skip_shielding: bool = False,
     nside: int = 4,
     b_kms: float = 0.3,
-    margin_dex: float = 1.5,
     Xco_tot: float = 1.0e-4,
     tau_form: Quantity = TAU_CO_FORM_DEFAULT,
     k0_co: Quantity = K0_CO_DEFAULT,
@@ -307,7 +299,6 @@ def evolve_co_time_dependent(
             rad,
             nside=nside,
             b_kms=b_kms,
-            margin_dex=margin_dex,
             Xco_guess=float(diskbridge.params.abundance),
             XH2_guess=0.5,
             progress_chunks=None,
