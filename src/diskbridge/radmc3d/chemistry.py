@@ -83,7 +83,7 @@ def compute_co_steady_state(
     nside: int = 4,
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+    tau_form: Optional[Quantity] = None,
     k0_co: Quantity = K0_CO_DEFAULT,
 ) -> Tuple[Quantity, Quantity, Quantity]:
     return _chem_compute_co_steady_state(
@@ -108,7 +108,7 @@ def evolve_co_time_dependent(
     nside: int = 4,
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+    tau_form: Optional[Quantity] = None,
     k0_co: Quantity = K0_CO_DEFAULT,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,

@@ -7,6 +7,7 @@ import numpy as np
 import diskbridge
 from diskbridge._units import Quantity
 from diskbridge.chemistry.constants import EPS_DEFAULT, K0_CO_DEFAULT, TAU_CO_FORM_DEFAULT, T_FRZ_DEFAULT
+from diskbridge.chemistry.tau_form import compute_tau_form_co
 from diskbridge.chemistry.driver import (
     compute_abundance_pinte,
     compute_co_photodissociation_rate_field as _chem_compute_kdiss,
@@ -227,7 +228,7 @@ def compute_co_steady_state(
     nside: int = 4,
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+    tau_form: Optional[Quantity] = None,
     k0_co: Quantity = K0_CO_DEFAULT,
 ) -> Tuple[Quantity, Quantity, Quantity]:
     T = _ensure_temperature(rad)
@@ -252,13 +253,30 @@ def compute_co_steady_state(
     if write_output:
         write_cb = lambda mol, dens: write_number_density_to_model_dir(rad, mol, dens)
 
+    if tau_form is None:
+        model = str(diskbridge.params.co_tau_form_model).lower()
+        if model == "density_capped":
+            tau_form_use = compute_tau_form_co(
+                nH=nH,
+                n0=diskbridge.params.co_n0,
+                tau0=diskbridge.params.co_tau0,
+                tau_min=diskbridge.params.co_tau_min,
+                alpha=float(diskbridge.params.co_alpha),
+            )
+        elif model == "off":
+            tau_form_use = TAU_CO_FORM_DEFAULT
+        else:
+            raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
+    else:
+        tau_form_use = tau_form
+
     X_co, nco_gas, nco_ice, k_pd, tau_pd = _chem_co_steady(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
         Xco_tot=float(Xco_tot),
-        tau_form=tau_form,
+        tau_form=tau_form_use,
         k0_co=k0_co,
         write_number_density=write_cb,
     )
@@ -281,7 +299,7 @@ def evolve_co_time_dependent(
     nside: int = 4,
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
+    tau_form: Optional[Quantity] = None,
     k0_co: Quantity = K0_CO_DEFAULT,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
@@ -308,6 +326,23 @@ def evolve_co_time_dependent(
     if write_output:
         write_cb = lambda mol, dens: write_number_density_to_model_dir(rad, mol, dens)
 
+    if tau_form is None:
+        model = str(diskbridge.params.co_tau_form_model).lower()
+        if model == "density_capped":
+            tau_form_use = compute_tau_form_co(
+                nH=nH,
+                n0=diskbridge.params.co_n0,
+                tau0=diskbridge.params.co_tau0,
+                tau_min=diskbridge.params.co_tau_min,
+                alpha=float(diskbridge.params.co_alpha),
+            )
+        elif model == "off":
+            tau_form_use = TAU_CO_FORM_DEFAULT
+        else:
+            raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
+    else:
+        tau_form_use = tau_form
+
     X_co, nco_gas, nco_ice, k_pd, tau_pd = _chem_co_evolve(
         nH=nH,
         T=T,
@@ -316,7 +351,7 @@ def evolve_co_time_dependent(
         t_end=t_end,
         dt=dt,
         Xco_tot=float(Xco_tot),
-        tau_form=tau_form,
+        tau_form=tau_form_use,
         k0_co=k0_co,
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,

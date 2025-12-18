@@ -72,6 +72,12 @@ class Params:
     external_uv: bool
     external_uv_chi: float
     co_self_shielding: bool
+
+    co_tau_form_model: str
+    co_n0: Quantity
+    co_tau0: Quantity
+    co_tau_min: Quantity
+    co_alpha: float
     # star
     rstar: Quantity
     teff: Quantity
@@ -128,6 +134,9 @@ PARAM_UNITS = {
     'turbvel': 'm/s',
     'uv_min': 'nm',
     'uv_max': 'nm',
+    'co_n0': 'cm^-3',
+    'co_tau0': 'yr',
+    'co_tau_min': 'yr',
     'rstar': 'solar_radius',
     'teff': 'K',
     'mstar': 'solar_mass',

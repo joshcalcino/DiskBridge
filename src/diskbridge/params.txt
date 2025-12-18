@@ -57,6 +57,12 @@ external_uv      = F               # include external uv photons
 external_uv_chi  = 1.0             # uv field strength in Draine units 
 co_self_shielding = F              # enable CO self-shielding via HEALPix rays (T/F)
 
+co_tau_form_model = off            # CO formation timescale model: off|density_capped
+co_n0             = 1e4            # reference density for density-capped tau_form (cm^-3)
+co_tau0           = 1e5            # tau_form at co_n0 (yr)
+co_tau_min        = 1e3            # minimum tau_form cap in dense gas (yr)
+co_alpha          = 1.0            # density scaling exponent for tau_form
+
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii
 teff        = 6130.0              # Temperature of the star in kelvin
