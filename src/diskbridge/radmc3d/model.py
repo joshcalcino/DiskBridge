@@ -37,7 +37,7 @@ C_LIGHT = units('c')  # Speed of light
 M_H = units('m_H')  # Hydrogen mass
 SIGMA_SB = units('sigma_SB')  # Stefan-Boltzmann constant
 
-from diskbridge.chemistry.constants import eps_chi
+from diskbridge.chemistry.constants import eps_chi, LOG_CHI_OVER_NH_PDISS
 
 # Draine (1978) UV field constant
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
@@ -558,7 +558,6 @@ class RadModel:
             )
         )
 
-        from diskbridge.chemistry.constants import LOG_CHI_OVER_NH_PDISS
         log_thr = float(LOG_CHI_OVER_NH_PDISS.magnitude)
         candidate_counts = []
         candidate_fractions = []
