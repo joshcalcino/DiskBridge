@@ -247,12 +247,32 @@ def evolve_co_two_phase_time_dependent(
     if Xco_gas_init is None:
         nco_gas = nco_max.copy()
     else:
-        nco_gas = float(Xco_gas_init) * nH_cm3
+        if isinstance(Xco_gas_init, Quantity):
+            X_init = Xco_gas_init.to('dimensionless').magnitude
+        else:
+            X_init = Xco_gas_init
+        X_init = np.asarray(X_init, dtype=float)
+        if np.ndim(X_init) != 0 and np.shape(X_init) != np.shape(nH_cm3):
+            raise ValueError(
+                f"Xco_gas_init shape {np.shape(X_init)} must match nH shape {np.shape(nH_cm3)} "
+                "when providing a per-cell initial condition"
+            )
+        nco_gas = X_init * nH_cm3
 
     if Xco_ice_init is None:
         nco_ice = np.zeros_like(nco_gas)
     else:
-        nco_ice = float(Xco_ice_init) * nH_cm3
+        if isinstance(Xco_ice_init, Quantity):
+            X_init_ice = Xco_ice_init.to('dimensionless').magnitude
+        else:
+            X_init_ice = Xco_ice_init
+        X_init_ice = np.asarray(X_init_ice, dtype=float)
+        if np.ndim(X_init_ice) != 0 and np.shape(X_init_ice) != np.shape(nH_cm3):
+            raise ValueError(
+                f"Xco_ice_init shape {np.shape(X_init_ice)} must match nH shape {np.shape(nH_cm3)} "
+                "when providing a per-cell initial condition"
+            )
+        nco_ice = X_init_ice * nH_cm3
 
     if dt is None:
         inv_tau = 1.0 / tau_s
