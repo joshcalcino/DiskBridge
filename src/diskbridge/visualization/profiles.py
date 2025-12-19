@@ -345,11 +345,17 @@ def plot_phi_avg_rz_slice(
     x_axis: str = "R",
     y_axis: str = "z",
     log10: bool = True,
+    log10_dyn_range_dex: Optional[float] = 6.0,
     cmap: str = "viridis",
+    xscale: Optional[str] = None,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
 ):
     mesh = model.mesh
     r = mesh.centers("r").to("au").magnitude
     theta = mesh.centers("theta").magnitude
+    r_edges = mesh.edges("r").to("au").magnitude
+    theta_edges = mesh.edges("theta").to("radian").magnitude
 
     if isinstance(field, str):
         f = model.gas[field]
@@ -370,18 +376,27 @@ def plot_phi_avg_rz_slice(
     x_axis_norm = x_axis.strip().lower()
     y_axis_norm = y_axis.strip().lower()
 
+    vmin = None
+    vmax = None
     if log10:
         tiny = np.finfo(np.float64).tiny
         z_plot = np.log10(np.maximum(data_phi_avg, tiny))
+        vmax = float(np.nanmax(z_plot))
+        if (log10_dyn_range_dex is not None) and np.isfinite(vmax):
+            vmin = vmax - float(log10_dyn_range_dex)
     else:
         z_plot = data_phi_avg
 
     fig, ax = plt.subplots(figsize=(6, 4))
 
     if x_axis_norm == "r" and y_axis_norm in ("z/r", "z_over_r", "z_over_r_sph"):
-        x1 = r
-        y1 = np.cos(theta)
-        pc = ax.pcolormesh(x1, y1, z_plot.T, shading="auto", cmap=cmap)
+        x1 = r_edges
+        y1 = np.cos(theta_edges)
+        c = z_plot.T
+        if y1[0] > y1[-1]:
+            y1 = y1[::-1]
+            c = c[::-1, :]
+        pc = ax.pcolormesh(x1, y1, c, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_xlabel("r [au]")
         ax.set_ylabel("z/r")
     else:
@@ -400,9 +415,16 @@ def plot_phi_avg_rz_slice(
             ylabel = "z [au]"
 
         tri = mtri.Triangulation(x_pts.ravel(), y_pts.ravel())
-        pc = ax.tripcolor(tri, z_plot.ravel(), shading="flat", cmap=cmap)
+        pc = ax.tripcolor(tri, z_plot.ravel(), shading="flat", cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
+
+    if xscale is not None:
+        ax.set_xscale(xscale)
+    if xlim is not None:
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    if ylim is not None:
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
 
     fig.colorbar(pc, ax=ax)
     fig.tight_layout()

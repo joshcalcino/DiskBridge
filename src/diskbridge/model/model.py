@@ -332,27 +332,14 @@ class Model:
         self,
         rho_disk_min: Quantity,
         *,
-        fthres: float = 2.0,
+        fthres: Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]] = 2.0,
+        fthres_vr: Optional[Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]]] = None,
         rho_core_min: Optional[Quantity] = None,
         r_max_for_axis: Optional[Quantity] = None,
-        n_z_bins: Optional[int] = None,
+        n_r_bins: Optional[int] = None,
+        n_theta_bins: Optional[int] = None,
         r_max: Optional[Quantity] = None,
     ) -> SubModel:
-        """
-        Disk selection following Joos+2012 style criteria, but using mass density.
-
-        Summary:
-          1) Define disk frame axis from angular momentum of a dense-core mask.
-          2) Convert velocities into cylindrical components (R, phi, z) about that axis.
-          3) Bin cells into (R, z) rings; compute volume-weighted ring averages.
-          4) Apply Joos criteria on ring-averaged quantities + connectivity to z=0 plane.
-          5) Return a SubModel/Disk with the resulting mask.
-
-        Requirements (3D spherical mesh):
-          - gas['density']
-          - gas['vr'], gas['vphi'], gas['vtheta']
-          - either gas['pressure'] OR gas['temperature'] (to compute P_th)
-        """
         mesh = self.mesh
         if mesh.coord_system != "spherical":
             raise ValueError(
@@ -435,7 +422,6 @@ class Model:
         Ly = np.sum(w * (z * vx.magnitude - x * vz.magnitude))
         Lz = np.sum(w * (x * vy.magnitude - y * vx.magnitude))
         Lnorm = float(np.sqrt(Lx * Lx + Ly * Ly + Lz * Lz))
-
         if Lnorm == 0.0 or not np.isfinite(Lnorm):
             k_hat = np.array([0.0, 0.0, 1.0], dtype=float)
         else:
@@ -477,101 +463,174 @@ class Model:
             raise KeyError("Need either gas['pressure'] or gas['temperature'] to evaluate thermal support")
         Pth = Pth.to_base_units()
 
-        R_edges = mesh.edges("r")
-        if R_edges is None:
+        r_edges_native = mesh.edges("r")
+        if r_edges_native is None:
             raise ValueError("Mesh is missing radial edges")
-        R_edges = R_edges.to_base_units()
-        if float(R_edges[0].magnitude) != 0.0:
-            R_edges = Quantity(np.concatenate(([0.0], R_edges.magnitude)), R_edges.units)
+        r_edges_native = r_edges_native.to_base_units()
 
         if r_max is not None:
             r_max_base = r_max.to_base_units().magnitude
-            R_edges = R_edges[R_edges.magnitude <= r_max_base]
-            if len(R_edges) < 2:
+            r_edges_native = r_edges_native[r_edges_native.magnitude <= r_max_base]
+            if len(r_edges_native) < 2:
                 raise ValueError("r_max is too small; no radial bins remain")
 
-        nR = len(R_edges) - 1
-        if n_z_bins is None:
-            n_z_bins = len(theta_c)
+        nR_native = len(r_edges_native) - 1
+        if nR_native < 1:
+            raise ValueError("No radial bins available")
 
-        z_sel = np.ones_like(z_d, dtype=bool)
-        if r_max is not None:
-            z_sel &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
-
-        if np.any(core_mask):
-            z_sel &= core_mask
-
-        if np.any(z_sel):
-            zmax = float(np.max(np.abs(z_d[z_sel])))
+        if n_r_bins is None:
+            r_edges = r_edges_native
         else:
-            zmax = float(np.max(np.abs(z_d)))
-        if zmax == 0.0 or not np.isfinite(zmax):
-            raise ValueError("Invalid disk-frame z extent; cannot build z bins")
-        Z_edges = np.linspace(-zmax, zmax, n_z_bins + 1)
+            if int(n_r_bins) != n_r_bins or n_r_bins <= 0:
+                raise ValueError("n_r_bins must be a positive integer")
+            if n_r_bins > nR_native:
+                raise ValueError(
+                    f"n_r_bins={n_r_bins} exceeds native radial bin count nR={nR_native}. "
+                    "Refining radial bins is not supported."
+                )
+            if n_r_bins == nR_native:
+                r_edges = r_edges_native
+            else:
+                idx = np.array([(i * nR_native) // n_r_bins for i in range(n_r_bins + 1)], dtype=int)
+                r_edges = r_edges_native[idx]
 
-        R_bin = np.digitize(R_d, R_edges.magnitude) - 1
-        Z_bin = np.digitize(z_d, Z_edges) - 1
-        valid = (R_bin >= 0) & (R_bin < nR) & (Z_bin >= 0) & (Z_bin < n_z_bins)
+        nR = len(r_edges) - 1
+        if n_theta_bins is None:
+            n_theta_bins = len(theta_c)
 
-        ring_index = (R_bin * n_z_bins + Z_bin).astype(np.int64)
+        if callable(fthres):
+            r_mid = 0.5 * (r_edges[:-1].to("au").magnitude + r_edges[1:].to("au").magnitude)
+            fthres_eval = np.asarray(fthres(r_mid), dtype=float)
+            if fthres_eval.ndim != 1:
+                raise ValueError("fthres callable must return a 1D array of thresholds")
+            if fthres_eval.size != nR:
+                raise ValueError(
+                    f"fthres callable returned {fthres_eval.size} values, expected nR={nR}"
+                )
+            fthres_use: Union[float, np.ndarray] = fthres_eval[:, None]
+        elif np.isscalar(fthres):
+            fthres_use = float(fthres)
+        else:
+            fthres_arr = np.asarray(fthres, dtype=float)
+            if fthres_arr.ndim != 1:
+                raise ValueError("fthres must be a scalar or a 1D array of length nR")
+            if fthres_arr.size != nR:
+                raise ValueError(f"fthres array length {fthres_arr.size} does not match nR={nR}")
+            fthres_use = fthres_arr[:, None]
+
+        if fthres_vr is None:
+            fthres_vr_use: Union[float, np.ndarray] = fthres_use
+        elif callable(fthres_vr):
+            r_mid = 0.5 * (r_edges[:-1].to("au").magnitude + r_edges[1:].to("au").magnitude)
+            fthres_vr_eval = np.asarray(fthres_vr(r_mid), dtype=float)
+            if fthres_vr_eval.ndim != 1:
+                raise ValueError("fthres_vr callable must return a 1D array of thresholds")
+            if fthres_vr_eval.size != nR:
+                raise ValueError(
+                    f"fthres_vr callable returned {fthres_vr_eval.size} values, expected nR={nR}"
+                )
+            fthres_vr_use = fthres_vr_eval[:, None]
+        elif np.isscalar(fthres_vr):
+            fthres_vr_use = float(fthres_vr)
+        else:
+            fthres_vr_arr = np.asarray(fthres_vr, dtype=float)
+            if fthres_vr_arr.ndim != 1:
+                raise ValueError("fthres_vr must be a scalar or a 1D array of length nR")
+            if fthres_vr_arr.size != nR:
+                raise ValueError(
+                    f"fthres_vr array length {fthres_vr_arr.size} does not match nR={nR}"
+                )
+            fthres_vr_use = fthres_vr_arr[:, None]
+
+        theta_sel = np.ones_like(z_d, dtype=bool)
+        if r_max is not None:
+            theta_sel &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
+
+        r_d = r_grid.to_base_units().magnitude
+        ok = r_d > 0.0
+        theta_from_midplane = np.zeros_like(z_d, dtype=float)
+        if np.any(ok):
+            cos_theta = np.clip((z_d / r_d)[ok], -1.0, 1.0)
+            theta_d = np.arccos(cos_theta)
+            theta_from_midplane[ok] = theta_d - (0.5 * np.pi)
+
+        theta_extent_sel = theta_sel & ok
+        if np.any(theta_extent_sel):
+            theta_max = float(np.max(np.abs(theta_from_midplane[theta_extent_sel])))
+        else:
+            theta_max = float(np.max(np.abs(theta_from_midplane[ok])))
+        if theta_max == 0.0 or not np.isfinite(theta_max):
+            raise ValueError("Invalid disk-frame theta extent; cannot build theta bins")
+
+        theta_edges = np.linspace(-theta_max, theta_max, n_theta_bins + 1)
+
+        r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
+        t_bin = np.digitize(theta_from_midplane, theta_edges) - 1
+        valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
+
+        ring_index = (r_bin * n_theta_bins + t_bin).astype(np.int64)
         ring_index_flat = ring_index[valid].ravel()
-
         dV_w = dV_mag[valid].ravel()
         if dV_w.size == 0:
             raise ValueError("No valid cells for ring binning (check mesh/edges)")
 
-        nbins = nR * n_z_bins
+        nbins = nR * n_theta_bins
         sum_w = np.bincount(ring_index_flat, weights=dV_w, minlength=nbins)
 
         def ring_avg(q_mag_flat: np.ndarray) -> np.ndarray:
             num = np.bincount(ring_index_flat, weights=(q_mag_flat * dV_w), minlength=nbins)
             out = np.zeros(nbins, dtype=float)
-            ok = sum_w > 0.0
-            out[ok] = num[ok] / sum_w[ok]
-            return out.reshape(nR, n_z_bins)
+            ok_w = sum_w > 0.0
+            out[ok_w] = num[ok_w] / sum_w[ok_w]
+            return out.reshape(nR, n_theta_bins)
 
         vphi_avg = ring_avg(np.abs(vphi_d.to_base_units().magnitude)[valid].ravel())
         vR_avg = ring_avg(np.abs(vR_d.to_base_units().magnitude)[valid].ravel())
         vz_avg = ring_avg(np.abs(vz_d.to_base_units().magnitude)[valid].ravel())
-
         rho_avg = ring_avg(rho.magnitude[valid].ravel())
+
         rho_thr = rho_disk_min.to(rho.units).magnitude
 
         rot = (0.5 * rho * (vphi_d.to_base_units() ** 2)).to_base_units()
         rot_avg = ring_avg(rot.magnitude[valid].ravel())
         P_avg = ring_avg(Pth.magnitude[valid].ravel())
 
-        c1 = vphi_avg > (fthres * vR_avg)
-        c2 = vphi_avg > (fthres * vz_avg)
-        c3 = rot_avg > (fthres * P_avg)
+        c1 = vphi_avg > (fthres_vr_use * vR_avg)
+        c2 = vphi_avg > (fthres_use * vz_avg)
+        c3 = rot_avg > (fthres_use * P_avg)
         c5 = rho_avg > rho_thr
         ring_pass = c1 & c2 & c3 & c5
 
-        mid_z_hi = np.searchsorted(Z_edges, 0.0, side="right") - 1
-        mid_z_lo = np.searchsorted(Z_edges, 0.0, side="left") - 1
-        mid_z_hi = int(np.clip(mid_z_hi, 0, n_z_bins - 1))
-        mid_z_lo = int(np.clip(mid_z_lo, 0, n_z_bins - 1))
-
-        mid_bins = [mid_z_hi]
-        if mid_z_lo != mid_z_hi:
-            mid_bins.append(mid_z_lo)
+        theta_centers = 0.5 * (theta_edges[:-1] + theta_edges[1:])
+        sum_w_2d = sum_w.reshape(nR, n_theta_bins)
 
         connected = np.zeros_like(ring_pass, dtype=bool)
         for i in range(nR):
-            for mid_z in mid_bins:
-                if not ring_pass[i, mid_z]:
-                    continue
-                j = mid_z
-                while j < n_z_bins and ring_pass[i, j]:
-                    connected[i, j] = True
-                    j += 1
-                j = mid_z - 1
-                while j >= 0 and ring_pass[i, j]:
-                    connected[i, j] = True
-                    j -= 1
+            populated_idx = np.flatnonzero(sum_w_2d[i] > 0.0)
+            if populated_idx.size == 0:
+                continue
+
+            seed_candidates = populated_idx[ring_pass[i, populated_idx]]
+            if seed_candidates.size == 0:
+                continue
+
+            mid_t = int(seed_candidates[np.argmin(np.abs(theta_centers[seed_candidates]))])
+
+            pop_order = populated_idx[np.argsort(theta_centers[populated_idx])]
+            k0 = int(np.flatnonzero(pop_order == mid_t)[0])
+
+            k = k0
+            while k < pop_order.size and ring_pass[i, pop_order[k]]:
+                connected[i, pop_order[k]] = True
+                k += 1
+
+            k = k0 - 1
+            while k >= 0 and ring_pass[i, pop_order[k]]:
+                connected[i, pop_order[k]] = True
+                k -= 1
 
         connected_flat = connected.reshape(-1)
-        mask = np.zeros_like(R_d, dtype=bool)
+        mask = np.zeros_like(r_grid_mag, dtype=bool)
         mask_valid = connected_flat[ring_index_flat]
         mask[valid] = mask_valid
 
