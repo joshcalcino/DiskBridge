@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 import numpy as np
+import matplotlib.tri as mtri
 
 if TYPE_CHECKING:
     from diskbridge.model.model import Model
@@ -330,6 +331,80 @@ def plot_small_dust_midplane_profile(
     ax.set_xlabel("r [au]")
     ax.set_ylabel("rho_dust(<%.3g um) [g/cm^3]" % amax_um)
     ax.set_title("Midplane small-grain dust density")
+    fig.tight_layout()
+    fig.savefig(str(output), dpi=200)
+    plt.close(fig)
+    return fig
+
+
+def plot_phi_avg_rz_slice(
+    model: "Model",
+    field: Union[str, "Field"],
+    output: Union[str, "Path"] = "rz_slice.png",
+    *,
+    x_axis: str = "R",
+    y_axis: str = "z",
+    log10: bool = True,
+    cmap: str = "viridis",
+):
+    mesh = model.mesh
+    r = mesh.centers("r").to("au").magnitude
+    theta = mesh.centers("theta").magnitude
+
+    if isinstance(field, str):
+        f = model.gas[field]
+        data = f.data
+    else:
+        data = field.data
+
+    if hasattr(data, "to"):
+        data_mag = data.to_base_units().magnitude
+    elif hasattr(data, "magnitude"):
+        data_mag = data.magnitude
+    else:
+        data_mag = np.asarray(data)
+
+    data_phi_avg = np.mean(data_mag, axis=1)
+    r_grid, theta_grid = np.meshgrid(r, theta, indexing="ij")
+
+    x_axis_norm = x_axis.strip().lower()
+    y_axis_norm = y_axis.strip().lower()
+
+    if log10:
+        tiny = np.finfo(np.float64).tiny
+        z_plot = np.log10(np.maximum(data_phi_avg, tiny))
+    else:
+        z_plot = data_phi_avg
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    if x_axis_norm == "r" and y_axis_norm in ("z/r", "z_over_r", "z_over_r_sph"):
+        x1 = r
+        y1 = np.cos(theta)
+        pc = ax.pcolormesh(x1, y1, z_plot.T, shading="auto", cmap=cmap)
+        ax.set_xlabel("r [au]")
+        ax.set_ylabel("z/r")
+    else:
+        if x_axis_norm == "r":
+            x_pts = r_grid
+            xlabel = "r [au]"
+        else:
+            x_pts = r_grid * np.sin(theta_grid)
+            xlabel = "R [au]"
+
+        if y_axis_norm in ("z/r", "z_over_r", "z_over_r_sph"):
+            y_pts = np.cos(theta_grid)
+            ylabel = "z/r"
+        else:
+            y_pts = r_grid * np.cos(theta_grid)
+            ylabel = "z [au]"
+
+        tri = mtri.Triangulation(x_pts.ravel(), y_pts.ravel())
+        pc = ax.tripcolor(tri, z_plot.ravel(), shading="flat", cmap=cmap)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+    fig.colorbar(pc, ax=ax)
     fig.tight_layout()
     fig.savefig(str(output), dpi=200)
     plt.close(fig)

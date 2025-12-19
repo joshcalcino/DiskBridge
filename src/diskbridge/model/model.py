@@ -494,7 +494,17 @@ class Model:
         if n_z_bins is None:
             n_z_bins = len(theta_c)
 
-        zmax = float(np.max(np.abs(z_d)))
+        z_sel = np.ones_like(z_d, dtype=bool)
+        if r_max is not None:
+            z_sel &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
+
+        if np.any(core_mask):
+            z_sel &= core_mask
+
+        if np.any(z_sel):
+            zmax = float(np.max(np.abs(z_d[z_sel])))
+        else:
+            zmax = float(np.max(np.abs(z_d)))
         if zmax == 0.0 or not np.isfinite(zmax):
             raise ValueError("Invalid disk-frame z extent; cannot build z bins")
         Z_edges = np.linspace(-zmax, zmax, n_z_bins + 1)
@@ -537,21 +547,28 @@ class Model:
         c5 = rho_avg > rho_thr
         ring_pass = c1 & c2 & c3 & c5
 
-        mid_z = np.searchsorted(Z_edges, 0.0, side="right") - 1
-        mid_z = int(np.clip(mid_z, 0, n_z_bins - 1))
+        mid_z_hi = np.searchsorted(Z_edges, 0.0, side="right") - 1
+        mid_z_lo = np.searchsorted(Z_edges, 0.0, side="left") - 1
+        mid_z_hi = int(np.clip(mid_z_hi, 0, n_z_bins - 1))
+        mid_z_lo = int(np.clip(mid_z_lo, 0, n_z_bins - 1))
+
+        mid_bins = [mid_z_hi]
+        if mid_z_lo != mid_z_hi:
+            mid_bins.append(mid_z_lo)
 
         connected = np.zeros_like(ring_pass, dtype=bool)
         for i in range(nR):
-            if not ring_pass[i, mid_z]:
-                continue
-            j = mid_z
-            while j < n_z_bins and ring_pass[i, j]:
-                connected[i, j] = True
-                j += 1
-            j = mid_z - 1
-            while j >= 0 and ring_pass[i, j]:
-                connected[i, j] = True
-                j -= 1
+            for mid_z in mid_bins:
+                if not ring_pass[i, mid_z]:
+                    continue
+                j = mid_z
+                while j < n_z_bins and ring_pass[i, j]:
+                    connected[i, j] = True
+                    j += 1
+                j = mid_z - 1
+                while j >= 0 and ring_pass[i, j]:
+                    connected[i, j] = True
+                    j -= 1
 
         connected_flat = connected.reshape(-1)
         mask = np.zeros_like(R_d, dtype=bool)

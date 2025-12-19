@@ -940,7 +940,7 @@ class Dust(SubModel):
         # Sum over all bins (works for both proportional and settling modes)
         total_data = None
         first_field = None
-        for i in range(self.distribution.nbin):
+        for i in range(self.nbin):
             bin_density = self._compute_bin_density(i)
             if total_data is None:
                 total_data = bin_density.data.copy()

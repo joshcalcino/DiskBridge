@@ -548,7 +548,16 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     
     if gasenergy_field is not None:
         # Check if simulation is isothermal from compile options
-        is_isothermal = compile_options.get('ISOTHERMAL', False)
+        is_isothermal_opt = compile_options.get('ISOTHERMAL', None)
+        if is_isothermal_opt is None:
+            write_energy = variables.get('WRITEENERGY', None)
+            try:
+                write_energy_val = int(write_energy) if write_energy is not None else None
+            except Exception:
+                write_energy_val = None
+            is_isothermal = (write_energy_val == 0)
+        else:
+            is_isothermal = bool(is_isothermal_opt)
         temp_data = None
         
         if is_isothermal:
@@ -584,8 +593,16 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
                 code_length_m = (1.0 * au).to('m').magnitude
                 mu = float(variables["MU"])
                 cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
+            elif norm_units == "cgs":
+                # For CGS snapshots, temp_data is a velocity^2-like quantity (cm^2/s^2)
+                # Convert v^2 to Kelvin via T = (mu*m_H/k_B) * v^2
+                mu = float(variables["MU"])
+                cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/cm^2').magnitude
+            elif norm_units == "kms":
+                # For SI snapshots, temp_data is a velocity^2-like quantity (m^2/s^2)
+                mu = float(variables["MU"])
+                cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/m^2').magnitude
             else:
-                # For CGS or SI units, cutemp is different but we assume already in K
                 cutemp = 1.0
             
             temp_data_K = temp_data * cutemp

@@ -63,6 +63,7 @@ from .profiles import (
     compute_small_dust_midplane_profile,
     plot_small_dust_midplane_profile,
     plot_small_dust_midplane_map,
+    plot_phi_avg_rz_slice,
     plot_small_dust_rz_slice,
     ProfilePlotter,
 )
@@ -100,6 +101,7 @@ __all__ = [
     'compute_small_dust_midplane_profile',
     'plot_small_dust_midplane_profile',
     'plot_small_dust_midplane_map',
+    'plot_phi_avg_rz_slice',
     'plot_small_dust_rz_slice',
     'ProfilePlotter',
     # Quick functions
