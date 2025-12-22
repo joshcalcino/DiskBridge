@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge.model.field import Field
 from .data import RadData
 from .utils import (
     _extract_radmc_errors,
@@ -312,6 +313,23 @@ class RadModel:
             If no dust temperature file is found
         """
         self.temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
+
+        # RadData returns spherical fields in RADMC-3D order (r, theta, phi).
+        # DiskBridge model convention is (r, phi, theta).
+        if self.model.mesh.coord_system == 'spherical':
+            self.temperature = np.transpose(self.temperature, (0, 2, 1))
+
+        # Register temperature as a Field on the model
+        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+        self.model.gas_register(
+            'temperature',
+            Field(
+                quantity='temperature',
+                data=self.temperature,
+                axis_order=axis_order,
+            ),
+        )
+        
         return self.temperature
     
     def read_temperature(self, source: str = 'auto', ispec: int = 0) -> Quantity:
@@ -363,6 +381,7 @@ class RadModel:
             'mean_intensity_lambda.out',
             'meanint_lambda.binp',
             'meanint_lambda.out',
+            'mean_intensity.bout',
             'mean_intensity.out',
         ]
         
@@ -371,6 +390,44 @@ class RadModel:
             if not filepath.exists():
                 continue
             
+            if filepath.suffix == '.bout':
+                try:
+                    with open(filepath, 'rb') as f:
+                        hdr4 = np.fromfile(f, dtype=np.int64, count=4)
+                        if hdr4.size < 4:
+                            continue
+                        iformat = int(hdr4[0])
+                        prec = int(hdr4[1])
+                        ncells = int(hdr4[2])
+                        nw = int(hdr4[3])
+
+                        freq_hz = np.fromfile(f, dtype=np.float64, count=nw) * units('Hz')
+                        dtype = np.float64 if prec == 8 else np.float32
+                        data = np.fromfile(f, dtype=dtype, count=ncells * nw)
+
+                    j_flat = data.astype(np.float64, copy=False)
+                    j_lambda = j_flat.reshape((nw, ncells)).T * units('erg/(s*cm^2*Hz*sr)')
+
+                    nx, ny, nz = self.data._getMeshShape()
+                    if ncells != nx * ny * nz:
+                        raise ValueError(
+                            f"mean_intensity.bout ncells ({ncells}) != mesh cells ({nx*ny*nz})"
+                        )
+
+                    J = np.empty((nx, ny, nz, nw), dtype=float)
+                    for iw in range(nw):
+                        J[..., iw] = j_lambda[:, iw].magnitude.reshape((nx, ny, nz), order='F')
+
+                    lam_cm = (C_LIGHT / freq_hz).to('cm').magnitude
+
+                    logger.info(
+                        f"Read mean intensity from {filepath}: grid=({nx},{ny},{nz}), nwave={nw}"
+                    )
+                    return lam_cm, J
+                except Exception as e:
+                    logger.warning(f"Failed to read binary file {filepath}: {e}")
+                    continue
+
             if filepath.suffix == '.binp':
                 # Binary format
                 with open(filepath, 'rb') as f:
@@ -647,7 +704,7 @@ class RadModel:
                 )
         
         # Create output directory
-        output_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
@@ -655,9 +712,11 @@ class RadModel:
         # is (re)generated on the current continuum wavelength grid before
         # creating symlinks and running mctherm.
         if getattr(self.params, 'external_uv', False):
-            from .writer import RadWriter
-            writer = RadWriter(self.model, organize_files=True)
-            writer.write_external_source(self.model_dir)
+            external_source_path = self.inputs_dir / 'external_source.inp'
+            if not external_source_path.exists():
+                from .writer import RadWriter
+                writer = RadWriter(self.model, organize_files=True)
+                writer.write_external_source(self.model_dir)
         
         # Create symlinks to input files
         self.create_symlinks()
@@ -750,6 +809,11 @@ class RadModel:
 
         # Reshape to 3D grid
         chi_3d = chi_flat.reshape(mesh_shape, order='F')
+
+        # For spherical grids, RadData/RADMC-3D uses (r, theta, phi) but DiskBridge uses (r, phi, theta)
+        if self.model.mesh.coord_system == 'spherical':
+            chi_3d = np.transpose(chi_3d, (0, 2, 1))
+
         return chi_3d, int(np.count_nonzero(uv_mask))
     
     def compute_mcmono(
@@ -832,8 +896,12 @@ class RadModel:
             output_dir = Path(output_dir)
 
         # Check if already computed
-        mean_intensity_file = output_dir / 'mean_intensity.out'
-        if mean_intensity_file.exists() and not force:
+        mean_intensity_candidates = [
+            output_dir / 'mean_intensity.bout',
+            output_dir / 'mean_intensity.out',
+        ]
+        mean_intensity_file = next((p for p in mean_intensity_candidates if p.exists()), None)
+        if mean_intensity_file is not None and not force:
             use_cache = False
             params_path_current = self.model_dir / 'params.txt'
             params_path_saved = output_dir / 'params.txt'
@@ -861,19 +929,28 @@ class RadModel:
 
             if use_cache:
                 logger.info(f"Mean intensity already computed at {mean_intensity_file}")
-                # Parse the existing file with multi-wavelength format
-                with open(mean_intensity_file, 'r') as f:
-                    iformat = int(f.readline().strip())
-                    nrcells = int(f.readline().strip())
-                    nwav = int(f.readline().strip())
-
-                    # Read wavelengths (all on one line, space-separated, in Hz)
-                    freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
-
-                    # Read mean intensity values
-                    # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
-                    j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+                if mean_intensity_file.suffix == '.bout':
+                    with open(mean_intensity_file, 'rb') as f:
+                        hdr4 = np.fromfile(f, dtype=np.int64, count=4)
+                        if hdr4.size < 4:
+                            raise ValueError(f"{mean_intensity_file} has incomplete header")
+                        iformat = int(hdr4[0])
+                        prec = int(hdr4[1])
+                        nrcells = int(hdr4[2])
+                        nwav = int(hdr4[3])
+                        freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
+                        dtype = np.float64 if prec == 8 else np.float32
+                        j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
                     j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+                else:
+                    with open(mean_intensity_file, 'r') as f:
+                        iformat = int(f.readline().strip())
+                        nrcells = int(f.readline().strip())
+                        nwav = int(f.readline().strip())
+
+                        freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
+                        j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+                        j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
 
                 nx, ny, nz = self.data._getMeshShape()
                 self.mean_intensity = j_lambda
@@ -907,7 +984,7 @@ class RadModel:
                 )
         
         # Create output directory
-        output_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
@@ -926,20 +1003,34 @@ class RadModel:
         
         # If an external UV field is requested, ensure external_source.inp exists
         if getattr(self.params, 'external_uv', False):
-            from .writer import RadWriter
-            writer = RadWriter(self.model, organize_files=True)
-            writer.write_external_source(self.model_dir)
+            external_source_path = self.inputs_dir / 'external_source.inp'
+            if not external_source_path.exists():
+                from .writer import RadWriter
+                writer = RadWriter(self.model, organize_files=True)
+                writer.write_external_source(self.model_dir)
 
         # RADMC-3D mcmono also needs temperature file - create symlink if it exists in outputs subdirectory
         for suffix in ['.bdat', '.dat', '.binp']:
-            src_temp = self.outputs_dir / f'dust_temperature{suffix}'
             dst_temp = self.model_dir / f'dust_temperature{suffix}'
-            if src_temp.exists() and not dst_temp.exists():
-                import os
-                os.symlink(src_temp, dst_temp)
-                self._active_symlinks.append(dst_temp)
-                logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
-                break
+            if dst_temp.exists():
+                continue
+
+            src_candidates = [
+                self.outputs_dir / f'dust_temperature{suffix}',
+                self.outputs_dir / 'temperature' / f'dust_temperature{suffix}',
+                Path(output_dir).parent / 'temperature' / f'dust_temperature{suffix}',
+                Path(output_dir) / f'dust_temperature{suffix}',
+            ]
+            src_temp = next((p for p in src_candidates if p.exists()), None)
+            if src_temp is None:
+                continue
+
+            import os
+            os.symlink(src_temp, dst_temp)
+            self._active_symlinks.append(dst_temp)
+
+            logger.debug(f"Created symlink: {dst_temp} -> {src_temp}")
+            break
         
         try:
             # Run mcmono at UV wavelengths
@@ -1000,33 +1091,47 @@ class RadModel:
         # Organize output (move mean_intensity file and mcmono_wavelength_micron.inp to mcmono/ directory)
         self._organize_output(
             output_dir,
-            ['mean_intensity.out', 'mcmono_wavelength_micron.inp'],
+            ['mean_intensity.out', 'mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
             f'radmc3d mcmono UV_range_{uv_min:~P}-{uv_max:~P}_{n_wavelengths}wavelengths'
         )
         
         # Read mean intensity directly from the mcmono output directory
-        mean_intensity_path = output_dir / 'mean_intensity.out'
-        if not mean_intensity_path.exists():
-            raise FileNotFoundError(f"Mean intensity file not found at {mean_intensity_path}")
+        mean_intensity_path = next(
+            (
+                p
+                for p in (
+                    output_dir / 'mean_intensity.bout',
+                    output_dir / 'mean_intensity.out',
+                )
+                if p.exists()
+            ),
+            None,
+        )
+        if mean_intensity_path is None:
+            raise FileNotFoundError(f"Mean intensity file not found in {output_dir}")
         
         # Parse the mean intensity file
-        with open(mean_intensity_path, 'r') as f:
-            # Format: iformat (line 1), nrcells (line 2), nwav (line 3)
-            # Line 4: all wavelengths (space-separated)
-            # Remaining lines: mean intensity values (one per line, nwav * nrcells total)
-            iformat = int(f.readline().strip())
-            nrcells = int(f.readline().strip())
-            nwav = int(f.readline().strip())
-            
-            # Read wavelengths (all on one line, space-separated, in Hz)
-            freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
-            
-            # Read mean intensity values (nwav * nrcells values, one per line)
-            # RADMC-3D stores data as: all cells for wavelength 0, then all cells for wavelength 1, etc.
-            j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-            
-            # Reshape to (nrcells, nwav) - data is wavelength-major, so reshape and transpose
-            j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')  # Attach units
+        if mean_intensity_path.suffix == '.bout':
+            with open(mean_intensity_path, 'rb') as f:
+                hdr4 = np.fromfile(f, dtype=np.int64, count=4)
+                if hdr4.size < 4:
+                    raise ValueError(f"{mean_intensity_path} has incomplete header")
+                iformat = int(hdr4[0])
+                prec = int(hdr4[1])
+                nrcells = int(hdr4[2])
+                nwav = int(hdr4[3])
+                freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
+                dtype = np.float64 if prec == 8 else np.float32
+                j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
+            j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+        else:
+            with open(mean_intensity_path, 'r') as f:
+                iformat = int(f.readline().strip())
+                nrcells = int(f.readline().strip())
+                nwav = int(f.readline().strip())
+                freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
+                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+                j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
         
         # Store wavelengths and mean intensity
         nx, ny, nz = self.data._getMeshShape()
@@ -1042,6 +1147,16 @@ class RadModel:
             source="mean_intensity file",
         )
         self.chi = chi_3d
+
+        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+        self.model.gas_register(
+            'chi',
+            Field(
+                quantity='chi',
+                data=self.chi,
+                axis_order=axis_order,
+            ),
+        )
         
         logger.info(
             f"Computed chi from {n_uv} UV wavelengths ({uv_min:~P}-{uv_max:~P}): "
@@ -1054,6 +1169,216 @@ class RadModel:
             logger.warning(f"summarize_chi_over_nH failed after computing chi: {e}")
         
         return self.chi
+    
+    def extract_shell_spectrum(
+        self,
+        r_split_au: float,
+        shell_ncells: int = 3,
+        mcmono_dir: Optional[Path] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract volume-weighted mean spectrum from a shell at R_split.
+        
+        This extracts the mean intensity from cells in a radial shell around
+        R_split to create an effective external spectrum for the inner run.
+        
+        Parameters
+        ----------
+        r_split_au : float
+            Split radius in AU
+        shell_ncells : int
+            Number of radial cells to include in the shell (default: 3)
+        mcmono_dir : Path, optional
+            Directory containing mcmono output (default: self.outputs_dir)
+            
+        Returns
+        -------
+        wavelengths_um : ndarray
+            Wavelengths in microns
+        spectrum : ndarray
+            Volume-weighted mean intensity in erg/s/cm^2/Hz/sr
+            
+        Raises
+        ------
+        ValueError
+            If mean_intensity not available or R_split outside grid
+        """
+        if mcmono_dir is None:
+            mcmono_dir = self.outputs_dir
+        mcmono_dir = Path(mcmono_dir)
+        
+        # Read mean intensity if not already loaded
+        mean_intensity_path = mcmono_dir / 'mean_intensity.bout'
+        if not mean_intensity_path.exists():
+            mean_intensity_path = mcmono_dir / 'mean_intensity.out'
+        
+        if not mean_intensity_path.exists():
+            raise FileNotFoundError(f"No mean_intensity file in {mcmono_dir}")
+        
+        # Read mean intensity file
+        if mean_intensity_path.suffix == '.bout':
+            with open(mean_intensity_path, 'rb') as f:
+                hdr4 = np.fromfile(f, dtype=np.int64, count=4)
+                iformat = int(hdr4[0])
+                prec = int(hdr4[1])
+                nrcells = int(hdr4[2])
+                nwav = int(hdr4[3])
+                freq_hz = np.fromfile(f, dtype=np.float64, count=nwav)
+                dtype = np.float64 if prec == 8 else np.float32
+                j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64)
+            j_lambda = j_flat.reshape((nwav, nrcells)).T  # (ncells, nwav)
+        else:
+            with open(mean_intensity_path, 'r') as f:
+                iformat = int(f.readline().strip())
+                nrcells = int(f.readline().strip())
+                nwav = int(f.readline().strip())
+                freq_hz = np.array([float(x) for x in f.readline().split()])
+                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
+            j_lambda = j_flat.reshape((nwav, nrcells)).T
+        
+        # Get mesh info
+        mesh = self.model.mesh
+        r_edges_au = mesh.edges('r').to('au').magnitude
+        r_centers_au = mesh.centers('r').to('au').magnitude
+        nr = len(r_centers_au)
+        nphi = len(mesh.centers('phi'))
+        ntheta = len(mesh.centers('theta'))
+        
+        # Find radial index closest to R_split
+        r_split_idx = np.searchsorted(r_edges_au, r_split_au)
+        if r_split_idx <= 0 or r_split_idx >= nr:
+            raise ValueError(f"R_split={r_split_au} AU outside grid range")
+        
+        # Define shell indices (cells just outside R_split)
+        shell_start = r_split_idx
+        shell_end = min(r_split_idx + shell_ncells, nr)
+        
+        if shell_end <= shell_start:
+            raise ValueError(f"Shell is empty: r_split_idx={r_split_idx}, nr={nr}")
+        
+        logger.info(
+            f"Extracting shell spectrum at R_split={r_split_au:.2f} AU, "
+            f"radial cells [{shell_start}:{shell_end}]"
+        )
+        
+        # Compute cell volumes for weighting
+        from diskbridge.model.profiles import compute_cell_volumes
+        volumes = compute_cell_volumes(self.model)  # (nr, nphi, ntheta)
+        
+        # Mean intensity is stored in RADMC-3D order (r, theta, phi) flattened
+        # Reshape to (nr, ntheta, nphi)
+        j_3d = j_lambda.reshape((nr, ntheta, nphi, nwav), order='F')
+        
+        # Extract shell and compute volume-weighted average
+        shell_volumes = volumes[shell_start:shell_end, :, :]  # (n_shell, nphi, ntheta)
+        shell_j = j_3d[shell_start:shell_end, :, :, :]  # (n_shell, ntheta, nphi, nwav)
+
+        # Transpose volumes to match j_3d order (swap phi and theta)
+        shell_volumes_reordered = shell_volumes.transpose((0, 2, 1))  # (n_shell, ntheta, nphi)
+        
+        # Compute weighted average over spatial dimensions
+        total_volume = np.sum(shell_volumes_reordered)
+        spectrum = np.zeros(nwav)
+        for iw in range(nwav):
+            weighted_sum = np.sum(shell_j[:, :, :, iw] * shell_volumes_reordered)
+            spectrum[iw] = weighted_sum / total_volume
+        
+        # Convert frequency to wavelength
+        c_cgs = 2.99792458e10  # cm/s
+        wavelengths_um = (c_cgs / freq_hz) * 1e4  # cm to micron
+        
+        logger.info(
+            f"Shell spectrum: {nwav} wavelengths, "
+            f"J_mean range [{spectrum.min():.2e}, {spectrum.max():.2e}] erg/s/cm^2/Hz/sr"
+        )
+        
+        return wavelengths_um, spectrum
+    
+    def write_effective_external_source(
+        self,
+        wavelengths_um: np.ndarray,
+        spectrum: np.ndarray,
+        output_dir: Path,
+    ) -> Path:
+        """Write effective external source file from shell spectrum.
+        
+        Parameters
+        ----------
+        wavelengths_um : ndarray
+            Wavelengths in microns
+        spectrum : ndarray
+            Mean intensity in erg/s/cm^2/Hz/sr
+        output_dir : Path
+            Directory to write the file
+            
+        Returns
+        -------
+        Path
+            Path to the written file
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        filepath = output_dir / 'external_source.inp'
+
+        wav_file = output_dir / 'wavelength_micron.inp'
+        if not wav_file.is_file():
+            raise FileNotFoundError(f"wavelength grid file not found: {wav_file}")
+
+        with open(wav_file, 'r') as f:
+            n_global = int(f.readline().strip())
+            wavelengths_global = np.array([float(f.readline().strip()) for _ in range(n_global)], dtype=float)
+
+        sort_idx = np.argsort(wavelengths_um)
+        w_src = np.asarray(wavelengths_um, dtype=float)[sort_idx]
+        s_src = np.asarray(spectrum, dtype=float)[sort_idx]
+
+        intensity = np.zeros_like(wavelengths_global, dtype=float)
+        if w_src.size > 0:
+            wmin = float(np.min(w_src))
+            wmax = float(np.max(w_src))
+            m = (wavelengths_global >= wmin) & (wavelengths_global <= wmax)
+            if np.any(m):
+                intensity[m] = np.interp(
+                    np.log(wavelengths_global[m]),
+                    np.log(w_src),
+                    s_src,
+                )
+
+        with open(filepath, 'w') as f:
+            f.write('2\n')
+            f.write(f'{len(wavelengths_global)}\n')
+            for w in wavelengths_global:
+                f.write(f'{w:13.6e}\n')
+            for val in intensity:
+                f.write(f'{val:13.6e}\n')
+        
+        logger.info(f"Wrote effective external source: {filepath}")
+        return filepath
+    
+    def compute_segmented_rt(
+        self,
+        nphot_therm: Optional[int] = None,
+        nphot_mono: Optional[int] = None,
+        force: bool = False,
+    ) -> dict:
+        """Run segmented RT using the driver layer.
+
+        Segmentation is a workflow/orchestration concern, not a property of the
+        hydro model. This method remains as a convenience wrapper.
+        """
+        from diskbridge.radmc3d.segmented import SegmentedRadmcRunner
+
+        runner = SegmentedRadmcRunner(base_model=self.model, base_model_dir=self.model_dir)
+        result = runner.run_segmented_rt(
+            nphot_therm=nphot_therm,
+            nphot_mono=nphot_mono,
+            force=force,
+        )
+
+        # Keep RadModel instance in sync with merged fields
+        self.temperature = result['temperature']
+        self.chi = result['chi']
+        return result
     
     def _organize_output(
         self,

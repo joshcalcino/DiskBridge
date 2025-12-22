@@ -367,8 +367,13 @@ class Dust(SubModel):
         # Set turbulence parameters for settling mode
         if mode == 'settling':
             if alpha is None:
-                raise ValueError("alpha parameter required for settling mode (pass as argument)")
-            alpha = alpha
+                if self.parent.disk is not None:
+                    alpha_q = self.parent.disk.parameters.get("alphavisocity")
+                else:
+                    alpha_q = None
+                if alpha_q is None:
+                    raise ValueError("alpha parameter required for settling mode")
+                alpha = float(getattr(alpha_q, "magnitude", alpha_q))
             delta = delta if delta is not None else alpha  # Assume Sc ~ 1
             logger.info(f"Settling mode: alpha={alpha}, delta={delta}")
         
@@ -495,7 +500,13 @@ class Dust(SubModel):
         # Validate settling mode
         if mode == 'settling':
             if alpha is None:
-                raise ValueError("alpha parameter required for settling mode")
+                if self.parent.disk is not None:
+                    alpha_q = self.parent.disk.parameters.get("alphavisocity")
+                else:
+                    alpha_q = None
+                if alpha_q is None:
+                    raise ValueError("alpha parameter required for settling mode")
+                alpha = float(getattr(alpha_q, "magnitude", alpha_q))
             delta = delta if delta is not None else alpha
             logger.info(f"Settling mode component: alpha={alpha}, delta={delta}")
         

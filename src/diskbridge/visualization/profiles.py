@@ -25,6 +25,12 @@ from diskbridge._logging import logger
 from diskbridge.model.field import Field
 import matplotlib.pyplot as plt
 
+from diskbridge.model.profiles import (
+    compute_cell_volumes as _compute_cell_volumes,
+    compute_volume_weighted_median_radial_profile as _compute_volume_weighted_median_radial_profile,
+    find_r_split as _find_r_split,
+)
+
 
 def azimuthal_average(
     data: np.ndarray,
@@ -197,6 +203,111 @@ def compute_vertical_profile(
     return z, profile
 
 
+def compute_cell_volumes(model: "Model") -> np.ndarray:
+    """Compute cell volumes for a spherical mesh.
+    
+    Parameters
+    ----------
+    model : Model
+        DiskBridge Model instance with spherical mesh
+        
+    Returns
+    -------
+    volumes : ndarray
+        Cell volumes in cm^3, shape (nr, nphi, ntheta) matching DiskBridge order
+    """
+    return _compute_cell_volumes(model)
+
+
+def compute_volume_weighted_median_radial_profile(
+    model: "Model",
+    field_name: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute volume-weighted median radial profile of a field.
+    
+    For each radial bin, computes the weighted median over all (phi, theta) cells,
+    using cell volume as the weight.
+    
+    Parameters
+    ----------
+    model : Model
+        DiskBridge Model instance
+    field_name : str
+        Name of the field to profile (e.g., 'chi', 'temperature')
+        
+    Returns
+    -------
+    r : ndarray
+        Radial coordinates in AU
+    profile : ndarray
+        Volume-weighted median profile values
+    """
+    return _compute_volume_weighted_median_radial_profile(model, field_name)
+
+
+def find_r_split(
+    r_au: np.ndarray,
+    r_edges_au: np.ndarray,
+    chi_profile: np.ndarray,
+    T_profile: np.ndarray,
+    tol_chi: float = 0.01,
+    tol_T: float = 0.01,
+    window_fraction: float = 0.1,
+    r_clip_min_au: float = 1.0,
+) -> Tuple[float, dict]:
+    """Find the split radius where chi and T profiles reach asymptotic values.
+    
+    Scans inward from the outer boundary to find the innermost radius where
+    both chi and T are within the specified tolerance of their asymptotic
+    (outer-window median) values.
+    
+    Parameters
+    ----------
+    r_au : ndarray
+        Radial cell centers in AU
+    r_edges_au : ndarray
+        Radial cell edges in AU
+    chi_profile : ndarray
+        Volume-weighted median chi profile
+    T_profile : ndarray
+        Volume-weighted median temperature profile
+    tol_chi : float
+        Fractional tolerance for chi asymptote (default: 0.01 = 1%)
+    tol_T : float
+        Fractional tolerance for T asymptote (default: 0.01 = 1%)
+    window_fraction : float
+        Fraction of radial domain for asymptote window (default: 0.1 = 10%)
+    r_clip_min_au : float
+        Minimum allowed R_split in AU (raises error if R_split < this)
+        
+    Returns
+    -------
+    r_split_au : float
+        Split radius in AU (snapped to cell edge)
+    info : dict
+        Diagnostic info with keys:
+        - 'chi_asymptote': asymptotic chi value
+        - 'T_asymptote': asymptotic T value
+        - 'r_split_cell_idx': index of the split cell
+        - 'window_r_min': inner edge of asymptote window
+        
+    Raises
+    ------
+    ValueError
+        If R_split < r_clip_min or no valid split point found
+    """
+    return _find_r_split(
+        r_au=r_au,
+        r_edges_au=r_edges_au,
+        chi_profile=chi_profile,
+        T_profile=T_profile,
+        tol_chi=tol_chi,
+        tol_T=tol_T,
+        window_fraction=window_fraction,
+        r_clip_min_au=r_clip_min_au,
+    )
+
+
 def compute_column_density(
     model: "Model",
     field_name: str = 'density',
@@ -350,6 +461,7 @@ def plot_phi_avg_rz_slice(
     xscale: Optional[str] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
+    vline_x: Optional[float] = None,
 ):
     mesh = model.mesh
     r = mesh.centers("r").to("au").magnitude
@@ -425,6 +537,9 @@ def plot_phi_avg_rz_slice(
         ax.set_xlim(float(xlim[0]), float(xlim[1]))
     if ylim is not None:
         ax.set_ylim(float(ylim[0]), float(ylim[1]))
+
+    if vline_x is not None:
+        ax.axvline(float(vline_x), color="k", linestyle="--", linewidth=1.0)
 
     fig.colorbar(pc, ax=ax)
     fig.tight_layout()
@@ -526,6 +641,66 @@ def plot_small_dust_midplane_map(
     cb = fig.colorbar(pc, ax=ax)
     cb.set_label("log10 rho_dust(<%.3g um) [g/cm^3]" % amax_um)
     ax.set_title('Midplane small-grain dust density')
+    fig.tight_layout()
+    fig.savefig(str(output), dpi=200)
+    plt.close(fig)
+    return fig
+
+
+def plot_midplane_xy_map(
+    model: "Model",
+    field: Union[str, "Field"],
+    output: Union[str, "Path"] = "midplane_xy_map.png",
+    *,
+    log10: bool = True,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+):
+    mesh = model.mesh
+    r_edges = mesh.edges("r").to("au").magnitude
+    phi_edges = mesh.edges("phi").magnitude
+    theta = mesh.centers("theta").magnitude
+
+    theta_mid_idx = int(np.argmin(np.abs(theta - np.pi / 2.0)))
+
+    if isinstance(field, str):
+        f = model.gas[field]
+        data = f.data
+        title = field
+    else:
+        data = field.data
+        title = field.quantity
+
+    if hasattr(data, "to"):
+        data_mag = data.to_base_units().magnitude
+    elif hasattr(data, "magnitude"):
+        data_mag = data.magnitude
+    else:
+        data_mag = np.asarray(data)
+
+    slice_mid = data_mag[:, :, theta_mid_idx]
+
+    rr, pp = np.meshgrid(r_edges, phi_edges, indexing="ij")
+    x = rr * np.cos(pp)
+    y = rr * np.sin(pp)
+
+    tiny = np.finfo(np.float64).tiny
+    c_plot = np.log10(np.maximum(slice_mid, tiny)) if log10 else slice_mid
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    pc = ax.pcolormesh(x, y, c_plot, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [au]")
+    ax.set_ylabel("y [au]")
+    ax.set_title(title)
+    if xlim is not None:
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    if ylim is not None:
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
+    fig.colorbar(pc, ax=ax)
     fig.tight_layout()
     fig.savefig(str(output), dpi=200)
     plt.close(fig)

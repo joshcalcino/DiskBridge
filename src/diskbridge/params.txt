@@ -63,6 +63,13 @@ co_tau0           = 1e5            # tau_form at co_n0 (yr)
 co_tau_min        = 1e3            # minimum tau_form cap in dense gas (yr)
 co_alpha          = 1.0            # density scaling exponent for tau_form
 
+# Segmented RT (two-run outer/inner workflow)
+segmented_tol_T            = 0.01  # fractional tolerance for T asymptote (R_split criterion)
+segmented_tol_chi          = 0.01  # fractional tolerance for chi asymptote (R_split criterion)
+segmented_window_fraction  = 0.1   # fraction of radial domain for asymptote window
+segmented_shell_ncells     = 3     # number of radial cells for shell spectrum extraction
+segmented_r_clip_min       = 1.0   # minimum allowed R_split in au
+
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii
 teff        = 6130.0              # Temperature of the star in kelvin

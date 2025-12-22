@@ -3,7 +3,8 @@ from typing import Optional, Union
 
 from .mesh import Mesh
 from .field import Field
-from .model import Model, puff_up_model
+from .model import Model, puff_up_model, extend_disk_inwards
+from .clipping import ClipIndexer, compute_clip_indexer
 
 def load_model(
     path: Union[str, Path],
@@ -100,4 +101,13 @@ def load_model(
         )
 
 
-__all__ = ["Mesh", "Field", "Model", "load_model", "puff_up_model"]
+__all__ = [
+    "Mesh",
+    "Field",
+    "Model",
+    "ClipIndexer",
+    "compute_clip_indexer",
+    "load_model",
+    "puff_up_model",
+    "extend_disk_inwards",
+]

@@ -307,6 +307,7 @@ class RadWriter:
             f.write(f'scattering_mode_max = {scattering_mode_max}\n')
             f.write(f'modified_random_walk = {modified_random_walk}\n')
             f.write(f'setthreads = {setthreads}\n')
+            f.write('rto_style = 3\n')
         
         self.written_files['radmc3d.inp'] = filepath
         logger.info(f"Wrote radmc3d.inp control file: {filepath}")

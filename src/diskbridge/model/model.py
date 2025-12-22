@@ -11,7 +11,7 @@ from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from .utils import validate_field_against_mesh
-
+from .clipping import compute_clip_indexer
 
 class Model:
 
@@ -357,6 +357,8 @@ class Model:
         if r_e is None or theta_e is None or phi_e is None:
             raise ValueError("Mesh is missing one or more spherical edge axes")
 
+        n_bins_native = len(theta_c)
+
         r3 = (r_e[1:] ** 3 - r_e[:-1] ** 3) / 3.0
         theta_e_rad = theta_e.to("radian").magnitude
         dcos = np.cos(theta_e_rad[:-1]) - np.cos(theta_e_rad[1:])
@@ -496,7 +498,7 @@ class Model:
 
         nR = len(r_edges) - 1
         if n_theta_bins is None:
-            n_theta_bins = len(theta_c)
+            n_theta_bins = n_bins_native
 
         if callable(fthres):
             r_mid = 0.5 * (r_edges[:-1].to("au").magnitude + r_edges[1:].to("au").magnitude)
@@ -710,6 +712,540 @@ class Model:
         """Puff 2D polar model to 3D spherical coordinates."""
         self.disk.puff_up_disk(n=n, zmax_over_H=zmax_over_H)
         return self
+
+    def extend_spherical_grid_inwards(
+        self,
+        r_min: Quantity,
+        *,
+        spacing: Optional[str] = None,
+        density_match: Optional[str] = None,
+    ) -> "Model":
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+        if mesh.coord_system != "spherical":
+            raise ValueError(
+                "extend_spherical_grid_inwards only supports spherical coordinates, "
+                f"got {mesh.coord_system}"
+            )
+
+        r_edges_old = mesh.edges("r")
+        theta_edges = mesh.edges("theta")
+        phi_edges = mesh.edges("phi")
+        if r_edges_old is None or theta_edges is None or phi_edges is None:
+            raise ValueError("Mesh is missing one or more spherical edge axes")
+        if r_edges_old.size < 2:
+            raise ValueError("Radial edges must have at least 2 entries")
+
+        r_min_use = r_min.to(r_edges_old.units)
+        r0_old = r_edges_old[0]
+        if float(r_min_use.magnitude) >= float(r0_old.magnitude):
+            raise ValueError(
+                f"Requested r_min={r_min_use} is not smaller than existing inner edge {r0_old}"
+            )
+
+        spacing_mode = (spacing or "").strip().lower()
+
+        r_edges_old_mag = np.asarray(r_edges_old.magnitude, dtype=float)
+        if not np.all(np.isfinite(r_edges_old_mag)):
+            raise ValueError("Radial edges contain non-finite values")
+
+        dr0 = float(r_edges_old_mag[1] - r_edges_old_mag[0])
+        ratio0 = float(r_edges_old_mag[1] / r_edges_old_mag[0])
+        if not spacing_mode:
+            diffs = np.diff(r_edges_old_mag[: min(6, r_edges_old_mag.size)])
+            ratios = (
+                r_edges_old_mag[1 : min(6, r_edges_old_mag.size)]
+                / r_edges_old_mag[: min(5, r_edges_old_mag.size - 1)]
+            )
+            eps = np.finfo(float).eps
+            dr_spread = float(np.max(np.abs(diffs - diffs[0])))
+            ratio_spread = float(np.max(np.abs(ratios - ratios[0])))
+            if dr_spread <= 32.0 * eps * max(1.0, abs(diffs[0])):
+                spacing_mode = "lin"
+            elif ratio_spread <= 32.0 * eps * max(1.0, abs(ratios[0])):
+                spacing_mode = "log"
+            else:
+                raise ValueError(
+                    "Could not infer radial spacing pattern from existing edges; provide spacing='log' or spacing='lin'"
+                )
+
+        if spacing_mode.startswith("log"):
+            ratio = float(r_edges_old_mag[1] / r_edges_old_mag[0])
+            if not np.isfinite(ratio) or ratio <= 1.0:
+                raise ValueError(
+                    "Cannot extend logarithmic grid inward: failed to infer ratio from first two radial edges"
+                )
+            inner_edges_desc: list[float] = []
+            r_next = float(r_edges_old_mag[0])
+            while True:
+                if r_next <= float(r_min_use.magnitude):
+                    break
+                r_next = r_next / ratio
+                if not np.isfinite(r_next) or r_next <= 0.0:
+                    raise ValueError("Failed to extend inward: encountered non-positive radial edge")
+                inner_edges_desc.append(r_next)
+            if not inner_edges_desc:
+                return self
+            inner_edges_mag = np.array(list(reversed(inner_edges_desc)), dtype=float)
+        elif spacing_mode.startswith("lin"):
+            dr = float(r_edges_old_mag[1] - r_edges_old_mag[0])
+            if not np.isfinite(dr) or dr <= 0.0:
+                raise ValueError(
+                    "Cannot extend linear grid inward: failed to infer positive dr from first two radial edges"
+                )
+            inner_edges_desc: list[float] = []
+            r_next = float(r_edges_old_mag[0])
+            while True:
+                if r_next <= float(r_min_use.magnitude):
+                    break
+                r_next = r_next - dr
+                if not np.isfinite(r_next) or r_next <= 0.0:
+                    raise ValueError("Failed to extend inward: encountered non-positive radial edge")
+                inner_edges_desc.append(r_next)
+            if not inner_edges_desc:
+                return self
+            inner_edges_mag = np.array(list(reversed(inner_edges_desc)), dtype=float)
+        else:
+            raise ValueError(
+                f"Unsupported spacing mode '{spacing_mode}'. Use 'log' or 'lin'."
+            )
+
+        r_edges_new = (
+            np.concatenate([inner_edges_mag, r_edges_old_mag]) * r_edges_old.units
+        )
+        if r_edges_new.size <= r_edges_old.size:
+            return self
+
+        new_mesh = Mesh.spherical(
+            r=Axis(edges=r_edges_new),
+            theta=Axis(edges=theta_edges),
+            phi=Axis(edges=phi_edges),
+        )
+
+        old_nr = int(r_edges_old.size - 1)
+        new_nr = int(r_edges_new.size - 1)
+        n_add = new_nr - old_nr
+
+        r_centers_new = new_mesh.centers("r")
+        theta_centers = new_mesh.centers("theta")
+        phi_centers = new_mesh.centers("phi")
+        if r_centers_new is None or theta_centers is None or phi_centers is None:
+            raise ValueError("Failed to compute spherical centers for new mesh")
+
+        if getattr(self.gas, "_lazy", None):
+            for name in list(self.gas._lazy.keys()):
+                _ = self.gas[name]
+
+        density_units = None
+        try:
+            if "density" in self.gas:
+                density_units = self.gas["density"].data.units
+        except Exception:
+            density_units = None
+
+        def _compute_initial_density_for_inner_region() -> Optional[Quantity]:
+            if self.disk is None:
+                return None
+            sigma0 = self.disk.parameters.get("sigma0")
+            sigmaslope = self.disk.parameters.get("sigmaslope")
+            h0 = self.disk.parameters.get("aspectratio")
+            fl = self.disk.parameters.get("flaringindex")
+            r0 = self.disk.parameters.get("r0")
+            if sigma0 is None or sigmaslope is None or h0 is None or fl is None or r0 is None:
+                return None
+
+            h0_f = float(getattr(h0, "magnitude", h0))
+            fl_f = float(getattr(fl, "magnitude", fl))
+            sigmaslope_f = float(getattr(sigmaslope, "magnitude", sigmaslope))
+
+            r_inner = r_centers_new[:n_add]
+            r_mag = np.asarray(r_inner.magnitude, dtype=float)
+            theta_mag = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
+            phi_mag = np.asarray(phi_centers.to("radian").magnitude, dtype=float)
+
+            r_grid, phi_grid, theta_grid = np.meshgrid(r_mag, phi_mag, theta_mag, indexing="ij")
+            r_grid = r_grid * r_inner.units
+
+            sin_t = np.sin(theta_grid)
+            cos_t = np.cos(theta_grid)
+            R_cyl = r_grid * sin_t
+            z = r_grid * cos_t
+
+            H = (h0_f * (r_grid / r0) ** fl_f) * r_grid
+            Sigma = sigma0 * (r_grid / r0) ** (-sigmaslope_f)
+            rho_mid = Sigma / (np.sqrt(2.0 * np.pi) * H)
+
+            expo = (-(z ** 2) / (2.0 * H ** 2)).to("dimensionless").magnitude
+            rho = rho_mid * np.exp(expo)
+
+            rhofloor = self.variables.get("RHOFLOORGAS", None)
+            if rhofloor is not None:
+                try:
+                    rho_units = density_units if density_units is not None else rho.units
+                    rho_floor_q = float(rhofloor) * rho_units
+                    rho = Quantity(
+                        np.maximum(
+                            np.asarray(rho.to(rho_units).magnitude, dtype=float),
+                            float(rho_floor_q.to(rho_units).magnitude),
+                        ),
+                        rho_units,
+                    )
+                except Exception:
+                    pass
+
+            return rho
+
+        def _scale_density_to_match_snapshot(rho: Quantity, units_f) -> Quantity:
+            mode = (density_match or "").strip().lower()
+            if not mode or mode == "none":
+                return rho
+            if mode not in ("join_midplane",):
+                raise ValueError(
+                    "density_match must be one of: None, 'none', 'join_midplane'"
+                )
+            if self.disk is None:
+                raise ValueError("density_match requested but model has no disk")
+
+            sigma0 = self.disk.parameters.get("sigma0")
+            sigmaslope = self.disk.parameters.get("sigmaslope")
+            h0 = self.disk.parameters.get("aspectratio")
+            fl = self.disk.parameters.get("flaringindex")
+            r0 = self.disk.parameters.get("r0")
+            if sigma0 is None or sigmaslope is None or h0 is None or fl is None or r0 is None:
+                raise ValueError("density_match requested but disk parameters are incomplete")
+
+            h0_f = float(getattr(h0, "magnitude", h0))
+            fl_f = float(getattr(fl, "magnitude", fl))
+            sigmaslope_f = float(getattr(sigmaslope, "magnitude", sigmaslope))
+
+            if "density" not in self.gas:
+                raise ValueError("density_match requested but gas field 'density' is missing")
+
+            f_density = self.gas["density"]
+            if not {"r", "phi", "theta"}.issubset(set(f_density.axis_order)):
+                raise ValueError(
+                    "density_match currently requires density axis_order to include ('r','phi','theta')"
+                )
+
+            r_axis = f_density.axis_order.index("r")
+            phi_axis = f_density.axis_order.index("phi")
+            theta_axis = f_density.axis_order.index("theta")
+
+            old_mag = np.asarray(f_density.data.to(units_f).magnitude, dtype=float)
+            old_mag_rpt = np.moveaxis(old_mag, [r_axis, phi_axis, theta_axis], [0, 1, 2])
+            if old_mag_rpt.shape[0] <= 0:
+                raise ValueError("density_match failed: density has no radial cells")
+
+            theta_vals = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
+            theta_mid_idx = int(np.argmin(np.abs(theta_vals - 0.5 * np.pi)))
+            snap_ref = float(np.mean(old_mag_rpt[0, :, theta_mid_idx]))
+            if not np.isfinite(snap_ref) or snap_ref <= 0.0:
+                raise ValueError("density_match failed: snapshot reference density is non-positive")
+
+            r_ref = r_centers_new[n_add]
+            theta_mid = float(theta_vals[theta_mid_idx])
+            z_ref = r_ref * np.cos(theta_mid)
+            H_ref = (h0_f * (r_ref / r0) ** fl_f) * r_ref
+            Sigma_ref = sigma0 * (r_ref / r0) ** (-sigmaslope_f)
+            rho_mid_ref = Sigma_ref / (np.sqrt(2.0 * np.pi) * H_ref)
+            expo_ref = (-(z_ref**2) / (2.0 * H_ref**2)).to("dimensionless").magnitude
+            rho_ref = (rho_mid_ref * np.exp(expo_ref)).to(units_f)
+            analytic_ref = float(getattr(rho_ref, "magnitude", rho_ref))
+            if not np.isfinite(analytic_ref) or analytic_ref <= 0.0:
+                raise ValueError("density_match failed: analytic reference density is non-positive")
+
+            scale = snap_ref / analytic_ref
+            if not np.isfinite(scale) or scale <= 0.0:
+                raise ValueError("density_match failed: computed scale is non-positive")
+            rho_scaled = rho * scale
+
+            rhofloor = self.variables.get("RHOFLOORGAS", None)
+            if rhofloor is not None:
+                try:
+                    rho_floor_q = float(rhofloor) * units_f
+                    rho_scaled = Quantity(
+                        np.maximum(
+                            np.asarray(rho_scaled.to(units_f).magnitude, dtype=float),
+                            float(rho_floor_q.to(units_f).magnitude),
+                        ),
+                        units_f,
+                    )
+                except Exception:
+                    pass
+
+            return rho_scaled
+
+        def _compute_initial_vphi_for_inner_region(v_unit) -> Quantity:
+            import diskbridge
+
+            mstar = getattr(diskbridge.params, "mstar", None)
+            if mstar is None:
+                raise ValueError("diskbridge.params.mstar is required to compute initial vphi")
+
+            r_inner = r_centers_new[:n_add]
+            r_mag = np.asarray(r_inner.to_base_units().magnitude, dtype=float)
+            theta_mag = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
+            phi_mag = np.asarray(phi_centers.to("radian").magnitude, dtype=float)
+
+            r_grid, phi_grid, theta_grid = np.meshgrid(r_mag, phi_mag, theta_mag, indexing="ij")
+            r_grid = r_grid * r_inner.to_base_units().units
+
+            sin_t = np.sin(theta_grid)
+            R_cyl = r_grid * sin_t
+
+            if np.any(np.asarray(R_cyl.magnitude) <= 0.0):
+                raise ValueError("Cannot compute Keplerian vphi where cylindrical radius is non-positive")
+
+            G = units("G")
+            vphi = np.sqrt((G * mstar.to("g")) / R_cyl)
+            return vphi.to(v_unit)
+
+        rho_inner = _compute_initial_density_for_inner_region()
+        if rho_inner is not None:
+            try:
+                units_density = density_units if density_units is not None else rho_inner.units
+                rho_inner = _scale_density_to_match_snapshot(rho_inner, units_density)
+            except Exception:
+                raise
+
+        new_fields: Dict[str, Field] = {}
+        for name, f in list(self.gas.items()):
+            if "r" not in f.axis_order:
+                new_fields[name] = f
+                continue
+
+            r_axis = f.axis_order.index("r")
+            old_mag = np.asarray(f.data.magnitude)
+            units_f = f.data.units
+
+            new_shape = list(old_mag.shape)
+            new_shape[r_axis] = new_shape[r_axis] + n_add
+            new_mag = np.empty(new_shape, dtype=old_mag.dtype)
+
+            dst = [slice(None)] * old_mag.ndim
+            dst[r_axis] = slice(n_add, None)
+            new_mag[tuple(dst)] = old_mag
+
+            src0 = np.take(old_mag, indices=0, axis=r_axis)
+            pad = np.repeat(np.expand_dims(src0, axis=r_axis), repeats=n_add, axis=r_axis)
+
+            if name == "density" and rho_inner is not None:
+                pad = np.asarray(rho_inner.to(units_f).magnitude, dtype=new_mag.dtype)
+            elif name == "vphi":
+                try:
+                    vphi_inner = _compute_initial_vphi_for_inner_region(units_f)
+                    pad = np.asarray(vphi_inner.to(units_f).magnitude, dtype=new_mag.dtype)
+                except Exception:
+                    pass
+            elif name in ("vr", "vtheta"):
+                pad = np.zeros_like(pad)
+
+            dst_inner = [slice(None)] * old_mag.ndim
+            dst_inner[r_axis] = slice(0, n_add)
+            new_mag[tuple(dst_inner)] = pad
+
+            new_data = Quantity(new_mag, units_f)
+            new_fields[name] = Field(
+                data=new_data,
+                quantity=f.quantity,
+                axis_order=f.axis_order,
+                attrs=f.attrs,
+            )
+
+        self.mesh = new_mesh
+        self.coord_system = "spherical"
+        self.gas.mesh = new_mesh
+        self.gas.coord_system = "spherical"
+        if self.disk is not None:
+            self.disk.mesh = new_mesh
+            self.disk.coord_system = "spherical"
+        if getattr(self, "dust", None) is not None:
+            self.dust.mesh = new_mesh
+            self.dust.coord_system = "spherical"
+            try:
+                self.dust._dust_fields.clear()
+            except Exception:
+                pass
+
+        self.gas.clear()
+        for name, field in new_fields.items():
+            self.gas_register(name, field)
+
+        if self.disk is not None and self.disk.mask is not None:
+            mask_field = self.disk.mask
+            if "r" in mask_field.axis_order:
+                r_axis = mask_field.axis_order.index("r")
+                mask_mag = np.asarray(mask_field.data.magnitude, dtype=bool)
+                new_shape = list(mask_mag.shape)
+                new_shape[r_axis] = new_shape[r_axis] + n_add
+                new_mask = np.zeros(new_shape, dtype=bool)
+
+                dst = [slice(None)] * mask_mag.ndim
+                dst[r_axis] = slice(n_add, None)
+                new_mask[tuple(dst)] = mask_mag
+
+                src0 = np.take(mask_mag, indices=0, axis=r_axis)
+                pad = np.repeat(np.expand_dims(src0, axis=r_axis), repeats=n_add, axis=r_axis)
+
+                dst_inner = [slice(None)] * mask_mag.ndim
+                dst_inner[r_axis] = slice(0, n_add)
+                new_mask[tuple(dst_inner)] = pad
+
+                self.disk.mask = Field(
+                    data=Quantity(new_mask, "dimensionless"),
+                    quantity=mask_field.quantity,
+                    axis_order=mask_field.axis_order,
+                    attrs=mask_field.attrs,
+                )
+
+        return self
+
+    def clip_mesh(
+        self,
+        *,
+        r_min: Optional[Quantity] = None,
+        r_max: Optional[Quantity] = None,
+        theta_min: Optional[Quantity] = None,
+        theta_max: Optional[Quantity] = None,
+        phi_min: Optional[Quantity] = None,
+        phi_max: Optional[Quantity] = None,
+        x_min: Optional[Quantity] = None,
+        x_max: Optional[Quantity] = None,
+        y_min: Optional[Quantity] = None,
+        y_max: Optional[Quantity] = None,
+        z_min: Optional[Quantity] = None,
+        z_max: Optional[Quantity] = None,
+    ) -> "Model":
+        mesh0 = self.mesh
+        if mesh0 is None:
+            raise ValueError("Model has no mesh")
+
+        bounds: Dict[str, tuple[Optional[Quantity], Optional[Quantity]]] = {
+            "r": (r_min, r_max),
+            "theta": (theta_min, theta_max),
+            "phi": (phi_min, phi_max),
+            "x": (x_min, x_max),
+            "y": (y_min, y_max),
+            "z": (z_min, z_max),
+        }
+        bounds = {
+            k: (vmin, vmax)
+            for k, (vmin, vmax) in bounds.items()
+            if vmin is not None or vmax is not None
+        }
+
+        for axis_name in bounds:
+            if axis_name not in mesh0.axes:
+                raise ValueError(
+                    f"Cannot clip axis '{axis_name}' for coord_system '{mesh0.coord_system}'"
+                )
+
+        indexer, new_axes = compute_clip_indexer(mesh0, bounds)
+        axis_slices = indexer.axis_slices
+
+        mesh1 = Mesh(mesh0.coord_system, new_axes)
+
+        def _slice_field(field0: Field) -> Field:
+            slicer = []
+            for ax in field0.axis_order:
+                slicer.append(axis_slices.get(ax, slice(None)))
+            mag0 = np.asarray(field0.data.magnitude)
+            mag1 = mag0[tuple(slicer)]
+            data1 = Quantity(mag1, field0.data.units)
+            return Field(
+                data=data1,
+                quantity=field0.quantity,
+                axis_order=field0.axis_order,
+                attrs=field0.attrs,
+            )
+
+        new = Model()
+        new.coord_system = mesh1.coord_system
+        new.variables = dict(self.variables)
+        new.compile_options = dict(self.compile_options)
+        new.macros = dict(self.macros)
+        new.mesh = mesh1
+        new.file_units = self.file_units
+        new.directory = self.directory
+        new.n_file = self.n_file
+        new.filename = self.filename
+
+        for attr in ("length_scale", "mass_scale", "time_scale", "velocity_scale"):
+            if hasattr(self, attr):
+                setattr(new, attr, getattr(self, attr))
+
+        new.gas = SubModel(new)
+        if getattr(self.gas, "_lazy", None):
+            for name in list(self.gas._lazy.keys()):
+                _ = self.gas[name]
+        for name, field0 in list(self.gas.items()):
+            new.gas_register(name, _slice_field(field0))
+
+        if getattr(self, "disk", None) is not None:
+            new.disk = Disk(new, dict(self.disk.parameters))
+            new.disk.is_disk_region = bool(getattr(self.disk, "is_disk_region", False))
+            if self.disk.mask is not None:
+                new.disk.mask = _slice_field(self.disk.mask)
+
+        if getattr(self, "dust", None) is not None:
+            from .dust import Dust, DustComponent, DustBin
+
+            old_dust = self.dust
+            new.dust = Dust(new)
+            new_dust = new.dust
+
+            new_dust.mask = _slice_field(old_dust.mask) if old_dust.mask is not None else None
+            new_dust.is_disk_region = bool(getattr(old_dust, "is_disk_region", False))
+
+            new_dust.distribution = old_dust.distribution
+            new_dust.dust_to_gas_ratio = old_dust.dust_to_gas_ratio
+            new_dust.mode = old_dust.mode
+            new_dust.alpha = old_dust.alpha
+            new_dust.delta = old_dust.delta
+            new_dust.mean_molecular_weight = old_dust.mean_molecular_weight
+
+            new_dust._has_region_components = bool(getattr(old_dust, "_has_region_components", False))
+            new_dust._components = []
+            for comp0 in getattr(old_dust, "_components", []):
+                comp_mask = _slice_field(comp0.mask) if comp0.mask is not None else None
+                new_dust._components.append(
+                    DustComponent(
+                        distribution=comp0.distribution,
+                        dust_to_gas_ratio=comp0.dust_to_gas_ratio,
+                        mode=comp0.mode,
+                        mask=comp_mask,
+                        alpha=comp0.alpha,
+                        delta=comp0.delta,
+                        mean_molecular_weight=comp0.mean_molecular_weight,
+                        species_base=comp0.species_base,
+                        component_index=comp0.component_index,
+                    )
+                )
+
+            new_dust._global_bins = {}
+            new_dust._bins = {}
+            for comp_idx, comp in enumerate(new_dust._components):
+                nbin = int(comp.distribution.nbin)
+                for local_idx in range(nbin):
+                    global_bin_idx = len(new_dust._global_bins)
+                    bin_name = f"bin_{global_bin_idx}"
+                    new_dust._global_bins[bin_name] = (comp_idx, local_idx)
+                    new_dust._bins[bin_name] = DustBin(
+                        parent_dust=new_dust,
+                        bin_index=global_bin_idx,
+                        size=comp.distribution.bin_centers[local_idx],
+                        size_min=comp.distribution.bin_edges[local_idx],
+                        size_max=comp.distribution.bin_edges[local_idx + 1],
+                        mass_fraction=comp.distribution.mass_fractions[local_idx],
+                        density_material=comp.distribution.grain_density,
+                    )
+
+            new_dust._dust_fields = {}
+            for name, field0 in getattr(old_dust, "_dust_fields", {}).items():
+                new_dust._dust_fields[name] = _slice_field(field0)
+
+        return new
         
 
 class SubModel:
@@ -1008,3 +1544,36 @@ def puff_up_model(
 
     new.disk.puff_up_disk(n, zmax_over_H=zmax_over_H)
     return new
+
+
+def extend_disk_inwards(
+    model: "Model",
+    *,
+    r_min: Optional[Quantity] = None,
+    r_min_factor: Optional[float] = None,
+    spacing: Optional[str] = None,
+    density_match: Optional[str] = None,
+) -> int:
+    if (r_min is None) == (r_min_factor is None):
+        raise ValueError("Provide exactly one of r_min or r_min_factor")
+
+    mesh0 = model.mesh
+    if mesh0 is None:
+        raise ValueError("Model mesh is not set")
+    r_edges0 = mesh0.edges("r")
+    if r_edges0 is None:
+        raise ValueError("Model radial edges are not set")
+
+    if r_min is None:
+        r_min = float(r_min_factor) * r_edges0[0]
+
+    model.extend_spherical_grid_inwards(r_min, spacing=spacing, density_match=density_match)
+
+    mesh1 = model.mesh
+    if mesh1 is None:
+        raise ValueError("Model mesh is not set after extension")
+    r_edges1 = mesh1.edges("r")
+    if r_edges1 is None:
+        raise ValueError("Model radial edges are not set after extension")
+
+    return int(r_edges1.size - r_edges0.size)

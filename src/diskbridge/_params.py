@@ -78,6 +78,14 @@ class Params:
     co_tau0: Quantity
     co_tau_min: Quantity
     co_alpha: float
+
+    # segmented RT
+    segmented_tol_T: float
+    segmented_tol_chi: float
+    segmented_window_fraction: float
+    segmented_shell_ncells: int
+    segmented_r_clip_min: Quantity
+
     # star
     rstar: Quantity
     teff: Quantity
@@ -140,6 +148,7 @@ PARAM_UNITS = {
     'rstar': 'solar_radius',
     'teff': 'K',
     'mstar': 'solar_mass',
+    'segmented_r_clip_min': 'au',
 }
 
 # ---------------------------------------------------------------------------
