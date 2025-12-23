@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 
 from diskbridge.model.profiles import (
     compute_cell_volumes as _compute_cell_volumes,
-    compute_volume_weighted_median_radial_profile as _compute_volume_weighted_median_radial_profile,
+    compute_volume_weighted_mean_radial_profile as _compute_volume_weighted_mean_radial_profile,
     find_r_split as _find_r_split,
 )
 
@@ -219,13 +219,13 @@ def compute_cell_volumes(model: "Model") -> np.ndarray:
     return _compute_cell_volumes(model)
 
 
-def compute_volume_weighted_median_radial_profile(
+def compute_volume_weighted_mean_radial_profile(
     model: "Model",
     field_name: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute volume-weighted median radial profile of a field.
+    """Compute volume-weighted mean radial profile of a field.
     
-    For each radial bin, computes the weighted median over all (phi, theta) cells,
+    For each radial bin, computes the weighted mean over all (phi, theta) cells,
     using cell volume as the weight.
     
     Parameters
@@ -240,9 +240,9 @@ def compute_volume_weighted_median_radial_profile(
     r : ndarray
         Radial coordinates in AU
     profile : ndarray
-        Volume-weighted median profile values
+        Volume-weighted mean profile values
     """
-    return _compute_volume_weighted_median_radial_profile(model, field_name)
+    return _compute_volume_weighted_mean_radial_profile(model, field_name)
 
 
 def find_r_split(
@@ -259,7 +259,7 @@ def find_r_split(
     
     Scans inward from the outer boundary to find the innermost radius where
     both chi and T are within the specified tolerance of their asymptotic
-    (outer-window median) values.
+    (outer-window mean) values.
     
     Parameters
     ----------
@@ -268,9 +268,9 @@ def find_r_split(
     r_edges_au : ndarray
         Radial cell edges in AU
     chi_profile : ndarray
-        Volume-weighted median chi profile
+        Volume-weighted mean chi profile
     T_profile : ndarray
-        Volume-weighted median temperature profile
+        Volume-weighted mean temperature profile
     tol_chi : float
         Fractional tolerance for chi asymptote (default: 0.01 = 1%)
     tol_T : float

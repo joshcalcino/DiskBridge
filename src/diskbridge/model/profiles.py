@@ -25,7 +25,7 @@ def compute_cell_volumes(model: "Model") -> np.ndarray:
     return volumes
 
 
-def compute_volume_weighted_median_radial_profile(
+def compute_volume_weighted_mean_radial_profile(
     model: "Model",
     field_name: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -42,7 +42,7 @@ def compute_volume_weighted_median_radial_profile(
 
     if getattr(mesh, 'coord_system', None) != 'spherical':
         raise ValueError(
-            "compute_volume_weighted_median_radial_profile supports spherical meshes only"
+            "compute_volume_weighted_mean_radial_profile supports spherical meshes only"
         )
 
     axis_order = getattr(field, 'axis_order', None)
@@ -74,17 +74,10 @@ def compute_volume_weighted_median_radial_profile(
     for i_r in range(nr):
         vals = data[i_r, :, :].ravel()
         wts = volumes_use[i_r, :, :].ravel()
-
-        sort_idx = np.argsort(vals)
-        vals_sorted = vals[sort_idx]
-        wts_sorted = wts[sort_idx]
-
-        cumwt = np.cumsum(wts_sorted)
-        total_wt = cumwt[-1]
-
-        median_idx = np.searchsorted(cumwt, 0.5 * total_wt)
-        median_idx = min(median_idx, len(vals_sorted) - 1)
-        profile[i_r] = vals_sorted[median_idx]
+        wt_sum = float(np.sum(wts))
+        if wt_sum <= 0.0:
+            raise ValueError(f"Non-positive volume sum at radial index {i_r}")
+        profile[i_r] = float(np.sum(vals * wts) / wt_sum)
 
     return r, profile
 
@@ -111,8 +104,8 @@ def find_r_split(
             f"Asymptote window is empty (window_r_min={window_r_min:.2f} AU)"
         )
 
-    chi_asymptote = np.median(chi_profile[window_mask])
-    T_asymptote = np.median(T_profile[window_mask])
+    chi_asymptote = float(np.mean(chi_profile[window_mask]))
+    T_asymptote = float(np.mean(T_profile[window_mask]))
 
     if chi_asymptote <= 0:
         raise ValueError(f"Invalid chi_asymptote={chi_asymptote}")

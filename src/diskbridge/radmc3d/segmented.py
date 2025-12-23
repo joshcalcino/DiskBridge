@@ -13,7 +13,7 @@ from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
 
 from diskbridge.model.profiles import (
-    compute_volume_weighted_median_radial_profile,
+    compute_volume_weighted_mean_radial_profile,
     find_r_split,
 )
 
@@ -66,6 +66,13 @@ class SegmentedRadmcRunner:
         self,
         nphot_therm: Optional[int] = None,
         nphot_mono: Optional[int] = None,
+        mcmono_n_wavelengths: Optional[int] = None,
+        mcmono_uv_n_wavelengths: Optional[int] = None,
+        mcmono_wavelength_source: str = 'external',
+        mcmono_wavelength_spacing: str = 'log',
+        mcmono_wavelengths_um: Optional[np.ndarray] = None,
+        effective_external_interpolation: str = 'loglog',
+        max_splits: Optional[int] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
         from diskbridge.radmc3d.model import RadModel
@@ -79,93 +86,196 @@ class SegmentedRadmcRunner:
         shell_ncells = params.segmented_shell_ncells
         r_clip_min_au = params.segmented_r_clip_min.to('au').magnitude
 
-        # ===== Phase 1: Outer run (full domain) =====
-        outer_dir = self.base_model_dir / 'outer_run'
-        outer_dir.mkdir(parents=True, exist_ok=True)
+        if max_splits is None:
+            max_splits = int(params.segmented_max_splits)
+        max_splits = int(max_splits)
+        if max_splits < 0:
+            raise ValueError("max_splits must be >= 0")
 
-        outer_writer_dir = outer_dir  # writer will create radmc3d_inputs within
-        outer_rad = RadModel(self.base_model, model_dir=outer_writer_dir)
-        outer_rad.writer.write_all_input_files(outer_writer_dir)
-        outer_rad.writer.compute_and_write_dust_opacities(outer_writer_dir)
-
-        outer_temp_dir = outer_rad.outputs_dir / 'temperature'
-        outer_mcmono_dir = outer_rad.outputs_dir / 'mcmono'
-
-        outer_rad.compute_temperature(nphot=nphot_therm, output_dir=outer_temp_dir, force=force)
-        outer_rad.compute_mcmono(nphot=nphot_mono, output_dir=outer_mcmono_dir, force=force)
-
-        # ===== Phase 2: Determine R_split =====
-        r_au, chi_profile = compute_volume_weighted_median_radial_profile(self.base_model, 'chi')
-        _, T_profile = compute_volume_weighted_median_radial_profile(self.base_model, 'temperature')
-        r_edges_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
-
-        r_split_au, r_split_info = find_r_split(
-            r_au=r_au,
-            r_edges_au=r_edges_au,
-            chi_profile=chi_profile,
-            T_profile=T_profile,
-            tol_chi=tol_chi,
-            tol_T=tol_T,
-            window_fraction=window_fraction,
-            r_clip_min_au=float(r_clip_min_au),
-        )
-
-        # ===== Phase 3: Shell spectrum extraction =====
-        wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
-            r_split_au=r_split_au,
-            shell_ncells=shell_ncells,
-            mcmono_dir=outer_mcmono_dir,
-        )
-
-        # ===== Phase 4: Inner run =====
-        inner_bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {
-            'r': (None, r_split_au * units('au')),
-        }
-        inner_segment = SegmentDefinition(
-            name='inner',
-            bounds=inner_bounds,
-            work_dir=self.base_model_dir / 'inner_run',
-        )
-
-        inner_model, inner_indexer = self._build_segment_model_and_indexer(inner_segment)
-
-        inner_segment.work_dir.mkdir(parents=True, exist_ok=True)
-        inner_rad = RadModel(inner_model, model_dir=inner_segment.work_dir)
-        inner_rad.writer.write_all_input_files(inner_segment.work_dir)
-        inner_rad.writer.compute_and_write_dust_opacities(inner_segment.work_dir)
-
-        # Override external source with effective spectrum
-        inner_rad.write_effective_external_source(
-            wavelengths_um=wavelengths_um,
-            spectrum=shell_spectrum,
-            output_dir=inner_rad.inputs_dir,
-        )
-
-        inner_temp_dir = inner_rad.outputs_dir / 'temperature'
-        inner_mcmono_dir = inner_rad.outputs_dir / 'mcmono'
-        inner_rad.compute_temperature(nphot=nphot_therm, output_dir=inner_temp_dir, force=force)
-        inner_rad.compute_mcmono(nphot=nphot_mono, output_dir=inner_mcmono_dir, force=force)
-
-        # ===== Phase 5: Merge =====
         mesh = self.base_model.mesh
         if mesh is None:
             raise ValueError("Base model has no mesh")
         axis_order = ('r', 'phi', 'theta') if mesh.coord_system == 'spherical' else mesh.axis_names()
 
-        merged_T = self._merge_field(
-            merged=outer_rad.temperature,
-            child=inner_rad.temperature,
-            indexer=inner_indexer,
-            axis_order=axis_order,
-        )
-        merged_chi = self._merge_field(
-            merged=outer_rad.chi,
-            child=inner_rad.chi,
-            indexer=inner_indexer,
-            axis_order=axis_order,
-        )
+        segments: list[dict[str, Any]] = []
+        split_radii_au: list[float] = []
+        r_edges_base_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
+        current_outer_rmax_au = float(np.max(r_edges_base_au))
+        outer_rad: Optional[RadModel] = None
+        merged_T: Optional[Quantity] = None
+        merged_chi: Optional[Quantity] = None
 
-        # Register fields back on base model
+        mcmono_wav_um_use: Optional[np.ndarray] = None
+
+        for level in range(max_splits + 1):
+            if level == 0:
+                seg_bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
+                seg_work_dir = self.base_model_dir / 'segments' / f'segment_{level:02d}_full'
+            else:
+                seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
+                seg_work_dir = self.base_model_dir / 'segments' / f'segment_{level:02d}_rmax_{current_outer_rmax_au:.6g}au'
+
+            segment = SegmentDefinition(
+                name=f'segment_{level:02d}',
+                bounds=seg_bounds,
+                work_dir=seg_work_dir,
+            )
+
+            if level == 0:
+                seg_model = self.base_model
+                seg_indexer = None
+            else:
+                seg_model, seg_indexer = self._build_segment_model_and_indexer(segment)
+
+            segment.work_dir.mkdir(parents=True, exist_ok=True)
+            rad = RadModel(seg_model, model_dir=segment.work_dir)
+            rad.writer.write_all_input_files(segment.work_dir)
+            rad.writer.compute_and_write_dust_opacities(segment.work_dir)
+
+            temp_dir = rad.outputs_dir / 'temperature'
+            mcmono_dir = rad.outputs_dir / 'mcmono'
+
+            if mcmono_wav_um_use is None:
+                if mcmono_wavelengths_um is not None:
+                    mcmono_wav_um_use = mcmono_wavelengths_um
+                else:
+                    if mcmono_wavelength_source == 'uv':
+                        lam_min = params.uv_min.to('micron').magnitude
+                        lam_max = params.uv_max.to('micron').magnitude
+                        n_use = params.uv_n_wavelengths if mcmono_n_wavelengths is None else int(mcmono_n_wavelengths)
+                        if n_use < 2:
+                            raise ValueError("mcmono_n_wavelengths must be >= 2")
+                        if mcmono_wavelength_spacing == 'linear':
+                            mcmono_wav_um_use = np.linspace(lam_min, lam_max, n_use)
+                        elif mcmono_wavelength_spacing == 'log':
+                            mcmono_wav_um_use = np.exp(np.linspace(np.log(lam_min), np.log(lam_max), n_use))
+                        else:
+                            raise ValueError(
+                                "mcmono_wavelength_spacing must be one of: 'linear', 'log'"
+                            )
+                    elif mcmono_wavelength_source == 'external':
+                        wav_file = rad.inputs_dir / 'wavelength_micron.inp'
+                        if not wav_file.is_file():
+                            raise FileNotFoundError(f"wavelength grid file not found: {wav_file}")
+                        with open(wav_file, 'r') as f:
+                            n_global = int(f.readline().strip())
+                            wav_global = np.array([float(f.readline().strip()) for _ in range(n_global)], dtype=float)
+                        if mcmono_n_wavelengths is None:
+                            mcmono_wav_um_use = wav_global
+                        else:
+                            lam_min = float(np.min(wav_global))
+                            lam_max = float(np.max(wav_global))
+                            n_use = int(mcmono_n_wavelengths)
+                            if n_use < 2:
+                                raise ValueError("mcmono_n_wavelengths must be >= 2")
+                            if mcmono_wavelength_spacing == 'linear':
+                                mcmono_wav_um_use = np.linspace(lam_min, lam_max, n_use)
+                            elif mcmono_wavelength_spacing == 'log':
+                                mcmono_wav_um_use = np.exp(np.linspace(np.log(lam_min), np.log(lam_max), n_use))
+                            else:
+                                raise ValueError(
+                                    "mcmono_wavelength_spacing must be one of: 'linear', 'log'"
+                                )
+                    else:
+                        raise ValueError(
+                            "mcmono_wavelength_source must be one of: 'uv', 'external'"
+                        )
+
+                n_uv = params.uv_n_wavelengths if mcmono_uv_n_wavelengths is None else int(mcmono_uv_n_wavelengths)
+                if n_uv == 1:
+                    raise ValueError("mcmono_uv_n_wavelengths must be >= 2 (or 0 to disable UV enforcement)")
+                if n_uv > 0:
+                    uv_min_um = float(params.uv_min.to('micron').magnitude)
+                    uv_max_um = float(params.uv_max.to('micron').magnitude)
+                    uv_grid = np.linspace(uv_min_um, uv_max_um, n_uv)
+                    mcmono_wav_um_use = np.unique(
+                        np.concatenate([np.asarray(mcmono_wav_um_use, dtype=float), uv_grid])
+                    )
+
+            if level > 0 and outer_rad is not None:
+                wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
+                    r_split_au=current_outer_rmax_au,
+                    shell_ncells=shell_ncells,
+                    mcmono_dir=outer_rad.outputs_dir / 'mcmono',
+                )
+                rad.write_effective_external_source(
+                    wavelengths_um=wavelengths_um,
+                    spectrum=shell_spectrum,
+                    output_dir=rad.inputs_dir,
+                    interpolation=effective_external_interpolation,
+                    require_coverage=True,
+                )
+
+            rad.compute_temperature(nphot=nphot_therm, output_dir=temp_dir, force=force)
+            rad.compute_mcmono(
+                nphot=nphot_mono,
+                output_dir=mcmono_dir,
+                force=force,
+                wavelengths_um=mcmono_wav_um_use,
+            )
+
+            if merged_T is None or merged_chi is None:
+                merged_T = rad.temperature
+                merged_chi = rad.chi
+            else:
+                if seg_indexer is None:
+                    raise ValueError("Internal error: missing indexer for inner segment")
+                merged_T = self._merge_field(
+                    merged=merged_T,
+                    child=rad.temperature,
+                    indexer=seg_indexer,
+                    axis_order=axis_order,
+                )
+                merged_chi = self._merge_field(
+                    merged=merged_chi,
+                    child=rad.chi,
+                    indexer=seg_indexer,
+                    axis_order=axis_order,
+                )
+
+            segments.append(
+                {
+                    'level': int(level),
+                    'work_dir': str(segment.work_dir),
+                    'r_max_au': float(current_outer_rmax_au),
+                }
+            )
+
+            if level >= max_splits:
+                outer_rad = rad
+                break
+
+            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(seg_model, 'chi')
+            _, T_profile = compute_volume_weighted_mean_radial_profile(seg_model, 'temperature')
+            r_edges_au = seg_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
+
+            try:
+                r_split_au, r_split_info = find_r_split(
+                    r_au=r_au,
+                    r_edges_au=r_edges_au,
+                    chi_profile=chi_profile,
+                    T_profile=T_profile,
+                    tol_chi=tol_chi,
+                    tol_T=tol_T,
+                    window_fraction=window_fraction,
+                    r_clip_min_au=float(r_clip_min_au),
+                )
+            except ValueError:
+                outer_rad = rad
+                break
+
+            split_radii_au.append(float(r_split_au))
+
+            if float(r_split_au) >= float(current_outer_rmax_au):
+                outer_rad = rad
+                break
+
+            outer_rad = rad
+            current_outer_rmax_au = float(r_split_au)
+
+        if merged_T is None or merged_chi is None:
+            raise ValueError("Segmented RT produced no results")
+
         self.base_model.gas_register(
             'temperature',
             Field(quantity='temperature', data=merged_T, axis_order=axis_order),
@@ -175,42 +285,13 @@ class SegmentedRadmcRunner:
             Field(quantity='chi', data=merged_chi, axis_order=axis_order),
         )
 
-        # seam diagnostics (mean of last inner + first outer radial cells)
-        seam_idx = int(r_split_info['r_split_cell_idx'])
-        t_mag = merged_T.to('K').magnitude
-        chi_mag = merged_chi.to('dimensionless').magnitude
-
-        if seam_idx - 1 >= 0 and seam_idx < t_mag.shape[0]:
-            T_inner = float(np.mean(t_mag[seam_idx - 1, :, :]))
-            T_outer = float(np.mean(t_mag[seam_idx, :, :]))
-            chi_inner = float(np.mean(chi_mag[seam_idx - 1, :, :]))
-            chi_outer = float(np.mean(chi_mag[seam_idx, :, :]))
-
-            if T_outer == 0.0:
-                raise ValueError("Invalid seam diagnostic: T_outer_seam is zero")
-            if chi_outer == 0.0:
-                raise ValueError("Invalid seam diagnostic: chi_outer_seam is zero")
-
-            seam = {
-                'T_inner_seam': T_inner,
-                'T_outer_seam': T_outer,
-                'T_discontinuity_frac': abs(T_outer - T_inner) / abs(T_outer),
-                'chi_inner_seam': chi_inner,
-                'chi_outer_seam': chi_outer,
-                'chi_discontinuity_frac': abs(chi_outer - chi_inner) / abs(chi_outer),
-            }
-        else:
-            seam = {'error': 'Invalid seam indices'}
-
-        logger.info(f"Segmented RT complete. R_split={r_split_au:.3f} AU")
+        logger.info(
+            f"Segmented RT complete. splits={len(split_radii_au)} max_splits={max_splits}"
+        )
 
         return {
-            'r_split_au': float(r_split_au),
-            'r_split_info': r_split_info,
-            'seam_diagnostics': seam,
+            'split_radii_au': split_radii_au,
+            'segments': segments,
             'temperature': merged_T,
             'chi': merged_chi,
-            'outer_rad': outer_rad,
-            'inner_rad': inner_rad,
-            'inner_indexer': inner_indexer,
         }

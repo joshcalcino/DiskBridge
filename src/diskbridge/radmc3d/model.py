@@ -821,6 +821,7 @@ class RadModel:
         nphot: int = None,
         output_dir: Optional[str | Path] = None,
         force: bool = False,
+        wavelengths_um: Optional[np.ndarray] = None,
         uv_min: Quantity = None,
         uv_max: Quantity = None,
         n_wavelengths: int = None
@@ -856,6 +857,7 @@ class RadModel:
         use_params_uv_min = uv_min is None
         use_params_uv_max = uv_max is None
         use_params_nw = n_wavelengths is None
+        use_params_wavelengths = wavelengths_um is None
 
         if nphot is None:
             nphot = self.params.nphot_mono
@@ -988,15 +990,34 @@ class RadModel:
 
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
-        # Create mcmono_wavelength_micron.inp with UV wavelength range
+        # Create mcmono_wavelength_micron.inp
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
-        uv_lam = np.linspace(uv_min, uv_max, n_wavelengths).to(self.params.lambda_min.units)
-        
+        if wavelengths_um is not None:
+            wav = np.asarray(wavelengths_um, dtype=float)
+            if wav.ndim != 1:
+                raise ValueError("wavelengths_um must be a 1D array")
+            if wav.size < 2:
+                raise ValueError("wavelengths_um must contain at least 2 wavelengths")
+            if not np.all(np.isfinite(wav)):
+                raise ValueError("wavelengths_um contains non-finite values")
+            if not np.all(wav[1:] > wav[:-1]):
+                raise ValueError("wavelengths_um must be strictly increasing")
+            if wav[0] < self.params.lambda_min.to('micron').magnitude or wav[-1] > self.params.lambda_max.to('micron').magnitude:
+                raise ValueError(
+                    "mcmono wavelength grid is outside the global wavelength grid: "
+                    f"mcmono=[{wav[0]:.6g},{wav[-1]:.6g}] micron, "
+                    f"grid=[{self.params.lambda_min.to('micron').magnitude:.6g},{self.params.lambda_max.to('micron').magnitude:.6g}] micron"
+                )
+            mcmono_lam_um = wav
+        else:
+            uv_lam = np.linspace(uv_min, uv_max, n_wavelengths).to('micron')
+            mcmono_lam_um = np.asarray(uv_lam.magnitude, dtype=float)
+
         with open(mcmono_wav_file, 'w') as f:
-            f.write(f'{len(uv_lam)}\n')  # Number of wavelengths
-            for lam in uv_lam:
+            f.write(f'{mcmono_lam_um.size}\n')
+            for lam in mcmono_lam_um:
                 f.write(f'{lam:.6f}\n')
-        logger.debug(f"Wrote {mcmono_wav_file} with {len(uv_lam)} UV wavelengths")
+        logger.debug(f"Wrote {mcmono_wav_file} with {mcmono_lam_um.size} wavelengths")
         
         # Create symlinks to input files
         self.create_symlinks()
@@ -1036,8 +1057,8 @@ class RadModel:
             # Run mcmono at UV wavelengths
             setthreads = self.params.nbcores
             logger.info(
-                f"Running RADMC-3D mcmono at {n_wavelengths} UV wavelengths "
-                f"({uv_min:~P}-{uv_max:~P}) with {nphot} photons "
+                f"Running RADMC-3D mcmono at {mcmono_lam_um.size} wavelengths "
+                f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} micron) with {nphot} photons "
                 f"(countwrite={countwrite})..."
             )
             cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)]
@@ -1092,7 +1113,7 @@ class RadModel:
         self._organize_output(
             output_dir,
             ['mean_intensity.out', 'mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
-            f'radmc3d mcmono UV_range_{uv_min:~P}-{uv_max:~P}_{n_wavelengths}wavelengths'
+            f'radmc3d mcmono range_{mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g}micron_{mcmono_lam_um.size}wavelengths'
         )
         
         # Read mean intensity directly from the mcmono output directory
@@ -1298,6 +1319,8 @@ class RadModel:
         wavelengths_um: np.ndarray,
         spectrum: np.ndarray,
         output_dir: Path,
+        interpolation: str = 'loglog',
+        require_coverage: bool = True,
     ) -> Path:
         """Write effective external source file from shell spectrum.
         
@@ -1332,17 +1355,40 @@ class RadModel:
         w_src = np.asarray(wavelengths_um, dtype=float)[sort_idx]
         s_src = np.asarray(spectrum, dtype=float)[sort_idx]
 
-        intensity = np.zeros_like(wavelengths_global, dtype=float)
-        if w_src.size > 0:
-            wmin = float(np.min(w_src))
-            wmax = float(np.max(w_src))
-            m = (wavelengths_global >= wmin) & (wavelengths_global <= wmax)
-            if np.any(m):
-                intensity[m] = np.interp(
-                    np.log(wavelengths_global[m]),
-                    np.log(w_src),
-                    s_src,
+        if require_coverage:
+            if w_src.size == 0:
+                raise ValueError("Effective external spectrum is empty")
+            if float(w_src[0]) > float(np.min(wavelengths_global)) or float(w_src[-1]) < float(np.max(wavelengths_global)):
+                raise ValueError(
+                    "Effective external spectrum does not cover the full external-field wavelength grid: "
+                    f"effective=[{w_src[0]:.6g},{w_src[-1]:.6g}] micron, "
+                    f"grid=[{float(np.min(wavelengths_global)):.6g},{float(np.max(wavelengths_global)):.6g}] micron"
                 )
+
+        if interpolation == 'loglog':
+            if np.any(s_src <= 0.0):
+                raise ValueError("loglog interpolation requires strictly positive spectrum values")
+            intensity = np.exp(
+                np.interp(
+                    np.log(wavelengths_global),
+                    np.log(w_src),
+                    np.log(s_src),
+                )
+            )
+        elif interpolation == 'loglin':
+            intensity = np.interp(
+                np.log(wavelengths_global),
+                np.log(w_src),
+                s_src,
+            )
+        elif interpolation == 'linlin':
+            intensity = np.interp(
+                wavelengths_global,
+                w_src,
+                s_src,
+            )
+        else:
+            raise ValueError(f"Unsupported interpolation='{interpolation}'")
 
         with open(filepath, 'w') as f:
             f.write('2\n')
@@ -1359,7 +1405,14 @@ class RadModel:
         self,
         nphot_therm: Optional[int] = None,
         nphot_mono: Optional[int] = None,
+        mcmono_n_wavelengths: Optional[int] = None,
+        mcmono_uv_n_wavelengths: Optional[int] = None,
+        mcmono_wavelength_source: str = 'external',
+        mcmono_wavelength_spacing: str = 'log',
+        mcmono_wavelengths_um: Optional[np.ndarray] = None,
+        effective_external_interpolation: str = 'loglog',
         force: bool = False,
+        max_splits: Optional[int] = None,
     ) -> dict:
         """Run segmented RT using the driver layer.
 
@@ -1372,7 +1425,14 @@ class RadModel:
         result = runner.run_segmented_rt(
             nphot_therm=nphot_therm,
             nphot_mono=nphot_mono,
+            mcmono_n_wavelengths=mcmono_n_wavelengths,
+            mcmono_uv_n_wavelengths=mcmono_uv_n_wavelengths,
+            mcmono_wavelength_source=mcmono_wavelength_source,
+            mcmono_wavelength_spacing=mcmono_wavelength_spacing,
+            mcmono_wavelengths_um=mcmono_wavelengths_um,
+            effective_external_interpolation=effective_external_interpolation,
             force=force,
+            max_splits=max_splits,
         )
 
         # Keep RadModel instance in sync with merged fields

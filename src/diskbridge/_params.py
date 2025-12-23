@@ -85,6 +85,7 @@ class Params:
     segmented_window_fraction: float
     segmented_shell_ncells: int
     segmented_r_clip_min: Quantity
+    segmented_max_splits: int
 
     # star
     rstar: Quantity
