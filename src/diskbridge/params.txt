@@ -70,6 +70,9 @@ segmented_window_fraction  = 0.1   # fraction of radial domain for asymptote win
 segmented_shell_ncells     = 3     # number of radial cells for shell spectrum extraction
 segmented_r_clip_min       = 1.0   # minimum allowed R_split in au
 segmented_max_splits        = 1
+segmented_stop_factor       = 0.9
+segmented_nphot_thermal     = 1e7
+segmented_nphot_mono        = 1e7
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii

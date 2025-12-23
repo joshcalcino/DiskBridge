@@ -804,8 +804,12 @@ class RadWriter:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'external')
         url = "https://home.strw.leidenuniv.nl/~ewine/photo/data/photo_data/radiation_fields/ISRF.dat"
-        isrf_target = output_dir / Path(isrf_path).name
-        isrf_file = self._ensure_isrf_file(isrf_target, url)
+        isrf_path = Path(isrf_path)
+        if not isrf_path.is_absolute():
+            data_dir = Path(__file__).resolve().parents[3] / 'data'
+            data_dir.mkdir(parents=True, exist_ok=True)
+            isrf_path = data_dir / isrf_path.name
+        isrf_file = self._ensure_isrf_file(isrf_path, url)
         wav_file = output_dir / 'wavelength_micron.inp'
         lam_um = self._read_wavelength_grid_from_file(wav_file)
         lam_cm = lam_um * 1.0e-4

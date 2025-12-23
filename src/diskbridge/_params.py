@@ -86,6 +86,9 @@ class Params:
     segmented_shell_ncells: int
     segmented_r_clip_min: Quantity
     segmented_max_splits: int
+    segmented_stop_factor: float
+    segmented_nphot_thermal: int
+    segmented_nphot_mono: int
 
     # star
     rstar: Quantity

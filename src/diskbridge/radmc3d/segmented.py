@@ -71,7 +71,6 @@ class SegmentedRadmcRunner:
         mcmono_wavelength_source: str = 'external',
         mcmono_wavelength_spacing: str = 'log',
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
-        effective_external_interpolation: str = 'loglog',
         max_splits: Optional[int] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
@@ -85,6 +84,15 @@ class SegmentedRadmcRunner:
         window_fraction = params.segmented_window_fraction
         shell_ncells = params.segmented_shell_ncells
         r_clip_min_au = params.segmented_r_clip_min.to('au').magnitude
+        stop_factor = float(params.segmented_stop_factor)
+        if stop_factor <= 0.0 or stop_factor >= 1.0:
+            raise ValueError("segmented_stop_factor must be in (0, 1)")
+
+        nphot_therm_intermediate = int(params.segmented_nphot_thermal)
+        nphot_mono_intermediate = int(params.segmented_nphot_mono)
+
+        nphot_therm_final = int(params.nphot_thermal) if nphot_therm is None else int(nphot_therm)
+        nphot_mono_final = int(params.nphot_mono) if nphot_mono is None else int(nphot_mono)
 
         if max_splits is None:
             max_splits = int(params.segmented_max_splits)
@@ -106,6 +114,28 @@ class SegmentedRadmcRunner:
         merged_chi: Optional[Quantity] = None
 
         mcmono_wav_um_use: Optional[np.ndarray] = None
+
+        base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
+        base_opacity_dir.mkdir(parents=True, exist_ok=True)
+
+        def _ensure_opacities_available() -> None:
+            from diskbridge.radmc3d.writer import RadWriter
+
+            if list(base_opacity_dir.glob('dustkappa_*.inp')):
+                return
+            writer = RadWriter(self.base_model)
+            writer.compute_and_write_dust_opacities(self.base_model_dir)
+
+        def _link_opacities_to(dest_inputs_dir: Path) -> None:
+            import os
+
+            for src in base_opacity_dir.glob('dustkappa_*.inp'):
+                dst = dest_inputs_dir / src.name
+                if dst.is_symlink() and dst.resolve() == src.resolve():
+                    continue
+                if dst.exists() or dst.is_symlink():
+                    dst.unlink()
+                os.symlink(src, dst)
 
         for level in range(max_splits + 1):
             if level == 0:
@@ -130,7 +160,9 @@ class SegmentedRadmcRunner:
             segment.work_dir.mkdir(parents=True, exist_ok=True)
             rad = RadModel(seg_model, model_dir=segment.work_dir)
             rad.writer.write_all_input_files(segment.work_dir)
-            rad.writer.compute_and_write_dust_opacities(segment.work_dir)
+
+            _ensure_opacities_available()
+            _link_opacities_to(rad.inputs_dir)
 
             temp_dir = rad.outputs_dir / 'temperature'
             mcmono_dir = rad.outputs_dir / 'mcmono'
@@ -202,13 +234,14 @@ class SegmentedRadmcRunner:
                     wavelengths_um=wavelengths_um,
                     spectrum=shell_spectrum,
                     output_dir=rad.inputs_dir,
-                    interpolation=effective_external_interpolation,
                     require_coverage=True,
                 )
 
-            rad.compute_temperature(nphot=nphot_therm, output_dir=temp_dir, force=force)
+            nphot_therm_use = nphot_therm_intermediate
+            nphot_mono_use = nphot_mono_intermediate
+            rad.compute_temperature(nphot=nphot_therm_use, output_dir=temp_dir, force=force)
             rad.compute_mcmono(
-                nphot=nphot_mono,
+                nphot=nphot_mono_use,
                 output_dir=mcmono_dir,
                 force=force,
                 wavelengths_um=mcmono_wav_um_use,
@@ -245,9 +278,21 @@ class SegmentedRadmcRunner:
                 outer_rad = rad
                 break
 
-            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(seg_model, 'chi')
-            _, T_profile = compute_volume_weighted_mean_radial_profile(seg_model, 'temperature')
-            r_edges_au = seg_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
+            if merged_T is None or merged_chi is None:
+                raise ValueError("Internal error: missing merged fields")
+
+            self.base_model.gas_register(
+                'temperature',
+                Field(quantity='temperature', data=merged_T, axis_order=axis_order),
+            )
+            self.base_model.gas_register(
+                'chi',
+                Field(quantity='chi', data=merged_chi, axis_order=axis_order),
+            )
+
+            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'chi')
+            _, T_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'temperature')
+            r_edges_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
 
             try:
                 r_split_au, r_split_info = find_r_split(
@@ -264,11 +309,73 @@ class SegmentedRadmcRunner:
                 outer_rad = rad
                 break
 
-            split_radii_au.append(float(r_split_au))
-
             if float(r_split_au) >= float(current_outer_rmax_au):
                 outer_rad = rad
                 break
+
+            if float(r_split_au) >= stop_factor * float(current_outer_rmax_au):
+                final_work_dir = self.base_model_dir / 'segments' / f'segment_{level + 1:02d}_rmax_{current_outer_rmax_au:.6g}au_final'
+                final_work_dir.mkdir(parents=True, exist_ok=True)
+
+                final_seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
+                final_segment = SegmentDefinition(
+                    name=f'segment_{level + 1:02d}_final',
+                    bounds=final_seg_bounds,
+                    work_dir=final_work_dir,
+                )
+                final_model, final_indexer = self._build_segment_model_and_indexer(final_segment)
+                final_rad = RadModel(final_model, model_dir=final_work_dir)
+                final_rad.writer.write_all_input_files(final_work_dir)
+                _ensure_opacities_available()
+                _link_opacities_to(final_rad.inputs_dir)
+
+                if outer_rad is not None:
+                    wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
+                        r_split_au=current_outer_rmax_au,
+                        shell_ncells=shell_ncells,
+                        mcmono_dir=outer_rad.outputs_dir / 'mcmono',
+                    )
+                    final_rad.write_effective_external_source(
+                        wavelengths_um=wavelengths_um,
+                        spectrum=shell_spectrum,
+                        output_dir=final_rad.inputs_dir,
+                        require_coverage=True,
+                    )
+
+                final_temp_dir = final_rad.outputs_dir / 'temperature'
+                final_mcmono_dir = final_rad.outputs_dir / 'mcmono'
+                final_rad.compute_temperature(nphot=nphot_therm_final, output_dir=final_temp_dir, force=force)
+                final_rad.compute_mcmono(
+                    nphot=nphot_mono_final,
+                    output_dir=final_mcmono_dir,
+                    force=force,
+                    wavelengths_um=mcmono_wav_um_use,
+                )
+
+                merged_T = self._merge_field(
+                    merged=merged_T,
+                    child=final_rad.temperature,
+                    indexer=final_indexer,
+                    axis_order=axis_order,
+                )
+                merged_chi = self._merge_field(
+                    merged=merged_chi,
+                    child=final_rad.chi,
+                    indexer=final_indexer,
+                    axis_order=axis_order,
+                )
+                segments.append(
+                    {
+                        'level': int(level + 1),
+                        'work_dir': str(final_segment.work_dir),
+                        'r_max_au': float(current_outer_rmax_au),
+                    }
+                )
+
+                outer_rad = final_rad
+                break
+
+            split_radii_au.append(float(r_split_au))
 
             outer_rad = rad
             current_outer_rmax_au = float(r_split_au)

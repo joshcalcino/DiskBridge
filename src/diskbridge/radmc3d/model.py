@@ -1319,7 +1319,6 @@ class RadModel:
         wavelengths_um: np.ndarray,
         spectrum: np.ndarray,
         output_dir: Path,
-        interpolation: str = 'loglog',
         require_coverage: bool = True,
     ) -> Path:
         """Write effective external source file from shell spectrum.
@@ -1365,30 +1364,15 @@ class RadModel:
                     f"grid=[{float(np.min(wavelengths_global)):.6g},{float(np.max(wavelengths_global)):.6g}] micron"
                 )
 
-        if interpolation == 'loglog':
-            if np.any(s_src <= 0.0):
-                raise ValueError("loglog interpolation requires strictly positive spectrum values")
-            intensity = np.exp(
-                np.interp(
-                    np.log(wavelengths_global),
-                    np.log(w_src),
-                    np.log(s_src),
-                )
-            )
-        elif interpolation == 'loglin':
-            intensity = np.interp(
+        if np.any(s_src <= 0.0):
+            raise ValueError("loglog interpolation requires strictly positive spectrum values")
+        intensity = np.exp(
+            np.interp(
                 np.log(wavelengths_global),
                 np.log(w_src),
-                s_src,
+                np.log(s_src),
             )
-        elif interpolation == 'linlin':
-            intensity = np.interp(
-                wavelengths_global,
-                w_src,
-                s_src,
-            )
-        else:
-            raise ValueError(f"Unsupported interpolation='{interpolation}'")
+        )
 
         with open(filepath, 'w') as f:
             f.write('2\n')
@@ -1410,7 +1394,6 @@ class RadModel:
         mcmono_wavelength_source: str = 'external',
         mcmono_wavelength_spacing: str = 'log',
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
-        effective_external_interpolation: str = 'loglog',
         force: bool = False,
         max_splits: Optional[int] = None,
     ) -> dict:
@@ -1430,7 +1413,6 @@ class RadModel:
             mcmono_wavelength_source=mcmono_wavelength_source,
             mcmono_wavelength_spacing=mcmono_wavelength_spacing,
             mcmono_wavelengths_um=mcmono_wavelengths_um,
-            effective_external_interpolation=effective_external_interpolation,
             force=force,
             max_splits=max_splits,
         )
