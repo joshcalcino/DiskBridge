@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
@@ -470,6 +470,53 @@ class RadData:
         logger.info(f"Read mean intensity from {fpath}: shape={intensity.shape}")
         
         return self.mean_intensity
+
+    @staticmethod
+    def _read_n_floats_from_text(f, n: int) -> np.ndarray:
+        vals: list[float] = []
+        while len(vals) < n:
+            line = f.readline()
+            if not line:
+                break
+            parts = line.split()
+            if not parts:
+                continue
+            for p in parts:
+                vals.append(float(p))
+                if len(vals) >= n:
+                    break
+        if len(vals) != n:
+            raise ValueError(f"Expected {n} floats, got {len(vals)}")
+        return np.asarray(vals, dtype=float)
+
+    def read_mean_intensity_file(self, path: str | Path) -> tuple[Quantity, Quantity]:
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Mean intensity file not found: {path}")
+
+        if path.suffix == '.bout':
+            with open(path, 'rb') as f:
+                hdr4 = np.fromfile(f, dtype=np.int64, count=4)
+                if hdr4.size < 4:
+                    raise ValueError(f"{path} has incomplete header")
+                prec = int(hdr4[1])
+                nrcells = int(hdr4[2])
+                nwav = int(hdr4[3])
+                freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
+                dtype = np.float64 if prec == 8 else np.float32
+                j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
+            j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+            return freq_hz, j_lambda
+
+        with open(path, 'r') as f:
+            _ = int(f.readline().strip())
+            nrcells = int(f.readline().strip())
+            nwav = int(f.readline().strip())
+            freq_vals = self._read_n_floats_from_text(f, nwav)
+            freq_hz = freq_vals * units('Hz')
+            j_vals = self._read_n_floats_from_text(f, nwav * nrcells)
+            j_lambda = j_vals.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+            return freq_hz, j_lambda
     
     def _readScalarFieldASCII(self, fname: Path) -> np.ndarray:
         """Read a scalar field from ASCII file.

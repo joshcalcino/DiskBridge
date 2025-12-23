@@ -16,7 +16,7 @@ import shutil
 import datetime
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
@@ -25,8 +25,8 @@ from .data import RadData
 from .utils import (
     _extract_radmc_errors,
     create_radmc3d_symlinks,
-    cleanup_symlinks,
-    run_radmc3d_command,
+    cleanup_symlink_paths,
+    run_radmc3d_and_log,
     _read_params_snapshot,
     _params_signature,
 )
@@ -203,7 +203,7 @@ class RadModel:
         This ensures the model directory stays clean after RADMC-3D runs.
         Only removes symlinks that were tracked by this instance.
         """
-        cleanup_symlinks(self._active_symlinks)
+        cleanup_symlink_paths(self._active_symlinks)
 
     def _ensure_cntdump_ge_countwrite(self, countwrite: int, nphot: int) -> None:
         radmc_inp_path = self.inputs_dir / 'radmc3d.inp'
@@ -725,20 +725,14 @@ class RadModel:
             # Run mctherm (RADMC-3D gets nphot and setthreads from radmc3d.inp)
             logger.info(f"Running RADMC-3D mctherm with {nphot} photons (countwrite={countwrite})...")
             cmd = ['radmc3d', 'mctherm', 'countwrite', str(countwrite)]
-            
-            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
-            
             log_path = self.model_dir / 'radmc3d.out'
-            try:
-                with open(log_path, 'a') as f:
-                    f.write('\n--- mctherm ---\n')
-                    if stdout:
-                        f.write(stdout)
-                    if stderr:
-                        f.write('\n[stderr]\n')
-                        f.write(stderr)
-            except Exception:
-                pass
+            returncode, stdout, stderr, _, _ = run_radmc3d_and_log(
+                cmd,
+                self.model_dir,
+                section='mctherm',
+                log_path=log_path,
+                preserve_existing=False,
+            )
             
             if returncode != 0:
                 logger.error(f"RADMC-3D mctherm failed (see {log_path})")
@@ -931,28 +925,7 @@ class RadModel:
 
             if use_cache:
                 logger.info(f"Mean intensity already computed at {mean_intensity_file}")
-                if mean_intensity_file.suffix == '.bout':
-                    with open(mean_intensity_file, 'rb') as f:
-                        hdr4 = np.fromfile(f, dtype=np.int64, count=4)
-                        if hdr4.size < 4:
-                            raise ValueError(f"{mean_intensity_file} has incomplete header")
-                        iformat = int(hdr4[0])
-                        prec = int(hdr4[1])
-                        nrcells = int(hdr4[2])
-                        nwav = int(hdr4[3])
-                        freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
-                        dtype = np.float64 if prec == 8 else np.float32
-                        j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
-                    j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
-                else:
-                    with open(mean_intensity_file, 'r') as f:
-                        iformat = int(f.readline().strip())
-                        nrcells = int(f.readline().strip())
-                        nwav = int(f.readline().strip())
-
-                        freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
-                        j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-                        j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+                freq_hz, j_lambda = self.data.read_mean_intensity_file(mean_intensity_file)
 
                 nx, ny, nz = self.data._getMeshShape()
                 self.mean_intensity = j_lambda
@@ -1063,32 +1036,14 @@ class RadModel:
             )
             cmd = ['radmc3d', 'mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)]
 
-            # Preserve any existing radmc3d.out log (e.g. from mctherm)
             log_path = self.model_dir / 'radmc3d.out'
-            previous_log = ""
-            if log_path.exists():
-                try:
-                    with open(log_path, 'r') as f:
-                        previous_log = f.read()
-                except Exception:
-                    previous_log = ""
-            
-            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
-
-            # Rebuild radmc3d.out to contain both the previous log and the new mcmono output
-            combined_log = previous_log
-            combined_log += '\n--- mcmono ---\n'
-            if stdout:
-                combined_log += stdout
-            if stderr:
-                combined_log += '\n[stderr]\n'
-                combined_log += stderr
-
-            try:
-                with open(log_path, 'w') as f:
-                    f.write(combined_log)
-            except Exception:
-                pass
+            returncode, stdout, stderr, combined_log, _ = run_radmc3d_and_log(
+                cmd,
+                self.model_dir,
+                section='mcmono',
+                log_path=log_path,
+                preserve_existing=True,
+            )
 
             mcmono_text = combined_log.split('--- mcmono ---', 1)[-1]
             error_lines = [line.strip() for line in mcmono_text.splitlines() if 'ERROR' in line.upper()]
@@ -1130,29 +1085,8 @@ class RadModel:
         )
         if mean_intensity_path is None:
             raise FileNotFoundError(f"Mean intensity file not found in {output_dir}")
-        
-        # Parse the mean intensity file
-        if mean_intensity_path.suffix == '.bout':
-            with open(mean_intensity_path, 'rb') as f:
-                hdr4 = np.fromfile(f, dtype=np.int64, count=4)
-                if hdr4.size < 4:
-                    raise ValueError(f"{mean_intensity_path} has incomplete header")
-                iformat = int(hdr4[0])
-                prec = int(hdr4[1])
-                nrcells = int(hdr4[2])
-                nwav = int(hdr4[3])
-                freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
-                dtype = np.float64 if prec == 8 else np.float32
-                j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
-            j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
-        else:
-            with open(mean_intensity_path, 'r') as f:
-                iformat = int(f.readline().strip())
-                nrcells = int(f.readline().strip())
-                nwav = int(f.readline().strip())
-                freq_hz = np.array([float(x) for x in f.readline().split()]) * units('Hz')
-                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-                j_lambda = j_flat.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
+
+        freq_hz, j_lambda = self.data.read_mean_intensity_file(mean_intensity_path)
         
         # Store wavelengths and mean intensity
         nx, ny, nz = self.data._getMeshShape()
@@ -1234,27 +1168,11 @@ class RadModel:
         
         if not mean_intensity_path.exists():
             raise FileNotFoundError(f"No mean_intensity file in {mcmono_dir}")
-        
-        # Read mean intensity file
-        if mean_intensity_path.suffix == '.bout':
-            with open(mean_intensity_path, 'rb') as f:
-                hdr4 = np.fromfile(f, dtype=np.int64, count=4)
-                iformat = int(hdr4[0])
-                prec = int(hdr4[1])
-                nrcells = int(hdr4[2])
-                nwav = int(hdr4[3])
-                freq_hz = np.fromfile(f, dtype=np.float64, count=nwav)
-                dtype = np.float64 if prec == 8 else np.float32
-                j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64)
-            j_lambda = j_flat.reshape((nwav, nrcells)).T  # (ncells, nwav)
-        else:
-            with open(mean_intensity_path, 'r') as f:
-                iformat = int(f.readline().strip())
-                nrcells = int(f.readline().strip())
-                nwav = int(f.readline().strip())
-                freq_hz = np.array([float(x) for x in f.readline().split()])
-                j_flat = np.array([float(f.readline().strip()) for _ in range(nwav * nrcells)])
-            j_lambda = j_flat.reshape((nwav, nrcells)).T
+
+        freq_hz_q, j_lambda_q = self.data.read_mean_intensity_file(mean_intensity_path)
+        freq_hz = np.asarray(freq_hz_q.to('Hz').magnitude, dtype=float)
+        j_lambda = np.asarray(j_lambda_q.to('erg/(s*cm^2*Hz*sr)').magnitude, dtype=float)
+        nwav = int(freq_hz.size)
         
         # Get mesh info
         mesh = self.model.mesh

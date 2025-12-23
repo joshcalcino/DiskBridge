@@ -46,11 +46,6 @@ def _edges_from_centers(centers: Quantity) -> Quantity:
     return e_mag * centers.units
 
 
-def _is_strictly_increasing(q: Quantity) -> bool:
-    a = np.asarray(q.magnitude, dtype=float)
-    return np.all(a[1:] > a[:-1])
-
-
 # ---------- small containers ----------
 @dataclass(frozen=True)
 class Axis:
@@ -65,7 +60,6 @@ def _allowed_axes(cs: CoordSystem) -> Tuple[str, ...]:
         return ("r", "phi")  # 2D only, no z axis
     if cs == "cartesian":
         return ("x", "y", "z")
-    raise ValueError(f"Unknown coordinate system: {cs}")
 
 
 def _display_order(cs: CoordSystem) -> Tuple[str, ...]:
@@ -76,7 +70,6 @@ def _display_order(cs: CoordSystem) -> Tuple[str, ...]:
         return ("r", "phi")
     if cs == "cartesian":
         return ("x", "y", "z")
-    raise ValueError(f"Unknown coordinate system: {cs}")
 
 
 # ---------- main Mesh ----------
@@ -110,11 +103,6 @@ class Mesh:
                         f"{name}: centers must have len(edges)-1 "
                         f"({centers.size} vs {edges.size - 1})"
                     )
-
-            # # Validate monotonicity of edges
-            # if edges is not None and not _is_strictly_increasing(edges):
-            #     print(edges)
-            #     raise ValueError(f"{name}: edges must be strictly increasing")
 
             new_axes[name] = Axis(edges=edges, centers=centers)
 

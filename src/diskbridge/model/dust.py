@@ -16,10 +16,10 @@ from diskbridge._params import params, canonicalize_dust_params
 from .mesh import Mesh, Axis
 
 if TYPE_CHECKING:
-    from .model import Model
+    from .core import Model
 
 # Import SubModel for inheritance
-from .model import SubModel
+from .core import SubModel
 
 k_B = units('k_B')  # Boltzmann constant
 m_H = units('m_H')  # Hydrogen mass

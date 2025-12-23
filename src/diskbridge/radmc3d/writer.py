@@ -14,7 +14,7 @@ from shutil import which
 import urllib.request
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units

@@ -16,7 +16,7 @@ import numpy as np
 import matplotlib.tri as mtri
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
     from diskbridge.radmc3d.model import RadModel
     from diskbridge.model.field import Field
     import yt

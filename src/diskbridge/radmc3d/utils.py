@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, get_type_hints
+from typing import Dict, List, Optional, get_type_hints
 from dataclasses import fields
 import subprocess
+import numpy as np
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
@@ -86,6 +87,12 @@ def create_radmc3d_symlinks(
     create_symlinks_for_file_map(model_dir, file_map, active_symlinks)
 
 
+def link_dustkappa_opacities(src_inputs_dir: Path, dest_inputs_dir: Path) -> None:
+    dest_inputs_dir.mkdir(parents=True, exist_ok=True)
+    file_map: Dict[Path, List[str]] = {src_inputs_dir: ['dustkappa_*.inp']}
+    create_symlinks_for_file_map(dest_inputs_dir, file_map, [])
+
+
 def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]:
     process = subprocess.Popen(
         cmd,
@@ -119,7 +126,54 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
     return returncode, "".join(stdout_lines), stderr_text
 
 
-def cleanup_symlinks(active_symlinks: List[Path]) -> None:
+def run_radmc3d_and_log(
+    cmd: list[str],
+    model_dir: Path,
+    *,
+    section: str,
+    log_path: Optional[Path] = None,
+    command_str: Optional[str] = None,
+    preserve_existing: bool = False,
+) -> tuple[int, str, str, str, str]:
+    model_dir = Path(model_dir)
+    if log_path is None:
+        log_path = model_dir / 'radmc3d.out'
+
+    previous_log = ""
+    if preserve_existing and log_path.exists():
+        try:
+            with open(log_path, 'r') as f:
+                previous_log = f.read()
+        except Exception:
+            previous_log = ""
+
+    returncode, stdout, stderr = run_radmc3d_command(cmd, model_dir)
+
+    section_text = f"\n--- {section} ---\n"
+    if command_str is not None:
+        section_text += f"command = {command_str}\n"
+    if stdout:
+        section_text += stdout
+    if stderr:
+        section_text += "\n[stderr]\n"
+        section_text += stderr
+
+    combined_log = ""
+    try:
+        if preserve_existing:
+            combined_log = previous_log + section_text
+            with open(log_path, 'w') as f:
+                f.write(combined_log)
+        else:
+            with open(log_path, 'a') as f:
+                f.write(section_text)
+    except Exception:
+        combined_log = previous_log + section_text
+
+    return returncode, stdout, stderr, combined_log, section_text
+
+
+def cleanup_symlink_paths(active_symlinks: List[Path]) -> None:
     removed_count = 0
     for symlink in active_symlinks:
         if symlink.is_symlink():

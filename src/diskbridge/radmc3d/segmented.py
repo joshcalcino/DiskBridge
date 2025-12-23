@@ -8,7 +8,7 @@ import numpy as np
 
 from diskbridge._logging import logger
 from diskbridge._units import units, Quantity
-from diskbridge.model.model import Model
+from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
 
@@ -75,6 +75,7 @@ class SegmentedRadmcRunner:
         force: bool = False,
     ) -> Dict[str, Any]:
         from diskbridge.radmc3d.model import RadModel
+        from diskbridge.radmc3d.utils import link_dustkappa_opacities
 
         import diskbridge
         params = diskbridge.params
@@ -126,17 +127,6 @@ class SegmentedRadmcRunner:
             writer = RadWriter(self.base_model)
             writer.compute_and_write_dust_opacities(self.base_model_dir)
 
-        def _link_opacities_to(dest_inputs_dir: Path) -> None:
-            import os
-
-            for src in base_opacity_dir.glob('dustkappa_*.inp'):
-                dst = dest_inputs_dir / src.name
-                if dst.is_symlink() and dst.resolve() == src.resolve():
-                    continue
-                if dst.exists() or dst.is_symlink():
-                    dst.unlink()
-                os.symlink(src, dst)
-
         for level in range(max_splits + 1):
             if level == 0:
                 seg_bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
@@ -162,7 +152,7 @@ class SegmentedRadmcRunner:
             rad.writer.write_all_input_files(segment.work_dir)
 
             _ensure_opacities_available()
-            _link_opacities_to(rad.inputs_dir)
+            link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
 
             temp_dir = rad.outputs_dir / 'temperature'
             mcmono_dir = rad.outputs_dir / 'mcmono'
@@ -327,7 +317,7 @@ class SegmentedRadmcRunner:
                 final_rad = RadModel(final_model, model_dir=final_work_dir)
                 final_rad.writer.write_all_input_files(final_work_dir)
                 _ensure_opacities_available()
-                _link_opacities_to(final_rad.inputs_dir)
+                link_dustkappa_opacities(base_opacity_dir, final_rad.inputs_dir)
 
                 if outer_rad is not None:
                     wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(

@@ -18,7 +18,7 @@ REPO_ROOT = PACKAGE_ROOT.parent.parent
 
 from astropy.io import fits
 from diskbridge._logging import logger
-from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlinks, run_radmc3d_command
+from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 import diskbridge
 from .molecule import RadMolecule
 
@@ -155,7 +155,7 @@ class RadImage:
         This ensures the model directory stays clean after RADMC-3D runs.
         Only removes symlinks that were tracked by this instance.
         """
-        cleanup_symlinks(self._active_symlinks)
+        cleanup_symlink_paths(self._active_symlinks)
         
     def readImage(self, fname: str | Path = 'image.out', binary: bool = False) -> None:
         """Read a RADMC-3D image file.
@@ -958,25 +958,19 @@ class RadImage:
         self.create_symlinks()
         
         try:
-            returncode, stdout, stderr = run_radmc3d_command(cmd, self.model_dir)
+            returncode, stdout, stderr, _, _ = run_radmc3d_and_log(
+                cmd,
+                self.model_dir,
+                section='image',
+                log_path=self.model_dir / 'radmc3d.out',
+                command_str=cmd_str,
+                preserve_existing=False,
+            )
         finally:
             # Always clean up symlinks
             self.cleanup_symlinks()
-        
-        # Append image run output to radmc3d.out (for debugging, like mctherm)
+
         log_path = self.model_dir / 'radmc3d.out'
-        try:
-            with open(log_path, 'a') as f:
-                f.write('\n--- image ---\n')
-                f.write(f'command = {cmd_str}\n')
-                if stdout:
-                    f.write(stdout)
-                if stderr:
-                    f.write('\n[stderr]\n')
-                    f.write(stderr)
-        except Exception:
-            # Logging to file is best-effort only
-            pass
         
         if returncode != 0:
             logger.error(f"RADMC-3D image failed (see {log_path})")

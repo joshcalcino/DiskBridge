@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 import numpy as np
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
     from diskbridge.radmc3d.model import RadModel
 
 from diskbridge._logging import logger

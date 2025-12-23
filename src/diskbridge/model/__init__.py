@@ -3,7 +3,7 @@ from typing import Optional, Union
 
 from .mesh import Mesh
 from .field import Field
-from .model import Model, puff_up_model, extend_disk_inwards
+from .core import Model, puff_up_model, extend_disk_inwards
 from .clipping import ClipIndexer, compute_clip_indexer
 
 def load_model(

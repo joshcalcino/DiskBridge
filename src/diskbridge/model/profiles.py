@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Tuple
 import numpy as np
 
 if TYPE_CHECKING:
-    from diskbridge.model.model import Model
+    from diskbridge.model.core import Model
 
 
 def compute_cell_volumes(model: "Model") -> np.ndarray:
