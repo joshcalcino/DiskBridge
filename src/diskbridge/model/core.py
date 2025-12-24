@@ -32,9 +32,9 @@ class Model:
         self.filename: Optional[str] = None 
         
         # Initialize submodels
-        self.gas: SubModel = None
-        self.disk: Disk = None
-        self.dust: 'Dust' = None  # Dust submodel
+        self.gas: Optional['SubModel'] = None
+        self.disk: Optional['Disk'] = None
+        self.dust: Optional['Dust'] = None
         
     def get_variables(self) -> Dict[str, Any]:
         return dict(self.variables)

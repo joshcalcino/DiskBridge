@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
@@ -8,7 +9,15 @@ from ..mesh import Mesh, Axis
 from ..field import Field
 from diskbridge._units import Quantity 
 from diskbridge._logging import logger
-from diskbridge import units  
+from diskbridge import units
+
+
+@dataclass
+class DimensionInfo:
+    is_3d: bool
+    nrad: int
+    nsec: int
+    ncol: int  
 
 # -----------------
 # helpers
@@ -59,7 +68,7 @@ def _get_units(file_units: str):
         unit_velocity = units("cm/s")
         unit_surface_density = units("g/cm^2")
         unit_density = units("g/cm^3")
-        unit_viscosity = units("g^2/s")
+        unit_viscosity = units("cm^2/s")
     elif file_units.lower() == "kms":
         unit_length = units("m")
         unit_time = units("s")
@@ -224,6 +233,360 @@ def _read_summary(directory: Path, file_n: int) -> Tuple[Dict[str, Optional[bool
     return out_flags_bool, macros
 
 
+def _detect_dimensionality(
+    directory: Path, variables: Dict[str, Any]
+) -> DimensionInfo:
+    nz_val = variables.get("NZ", None)
+    if nz_val is not None:
+        try:
+            nz = int(nz_val)
+        except Exception:
+            nz = 0
+        is_3d = nz > 1
+    else:
+        nz = 0
+        if (directory / "domain_z.dat").exists():
+            is_3d = True
+            logger.info("Detected 3D run from domain_z.dat; NZ missing in variables.par")
+        else:
+            is_3d = False
+    
+    return DimensionInfo(is_3d=is_3d, nrad=0, nsec=0, ncol=nz if is_3d else 1)
+
+
+def _load_edges_2d(
+    directory: Path, variables: Dict[str, Any], unit_dict: Dict[str, Quantity]
+) -> Tuple[Quantity, Quantity, int, int]:
+    dims = _read_dims(directory)
+    if dims is None:
+        nrad = int(variables.get("NY", 0))
+        nsec = int(variables.get("NX", 0))
+        if nrad <= 0 or nsec <= 0:
+            raise RuntimeError("Could not determine grid dimensions from dims.dat or variables.par")
+    else:
+        nrad, nsec = dims
+
+    redge = _read_used_rad(directory)
+    if redge is None:
+        try:
+            rmin = float(variables.get("RMIN"))
+            rmax = float(variables.get("RMAX"))
+            if rmax <= rmin:
+                raise ValueError
+            redge = np.linspace(rmin, rmax, nrad + 1)
+            logger.warning("used_rad.dat missing; built redge from RMIN/RMAX in variables.par")
+        except Exception:
+            logger.error("used_rad.dat missing and could not infer redge from variables.par")
+            raise FileNotFoundError("used_rad.dat not found and no valid RMIN/RMAX; cannot build radial edges")
+    
+    redge = redge * unit_dict['unit_length']
+    pedge = _build_pedge(nsec) * units('radians')
+    return redge, pedge, nrad, nsec
+
+
+def _load_edges_3d(
+    directory: Path, variables: Dict[str, Any], unit_dict: Dict[str, Quantity], nz: int
+) -> Tuple[Quantity, Quantity, Quantity, int, int, int]:
+    px = directory / "domain_x.dat"
+    py = directory / "domain_y.dat"
+    pz = directory / "domain_z.dat"
+    pedge = None
+    redge = None
+    tedge = None
+    
+    if px.exists():
+        try:
+            pedge = np.loadtxt(px) * units('radians')
+        except Exception:
+            logger.warning(f"Failed reading {px}; will try building phi edges from NX")
+    else:
+        logger.info(f"{px} not found; will try building phi edges from NX")
+    
+    if py.exists():
+        try:
+            redge = np.loadtxt(py) * unit_dict['unit_length']
+        except Exception:
+            logger.warning(f"Failed reading {py}; will try used_rad.dat or variables")
+    else:
+        logger.info(f"{py} not found; will try used_rad.dat or variables")
+    
+    if pz.exists():
+        try:
+            tedge = np.loadtxt(pz) * units('radians')
+        except Exception:
+            logger.warning(f"Failed reading {pz}; will try building theta edges from NZ")
+    else:
+        logger.info(f"{pz} not found; will try building theta edges from NZ")
+
+    if redge is None:
+        rr = _read_used_rad(directory)
+        if rr is not None:
+            redge = rr * unit_dict['unit_length']
+            logger.warning("domain_y.dat missing; using used_rad.dat for radial edges")
+    
+    if redge is None:
+        try:
+            nrad = int(variables.get("NY"))
+            rmin = float(variables.get("RMIN"))
+            rmax = float(variables.get("RMAX"))
+            if nrad > 0 and rmax > rmin:
+                redge = np.linspace(rmin, rmax, nrad + 1) * unit_dict['unit_length']
+                logger.warning("domain_y.dat missing; built redge from variables.par (RMIN/RMAX/NY)")
+        except Exception:
+            pass
+
+    if pedge is None:
+        try:
+            nsec = int(variables.get("NX"))
+            if nsec > 0:
+                pedge = _build_pedge(nsec) * units('radians')
+                logger.warning("domain_x.dat missing; built phi edges from NX")
+        except Exception:
+            pass
+
+    if tedge is None:
+        if nz > 1:
+            ncol = nz
+            tedge = np.linspace(0.0, np.pi, ncol + 1) * units('radians')
+            logger.warning("domain_z.dat missing; built theta edges uniformly from NZ between 0 and pi")
+
+    if redge is None or pedge is None or tedge is None:
+        logger.error("Insufficient information to construct 3D mesh (need domain files or valid fallbacks)")
+        raise FileNotFoundError("Cannot construct 3D mesh: missing domain edges and fallbacks")
+
+    nsec_raw = int(pedge.size - 1)
+    nrad_raw = int(redge.size - 1)
+    ncol_raw = int(tedge.size - 1)
+    
+    nsec = nsec_raw
+    nrad = nrad_raw - 6
+    ncol = ncol_raw - 6
+    
+    redge = redge[3:-3]
+    tedge = tedge[3:-3]
+    
+    return redge, pedge, tedge, nrad, nsec, ncol
+
+
+def _load_fields(
+    directory: Path,
+    file_n: int,
+    is_3d: bool,
+    nrad: int,
+    nsec: int,
+    ncol: int,
+    unit_dict: Dict[str, Quantity],
+) -> Dict[str, Field]:
+    gas_fields: Dict[str, Field] = {}
+    
+    def _read_field(filename: str, quantity: str, units: Quantity) -> Optional[Field]:
+        p = directory / filename
+        if not p.exists():
+            logger.info(f"Field file missing: {p}")
+            return None
+        arr = np.fromfile(p, dtype="float64")
+        if is_3d:
+            try:
+                arr = arr.reshape(ncol, nrad, nsec)
+            except Exception:
+                logger.warning(f"Reshape to (ncol,nrad,nsec) failed for {p}; attempting auto-infer of dimensions")
+                if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
+                    inferred_ncol = arr.size // (nrad * nsec)
+                    arr = arr.reshape(inferred_ncol, nrad, nsec)
+                    logger.info(f"Inferred ncol={inferred_ncol} from file size for {p}")
+                else:
+                    raise
+            
+            arr = np.roll(arr, shift=int(nsec//2), axis=2)
+            arr = np.transpose(arr, (1, 2, 0))
+            axes = ("r", "phi", "theta")
+        else:
+            arr = arr.reshape(nrad, nsec)
+            if (directory / "variables.par").exists():
+                arr = np.roll(arr, shift=int(nsec//2), axis=1)
+            axes = ("r", "phi")
+        arr = arr * units
+        return Field(
+            data=arr,
+            quantity=quantity,
+            axis_order=axes,
+        )
+
+    if is_3d:
+        gas_fields["density"] = _read_field(f"gasdens{file_n}.dat", 
+                                            "density", 
+                                            units=unit_dict['unit_density'])
+    else:
+        gas_fields["surface_density"] = _read_field(f"gasdens{file_n}.dat", 
+                                                    "surface_density", 
+                                                    units=unit_dict['unit_surface_density'])
+
+    gas_fields["vr"] = _read_field(f"gasvy{file_n}.dat", 
+                                   "vr", 
+                                   units=unit_dict['unit_velocity'])
+
+    gas_fields["vphi"] = _read_field(f"gasvx{file_n}.dat", 
+                                     "vphi", 
+                                     units=unit_dict['unit_velocity'])
+
+    if is_3d:
+        gas_fields["vtheta"] = _read_field(f"gasvz{file_n}.dat", 
+                                            "vtheta", 
+                                            units=unit_dict['unit_velocity'])
+    
+    return gas_fields
+
+
+def _apply_frame_corrections(
+    gas_fields: Dict[str, Field],
+    variables: Dict[str, Any],
+    redge: Quantity,
+    is_3d: bool,
+    unit_dict: Dict[str, Quantity],
+) -> None:
+    omegaframe = variables.get("OMEGAFRAME", 0.0)
+    if omegaframe == 0.0 or gas_fields.get("vphi") is None:
+        return
+    
+    logger.info(f"Applying corotating frame correction: OMEGAFRAME = {omegaframe}")
+    
+    vphi_data = gas_fields["vphi"].data
+    r_centers = 0.5 * (redge[:-1] + redge[1:])
+    r_centers = np.asarray(r_centers, dtype=float)
+    vphi_mag = np.asarray(vphi_data.to(unit_dict['unit_velocity']).magnitude, dtype=float)
+    
+    if is_3d:
+        r_grid = r_centers[:, np.newaxis, np.newaxis]
+    else:
+        r_grid = r_centers[:, np.newaxis]
+    
+    vphi_corrected_mag = vphi_mag + r_grid * omegaframe
+    vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
+    
+    gas_fields["vphi"] = Field(
+        data=vphi_corrected,
+        quantity="vphi",
+        axis_order=gas_fields["vphi"].axis_order,
+    )
+    
+    logger.info(f"Corotating frame correction applied to vphi")
+
+
+def _derive_temperature(
+    directory: Path,
+    file_n: int,
+    gas_fields: Dict[str, Field],
+    variables: Dict[str, Any],
+    compile_options: Dict[str, Optional[bool]],
+    is_3d: bool,
+    norm_units: str,
+) -> None:
+    gasenergy_field = gas_fields.get("gasenergy")
+    if gasenergy_field is None:
+        p = directory / f"gasenergy{file_n}.dat"
+        if not p.exists():
+            return
+        arr = np.fromfile(p, dtype="float64")
+        if is_3d:
+            nrad = gas_fields["density"].data.shape[0]
+            nsec = gas_fields["density"].data.shape[1]
+            ncol = gas_fields["density"].data.shape[2]
+            try:
+                arr = arr.reshape(ncol, nrad, nsec)
+            except Exception:
+                if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
+                    inferred_ncol = arr.size // (nrad * nsec)
+                    arr = arr.reshape(inferred_ncol, nrad, nsec)
+                else:
+                    raise
+            arr = np.roll(arr, shift=int(nsec//2), axis=2)
+            arr = np.transpose(arr, (1, 2, 0))
+            axes = ("r", "phi", "theta")
+        else:
+            nrad = gas_fields["surface_density"].data.shape[0]
+            nsec = gas_fields["surface_density"].data.shape[1]
+            arr = arr.reshape(nrad, nsec)
+            if (directory / "variables.par").exists():
+                arr = np.roll(arr, shift=int(nsec//2), axis=1)
+            axes = ("r", "phi")
+        gasenergy_field = Field(
+            data=Quantity(arr, 'dimensionless'),
+            quantity="gasenergy",
+            axis_order=axes,
+        )
+    
+    is_isothermal_opt = compile_options.get('ISOTHERMAL', None)
+    if is_isothermal_opt is None:
+        write_energy = variables.get('WRITEENERGY', None)
+        try:
+            write_energy_val = int(write_energy) if write_energy is not None else None
+        except Exception:
+            write_energy_val = None
+        is_isothermal = (write_energy_val == 0)
+    else:
+        is_isothermal = bool(is_isothermal_opt)
+    
+    temp_data = None
+    
+    if is_isothermal:
+        c_s = gasenergy_field.data.magnitude
+        temp_data = c_s ** 2
+        logger.debug(f"Isothermal: c_s range = {c_s.min():.3e} - {c_s.max():.3e}")
+        logger.debug(f"T_code range = {temp_data.min():.3e} - {temp_data.max():.3e}")
+    else:
+        gamma = variables.get("GAMMA")
+        if is_3d:
+            rho = gas_fields["density"].data.magnitude
+            e = gasenergy_field.data.magnitude
+            temp_data = (gamma - 1.0) * e / rho
+        else:
+            logger.warning("Temperature calculation for 2D non-isothermal requires vertical puffing")
+    
+    if temp_data is not None:
+        if norm_units == "code":
+            code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
+            code_length_m = (1.0 * au).to('m').magnitude
+            mu = float(variables["MU"])
+            cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
+        elif norm_units == "cgs":
+            mu = float(variables["MU"])
+            cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/cm^2').magnitude
+        elif norm_units == "kms":
+            mu = float(variables["MU"])
+            cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/m^2').magnitude
+        else:
+            cutemp = 1.0
+        
+        temp_data_K = temp_data * cutemp
+        temp_field = Field(
+            data=Quantity(temp_data_K, 'K'),
+            quantity="temperature",
+            axis_order=gasenergy_field.axis_order,
+        )
+        gas_fields["temperature"] = temp_field
+
+
+def _build_disk_parameters(
+    variables: Dict[str, Any], unit_dict: Dict[str, Quantity], norm_units: str
+) -> Dict[str, Any]:
+    disk_parameters: Dict[str, Any] = {}
+    disk_parameters["alphavisocity"] = variables.get("ALPHA") * units('dimensionless')
+    disk_parameters["kinematicviscosity"] = variables.get("NU") * unit_dict['unit_viscosity']
+    disk_parameters["aspectratio"] = variables.get("ASPECTRATIO") * units('dimensionless')
+    disk_parameters["flaringindex"] = variables.get("FLARINGINDEX") * units('dimensionless')
+    disk_parameters["sigma0"] = variables.get("SIGMA0") * unit_dict['unit_surface_density']
+    disk_parameters["sigmaslope"] = variables.get("SIGMASLOPE") * units('dimensionless')
+    disk_parameters["gamma"] = variables.get("GAMMA") * units('dimensionless')
+    disk_parameters["cs"] = variables.get("CS") * unit_dict['unit_velocity']
+
+    if norm_units in ("cgs", "kms"):
+        disk_parameters["r0"] = 5.2 * units('au')
+    else:
+        disk_parameters["r0"] = 1.0 * units('code_length')
+    
+    return disk_parameters
+
+
 # -----------------
 # main entry
 # -----------------
@@ -257,377 +620,29 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         else:
             variables["MU"] = float(FARGO_DEFAULT_MU)
 
-    # Auto-detect dimensionality
-    nz_val = variables.get("NZ", None)
-    if nz_val is not None:
-        try:
-            nz = int(nz_val)
-        except Exception:
-            nz = 0
-        is_3d = nz > 1
-    else:
-        nz = 0
-        # Only fall back to domain_z.dat presence when NZ absent
-        if (directory / "domain_z.dat").exists():
-            is_3d = True
-            logger.info("Detected 3D run from domain_z.dat; NZ missing in variables.par")
-        else:
-            is_3d = False
-
-    # Dimensions and edges
-    if not is_3d:
-        dims = _read_dims(directory)
-        if dims is None:
-            # Fall back to variables (FARGO uses NY=radial, NX=azimuthal)
-            nrad = int(variables.get("NY", 0))
-            nsec = int(variables.get("NX", 0))
-            if nrad <= 0 or nsec <= 0:
-                raise RuntimeError("Could not determine grid dimensions from dims.dat or variables.par")
-        else:
-            nrad, nsec = dims
-
-        # Radial edges
-        redge = _read_used_rad(directory) * unit_dict['unit_length']
-        if redge is None:
-            # Try to build from variables
-            try:
-                rmin = float(variables.get("RMIN"))
-                rmax = float(variables.get("RMAX"))
-                if rmax <= rmin:
-                    raise ValueError
-                redge = np.linspace(rmin, rmax, nrad + 1) * unit_dict['unit_length']
-                logger.warning("used_rad.dat missing; built redge from RMIN/RMAX in variables.par")
-            except Exception:
-                logger.error("used_rad.dat missing and could not infer redge from variables.par")
-                raise FileNotFoundError("used_rad.dat not found and no valid RMIN/RMAX; cannot build radial edges")
-
-        # Azimuth edges
-        pedge = _build_pedge(nsec) * units('radians')
-
-        mesh = Mesh.polar(r=Axis(edges=redge), 
-                          phi=Axis(edges=pedge))
+    dim_info = _detect_dimensionality(directory, variables)
+    
+    if not dim_info.is_3d:
+        redge, pedge, nrad, nsec = _load_edges_2d(directory, variables, unit_dict)
+        mesh = Mesh.polar(r=Axis(edges=redge), phi=Axis(edges=pedge))
         coord_system = "polar"
         ncol = 1
     else:
-        # For 3D, prefer edges from domain files (FARGO3D)
-        px = directory / "domain_x.dat"
-        py = directory / "domain_y.dat"
-        pz = directory / "domain_z.dat"
-        pedge = None
-        redge = None
-        tedge = None
-        if px.exists():
-            try:
-                pedge = np.loadtxt(px) * units('radians')
-            except Exception:
-                logger.warning(f"Failed reading {px}; will try building phi edges from NX")
-        else:
-            logger.info(f"{px} not found; will try building phi edges from NX")
-        if py.exists():
-            try:
-                redge = np.loadtxt(py) * unit_dict['unit_length']
-            except Exception:
-                logger.warning(f"Failed reading {py}; will try used_rad.dat or variables")
-        else:
-            logger.info(f"{py} not found; will try used_rad.dat or variables")
-        if pz.exists():
-            try:
-                tedge = np.loadtxt(pz) * units('radians')
-            except Exception:
-                logger.warning(f"Failed reading {pz}; will try building theta edges from NZ")
-        else:
-            logger.info(f"{pz} not found; will try building theta edges from NZ")
-
-        # Fallbacks
-        if redge is None:
-            rr = _read_used_rad(directory)
-            if rr is not None:
-                redge = rr * unit_dict['unit_length']
-                logger.warning("domain_y.dat missing; using used_rad.dat for radial edges")
-        if redge is None:
-            # variables RMIN/RMAX and NY
-            try:
-                nrad = int(variables.get("NY"))
-                rmin = float(variables.get("RMIN"))
-                rmax = float(variables.get("RMAX"))
-                if nrad > 0 and rmax > rmin:
-                    redge = np.linspace(rmin, rmax, nrad + 1) * unit_dict['unit_length']
-                    logger.warning("domain_y.dat missing; built redge from variables.par (RMIN/RMAX/NY)")
-            except Exception:
-                pass
-
-        if pedge is None:
-            try:
-                nsec = int(variables.get("NX"))
-                if nsec > 0:
-                    pedge = _build_pedge(nsec) * units('radians')
-                    logger.warning("domain_x.dat missing; built phi edges from NX")
-            except Exception:
-                pass
-
-        if tedge is None:
-            if nz > 1:
-                ncol = nz
-                tedge = np.linspace(0.0, np.pi, ncol + 1) * units('radians')
-                logger.warning("domain_z.dat missing; built theta edges uniformly from NZ between 0 and pi")
-
-        # Final checks
-        if redge is None or pedge is None or tedge is None:
-            logger.error("Insufficient information to construct 3D mesh (need domain files or valid fallbacks)")
-            raise FileNotFoundError("Cannot construct 3D mesh: missing domain edges and fallbacks")
-
-        # Cell counts
-        # Note: FARGO3D domain files include ghost zones (3 on each side) for radial and vertical directions
-        # The azimuthal direction is periodic and does not have ghost zones
-        nsec_raw = int(pedge.size - 1)
-        nrad_raw = int(redge.size - 1)
-        ncol_raw = int(tedge.size - 1)
-        
-        # Account for 6 ghost zones (3 on each side) in radial and colatitude
-        # No ghost zones in azimuthal (periodic boundary)
-        nsec = nsec_raw
-        nrad = nrad_raw - 6
-        ncol = ncol_raw - 6
-        
-        # Adjust edges to exclude ghost zones
-        # FARGO3D domain files: first 3 are lower ghost, last 3 are upper ghost
-        redge = redge[3:-3]
-        tedge = tedge[3:-3]
-        # pedge does not need adjustment (no ghost zones in azimuthal)
-
+        redge, pedge, tedge, nrad, nsec, ncol = _load_edges_3d(
+            directory, variables, unit_dict, dim_info.ncol
+        )
         mesh = Mesh.spherical(r=Axis(edges=redge), 
                               phi=Axis(edges=pedge), 
                               theta=Axis(edges=tedge))
         coord_system = "spherical"
 
-    # Load fields present on disk for the snapshot
-    gas_fields: Dict[str, Field] = {}
-
-    def _read_field(filename: str, quantity: str, units: Quantity) -> Optional[Field]:
-        p = directory / filename
-        if not p.exists():
-            logger.info(f"Field file missing: {p}")
-            return None
-        arr = np.fromfile(p, dtype="float64")
-        if is_3d:
-            # FARGO3D stores 3D data in (ncol, nrad, nsec) order (colatitude, radius, azimuth)
-            # This is the native output format from FARGO3D simulations
-            try:
-                arr = arr.reshape(ncol, nrad, nsec)
-            except Exception:
-                logger.warning(f"Reshape to (ncol,nrad,nsec) failed for {p}; attempting auto-infer of dimensions")
-                if nrad > 0 and nsec > 0 and arr.size % (nrad * nsec) == 0:
-                    inferred_ncol = arr.size // (nrad * nsec)
-                    arr = arr.reshape(inferred_ncol, nrad, nsec)
-                    logger.info(f"Inferred ncol={inferred_ncol} from file size for {p}")
-                else:
-                    raise
-            
-            # Apply azimuthal roll by nsec/2 (FARGO3D convention: origin at x-axis, needs shift to align with standard coordinates)
-            arr = np.roll(arr, shift=int(nsec//2), axis=2)
-            
-            # Transpose to (r, phi, theta) order for consistency with mesh
-            arr = np.transpose(arr, (1, 2, 0))  # (ncol, nrad, nsec) -> (nrad, nsec, ncol)
-            axes = ("r", "phi", "theta")
-        else:
-            arr = arr.reshape(nrad, nsec)
-            # For FARGO3D runs (indicated by presence of variables.par), apply azimuthal roll
-            if (directory / "variables.par").exists():
-                arr = np.roll(arr, shift=int(nsec//2), axis=1)
-            axes = ("r", "phi")
-        arr = arr * units
-        return Field(
-            data=arr,
-            quantity=quantity,
-            axis_order=axes,
-        )
-
-    # FARGO 2D canonical names
-    if is_3d:
-        gas_fields["density"] = _read_field(f"gasdens{file_n}.dat", 
-                                            "density", 
-                                            units=unit_dict['unit_density'])
-    else:
-        gas_fields["surface_density"] = _read_field(f"gasdens{file_n}.dat", 
-                                                    "surface_density", 
-                                                    units=unit_dict['unit_surface_density'])
-
-    # FARGO3D file convention:
-    # gasvx = azimuthal velocity (vphi)
-    # gasvy = radial velocity (vr)  
-    # gasvz = colatitude velocity (vtheta)
-    gas_fields["vr"] = _read_field(f"gasvy{file_n}.dat", 
-                                   "vr", 
-                                   units=unit_dict['unit_velocity'])
-
-    gas_fields["vphi"] = _read_field(f"gasvx{file_n}.dat", 
-                                     "vphi", 
-                                     units=unit_dict['unit_velocity'])
-
-    if is_3d:
-        gas_fields["vtheta"] = _read_field(f"gasvz{file_n}.dat", 
-                                            "vtheta", 
-                                            units=unit_dict['unit_velocity'])
+    gas_fields = _load_fields(
+        directory, file_n, dim_info.is_3d, nrad, nsec, ncol, unit_dict
+    )
     
-    # Correct for corotating frame if OMEGAFRAME is present in variables.par
-    # FARGO stores velocities in the corotating frame, so we need to add back
-    # the frame rotation to get velocities in the inertial frame
-    omegaframe = variables.get("OMEGAFRAME", 0.0)
-    if omegaframe != 0.0 and gas_fields.get("vphi") is not None:
-        logger.info(f"Applying corotating frame correction: OMEGAFRAME = {omegaframe}")
-        
-        # The correction is: vphi_inertial = vphi_corotating + r * omegaframe
-        # OMEGAFRAME is in code units (code_omega = 1/code_time)
-        # r * omegaframe gives velocity in code_velocity units
-        
-        if is_3d:
-            # For 3D: vphi has shape (r, phi, theta)
-            vphi_data = gas_fields["vphi"].data
-            nr, nphi, ntheta = vphi_data.shape
-            
-            # Create radial grid matching the data shape
-            # redge is dimensionless array in code units, we need cell centers
-            r_centers = 0.5 * (redge[:-1] + redge[1:])
-            # Ensure it's a pure numpy array
-            r_centers = np.asarray(r_centers, dtype=float)
-            
-            # Convert vphi to velocity magnitude (pure numpy array in code units)
-            vphi_mag = np.asarray(vphi_data.to(unit_dict['unit_velocity']).magnitude, dtype=float)
-            
-            # Broadcast radius to match vphi shape: (nr, nphi, ntheta)
-            r_grid = r_centers[:, np.newaxis, np.newaxis]
-            
-            # Add corotating frame correction: vphi_inertial = vphi_corotating + r * omegaframe
-            # All in code units: code_length * code_omega = code_velocity
-            vphi_corrected_mag = vphi_mag + r_grid * omegaframe
-            
-            # Reattach units
-            vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
-            
-            # Update the field with corrected velocity
-            gas_fields["vphi"] = Field(
-                data=vphi_corrected,
-                quantity="vphi",
-                axis_order=gas_fields["vphi"].axis_order,
-            )
-        else:
-            # For 2D: vphi has shape (r, phi)
-            vphi_data = gas_fields["vphi"].data
-            nr, nphi = vphi_data.shape
-            
-            # Create radial grid matching the data shape
-            r_centers = 0.5 * (redge[:-1] + redge[1:])
-            # Ensure it's a pure numpy array
-            r_centers = np.asarray(r_centers, dtype=float)
-            
-            # Convert vphi to velocity magnitude (pure numpy array in code units)
-            vphi_mag = np.asarray(vphi_data.to(unit_dict['unit_velocity']).magnitude, dtype=float)
-            
-            # Broadcast radius to match vphi shape: (nr, nphi)
-            r_grid = r_centers[:, np.newaxis]
-            
-            # Add corotating frame correction
-            vphi_corrected_mag = vphi_mag + r_grid * omegaframe
-            
-            # Reattach units
-            vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
-            
-            # Update the field with corrected velocity
-            gas_fields["vphi"] = Field(
-                data=vphi_corrected,
-                quantity="vphi",
-                axis_order=gas_fields["vphi"].axis_order,
-            )
-        
-        logger.info(f"Corotating frame correction applied to vphi")
-    
-    # Read temperature from gasenergy file
-    gasenergy_field = _read_field(f"gasenergy{file_n}.dat", 
-                                   "gasenergy",
-                                   units=units('dimensionless'))
-    
-    if gasenergy_field is not None:
-        # Check if simulation is isothermal from compile options
-        is_isothermal_opt = compile_options.get('ISOTHERMAL', None)
-        if is_isothermal_opt is None:
-            write_energy = variables.get('WRITEENERGY', None)
-            try:
-                write_energy_val = int(write_energy) if write_energy is not None else None
-            except Exception:
-                write_energy_val = None
-            is_isothermal = (write_energy_val == 0)
-        else:
-            is_isothermal = bool(is_isothermal_opt)
-        temp_data = None
-        
-        if is_isothermal:
-            # For isothermal: gasenergy contains sound speed c_s
-            # Temperature in code units: T = c_s^2
-            c_s = gasenergy_field.data.magnitude
-            temp_data = c_s ** 2
-            logger.debug(f"Isothermal: c_s range = {c_s.min():.3e} - {c_s.max():.3e}")
-            logger.debug(f"T_code range = {temp_data.min():.3e} - {temp_data.max():.3e}")
-        else:
-            # For non-isothermal: gasenergy contains thermal energy per unit volume
-            # T = (gamma-1) * e / rho
-            gamma = variables.get("GAMMA")
-            if is_3d:
-                rho = gas_fields["density"].data.magnitude
-                e = gasenergy_field.data.magnitude
-                temp_data = (gamma - 1.0) * e / rho
-            else:
-                # For 2D, we can't directly compute temperature without vertical structure
-                logger.warning("Temperature calculation for 2D non-isothermal requires vertical puffing")
-        
-        if temp_data is not None:
-            # Convert from FARGO code units to Kelvin
-            # Following fargo2radmc3d: cutemp = mu * 8.0841643e-15 * M / L
-            # where mu is mean molecular weight, M in kg, L in m
-            # This factor converts v^2 (in code units) to K
-            # Note: This uses the BASE code units (1 AU, 1 M_sun)
-            # Any length_scale/mass_scale rescaling is handled in Model._apply_rescaling()
-            
-            if norm_units == "code":
-                # For base code units: 1 code_length = 1 AU, 1 code_mass = 1 M_sun
-                code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
-                code_length_m = (1.0 * au).to('m').magnitude
-                mu = float(variables["MU"])
-                cutemp = mu * 8.0841643e-15 * code_mass_kg / code_length_m
-            elif norm_units == "cgs":
-                # For CGS snapshots, temp_data is a velocity^2-like quantity (cm^2/s^2)
-                # Convert v^2 to Kelvin via T = (mu*m_H/k_B) * v^2
-                mu = float(variables["MU"])
-                cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/cm^2').magnitude
-            elif norm_units == "kms":
-                # For SI snapshots, temp_data is a velocity^2-like quantity (m^2/s^2)
-                mu = float(variables["MU"])
-                cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/m^2').magnitude
-            else:
-                cutemp = 1.0
-            
-            temp_data_K = temp_data * cutemp
-            temp_field = Field(
-                data=Quantity(temp_data_K, 'K'),
-                quantity="temperature",
-                axis_order=gasenergy_field.axis_order,
-            )
-            gas_fields["temperature"] = temp_field
-
-    # Curate disk parameters used by downstream steps
-    disk_parameters: Dict[str, Any] = {}
-    disk_parameters["alphavisocity"] = variables.get("ALPHA") * units('dimensionless')
-    disk_parameters["kinematicviscosity"] = variables.get("NU") * unit_dict['unit_viscosity']
-    disk_parameters["aspectratio"] = variables.get("ASPECTRATIO") * units('dimensionless')
-    disk_parameters["flaringindex"] = variables.get("FLARINGINDEX") * units('dimensionless')
-    disk_parameters["sigma0"] = variables.get("SIGMA0") * unit_dict['unit_surface_density']
-    disk_parameters["sigmaslope"] = variables.get("SIGMASLOPE") * units('dimensionless')
-    disk_parameters["gamma"] = variables.get("GAMMA") * units('dimensionless')
-    disk_parameters["cs"] = variables.get("CS") * unit_dict['unit_velocity']
-
-    if norm_units in ("cgs", "kms"):
-        disk_parameters["r0"] = 5.2 * units('au')
-    else:
-        disk_parameters["r0"] = 1.0 * units('code_length')
+    _apply_frame_corrections(gas_fields, variables, redge, dim_info.is_3d, unit_dict)
+    _derive_temperature(directory, file_n, gas_fields, variables, compile_options, dim_info.is_3d, norm_units)
+    disk_parameters = _build_disk_parameters(variables, unit_dict, norm_units)
 
     return {
         "coord_system": coord_system,
