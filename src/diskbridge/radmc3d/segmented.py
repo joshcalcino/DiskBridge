@@ -16,6 +16,7 @@ from diskbridge.model.profiles import (
     compute_volume_weighted_mean_radial_profile,
     find_r_split,
 )
+from .wavelengths import build_mcmono_wavelengths
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,61 @@ class SegmentedRadmcRunner:
             **{f"{ax}_max": v[1] for ax, v in segment.bounds.items() if v[1] is not None},
         )
         return clipped, indexer
+    
+    def _setup_segment(
+        self,
+        seg_model: Model,
+        work_dir: Path,
+        base_opacity_dir: Path,
+    ) -> 'RadModel':
+        """Setup segment: create RadModel, write inputs, link opacities."""
+        from diskbridge.radmc3d.model import RadModel
+        from diskbridge.radmc3d.utils import link_dustkappa_opacities
+        
+        work_dir.mkdir(parents=True, exist_ok=True)
+        rad = RadModel(seg_model, model_dir=work_dir)
+        rad.writer.write_all_input_files(work_dir)
+        link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
+        return rad
+    
+    def _inherit_external_source(
+        self,
+        outer_rad: 'RadModel',
+        inner_rad: 'RadModel',
+        r_split_au: float,
+        shell_ncells: int,
+    ) -> None:
+        """Extract shell spectrum from outer and write as external source for inner."""
+        wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
+            r_split_au=r_split_au,
+            shell_ncells=shell_ncells,
+            mcmono_dir=outer_rad.outputs_dir / 'mcmono',
+        )
+        inner_rad.write_effective_external_source(
+            wavelengths_um=wavelengths_um,
+            spectrum=shell_spectrum,
+            output_dir=inner_rad.inputs_dir,
+            require_coverage=True,
+        )
+    
+    def _run_segment_rt(
+        self,
+        rad: 'RadModel',
+        nphot_therm: int,
+        nphot_mono: int,
+        mcmono_wav_um: np.ndarray,
+        force: bool,
+    ) -> None:
+        """Run temperature and mcmono for a segment."""
+        temp_dir = rad.outputs_dir / 'temperature'
+        mcmono_dir = rad.outputs_dir / 'mcmono'
+        rad.compute_temperature(nphot=nphot_therm, output_dir=temp_dir, force=force)
+        rad.compute_mcmono(
+            nphot=nphot_mono,
+            output_dir=mcmono_dir,
+            force=force,
+            wavelengths_um=mcmono_wav_um,
+        )
 
     def _merge_field(
         self,
@@ -114,8 +170,6 @@ class SegmentedRadmcRunner:
         merged_T: Optional[Quantity] = None
         merged_chi: Optional[Quantity] = None
 
-        mcmono_wav_um_use: Optional[np.ndarray] = None
-
         base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
 
@@ -147,95 +201,26 @@ class SegmentedRadmcRunner:
             else:
                 seg_model, seg_indexer = self._build_segment_model_and_indexer(segment)
 
-            segment.work_dir.mkdir(parents=True, exist_ok=True)
-            rad = RadModel(seg_model, model_dir=segment.work_dir)
-            rad.writer.write_all_input_files(segment.work_dir)
-
             _ensure_opacities_available()
-            link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
-
-            temp_dir = rad.outputs_dir / 'temperature'
-            mcmono_dir = rad.outputs_dir / 'mcmono'
+            rad = self._setup_segment(seg_model, segment.work_dir, base_opacity_dir)
 
             if mcmono_wav_um_use is None:
-                if mcmono_wavelengths_um is not None:
-                    mcmono_wav_um_use = mcmono_wavelengths_um
-                else:
-                    if mcmono_wavelength_source == 'uv':
-                        lam_min = params.uv_min.to('micron').magnitude
-                        lam_max = params.uv_max.to('micron').magnitude
-                        n_use = params.uv_n_wavelengths if mcmono_n_wavelengths is None else int(mcmono_n_wavelengths)
-                        if n_use < 2:
-                            raise ValueError("mcmono_n_wavelengths must be >= 2")
-                        if mcmono_wavelength_spacing == 'linear':
-                            mcmono_wav_um_use = np.linspace(lam_min, lam_max, n_use)
-                        elif mcmono_wavelength_spacing == 'log':
-                            mcmono_wav_um_use = np.exp(np.linspace(np.log(lam_min), np.log(lam_max), n_use))
-                        else:
-                            raise ValueError(
-                                "mcmono_wavelength_spacing must be one of: 'linear', 'log'"
-                            )
-                    elif mcmono_wavelength_source == 'external':
-                        wav_file = rad.inputs_dir / 'wavelength_micron.inp'
-                        if not wav_file.is_file():
-                            raise FileNotFoundError(f"wavelength grid file not found: {wav_file}")
-                        with open(wav_file, 'r') as f:
-                            n_global = int(f.readline().strip())
-                            wav_global = np.array([float(f.readline().strip()) for _ in range(n_global)], dtype=float)
-                        if mcmono_n_wavelengths is None:
-                            mcmono_wav_um_use = wav_global
-                        else:
-                            lam_min = float(np.min(wav_global))
-                            lam_max = float(np.max(wav_global))
-                            n_use = int(mcmono_n_wavelengths)
-                            if n_use < 2:
-                                raise ValueError("mcmono_n_wavelengths must be >= 2")
-                            if mcmono_wavelength_spacing == 'linear':
-                                mcmono_wav_um_use = np.linspace(lam_min, lam_max, n_use)
-                            elif mcmono_wavelength_spacing == 'log':
-                                mcmono_wav_um_use = np.exp(np.linspace(np.log(lam_min), np.log(lam_max), n_use))
-                            else:
-                                raise ValueError(
-                                    "mcmono_wavelength_spacing must be one of: 'linear', 'log'"
-                                )
-                    else:
-                        raise ValueError(
-                            "mcmono_wavelength_source must be one of: 'uv', 'external'"
-                        )
-
                 n_uv = params.uv_n_wavelengths if mcmono_uv_n_wavelengths is None else int(mcmono_uv_n_wavelengths)
-                if n_uv == 1:
-                    raise ValueError("mcmono_uv_n_wavelengths must be >= 2 (or 0 to disable UV enforcement)")
-                if n_uv > 0:
-                    uv_min_um = float(params.uv_min.to('micron').magnitude)
-                    uv_max_um = float(params.uv_max.to('micron').magnitude)
-                    uv_grid = np.linspace(uv_min_um, uv_max_um, n_uv)
-                    mcmono_wav_um_use = np.unique(
-                        np.concatenate([np.asarray(mcmono_wav_um_use, dtype=float), uv_grid])
-                    )
+                mcmono_wav_um_use = build_mcmono_wavelengths(
+                    wavelength_source=mcmono_wavelength_source,
+                    wavelength_file=rad.inputs_dir / 'wavelength_micron.inp',
+                    uv_min_um=params.uv_min.to('micron').magnitude,
+                    uv_max_um=params.uv_max.to('micron').magnitude,
+                    n_wavelengths=mcmono_n_wavelengths,
+                    n_uv_enforce=n_uv,
+                    spacing=mcmono_wavelength_spacing,
+                    provided_wavelengths=mcmono_wavelengths_um,
+                )
 
             if level > 0 and outer_rad is not None:
-                wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
-                    r_split_au=current_outer_rmax_au,
-                    shell_ncells=shell_ncells,
-                    mcmono_dir=outer_rad.outputs_dir / 'mcmono',
-                )
-                rad.write_effective_external_source(
-                    wavelengths_um=wavelengths_um,
-                    spectrum=shell_spectrum,
-                    output_dir=rad.inputs_dir,
-                    require_coverage=True,
-                )
+                self._inherit_external_source(outer_rad, rad, current_outer_rmax_au, shell_ncells)
 
-            nphot_therm_use = nphot_therm_intermediate
-            nphot_mono_use = nphot_mono_intermediate
-            rad.compute_temperature(nphot=nphot_therm_use, output_dir=temp_dir, force=force)
-            rad.compute_mcmono(
-                nphot=nphot_mono_use,
-                output_dir=mcmono_dir,
-                force=force,
-                wavelengths_um=mcmono_wav_um_use,
-            )
+            self._run_segment_rt(rad, nphot_therm_intermediate, nphot_mono_intermediate, mcmono_wav_um_use, force)
 
             if merged_T is None or merged_chi is None:
                 merged_T = rad.temperature
@@ -305,8 +290,6 @@ class SegmentedRadmcRunner:
 
             if float(r_split_au) >= stop_factor * float(current_outer_rmax_au):
                 final_work_dir = self.base_model_dir / 'segments' / f'segment_{level + 1:02d}_rmax_{current_outer_rmax_au:.6g}au_final'
-                final_work_dir.mkdir(parents=True, exist_ok=True)
-
                 final_seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
                 final_segment = SegmentDefinition(
                     name=f'segment_{level + 1:02d}_final',
@@ -314,33 +297,14 @@ class SegmentedRadmcRunner:
                     work_dir=final_work_dir,
                 )
                 final_model, final_indexer = self._build_segment_model_and_indexer(final_segment)
-                final_rad = RadModel(final_model, model_dir=final_work_dir)
-                final_rad.writer.write_all_input_files(final_work_dir)
+                
                 _ensure_opacities_available()
-                link_dustkappa_opacities(base_opacity_dir, final_rad.inputs_dir)
-
+                final_rad = self._setup_segment(final_model, final_work_dir, base_opacity_dir)
+                
                 if outer_rad is not None:
-                    wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
-                        r_split_au=current_outer_rmax_au,
-                        shell_ncells=shell_ncells,
-                        mcmono_dir=outer_rad.outputs_dir / 'mcmono',
-                    )
-                    final_rad.write_effective_external_source(
-                        wavelengths_um=wavelengths_um,
-                        spectrum=shell_spectrum,
-                        output_dir=final_rad.inputs_dir,
-                        require_coverage=True,
-                    )
-
-                final_temp_dir = final_rad.outputs_dir / 'temperature'
-                final_mcmono_dir = final_rad.outputs_dir / 'mcmono'
-                final_rad.compute_temperature(nphot=nphot_therm_final, output_dir=final_temp_dir, force=force)
-                final_rad.compute_mcmono(
-                    nphot=nphot_mono_final,
-                    output_dir=final_mcmono_dir,
-                    force=force,
-                    wavelengths_um=mcmono_wav_um_use,
-                )
+                    self._inherit_external_source(outer_rad, final_rad, current_outer_rmax_au, shell_ncells)
+                
+                self._run_segment_rt(final_rad, nphot_therm_final, nphot_mono_final, mcmono_wav_um_use, force)
 
                 merged_T = self._merge_field(
                     merged=merged_T,

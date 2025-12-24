@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Sequence, Optional
 
 from diskbridge._logging import logger
-from diskbridge._params import Params
 from .utils import _read_params_snapshot, _params_signature
 
 
@@ -18,7 +17,6 @@ def check_cache_validity(
     current_params_path: Path,
     saved_params_path: Path,
     param_keys: Sequence[str],
-    allow_overrides: bool = True,
 ) -> bool:
     """Check if cached output is valid based on parameter signatures.
     
@@ -32,8 +30,6 @@ def check_cache_validity(
         Path to saved params.txt from when cache was created
     param_keys : Sequence[str]
         Parameter names to include in signature comparison
-    allow_overrides : bool, optional
-        If False, only use cache if no parameter overrides were used
         
     Returns
     -------
