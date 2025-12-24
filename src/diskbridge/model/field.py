@@ -42,14 +42,12 @@ class Field:
                 f"ndim={self.ndim})")
 
     def _scaled(self, factor):
-        try:
-            new_data = self.data * factor
-        except Exception:
-            new_data = self.data
+        new_data = self.data * factor
         return Field(
             data=new_data,
             quantity=self.quantity,
             axis_order=self.axis_order,
+            attrs=self.attrs,
         )
         
     def __mul__(self, other):

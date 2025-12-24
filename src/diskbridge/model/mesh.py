@@ -299,3 +299,26 @@ class Mesh:
             new_axes[name] = Axis(edges=new_edges, centers=new_centers)
         
         return Mesh(self.coord_system, new_axes)
+    
+    def clip(self, bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]]) -> "Mesh":
+        """
+        Clip mesh to given bounds along specified axes.
+        
+        Parameters
+        ----------
+        bounds : dict
+            Mapping from axis name to (min, max) bounds. Either bound can be None.
+            
+        Returns
+        -------
+        Mesh
+            New mesh with clipped axes
+            
+        Raises
+        ------
+        ValueError
+            If clipping removes all cells or if axis doesn't exist
+        """
+        from .clipping import compute_clip_indexer
+        _, new_axes = compute_clip_indexer(self, bounds)
+        return Mesh(self.coord_system, new_axes)

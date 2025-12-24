@@ -479,3 +479,83 @@ def set_mask_from_joos_disk(
         mask &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
 
     return model.set_mask_from_array(mask, is_a_disk=True)
+
+
+def set_mask_from_geometry(
+    model: "Model",
+    r_min: Optional[Quantity] = None,
+    r_max: Optional[Quantity] = None,
+    theta_min: Optional[Quantity] = None,
+    theta_max: Optional[Quantity] = None,
+    honrmax: Optional[float] = None,
+    is_a_disk: bool = False,
+) -> "SubModel":
+    from .core import SubModel
+    
+    mesh = model.mesh
+    if mesh is None:
+        raise ValueError("Model has no mesh")
+        
+    if mesh.coord_system != 'spherical':
+        raise ValueError(
+            f"set_mask_from_geometry only supports spherical coordinates, "
+            f"got {mesh.coord_system}"
+        )
+    
+    if is_a_disk and model.disk is not None:
+        target_region = model.disk
+    else:
+        target_region = SubModel(model)
+    
+    r = mesh.centers('r')
+    theta = mesh.centers('theta')
+    phi = mesh.centers('phi')
+    
+    r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
+    
+    mask = np.ones_like(r_grid, dtype=bool)
+    
+    if r_min is not None:
+        mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+    if r_max is not None:
+        mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+    
+    if honrmax is not None and model.disk is not None:
+        R_cyl = r_grid * np.sin(theta_grid)
+        z_cyl = r_grid * np.cos(theta_grid)
+        
+        h0 = model.disk.parameters["aspectratio"]
+        fl = model.disk.parameters["flaringindex"]
+        r0 = model.disk.parameters["r0"]
+        
+        h = h0 * (R_cyl / r0.to(R_cyl.units)) ** fl
+        H = h * R_cyl
+        
+        z_max = honrmax * H
+        mask &= (np.abs(z_cyl) <= z_max)
+    
+    if theta_min is not None:
+        mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
+    if theta_max is not None:
+        mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
+    
+    axis_order = ('r', 'phi', 'theta')
+    
+    mask_quantity = Quantity(mask, 'dimensionless')
+    mask_field = Field(
+        data=mask_quantity,
+        quantity='mask',
+        axis_order=axis_order,
+    )
+    
+    target_region.mask = mask_field
+    
+    if is_a_disk:
+        target_region.is_disk_region = True
+    
+    logger.info(
+        f"{target_region.__class__.__name__} mask set: {np.sum(mask)} / {mask.size} cells "
+        f"({100*np.sum(mask)/mask.size:.1f}%)"
+    )
+    
+    return target_region

@@ -121,8 +121,9 @@ class Model:
             self.time_scale = time_factor
             self.velocity_scale = velocity_factor
 
-    def load_model(
-        self,
+    @classmethod
+    def load(
+        cls,
         path: Union[str, Path],
         reader: str = "fargo",
         file_n: int = 0,
@@ -131,98 +132,86 @@ class Model:
         mass_scale: Optional[float] = None,
     ) -> "Model":
         """
-        Load a hydro snapshot and populate this Model, then return self.
+        Load a hydro snapshot or saved model.
         
         Parameters
         ----------
         path : str or Path
-            Path to the simulation data directory
+            Path to simulation data directory or saved model file
         reader : str, optional
-            Reader type (default: "fargo")
+            Reader type (default: "fargo"). Ignored for saved models.
         file_n : int, optional
-            File number to load (default: 0)
+            File number to load (default: 0). Ignored for saved models.
         file_units : str, optional
-            Unit system of the files: 'code', 'cgs', or 'kms' (default: 'code')
+            Unit system: 'code', 'cgs', or 'kms' (default: 'code'). Ignored for saved models.
         length_scale : float, optional
-            Dimensionless multiplier for length units. For code units (1 au), 
-            this rescales by this factor (e.g., 10 means 1 code_length = 10 au).
-            Time is also rescaled following Keplerian dynamics.
+            Length units multiplier (e.g., 10 means 1 code_length = 10 au). Ignored for saved models.
         mass_scale : float, optional
-            Dimensionless multiplier for mass units. For code units (1 M_sun),
-            this rescales by this factor (e.g., 2 means 1 code_mass = 2 M_sun).
-            Velocities are rescaled as V -> V*sqrt(mass_scale/length_scale).
+            Mass units multiplier (e.g., 2 means 1 code_mass = 2 M_sun). Ignored for saved models.
         
         Returns
         -------
         Model
-            The populated model instance
-            
-        Notes
-        -----
-        Rescaling follows Keplerian dynamics where T^2 ~ L^3/M:
-        - Lengths scale by length_scale
-        - Masses scale by mass_scale  
-        - Times scale by sqrt(length_scale^3/mass_scale)
-        - Velocities scale by sqrt(mass_scale/length_scale)
-        - Densities scale by mass_scale/length_factor^3
+            The loaded model instance
         """
+        import pickle
+        
+        p = Path(path)
+        
+        if p.is_file():
+            with open(p, 'rb') as f:
+                return pickle.load(f)
+        
         if length_scale is None or mass_scale is None:
             try:
                 from diskbridge import params as _global_params
-            except Exception:
+            except (ImportError, AttributeError):
                 _global_params = None
             if _global_params is not None:
                 if length_scale is None and hasattr(_global_params, "length_scale"):
                     length_scale = float(_global_params.length_scale)
                 if mass_scale is None and hasattr(_global_params, "mass_scale"):
                     mass_scale = float(_global_params.mass_scale)
-        p = Path(path)
+        
         if reader.lower() == "fargo":
             from .readers.fargo import read_fargo_snapshot
-
             snap = read_fargo_snapshot(p, file_n=file_n, file_units=file_units)
         else:
             raise ValueError(f"Unsupported reader: {reader}")
 
-        # Populate instance
-        self.coord_system = snap["coord_system"]
-        self.variables = snap["variables"]
-        self.compile_options = snap.get("compile_options", {})
-        self.macros = snap.get("macros", {})
-        self.mesh = snap["mesh"]
-        self.file_units = file_units 
-        self.directory = str(p)
-        self.n_file = file_n
-        self.filename = None
+        model = cls()
+        model.coord_system = snap["coord_system"]
+        model.variables = snap["variables"]
+        model.compile_options = snap.get("compile_options", {})
+        model.macros = snap.get("macros", {})
+        model.mesh = snap["mesh"]
+        model.file_units = file_units 
+        model.directory = str(p)
+        model.n_file = file_n
+        model.filename = None
         
-        # Initialize submodels
-        self.gas = SubModel(self)
+        model.gas = SubModel(model)
         
-        # Initialize Dust submodel (lazy import to avoid circular dependency)
         from .dust import Dust
-        self.dust = Dust(self)
+        model.dust = Dust(model)
 
-        # Initialize Disk parameters if present
         if "disk_parameters" in snap:
             from .disk_component import Disk
-            self.disk = Disk(self, snap["disk_parameters"])
+            model.disk = Disk(model, snap["disk_parameters"])
 
-        # Register gas fields
         for name, field in snap["gas_fields"].items():
-            self.gas_register(name, field)
+            model.gas_register(name, field)
         
-        # Apply rescaling if requested
         if length_scale is not None or mass_scale is not None:
-            self._apply_rescaling(length_scale=length_scale, mass_scale=mass_scale)
-            # Update SubModel mesh references after rescaling
-            if self.gas is not None:
-                self.gas.mesh = self.mesh
-            if self.dust is not None:
-                self.dust.mesh = self.mesh
-            if hasattr(self, 'disk') and self.disk is not None:
-                self.disk.mesh = self.mesh
+            model._apply_rescaling(length_scale=length_scale, mass_scale=mass_scale)
+            if model.gas is not None:
+                model.gas.mesh = model.mesh
+            if model.dust is not None:
+                model.dust.mesh = model.mesh
+            if hasattr(model, 'disk') and model.disk is not None:
+                model.disk.mesh = model.mesh
 
-        return self
+        return model
     
     def set_mask_from_geometry(
         self,
@@ -233,102 +222,17 @@ class Model:
         honrmax: Optional[float] = None,
         is_a_disk: bool = False,
     ) -> SubModel:
-        """Define a masked region on the model.
+        from .masking import set_mask_from_geometry as _set_mask_from_geometry
         
-        If is_a_disk=True and self.disk exists, configure self.disk's mask.
-        Otherwise, create and return a new SubModel with the requested mask.
-        
-        Args:
-            r_min: Minimum radius
-            r_max: Maximum radius
-            theta_min: Minimum colatitude (spherical)
-            theta_max: Maximum colatitude (spherical)
-            honrmax: Number of pressure scale heights (disk-specific, requires self.disk)
-            is_a_disk: Mark region as disk (enables settling mode)
-            
-        Returns:
-            SubModel (or Disk) with mask applied
-        """
-        mesh = self.mesh
-        if mesh is None:
-            raise ValueError("Model has no mesh")
-            
-        if mesh.coord_system != 'spherical':
-            raise ValueError(
-                f"set_mask_from_geometry only supports spherical coordinates, "
-                f"got {mesh.coord_system}"
-            )
-        
-        # Determine target region
-        if is_a_disk and self.disk is not None:
-            target_region = self.disk
-        else:
-            target_region = SubModel(self)
-        
-        # Get coordinate arrays
-        r = mesh.centers('r')
-        theta = mesh.centers('theta')
-        phi = mesh.centers('phi')
-        
-        r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
-        
-        # Start with all True
-        mask = np.ones_like(r_grid, dtype=bool)
-        
-        # Apply radial constraints
-        if r_min is not None:
-            mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
-        if r_max is not None:
-            mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
-        
-        # If honrmax is provided and we have disk parameters, compute hydrostatic mask
-        if honrmax is not None and self.disk is not None:
-            # Convert spherical to cylindrical for height calculation
-            R_cyl = r_grid * np.sin(theta_grid)
-            z_cyl = r_grid * np.cos(theta_grid)
-            
-            # Get disk parameters
-            h0 = self.disk.parameters["aspectratio"]
-            fl = self.disk.parameters["flaringindex"]
-            r0 = self.disk.parameters["r0"]
-            
-            # h(R_cyl) = h0 * (R_cyl/r0)^fl, dimensionless
-            h = h0 * (R_cyl / r0.to(R_cyl.units)) ** fl
-            
-            # H(R_cyl) = h * R_cyl, scale height with units
-            H = h * R_cyl
-            
-            # Mask: |z| <= honrmax * H(R_cyl)
-            z_max = honrmax * H
-            mask &= (np.abs(z_cyl) <= z_max)
-        
-        # Apply theta constraints if given
-        if theta_min is not None:
-            mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
-        if theta_max is not None:
-            mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
-        
-        axis_order = ('r', 'phi', 'theta')
-        
-        mask_quantity = Quantity(mask, 'dimensionless')
-        mask_field = Field(
-            data=mask_quantity,
-            quantity='mask',
-            axis_order=axis_order,
+        return _set_mask_from_geometry(
+            self,
+            r_min=r_min,
+            r_max=r_max,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            honrmax=honrmax,
+            is_a_disk=is_a_disk,
         )
-        
-        target_region.mask = mask_field
-        
-        # Mark as disk region if requested
-        if is_a_disk:
-            target_region.is_disk_region = True
-        
-        logger.info(
-            f"{target_region.__class__.__name__} mask set: {np.sum(mask)} / {mask.size} cells "
-            f"({100*np.sum(mask)/mask.size:.1f}%)"
-        )
-        
-        return target_region
     
     def set_mask_from_joos_disk(
         self,
@@ -460,137 +364,23 @@ class Model:
         z_min: Optional[Quantity] = None,
         z_max: Optional[Quantity] = None,
     ) -> "Model":
-        mesh0 = self.mesh
-        if mesh0 is None:
-            raise ValueError("Model has no mesh")
-
-        bounds: Dict[str, tuple[Optional[Quantity], Optional[Quantity]]] = {
-            "r": (r_min, r_max),
-            "theta": (theta_min, theta_max),
-            "phi": (phi_min, phi_max),
-            "x": (x_min, x_max),
-            "y": (y_min, y_max),
-            "z": (z_min, z_max),
-        }
-        bounds = {
-            k: (vmin, vmax)
-            for k, (vmin, vmax) in bounds.items()
-            if vmin is not None or vmax is not None
-        }
-
-        for axis_name in bounds:
-            if axis_name not in mesh0.axes:
-                raise ValueError(
-                    f"Cannot clip axis '{axis_name}' for coord_system '{mesh0.coord_system}'"
-                )
-
-        indexer, new_axes = compute_clip_indexer(mesh0, bounds)
-        axis_slices = indexer.axis_slices
-
-        mesh1 = Mesh(mesh0.coord_system, new_axes)
-
-        def _slice_field(field0: Field) -> Field:
-            slicer = []
-            for ax in field0.axis_order:
-                slicer.append(axis_slices.get(ax, slice(None)))
-            mag0 = np.asarray(field0.data.magnitude)
-            mag1 = mag0[tuple(slicer)]
-            data1 = Quantity(mag1, field0.data.units)
-            return Field(
-                data=data1,
-                quantity=field0.quantity,
-                axis_order=field0.axis_order,
-                attrs=field0.attrs,
-            )
-
-        new = Model()
-        new.coord_system = mesh1.coord_system
-        new.variables = dict(self.variables)
-        new.compile_options = dict(self.compile_options)
-        new.macros = dict(self.macros)
-        new.mesh = mesh1
-        new.file_units = self.file_units
-        new.directory = self.directory
-        new.n_file = self.n_file
-        new.filename = self.filename
-
-        for attr in ("length_scale", "mass_scale", "time_scale", "velocity_scale"):
-            if hasattr(self, attr):
-                setattr(new, attr, getattr(self, attr))
-
-        new.gas = SubModel(new)
-        if getattr(self.gas, "_lazy", None):
-            for name in list(self.gas._lazy.keys()):
-                _ = self.gas[name]
-        for name, field0 in list(self.gas.items()):
-            new.gas_register(name, _slice_field(field0))
-
-        if getattr(self, "disk", None) is not None:
-            from .disk_component import Disk
-
-            new.disk = Disk(new, dict(self.disk.parameters))
-            new.disk.is_disk_region = bool(getattr(self.disk, "is_disk_region", False))
-            if self.disk.mask is not None:
-                new.disk.mask = _slice_field(self.disk.mask)
-
-        if getattr(self, "dust", None) is not None:
-            from .dust import Dust, DustComponent, DustBin
-
-            old_dust = self.dust
-            new.dust = Dust(new)
-            new_dust = new.dust
-
-            new_dust.mask = _slice_field(old_dust.mask) if old_dust.mask is not None else None
-            new_dust.is_disk_region = bool(getattr(old_dust, "is_disk_region", False))
-
-            new_dust.distribution = old_dust.distribution
-            new_dust.dust_to_gas_ratio = old_dust.dust_to_gas_ratio
-            new_dust.mode = old_dust.mode
-            new_dust.alpha = old_dust.alpha
-            new_dust.delta = old_dust.delta
-            new_dust.mean_molecular_weight = old_dust.mean_molecular_weight
-
-            new_dust._has_region_components = bool(getattr(old_dust, "_has_region_components", False))
-            new_dust._components = []
-            for comp0 in getattr(old_dust, "_components", []):
-                comp_mask = _slice_field(comp0.mask) if comp0.mask is not None else None
-                new_dust._components.append(
-                    DustComponent(
-                        distribution=comp0.distribution,
-                        dust_to_gas_ratio=comp0.dust_to_gas_ratio,
-                        mode=comp0.mode,
-                        mask=comp_mask,
-                        alpha=comp0.alpha,
-                        delta=comp0.delta,
-                        mean_molecular_weight=comp0.mean_molecular_weight,
-                        species_base=comp0.species_base,
-                        component_index=comp0.component_index,
-                    )
-                )
-
-            new_dust._global_bins = {}
-            new_dust._bins = {}
-            for comp_idx, comp in enumerate(new_dust._components):
-                nbin = int(comp.distribution.nbin)
-                for local_idx in range(nbin):
-                    global_bin_idx = len(new_dust._global_bins)
-                    bin_name = f"bin_{global_bin_idx}"
-                    new_dust._global_bins[bin_name] = (comp_idx, local_idx)
-                    new_dust._bins[bin_name] = DustBin(
-                        parent_dust=new_dust,
-                        bin_index=global_bin_idx,
-                        size=comp.distribution.bin_centers[local_idx],
-                        size_min=comp.distribution.bin_edges[local_idx],
-                        size_max=comp.distribution.bin_edges[local_idx + 1],
-                        mass_fraction=comp.distribution.mass_fractions[local_idx],
-                        density_material=comp.distribution.grain_density,
-                    )
-
-            new_dust._dust_fields = {}
-            for name, field0 in getattr(old_dust, "_dust_fields", {}).items():
-                new_dust._dust_fields[name] = _slice_field(field0)
-
-        return new
+        from .clipping import clip_model
+        
+        return clip_model(
+            self,
+            r_min=r_min,
+            r_max=r_max,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            phi_min=phi_min,
+            phi_max=phi_max,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            z_min=z_min,
+            z_max=z_max,
+        )
         
 
 class SubModel:
@@ -621,7 +411,7 @@ class SubModel:
         if key == "density":
             try:
                 nd = getattr(self.mesh, "ndims", None)
-            except Exception:
+            except AttributeError:
                 nd = None
             if nd is not None and nd != 3:
                 logger.error("'density' is unavailable: simulation is %sd (use 'surface_density')", nd)
