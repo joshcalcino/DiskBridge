@@ -498,12 +498,12 @@ class RadModel:
         
         This unifies postprocessing for both cache-hit and recompute paths.
         """
-        freq_hz, j_lambda = self.data.read_mean_intensity_file(mean_intensity_file)
+        freq_hz, Jnu_flat = self.data.read_mean_intensity_file(mean_intensity_file)
+        self.mean_intensity = Jnu_flat
         nx, ny, nz = self.data._getMeshShape()
-        self.mean_intensity = j_lambda
         
         chi_3d, n_uv = self._compute_chi_from_mean_intensity(
-            j_lambda=j_lambda,
+            j_lambda=Jnu_flat,
             freq_hz=freq_hz,
             uv_min=uv_min,
             uv_max=uv_max,
@@ -535,39 +535,20 @@ class RadModel:
         
         return self.chi
     
-    def compute_mcmono(
+    def _resolve_mcmono_config(
         self,
-        nphot: int = None,
-        output_dir: Optional[str | Path] = None,
-        force: bool = False,
-        wavelengths_um: Optional[np.ndarray] = None,
-        uv_min: Quantity = None,
-        uv_max: Quantity = None,
-        n_wavelengths: int = None
-    ) -> Quantity:
-        """Run RADMC-3D monochromatic Monte Carlo for UV field.
+        nphot: Optional[int],
+        uv_min: Optional[Quantity],
+        uv_max: Optional[Quantity],
+        n_wavelengths: Optional[int],
+        wavelengths_um: Optional[np.ndarray],
+    ) -> Tuple[int, Quantity, Quantity, int, bool]:
+        """Resolve mcmono configuration from params and arguments.
         
-        Parameters
-        ----------
-        nphot : int, optional
-            Number of photon packages (uses nphot_mono from params if None)
-        output_dir : str or Path, optional
-            Output directory (default: 'mcmono/')
-        force : bool, optional
-            Force recomputation even if output exists (default: False)
-        wavelengths_um : ndarray, optional
-            Custom wavelength grid in microns
-        uv_min : Quantity, optional
-            UV range lower bound (uses params if None)
-        uv_max : Quantity, optional
-            UV range upper bound (uses params if None)
-        n_wavelengths : int, optional
-            Number of wavelengths for integration
-            
         Returns
         -------
-        Quantity
-            UV field chi in Draine units
+        tuple
+            (nphot, uv_min, uv_max, n_wavelengths, all_params_used)
         """
         use_params_nphot = nphot is None
         use_params_uv_min = uv_min is None
@@ -584,44 +565,35 @@ class RadModel:
         if n_wavelengths is None:
             n_wavelengths = self.params.uv_n_wavelengths
         
-        countwrite = max(1, int(nphot // 100))
-        countwrite = min(countwrite, int(np.iinfo(np.int32).max))
-        
         if uv_min < self.params.lambda_min or uv_max > self.params.lambda_max:
             raise ValueError(
-                "mcmono UV wavelength range is outside the global wavelength grid: "
-                f"uv=[{uv_min:~P},{uv_max:~P}], "
-                f"grid=[{self.params.lambda_min:~P},{self.params.lambda_max:~P}]"
+                f"mcmono UV range [{uv_min:~P},{uv_max:~P}] outside global grid "
+                f"[{self.params.lambda_min:~P},{self.params.lambda_max:~P}]"
             )
         
-        logger.info(
-            f"UV field configuration: uv=[{uv_min:~P},{uv_max:~P}], n_wavelengths={n_wavelengths}"
-        )
-        if output_dir is None:
-            output_dir = self.outputs_dir
-        else:
-            output_dir = Path(output_dir)
+        logger.info(f"UV field: [{uv_min:~P},{uv_max:~P}], n={n_wavelengths}")
         
-        use_cache, cached_file = should_use_cache(
-            output_dir=output_dir,
-            candidate_files=['mean_intensity.bout', 'mean_intensity.out'],
-            current_params_path=self.model_dir / 'params.txt',
-            param_keys=_MCTHERM_PARAM_KEYS + _MCMONO_EXTRA_PARAM_KEYS,
-            force=force,
-            use_params_nphot=use_params_nphot,
-            use_params_uv_min=use_params_uv_min,
-            use_params_uv_max=use_params_uv_max,
-            use_params_nw=use_params_nw,
-            use_params_wavelengths=use_params_wavelengths,
+        all_params_used = (
+            use_params_nphot and use_params_uv_min and 
+            use_params_uv_max and use_params_nw and use_params_wavelengths
         )
         
-        if use_cache and cached_file:
-            return self._postprocess_chi(cached_file, uv_min, uv_max)
+        return nphot, uv_min, uv_max, n_wavelengths, all_params_used
+    
+    def _prepare_mcmono_wavelengths(
+        self,
+        wavelengths_um: Optional[np.ndarray],
+        uv_min: Quantity,
+        uv_max: Quantity,
+        n_wavelengths: int,
+    ) -> np.ndarray:
+        """Prepare mcmono wavelength grid.
         
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        self._ensure_cntdump_ge_countwrite(countwrite, nphot)
-        
+        Returns
+        -------
+        ndarray
+            Wavelength grid in microns
+        """
         if wavelengths_um is not None:
             validate_wavelength_array(wavelengths_um, "wavelengths_um")
             mcmono_lam_um = np.asarray(wavelengths_um, dtype=float)
@@ -641,13 +613,24 @@ class RadModel:
         
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
         write_wavelength_file(mcmono_wav_file, mcmono_lam_um, file_format='mcmono')
-        
+        return mcmono_lam_um
+    
+    def _prepare_mcmono_run(self, output_dir: Path) -> None:
+        """Prepare environment for mcmono run (external source, temperature)."""
         if getattr(self.params, 'external_uv', False):
             external_source_path = self.inputs_dir / 'external_source.inp'
             if not external_source_path.exists():
                 writer = RadWriter(self.model, organize_files=True)
                 writer.write_external_source(self.model_dir)
-        
+    
+    def _run_mcmono(
+        self,
+        output_dir: Path,
+        mcmono_lam_um: np.ndarray,
+        nphot: int,
+        countwrite: int,
+    ) -> None:
+        """Run RADMC-3D mcmono and organize outputs."""
         with SymlinkContext(
             model_dir=self.model_dir,
             inputs_dir=self.inputs_dir,
@@ -663,9 +646,9 @@ class RadModel:
             
             setthreads = self.params.nbcores
             logger.info(
-                f"Running RADMC-3D mcmono at {mcmono_lam_um.size} wavelengths "
-                f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} micron) with {nphot} photons "
-                f"(countwrite={countwrite})..."
+                f"Running mcmono: {mcmono_lam_um.size} wavelengths "
+                f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} µm), "
+                f"{nphot} photons"
             )
             run_radmc3d(
                 command=['mcmono', 'setthreads', str(setthreads), 'countwrite', str(countwrite)],
@@ -680,6 +663,69 @@ class RadModel:
             output_files=['mean_intensity.out', 'mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
             description=f'radmc3d mcmono range_{mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g}micron_{mcmono_lam_um.size}wavelengths',
         )
+    
+    def compute_mcmono(
+        self,
+        nphot: int = None,
+        output_dir: Optional[str | Path] = None,
+        force: bool = False,
+        wavelengths_um: Optional[np.ndarray] = None,
+        uv_min: Quantity = None,
+        uv_max: Quantity = None,
+        n_wavelengths: int = None
+    ) -> Quantity:
+        """Run RADMC-3D monochromatic Monte Carlo for UV field.
+        
+        Parameters
+        ----------
+        nphot : int, optional
+            Number of photon packages
+        output_dir : str or Path, optional
+            Output directory (default: outputs_dir)
+        force : bool, optional
+            Force recomputation
+        wavelengths_um : ndarray, optional
+            Custom wavelength grid in microns
+        uv_min, uv_max : Quantity, optional
+            UV range bounds
+        n_wavelengths : int, optional
+            Number of wavelengths
+            
+        Returns
+        -------
+        Quantity
+            UV field chi in Draine units
+        """
+        nphot, uv_min, uv_max, n_wavelengths, all_params_used = self._resolve_mcmono_config(
+            nphot, uv_min, uv_max, n_wavelengths, wavelengths_um
+        )
+        
+        if output_dir is None:
+            output_dir = self.outputs_dir
+        else:
+            output_dir = Path(output_dir)
+        
+        use_cache, cached_file = should_use_cache(
+            output_dir=output_dir,
+            candidate_files=['mean_intensity.bout', 'mean_intensity.out'],
+            current_params_path=self.model_dir / 'params.txt',
+            param_keys=_MCTHERM_PARAM_KEYS + _MCMONO_EXTRA_PARAM_KEYS,
+            force=force,
+            use_params_nphot=all_params_used,
+        )
+        
+        if use_cache and cached_file:
+            return self._postprocess_chi(cached_file, uv_min, uv_max)
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        countwrite = max(1, min(int(nphot // 100), int(np.iinfo(np.int32).max)))
+        self._ensure_cntdump_ge_countwrite(countwrite, nphot)
+        
+        mcmono_lam_um = self._prepare_mcmono_wavelengths(
+            wavelengths_um, uv_min, uv_max, n_wavelengths
+        )
+        self._prepare_mcmono_run(output_dir)
+        self._run_mcmono(output_dir, mcmono_lam_um, nphot, countwrite)
         
         mean_intensity_file = find_cached_output(
             output_dir,
