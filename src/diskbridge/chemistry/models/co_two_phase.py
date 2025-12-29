@@ -118,7 +118,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         RADMC-3D model wrapper
     config : dict
         Configuration with keys:
-        - t_end: Quantity (required)
+        - t_end: Quantity (required, scalar or array for per-cell time)
         - dt: Quantity (optional)
         - Xco_tot: float (default: from diskbridge.params.abundance)
         - tau_form: Quantity (default: from diskbridge.params.co_tau_form_model)
@@ -126,8 +126,8 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         - skip_shielding: bool (default: False)
         - nside: int (default: 4)
         - b_kms: float (default: 0.3)
-        - Xco_gas_init: float (optional)
-        - Xco_ice_init: float (optional)
+        - Xco_gas_init: float or array (optional, scalar or per-cell IC)
+        - Xco_ice_init: float or array (optional, scalar or per-cell IC)
         
     Returns
     -------
@@ -144,8 +144,14 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     skip_shielding = config.get('skip_shielding', False)
     nside = config.get('nside', 4)
     b_kms = config.get('b_kms', 0.3)
+    
     Xco_gas_init = config.get('Xco_gas_init', None)
+    if Xco_gas_init is not None and hasattr(Xco_gas_init, 'magnitude'):
+        Xco_gas_init = Xco_gas_init.magnitude
+    
     Xco_ice_init = config.get('Xco_ice_init', None)
+    if Xco_ice_init is not None and hasattr(Xco_ice_init, 'magnitude'):
+        Xco_ice_init = Xco_ice_init.magnitude
     
     if 'tau_form' in config:
         tau_form = config['tau_form']
@@ -216,3 +222,124 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
         meta={'model': 'co_two_phase_time_dependent'},
     )
+
+
+def compute_boundary_co_ic(
+    rad: 'RadModel',
+    *,
+    r_boundary: Quantity,
+    shell_dr: Optional[Quantity] = None,
+    age: Quantity,
+    base_config: Optional[dict] = None,
+    reducer: str = "median",
+) -> tuple[float, float]:
+    """Compute boundary CO initial conditions from outer shell chemistry.
+    
+    Solves time-dependent chemistry in a thin shell near r_boundary for the
+    specified age, then reduces to scalar abundances for use as ICs.
+    
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper
+    r_boundary : Quantity
+        Boundary radius
+    shell_dr : Quantity, optional
+        Shell thickness (default: 2 * dr at boundary)
+    age : Quantity
+        Evolution time for boundary chemistry
+    base_config : dict, optional
+        Base chemistry config (default: {})
+    reducer : str, optional
+        "median" or "mean" (default: "median")
+        
+    Returns
+    -------
+    xco_gas0 : float
+        Boundary gas abundance (dimensionless)
+    xco_ice0 : float
+        Boundary ice abundance (dimensionless)
+        
+    Examples
+    --------
+    >>> xco_gas0, xco_ice0 = compute_boundary_co_ic(
+    ...     rad,
+    ...     r_boundary=Quantity(100, "au"),
+    ...     age=Quantity(1e5, "yr"),
+    ... )
+    """
+    from diskbridge._logging import logger
+    
+    if reducer not in ("median", "mean"):
+        raise ValueError(f"Invalid reducer='{reducer}'")
+    
+    mesh = rad.model.mesh
+    r_centers = mesh.centers('r')
+    r_edges = mesh.edges('r')
+    
+    r_au = r_centers.to('au').magnitude
+    r_edges_au = r_edges.to('au').magnitude
+    r_boundary_au = r_boundary.to('au').magnitude
+    
+    r_idx = np.argmin(np.abs(r_au - r_boundary_au))
+    
+    if shell_dr is None:
+        if r_idx < len(r_edges_au) - 1:
+            dr = r_edges_au[r_idx + 1] - r_edges_au[r_idx]
+        else:
+            dr = r_edges_au[r_idx] - r_edges_au[r_idx - 1]
+        shell_dr = Quantity(2.0 * dr, 'au')
+    
+    shell_dr_au = shell_dr.to('au').magnitude
+    shell_mask = np.abs(r_au - r_boundary_au) <= shell_dr_au / 2.0
+    shell_mask_3d = shell_mask[:, None, None]
+    
+    if not np.any(shell_mask):
+        raise ValueError(f"No cells in shell at r={r_boundary_au:.3g} AU")
+    
+    if base_config is None:
+        base_config = {}
+    
+    config = base_config.copy()
+    config['t_end'] = age
+    config['dt'] = None
+    
+    result = run_time_dependent(rad, config)
+    
+    nH = rad.ensure_nH()
+    if hasattr(nH, 'magnitude'):
+        nH_cm3 = nH.to('cm^-3').magnitude
+    else:
+        nH_cm3 = nH
+    
+    nco_gas = result.number_densities['co_gas']
+    if hasattr(nco_gas, 'magnitude'):
+        nco_gas_cm3 = nco_gas.to('cm^-3').magnitude
+    else:
+        nco_gas_cm3 = nco_gas
+    
+    nco_ice = result.number_densities['co_ice']
+    if hasattr(nco_ice, 'magnitude'):
+        nco_ice_cm3 = nco_ice.to('cm^-3').magnitude
+    else:
+        nco_ice_cm3 = nco_ice
+    
+    xco_gas = nco_gas_cm3 / (nH_cm3 + 1e-99)
+    xco_ice = nco_ice_cm3 / (nH_cm3 + 1e-99)
+    
+    xco_gas_shell = xco_gas[shell_mask_3d]
+    xco_ice_shell = xco_ice[shell_mask_3d]
+    
+    if reducer == "median":
+        xco_gas0 = float(np.median(xco_gas_shell))
+        xco_ice0 = float(np.median(xco_ice_shell))
+    else:
+        xco_gas0 = float(np.mean(xco_gas_shell))
+        xco_ice0 = float(np.mean(xco_ice_shell))
+    
+    logger.info(
+        f"Boundary IC: r={r_boundary_au:.3g} AU, "
+        f"Xco_gas={xco_gas0:.3e}, Xco_ice={xco_ice0:.3e}"
+    )
+    
+    return xco_gas0, xco_ice0
