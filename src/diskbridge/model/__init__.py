@@ -5,6 +5,7 @@ from .mesh import Mesh
 from .field import Field
 from .core import Model, puff_up_model, extend_disk_inwards
 from .clipping import ClipIndexer, compute_clip_indexer
+from .masking import set_mask_from_joos_disk
 
 def load_model(
     path: Union[str, Path],
@@ -56,4 +57,5 @@ __all__ = [
     "load_model",
     "puff_up_model",
     "extend_disk_inwards",
+    "set_mask_from_joos_disk",
 ]
