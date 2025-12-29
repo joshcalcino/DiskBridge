@@ -736,6 +736,103 @@ class RadModel:
         
         return self._postprocess_chi(mean_intensity_file, uv_min, uv_max)
     
+    def ensure_temperature(self, force: bool = False) -> Quantity:
+        """Ensure temperature field exists, reading or computing as needed.
+        
+        Parameters
+        ----------
+        force : bool, optional
+            Force recomputation even if temperature exists (default: False)
+            
+        Returns
+        -------
+        Quantity
+            Temperature field in Kelvin
+            
+        Raises
+        ------
+        RuntimeError
+            If temperature cannot be obtained
+        """
+        if self.temperature is not None and not force:
+            return self.temperature
+        
+        try:
+            self.read_temperature()
+        except Exception:
+            self.compute_temperature(force=force)
+        
+        if self.temperature is None:
+            raise RuntimeError('Temperature not available after ensure_temperature')
+        
+        return self.temperature
+    
+    def ensure_nH(self) -> Quantity:
+        """Ensure H nuclei number density exists, computing from gas density if needed.
+        
+        Returns
+        -------
+        Quantity
+            Number density of H nuclei in cm^-3
+            
+        Raises
+        ------
+        RuntimeError
+            If nH cannot be computed
+        """
+        if self.nH is None:
+            self.compute_nH_from_model()
+        
+        if self.nH is None:
+            raise RuntimeError('nH not available after ensure_nH')
+        
+        return self.nH
+    
+    def ensure_chi(
+        self,
+        force: bool = False,
+        uv_min: Optional[Quantity] = None,
+        uv_max: Optional[Quantity] = None,
+        n_wavelengths: Optional[int] = None,
+    ) -> Quantity:
+        """Ensure UV field exists, computing with mcmono if needed.
+        
+        Parameters
+        ----------
+        force : bool, optional
+            Force recomputation even if chi exists (default: False)
+        uv_min : Quantity, optional
+            Minimum UV wavelength (uses params if None)
+        uv_max : Quantity, optional
+            Maximum UV wavelength (uses params if None)
+        n_wavelengths : int, optional
+            Number of wavelengths (uses params if None)
+            
+        Returns
+        -------
+        Quantity
+            UV field in Draine units
+            
+        Raises
+        ------
+        RuntimeError
+            If chi cannot be computed
+        """
+        if self.chi is not None and not force:
+            return self.chi
+        
+        self.compute_mcmono(
+            force=force,
+            uv_min=uv_min,
+            uv_max=uv_max,
+            n_wavelengths=n_wavelengths,
+        )
+        
+        if self.chi is None:
+            raise RuntimeError('chi not available after ensure_chi')
+        
+        return self.chi
+    
     def _organize_output(
         self,
         output_dir: Path,
