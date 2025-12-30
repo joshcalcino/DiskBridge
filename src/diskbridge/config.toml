@@ -69,3 +69,15 @@ pressure = "pascal"
 temperature = "kelvin"
 time = "s"
 velocity = "m / s"
+
+[thermal]
+gamma_cii = "2.3e-3 cm^3/s"
+E_cii = "91.2 K"
+alpha_rec_c0 = 4.67e-12
+T_rec_exp = -0.6
+zeta_cr_default = "1e-17 s^-1"
+pah_scale_default = 1.0
+X_C_tot_default = 1.4e-4
+Gamma_C0_default = "3.0e-10 s^-1"
+T_min_solve = "2.0 K"
+T_max_solve = "5000.0 K"

@@ -10,7 +10,7 @@ import numpy as np
 import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
-from diskbridge.chemistry.api import run_chemistry
+from diskbridge.chemistry.api import run_chemistry, run_thermochemistry
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
 from diskbridge.chemistry.tracers import compute_chem_age
@@ -336,6 +336,7 @@ def evolve_co_time_dependent_infall_age(
 
 __all__ = [
     "run_chemistry",
+    "run_thermochemistry",
     "ChemistryResult",
     "find_uv_boundary_radius",
     "compute_chem_age",

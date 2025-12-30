@@ -124,7 +124,8 @@ class RadModel:
         self.writer = RadWriter(model)
         self.params = diskbridge.params
         
-        self.temperature: Optional[Quantity] = None
+        self.dust_temperature: Optional[Quantity] = None
+        self.gas_temperature: Optional[Quantity] = None
         self.chi: Optional[Quantity] = None
         self.nH: Optional[Quantity] = None
         self.theta_co: Optional[Quantity] = None
@@ -230,8 +231,19 @@ class RadModel:
         Quantity
             Temperature field in Kelvin with shape matching model mesh
         """
-        self.temperature = self.data.readGasTemp()
-        return self.temperature
+        self.gas_temperature = self.data.readGasTemp()
+        
+        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+        self.model.gas_register(
+            'gas_temperature',
+            Field(
+                quantity='gas_temperature',
+                data=self.gas_temperature,
+                axis_order=axis_order,
+            ),
+        )
+        
+        return self.gas_temperature
     
     def read_dust_temperature(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
         """Read dust temperature from RADMC-3D output using radmc3dData.
@@ -248,22 +260,22 @@ class RadModel:
         Quantity
             Temperature field in Kelvin
         """
-        self.temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
+        self.dust_temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
 
         if self.model.mesh.coord_system == 'spherical':
-            self.temperature = np.transpose(self.temperature, (0, 2, 1))
+            self.dust_temperature = np.transpose(self.dust_temperature, (0, 2, 1))
 
         axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
         self.model.gas_register(
-            'temperature',
+            'dust_temperature',
             Field(
-                quantity='temperature',
-                data=self.temperature,
+                quantity='dust_temperature',
+                data=self.dust_temperature,
                 axis_order=axis_order,
             ),
         )
         
-        return self.temperature
+        return self.dust_temperature
     
     def read_temperature(self, source: str = 'auto', ispec: int = 0) -> Quantity:
         """Read temperature from RADMC-3D output.
@@ -410,7 +422,7 @@ class RadModel:
         
         if use_cache and cached_file:
             self.read_dust_temperature(fname=str(cached_file))
-            return self.temperature
+            return self.dust_temperature
         
         output_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
@@ -448,7 +460,7 @@ class RadModel:
         if temp_file:
             self.read_dust_temperature(fname=str(temp_file))
         
-        return self.temperature
+        return self.dust_temperature
 
     def _compute_chi_from_mean_intensity(
         self,
@@ -736,8 +748,8 @@ class RadModel:
         
         return self._postprocess_chi(mean_intensity_file, uv_min, uv_max)
     
-    def ensure_temperature(self, force: bool = False) -> Quantity:
-        """Ensure temperature field exists, reading or computing as needed.
+    def ensure_dust_temperature(self, force: bool = False) -> Quantity:
+        """Ensure dust temperature field exists, reading or computing as needed.
         
         Parameters
         ----------
@@ -747,25 +759,73 @@ class RadModel:
         Returns
         -------
         Quantity
-            Temperature field in Kelvin
+            Dust temperature field in Kelvin
             
         Raises
         ------
         RuntimeError
-            If temperature cannot be obtained
+            If dust temperature cannot be obtained
         """
-        if self.temperature is not None and not force:
-            return self.temperature
+        if self.dust_temperature is not None and not force:
+            return self.dust_temperature
         
         try:
-            self.read_temperature()
+            self.read_dust_temperature()
         except Exception:
             self.compute_temperature(force=force)
         
-        if self.temperature is None:
-            raise RuntimeError('Temperature not available after ensure_temperature')
+        if self.dust_temperature is None:
+            raise RuntimeError('Dust temperature not available after ensure_dust_temperature')
         
-        return self.temperature
+        return self.dust_temperature
+    
+    def ensure_gas_temperature(self) -> Optional[Quantity]:
+        """Ensure gas temperature field exists if available.
+        
+        Returns
+        -------
+        Quantity or None
+            Gas temperature field in Kelvin if available, else None
+            
+        Notes
+        -----
+        Unlike ensure_dust_temperature, this does not compute if missing.
+        Gas temperature must be read from file or set by a thermal solver.
+        """
+        if self.gas_temperature is not None:
+            return self.gas_temperature
+        
+        try:
+            self.read_gas_temperature()
+        except Exception:
+            pass
+        
+        return self.gas_temperature
+    
+    def ensure_temperature(self, force: bool = False) -> Quantity:
+        """Ensure temperature field exists (alias to ensure_dust_temperature).
+        
+        Parameters
+        ----------
+        force : bool, optional
+            Force recomputation even if temperature exists (default: False)
+            
+        Returns
+        -------
+        Quantity
+            Dust temperature field in Kelvin
+            
+        Raises
+        ------
+        RuntimeError
+            If dust temperature cannot be obtained
+            
+        Notes
+        -----
+        This is kept as an alias to ensure_dust_temperature for backward compatibility.
+        For new code, prefer ensure_dust_temperature or ensure_gas_temperature explicitly.
+        """
+        return self.ensure_dust_temperature(force=force)
     
     def ensure_nH(self) -> Quantity:
         """Ensure H nuclei number density exists, computing from gas density if needed.

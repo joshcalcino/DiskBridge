@@ -1,0 +1,155 @@
+"""High-level thermal balance API."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from diskbridge.radmc3d.model import RadModel
+
+import diskbridge
+from diskbridge._logging import logger
+from diskbridge._units import Quantity
+from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
+from diskbridge.chemistry.thermal.registry import get_thermal_model
+
+
+def run_thermal(
+    rad: "RadModel",
+    model: str = "thermal_balance_v1",
+    config: Optional[dict] = None,
+    write: bool = True,
+) -> ThermalResult:
+    """Run thermal balance calculation to solve for gas temperature.
+    
+    This is the main user-facing API for thermal calculations. It:
+    1. Ensures required fields (nH, Tdust, chi)
+    2. Pulls chemistry products if available (CO, theta_co, chi_eff)
+    3. Runs the thermal solver
+    4. Stores and optionally writes results
+    
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper with radiative transfer outputs
+    model : str, optional
+        Thermal model name (default "thermal_balance_v1")
+    config : dict, optional
+        Model-specific configuration (merged with defaults)
+    write : bool, optional
+        Write gas_temperature.inp to model directory (default True)
+        
+    Returns
+    -------
+    ThermalResult
+        Result object with solved Tgas and auxiliary fields
+        
+    Examples
+    --------
+    >>> from diskbridge.chemistry.thermal import run_thermal
+    >>> 
+    >>> result = run_thermal(rad, model="thermal_balance_v1")
+    >>> print(f"Gas temperature: {result.tgas.to('K')}")
+    >>> 
+    >>> result = run_thermal(
+    ...     rad,
+    ...     config={
+    ...         'zeta_cr': 1e-16,
+    ...         'pah_scale': 0.5,
+    ...         'n_iter': 5,
+    ...     }
+    ... )
+    """
+    if config is None:
+        config = {}
+    
+    logger.info("=" * 60)
+    logger.info(f"Running thermal balance: {model}")
+    logger.info("=" * 60)
+    
+    logger.info("Ensuring required fields...")
+    nH = rad.ensure_nH()
+    Tdust = rad.ensure_dust_temperature()
+    
+    if rad.chi_eff is not None:
+        logger.info("Using chi_eff from shielding calculation")
+        chi_eff = rad.chi_eff
+    elif rad.chi is not None:
+        logger.info("Using chi (no shielding correction)")
+        chi_eff = rad.chi
+    else:
+        logger.info("Computing chi from mean intensity")
+        chi_eff = rad.ensure_chi()
+    
+    logger.info("Building thermal state...")
+    state = ThermalState(
+        nH=nH,
+        Tdust=Tdust,
+        chi_eff=chi_eff,
+        mesh=rad.model.mesh,
+    )
+    
+    if rad.theta_co is not None:
+        logger.info("Including CO shielding factor")
+        state.theta_co = rad.theta_co
+    
+    if rad.chi is not None:
+        state.chi = rad.chi
+    
+    if rad.nco_gas is not None and rad.nco_ice is not None:
+        logger.info("Including CO number densities from chemistry")
+        state.nco_gas = rad.nco_gas
+        state.nco_ice = rad.nco_ice
+    
+    params = {
+        'zeta_cr': config.get('zeta_cr', Quantity(diskbridge.params.zeta_cr_default, 's^-1')),
+        'pah_scale': config.get('pah_scale', diskbridge.params.pah_scale_default),
+        'X_C_tot': config.get('X_C_tot', diskbridge.params.X_C_tot_default),
+        'Gamma_C0': config.get('Gamma_C0', Quantity(diskbridge.params.Gamma_C0_default, 's^-1')),
+        'T_min': config.get('T_min', diskbridge.params.T_min_solve),
+        'T_max': config.get('T_max', diskbridge.params.T_max_solve),
+        'n_iter': config.get('n_iter', 3),
+        'tol': config.get('tol', 0.01),
+        'beta_cii': config.get('beta_cii', 1.0),
+        'alpha_acc': config.get('alpha_acc', 0.3),
+    }
+    
+    logger.info("Solver parameters:")
+    logger.info(f"  zeta_cr: {params['zeta_cr']}")
+    logger.info(f"  pah_scale: {params['pah_scale']}")
+    logger.info(f"  X_C_tot: {params['X_C_tot']}")
+    logger.info(f"  n_iter: {params['n_iter']}")
+    logger.info(f"  tol: {params['tol']}")
+    
+    thermal_func = get_thermal_model(model)
+    
+    logger.info("Running thermal solver...")
+    result = thermal_func(state, params)
+    
+    logger.info("=" * 60)
+    logger.info("Thermal solve complete!")
+    logger.info(f"  Tgas: min={result.tgas.to('K').magnitude.min():.1f} K, "
+               f"max={result.tgas.to('K').magnitude.max():.1f} K, "
+               f"median={result.tgas.to('K').magnitude.flatten()[len(result.tgas.magnitude.flatten())//2]:.1f} K")
+    logger.info(f"  Converged: {result.meta.get('converged', False)}")
+    logger.info(f"  Iterations: {result.meta.get('n_iter', 0)}")
+    logger.info("=" * 60)
+    
+    rad.gas_temperature = result.tgas
+    
+    if 'nCplus' in result.fields:
+        logger.info("Storing auxiliary fields (nCplus, ne, nC)...")
+        rad.model.gas_register(
+            'nCplus',
+            rad.model.Field(
+                quantity='nCplus',
+                data=result.fields['nCplus'],
+                axis_order=rad.model.mesh.axis_names(),
+            ),
+        )
+    
+    if write:
+        logger.info(f"Writing gas_temperature.inp to {rad.model_dir}")
+        rad.writer.write_gas_temperature(result.tgas, output_dir=rad.model_dir)
+    
+    return result
