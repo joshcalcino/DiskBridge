@@ -7,11 +7,14 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
-import diskbridge
+import numpy as np
+
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
+from diskbridge.model.field import Field
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.registry import get_thermal_model
+from diskbridge.chemistry.thermal import constants as thermal_const
 
 
 def run_thermal(
@@ -102,12 +105,12 @@ def run_thermal(
         state.nco_ice = rad.nco_ice
     
     params = {
-        'zeta_cr': config.get('zeta_cr', Quantity(diskbridge.params.zeta_cr_default, 's^-1')),
-        'pah_scale': config.get('pah_scale', diskbridge.params.pah_scale_default),
-        'X_C_tot': config.get('X_C_tot', diskbridge.params.X_C_tot_default),
-        'Gamma_C0': config.get('Gamma_C0', Quantity(diskbridge.params.Gamma_C0_default, 's^-1')),
-        'T_min': config.get('T_min', diskbridge.params.T_min_solve),
-        'T_max': config.get('T_max', diskbridge.params.T_max_solve),
+        'zeta_cr': config.get('zeta_cr', thermal_const.zeta_cr_default),
+        'pah_scale': config.get('pah_scale', thermal_const.pah_scale_default),
+        'X_C_tot': config.get('X_C_tot', thermal_const.X_C_tot_default),
+        'Gamma_C0': config.get('Gamma_C0', thermal_const.Gamma_C0_default),
+        'T_min': config.get('T_min', thermal_const.T_min_solve),
+        'T_max': config.get('T_max', thermal_const.T_max_solve),
         'n_iter': config.get('n_iter', 3),
         'tol': config.get('tol', 0.01),
         'beta_cii': config.get('beta_cii', 1.0),
@@ -130,21 +133,52 @@ def run_thermal(
     logger.info("Thermal solve complete!")
     logger.info(f"  Tgas: min={result.tgas.to('K').magnitude.min():.1f} K, "
                f"max={result.tgas.to('K').magnitude.max():.1f} K, "
-               f"median={result.tgas.to('K').magnitude.flatten()[len(result.tgas.magnitude.flatten())//2]:.1f} K")
+               f"median={np.median(result.tgas.to('K').magnitude):.1f} K")
     logger.info(f"  Converged: {result.meta.get('converged', False)}")
     logger.info(f"  Iterations: {result.meta.get('n_iter', 0)}")
     logger.info("=" * 60)
     
     rad.gas_temperature = result.tgas
     
+    axis_order = rad.model.mesh.axis_names()
+    
+    rad.model.gas_register(
+        'gas_temperature',
+        Field(
+            quantity='temperature',
+            data=result.tgas,
+            axis_order=axis_order,
+        ),
+    )
+    
     if 'nCplus' in result.fields:
-        logger.info("Storing auxiliary fields (nCplus, ne, nC)...")
+        logger.info("Storing auxiliary fields (nCplus, nC, ne)...")
         rad.model.gas_register(
             'nCplus',
-            rad.model.Field(
-                quantity='nCplus',
+            Field(
+                quantity='number_density',
                 data=result.fields['nCplus'],
-                axis_order=rad.model.mesh.axis_names(),
+                axis_order=axis_order,
+            ),
+        )
+    
+    if 'nC' in result.fields:
+        rad.model.gas_register(
+            'nC',
+            Field(
+                quantity='number_density',
+                data=result.fields['nC'],
+                axis_order=axis_order,
+            ),
+        )
+    
+    if 'ne' in result.fields:
+        rad.model.gas_register(
+            'ne',
+            Field(
+                quantity='number_density',
+                data=result.fields['ne'],
+                axis_order=axis_order,
             ),
         )
     

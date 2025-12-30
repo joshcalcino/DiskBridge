@@ -11,10 +11,10 @@ Design principle:
 from __future__ import annotations
 
 import numpy as np
-import diskbridge
 
 from diskbridge._units import Quantity, units
 from diskbridge.chemistry.thermal.types import ThermalState
+from diskbridge.chemistry.thermal import constants as thermal_const
 
 K_B = units('k_B')
 M_H = units('m_H')
@@ -39,7 +39,7 @@ def term_cosmic_ray(state: ThermalState, params: dict) -> Quantity:
     -----
     Simple prescription: each ionization deposits ~20 eV into gas heating.
     """
-    zeta_cr = params.get('zeta_cr', Quantity(diskbridge.params.zeta_cr_default, 's^-1'))
+    zeta_cr = params.get('zeta_cr', thermal_const.zeta_cr_default)
     if not hasattr(zeta_cr, 'to'):
         zeta_cr = Quantity(zeta_cr, 's^-1')
     
@@ -74,7 +74,7 @@ def term_photoelectric(state: ThermalState, params: dict) -> Quantity:
     Heating efficiency epsilon ~ 0.05 * (Tg/1e4)^0.5 / (1 + psi)
     where psi ~ sqrt(Tg) * chi / ne characterizes grain charge.
     """
-    pah_scale = params.get('pah_scale', diskbridge.params.pah_scale_default)
+    pah_scale = params.get('pah_scale', thermal_const.pah_scale_default)
     
     nH_cm3 = state.nH.to('cm^-3').magnitude
     chi = state.chi_eff.magnitude
@@ -141,7 +141,7 @@ def term_gas_dust_exchange(state: ThermalState, params: dict) -> Quantity:
     
     rate_erg_cm3_s = (
         alpha_acc * nH_cm3 * n_dust * sigma_d * v_th 
-        * 2.0 * K_B.to('erg/K').magnitude * (Tgas_K - Tdust_K)
+        * 2.0 * K_B.to('erg/K').magnitude * (Tdust_K - Tgas_K)
     )
     
     return Quantity(rate_erg_cm3_s, 'erg/(cm^3 * s)')
@@ -188,8 +188,8 @@ def term_cii_cooling(state: ThermalState, params: dict) -> Quantity:
     n_coll = ne_cm3 + 0.1 * nH_cm3
     n_coll = np.maximum(n_coll, 1e-10)
     
-    gamma_cii = diskbridge.params.gamma_cii.to('cm^3/s').magnitude
-    E_cii_K = diskbridge.params.E_cii.to('K').magnitude
+    gamma_cii = thermal_const.gamma_cii.to('cm^3/s').magnitude
+    E_cii_K = thermal_const.E_cii.to('K').magnitude
     
     n_crit = 3e3
     

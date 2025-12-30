@@ -7,10 +7,10 @@ without requiring a full UMIST network.
 from __future__ import annotations
 
 import numpy as np
-import diskbridge
 
 from diskbridge._units import Quantity
 from diskbridge.chemistry.thermal.types import ThermalState
+from diskbridge.chemistry.thermal import constants as thermal_const
 
 
 def alpha_rec_c(T_K: np.ndarray) -> np.ndarray:
@@ -30,7 +30,7 @@ def alpha_rec_c(T_K: np.ndarray) -> np.ndarray:
     -----
     UMIST-style fit: alpha_rec = A * (T/300)^beta
     """
-    return diskbridge.params.alpha_rec_c0 * (T_K / 300.0)**diskbridge.params.T_rec_exp
+    return thermal_const.alpha_rec_c0 * (T_K / 300.0)**thermal_const.T_rec_exp
 
 
 def update_carbon_ions(state: ThermalState, params: dict) -> None:
@@ -58,8 +58,8 @@ def update_carbon_ions(state: ThermalState, params: dict) -> None:
     This is a simplified closure for Milestone 1. Later can be replaced
     with full UMIST network without touching thermal solver.
     """
-    X_C_tot = params.get('X_C_tot', diskbridge.params.X_C_tot_default)
-    Gamma_C0 = params.get('Gamma_C0', Quantity(diskbridge.params.Gamma_C0_default, 's^-1'))
+    X_C_tot = params.get('X_C_tot', thermal_const.X_C_tot_default)
+    Gamma_C0 = params.get('Gamma_C0', thermal_const.Gamma_C0_default)
     
     if not hasattr(Gamma_C0, 'to'):
         Gamma_C0 = Quantity(Gamma_C0, 's^-1')

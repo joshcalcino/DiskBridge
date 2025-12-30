@@ -8,12 +8,12 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import brentq
 
-import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.terms import HEATING_TERMS, COOLING_TERMS, EXCHANGE_TERMS
 from diskbridge.chemistry.thermal.carbon_closure import update_carbon_ions
+from diskbridge.chemistry.thermal import constants as thermal_const
 
 
 def evaluate_net_heating(
@@ -164,8 +164,8 @@ def solve_thermal_balance(
     ThermalResult
         Result with solved Tgas and auxiliary fields
     """
-    T_min_qty = params.get('T_min', diskbridge.params.T_min_solve)
-    T_max_qty = params.get('T_max', diskbridge.params.T_max_solve)
+    T_min_qty = params.get('T_min', thermal_const.T_min_solve)
+    T_max_qty = params.get('T_max', thermal_const.T_max_solve)
     T_min = T_min_qty.to('K').magnitude
     T_max = T_max_qty.to('K').magnitude
     
