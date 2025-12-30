@@ -13,15 +13,15 @@ def compute_cell_volumes(model: "Model") -> np.ndarray:
     if mesh.coord_system != 'spherical':
         raise ValueError(f"Only spherical meshes supported, got {mesh.coord_system}")
 
-    r_edges = mesh.edges('r').to('cm').magnitude
-    theta_edges = mesh.edges('theta').magnitude
-    phi_edges = mesh.edges('phi').magnitude
+    r_edges = mesh.edges('r').to('cm')
+    theta_edges = mesh.edges('theta').to('radian')
+    phi_edges = mesh.edges('phi').to('radian')
 
     dr3 = (r_edges[1:] ** 3 - r_edges[:-1] ** 3) / 3.0
-    dcos_theta = np.cos(theta_edges[:-1]) - np.cos(theta_edges[1:])
-    dphi = np.diff(phi_edges)
+    dcos_theta = np.cos(theta_edges[:-1].magnitude) - np.cos(theta_edges[1:].magnitude)
+    dphi = np.diff(phi_edges.magnitude)
 
-    volumes = dr3[:, None, None] * dphi[None, :, None] * dcos_theta[None, None, :]
+    volumes = (dr3[:, None, None] * dphi[None, :, None] * dcos_theta[None, None, :]).magnitude
     return volumes
 
 

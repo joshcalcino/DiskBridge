@@ -93,7 +93,7 @@ def rho_gaussian_from_sigma(Sigma: Quantity, z: Quantity, H: Quantity) -> Quanti
     The midplane density is rho_mid = Sigma / (sqrt(2pi) * H).
     """
     rho_mid = Sigma / (np.sqrt(2.0 * np.pi) * H)
-    expo = -(z**2) / (2.0 * H**2)
+    expo = (-(z**2) / (2.0 * H**2)).to("dimensionless").magnitude
     return rho_mid * np.exp(expo)
 
 

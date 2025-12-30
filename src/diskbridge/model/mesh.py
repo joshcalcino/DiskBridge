@@ -10,10 +10,9 @@ CoordSystem = Literal["spherical", "polar", "cartesian"]
 
 # ---------- utilities ----------
 def _centers_from_edges(edges: Quantity) -> Quantity:
-    e = np.asarray(edges.magnitude, dtype=float) * edges.units
-    if e.ndim != 1 or e.size < 2:
+    if edges.ndim != 1 or edges.size < 2:
         raise ValueError("edges must be 1D with at least 2 elements")
-    return 0.5 * (e[:-1] + e[1:])
+    return 0.5 * (edges[:-1] + edges[1:])
 
 
 def _spherical_r_centers(edges: Quantity) -> Quantity:

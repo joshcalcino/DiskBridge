@@ -836,7 +836,7 @@ class Dust(SubModel):
         
         # Gas scale height at midplane: H_g = c_s / Omega_K
         # Convert to same units as r for consistent length units
-        H_g0 = (c_s0 / Omega_K).to(r_units)
+        H_g0 = (c_s0 / Omega_K).to(r.units)
         
         # Stokes number at midplane
         St0 = stokes_number(
@@ -857,7 +857,8 @@ class Dust(SubModel):
         H_d = np.broadcast_to(H_d0[:, :, None], (*H_d0.shape, n_theta))
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
-        vertical_profile = np.exp(-(z_cyl**2 / (2 * H_d**2)))
+        expo = (-(z_cyl**2) / (2 * H_d**2)).to("dimensionless").magnitude
+        vertical_profile = np.exp(expo)
         
         # Compute dust density directly from analytic settling profile, without
         # additional column renormalization. This makes the dust density a

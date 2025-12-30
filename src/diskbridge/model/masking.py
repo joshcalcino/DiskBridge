@@ -5,7 +5,7 @@ from typing import Callable, Optional, TYPE_CHECKING, Tuple, Union
 
 import numpy as np
 
-from diskbridge._units import Quantity
+from diskbridge._units import Quantity, units
 from diskbridge._logging import logger
 from diskbridge.model.field import Field
 from diskbridge.model.coords import spherical_grids, cylindrical_from_spherical
@@ -41,10 +41,9 @@ def _compute_disk_orientation(
     rho_disk_min: Quantity,
     r_max_for_axis: Optional[Quantity],
 ) -> np.ndarray:
-    rho_core_thr = rho_core_min.to(rho.units).magnitude
-    core_mask = rho.magnitude >= rho_core_thr
+    core_mask = rho >= rho_core_min
     if r_max_for_axis is not None:
-        core_mask &= (r_grid.magnitude <= r_max_for_axis.to(r_grid.units).magnitude)
+        core_mask &= (r_grid <= r_max_for_axis)
 
     sin_t = np.sin(theta_grid_mag)
     cos_t = np.cos(theta_grid_mag)
@@ -63,29 +62,32 @@ def _compute_disk_orientation(
     ep_y = cos_p
     ep_z = 0.0
 
-    r_base_mag = r_grid.to_base_units().magnitude
-    x = r_base_mag * er_x
-    y = r_base_mag * er_y
-    z = r_base_mag * er_z
+    x = r_grid * er_x
+    y = r_grid * er_y
+    z = r_grid * er_z
 
     vx = vr * er_x + vtheta * et_x + vphi * ep_x
     vy = vr * er_y + vtheta * et_y + vphi * ep_y
     vz = vr * er_z + vtheta * et_z + vphi * ep_z
 
-    mcell = (rho * dV).to_base_units().magnitude
+    w = (rho * dV) * core_mask
     if not np.any(core_mask):
-        rho_disk_thr = rho_disk_min.to(rho.units).magnitude
-        core_mask = rho.magnitude >= rho_disk_thr
+        core_mask = rho >= rho_disk_min
+        w = (rho * dV) * core_mask
 
-    w = mcell * core_mask
-    Lx = np.sum(w * (y * vz.magnitude - z * vy.magnitude))
-    Ly = np.sum(w * (z * vx.magnitude - x * vz.magnitude))
-    Lz = np.sum(w * (x * vy.magnitude - y * vx.magnitude))
-    Lnorm = float(np.sqrt(Lx * Lx + Ly * Ly + Lz * Lz))
-    if Lnorm == 0.0 or not np.isfinite(Lnorm):
+    Lx = np.sum(w * (y * vz - z * vy))
+    Ly = np.sum(w * (z * vx - x * vz))
+    Lz = np.sum(w * (x * vy - y * vx))
+    Lnorm = np.sqrt(Lx * Lx + Ly * Ly + Lz * Lz)
+    Lnorm_mag = float(Lnorm.magnitude)
+    if Lnorm_mag == 0.0 or not np.isfinite(Lnorm_mag):
         k_hat = np.array([0.0, 0.0, 1.0], dtype=float)
     else:
-        k_hat = np.array([Lx / Lnorm, Ly / Lnorm, Lz / Lnorm], dtype=float)
+        k_hat = np.array([
+            (Lx / Lnorm).to("dimensionless").magnitude,
+            (Ly / Lnorm).to("dimensionless").magnitude,
+            (Lz / Lnorm).to("dimensionless").magnitude
+        ])
     return k_hat
 
 
@@ -115,10 +117,9 @@ def _transform_to_disk_frame(
     ep_y = cos_p
     ep_z = 0.0
 
-    r_base_mag = r_grid.to_base_units().magnitude
-    x = r_base_mag * er_x
-    y = r_base_mag * er_y
-    z = r_base_mag * er_z
+    x = r_grid * er_x
+    y = r_grid * er_y
+    z = r_grid * er_z
 
     vx = vr * er_x + vtheta * et_x + vphi * ep_x
     vy = vr * er_y + vtheta * et_y + vphi * ep_y
@@ -130,8 +131,8 @@ def _transform_to_disk_frame(
     rz = z - z_d * k_hat[2]
     R_d = np.sqrt(rx * rx + ry * ry + rz * rz)
 
-    invR = np.zeros_like(R_d)
-    nz = R_d > 0.0
+    invR = np.zeros_like(R_d.magnitude) / R_d.units
+    nz = R_d.magnitude > 0.0
     invR[nz] = 1.0 / R_d[nz]
     rhatx = rx * invR
     rhaty = ry * invR
@@ -145,18 +146,17 @@ def _transform_to_disk_frame(
     vphi_d = vx * phix + vy * phiy + vz * phiz
     vz_d = vx * k_hat[0] + vy * k_hat[1] + vz * k_hat[2]
 
-    r_d = r_grid.to_base_units().magnitude
-    ok = r_d > 0.0
-    theta_from_midplane = np.zeros_like(z_d, dtype=float)
+    ok = r_grid.magnitude > 0.0
+    theta_from_midplane = np.zeros_like(z_d.magnitude, dtype=float)
     if np.any(ok):
-        cos_theta = np.clip((z_d / r_d)[ok], -1.0, 1.0)
+        cos_theta = np.clip((z_d / r_grid)[ok].to("dimensionless").magnitude, -1.0, 1.0)
         theta_d = np.arccos(cos_theta)
         theta_from_midplane[ok] = theta_d - (0.5 * np.pi)
 
     return DiskFrameData(
         k_hat=k_hat,
-        R_d=R_d,
-        z_d=z_d,
+        R_d=R_d.magnitude,
+        z_d=z_d.magnitude,
         vR_d=vR_d,
         vphi_d=vphi_d,
         vz_d=vz_d,
@@ -197,8 +197,8 @@ def _setup_binning(
     r_edges_native = r_edges_native.to_base_units()
 
     if r_max is not None:
-        r_max_base = r_max.to_base_units().magnitude
-        r_edges_native = r_edges_native[r_edges_native.magnitude <= r_max_base]
+        r_max_base = r_max.to_base_units()
+        r_edges_native = r_edges_native[r_edges_native <= r_max_base]
         if len(r_edges_native) < 2:
             raise ValueError("r_max is too small; no radial bins remain")
 
@@ -226,7 +226,7 @@ def _setup_binning(
     if n_theta_bins is None:
         n_theta_bins = n_bins_native
 
-    ok = r_grid.to_base_units().magnitude > 0.0
+    ok = r_grid.to_base_units() > (0.0 * r_grid.units)
     theta_extent_sel = theta_sel & ok
     if np.any(theta_extent_sel):
         theta_max = float(np.max(np.abs(disk_frame.theta_from_midplane[theta_extent_sel])))
@@ -329,18 +329,16 @@ def _compute_ring_criteria(
     vphi_avg = ring_avg(np.abs(disk_frame.vphi_d.to_base_units().magnitude)[valid].ravel())
     vR_avg = ring_avg(np.abs(disk_frame.vR_d.to_base_units().magnitude)[valid].ravel())
     vz_avg = ring_avg(np.abs(disk_frame.vz_d.to_base_units().magnitude)[valid].ravel())
-    rho_avg = ring_avg(rho.magnitude[valid].ravel())
-
-    rho_thr = rho_disk_min.to(rho.units).magnitude
+    rho_avg_base = ring_avg(rho.to_base_units().magnitude[valid].ravel())
 
     rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units()
     rot_avg = ring_avg(rot.magnitude[valid].ravel())
-    P_avg = ring_avg(Pth.magnitude[valid].ravel())
+    P_avg = ring_avg(Pth.to_base_units().magnitude[valid].ravel())
 
     c1 = vphi_avg > (fthres_vr_use * vR_avg)
     c2 = vphi_avg > (fthres_use * vz_avg)
     c3 = rot_avg > (fthres_use * P_avg)
-    c5 = rho_avg > rho_thr
+    c5 = rho_avg_base > rho_disk_min.to_base_units().magnitude
     ring_pass = c1 & c2 & c3 & c5
 
     return ring_pass, sum_w.reshape(nR, n_theta_bins), theta_edges
@@ -450,7 +448,7 @@ def set_mask_from_joos_disk(
 
     theta_sel = np.ones_like(disk_frame.z_d, dtype=bool)
     if r_max is not None:
-        theta_sel &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
+        theta_sel &= (r_grid <= r_max)
 
     r_edges, theta_edges, n_theta_bins = _setup_binning(
         mesh, r_max, n_r_bins, n_theta_bins, n_bins_native, disk_frame, r_grid, theta_sel
@@ -480,7 +478,7 @@ def set_mask_from_joos_disk(
     mask[valid] = mask_valid
 
     if r_max is not None:
-        mask &= (r_grid.to_base_units().magnitude <= r_max.to_base_units().magnitude)
+        mask &= (r_grid <= r_max)
 
     return model.set_mask_from_array(mask, is_a_disk=True)
 
