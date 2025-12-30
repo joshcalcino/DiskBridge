@@ -332,22 +332,6 @@ class Model:
         self.disk.puff_up_disk(n=n, zmax_over_H=zmax_over_H)
         return self
 
-    def extend_spherical_grid_inwards(
-        self,
-        r_min: Quantity,
-        *,
-        spacing: Optional[str] = None,
-        density_match: Optional[str] = None,
-    ) -> "Model":
-        from .mesh_extend import extend_spherical_grid_inwards as _extend_spherical_grid_inwards
-
-        return _extend_spherical_grid_inwards(
-            self,
-            r_min,
-            spacing=spacing,
-            density_match=density_match,
-        )
-
     def clip_mesh(
         self,
         *,
@@ -525,34 +509,3 @@ def puff_up_model(
     return new
 
 
-def extend_disk_inwards(
-    model: "Model",
-    *,
-    r_min: Optional[Quantity] = None,
-    r_min_factor: Optional[float] = None,
-    spacing: Optional[str] = None,
-    density_match: Optional[str] = None,
-) -> int:
-    if (r_min is None) == (r_min_factor is None):
-        raise ValueError("Provide exactly one of r_min or r_min_factor")
-
-    mesh0 = model.mesh
-    if mesh0 is None:
-        raise ValueError("Model mesh is not set")
-    r_edges0 = mesh0.edges("r")
-    if r_edges0 is None:
-        raise ValueError("Model radial edges are not set")
-
-    if r_min is None:
-        r_min = float(r_min_factor) * r_edges0[0]
-
-    model.extend_spherical_grid_inwards(r_min, spacing=spacing, density_match=density_match)
-
-    mesh1 = model.mesh
-    if mesh1 is None:
-        raise ValueError("Model mesh is not set after extension")
-    r_edges1 = mesh1.edges("r")
-    if r_edges1 is None:
-        raise ValueError("Model radial edges are not set after extension")
-
-    return int(r_edges1.size - r_edges0.size)

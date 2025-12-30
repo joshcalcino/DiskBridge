@@ -3,7 +3,7 @@ from typing import Optional, Union
 
 from .mesh import Mesh
 from .field import Field
-from .core import Model, puff_up_model, extend_disk_inwards
+from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .masking import set_mask_from_joos_disk
 
@@ -56,6 +56,5 @@ __all__ = [
     "compute_clip_indexer",
     "load_model",
     "puff_up_model",
-    "extend_disk_inwards",
     "set_mask_from_joos_disk",
 ]
