@@ -12,6 +12,7 @@ from .field import Field
 
 if TYPE_CHECKING:
     from .core import Model
+    from .disk import Disk
 
 
 @dataclass(frozen=True)
@@ -149,8 +150,7 @@ def clip_model(
         new.gas_register(name, _slice_field(field0))
 
     if getattr(model, "disk", None) is not None:
-        from .disk_component import Disk
-
+        from .disk import Disk
         new.disk = Disk(new, dict(model.disk.parameters))
         new.disk.is_disk_region = bool(getattr(model.disk, "is_disk_region", False))
         if model.disk.mask is not None:

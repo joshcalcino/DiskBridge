@@ -6,9 +6,11 @@ from typing import Dict, Optional, TYPE_CHECKING
 import numpy as np
 
 from diskbridge._units import Quantity, units
-
-from .field import Field
-from .mesh import Axis, Mesh
+from diskbridge._logging import logger
+from diskbridge.model.field import Field
+from diskbridge.model.mesh import Axis, Mesh
+from diskbridge.model.coords import spherical_grids, cylindrical_from_spherical
+from diskbridge.model.disk import scale_height, rho_gaussian_from_sigma, midplane_theta_index
 
 if TYPE_CHECKING:
     from .core import Model
@@ -124,24 +126,14 @@ def _compute_initial_density_for_inner_region(
         raise ValueError("Failed to compute spherical centers for new mesh")
 
     r_inner = r_centers_new[:plan.n_add]
-    r_mag = np.asarray(r_inner.magnitude, dtype=float)
-    theta_mag = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
-    phi_mag = np.asarray(phi_centers.to("radian").magnitude, dtype=float)
 
-    r_grid, phi_grid, theta_grid = np.meshgrid(r_mag, phi_mag, theta_mag, indexing="ij")
-    r_grid = r_grid * r_inner.units
+    r_grid, phi_grid, theta_grid = spherical_grids(r_inner, phi_centers, theta_centers)
+    R_cyl, z = cylindrical_from_spherical(r_grid, theta_grid)
 
-    sin_t = np.sin(theta_grid)
-    cos_t = np.cos(theta_grid)
-    R_cyl = r_grid * sin_t
-    z = r_grid * cos_t
-
-    H = (h0_f * (r_grid / r0) ** fl_f) * r_grid
+    H = scale_height(R_cyl, h0, r0, fl)
     Sigma = sigma0 * (r_grid / r0) ** (-sigmaslope_f)
-    rho_mid = Sigma / (np.sqrt(2.0 * np.pi) * H)
-
-    expo = (-(z**2) / (2.0 * H**2)).to("dimensionless").magnitude
-    rho = rho_mid * np.exp(expo)
+    
+    rho = rho_gaussian_from_sigma(Sigma, z, H)
 
     rhofloor = model.variables.get("RHOFLOORGAS", None)
     if rhofloor is not None:
@@ -206,20 +198,19 @@ def _scale_density_to_match_snapshot(
     if r_centers_new is None or theta_centers is None:
         raise ValueError("Failed to compute spherical centers for new mesh")
 
-    theta_vals = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
-    theta_mid_idx = int(np.argmin(np.abs(theta_vals - 0.5 * np.pi)))
+    theta_mid_idx = midplane_theta_index(theta_centers)
     snap_ref = float(np.mean(old_mag_rpt[0, :, theta_mid_idx]))
     if not np.isfinite(snap_ref) or snap_ref <= 0.0:
         raise ValueError("density_match failed: snapshot reference density is non-positive")
 
     r_ref = r_centers_new[plan.n_add]
+    theta_vals = np.asarray(theta_centers.to("radian").magnitude, dtype=float)
     theta_mid = float(theta_vals[theta_mid_idx])
     z_ref = r_ref * np.cos(theta_mid)
-    H_ref = (h0_f * (r_ref / r0) ** fl_f) * r_ref
+    R_ref = r_ref * np.sin(theta_mid)
+    H_ref = scale_height(R_ref, h0, r0, fl)
     Sigma_ref = sigma0 * (r_ref / r0) ** (-sigmaslope_f)
-    rho_mid_ref = Sigma_ref / (np.sqrt(2.0 * np.pi) * H_ref)
-    expo_ref = (-(z_ref**2) / (2.0 * H_ref**2)).to("dimensionless").magnitude
-    rho_ref = (rho_mid_ref * np.exp(expo_ref)).to(units_f)
+    rho_ref = rho_gaussian_from_sigma(Sigma_ref, z_ref, H_ref).to(units_f)
     analytic_ref = float(getattr(rho_ref, "magnitude", rho_ref))
     if not np.isfinite(analytic_ref) or analytic_ref <= 0.0:
         raise ValueError("density_match failed: analytic reference density is non-positive")

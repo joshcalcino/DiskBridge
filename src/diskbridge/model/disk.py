@@ -1,14 +1,139 @@
+"""Disk geometry and structure models.
+
+This module provides disk geometry laws and the Disk component class.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
 
+from diskbridge._units import Quantity, units
 from .core import SubModel
 from .field import Field
+from .coords import spherical_grids, cylindrical_from_spherical
 
 if TYPE_CHECKING:
     from .core import Model
+
+
+def aspect_ratio(R: Quantity, h0: Quantity, r0: Quantity, flaring: Quantity) -> Quantity:
+    """Compute disk aspect ratio h = H/R as a function of radius.
+    
+    Parameters
+    ----------
+    R : Quantity
+        Cylindrical radius [length]
+    h0 : Quantity
+        Aspect ratio at reference radius (dimensionless)
+    r0 : Quantity
+        Reference radius [length]
+    flaring : Quantity
+        Flaring index (dimensionless)
+        
+    Returns
+    -------
+    Quantity
+        Aspect ratio h(R) = h0 * (R/r0)^flaring (dimensionless)
+        
+    Notes
+    -----
+    For a constant aspect ratio disk, set flaring = 0.
+    """
+    return h0 * (R / r0) ** flaring
+
+
+def scale_height(R: Quantity, h0: Quantity, r0: Quantity, flaring: Quantity) -> Quantity:
+    """Compute disk scale height H(R) = h(R) * R.
+    
+    Parameters
+    ----------
+    R : Quantity
+        Cylindrical radius [length]
+    h0 : Quantity
+        Aspect ratio at reference radius (dimensionless)
+    r0 : Quantity
+        Reference radius [length]
+    flaring : Quantity
+        Flaring index (dimensionless)
+        
+    Returns
+    -------
+    Quantity
+        Scale height H(R) = h0 * (R/r0)^flaring * R [length]
+        
+    Notes
+    -----
+    This is the canonical scale height definition. For flaring=0, H ~ R (constant h).
+    """
+    return aspect_ratio(R, h0, r0, flaring) * R
+
+
+def rho_gaussian_from_sigma(Sigma: Quantity, z: Quantity, H: Quantity) -> Quantity:
+    """Compute 3D density from surface density assuming Gaussian vertical profile.
+    
+    Parameters
+    ----------
+    Sigma : Quantity
+        Surface density [mass/area]
+    z : Quantity
+        Height above midplane [length]
+    H : Quantity
+        Scale height [length]
+        
+    Returns
+    -------
+    Quantity
+        Volume density rho(z) = Sigma/(sqrt(2pi)H) * exp(-z^2/(2H^2)) [mass/volume]
+        
+    Notes
+    -----
+    This assumes vertical hydrostatic equilibrium with an isothermal sound speed.
+    The midplane density is rho_mid = Sigma / (sqrt(2pi) * H).
+    """
+    rho_mid = Sigma / (np.sqrt(2.0 * np.pi) * H)
+    expo = -(z**2) / (2.0 * H**2)
+    return rho_mid * np.exp(expo)
+
+
+def midplane_theta_index(theta_centers: Quantity) -> int:
+    """Find the theta index closest to the midplane (theta = pi/2).
+    
+    Parameters
+    ----------
+    theta_centers : Quantity
+        Theta cell centers [angle]
+        
+    Returns
+    -------
+    int
+        Index of theta cell closest to midplane
+        
+    Notes
+    -----
+    In spherical coordinates, the midplane is at theta = pi/2.
+    """
+    return int(np.argmin(np.abs(theta_centers.to("radian") - 0.5 * np.pi)))
+
+
+def keplerian_frequency(r: Quantity, mstar: Quantity) -> Quantity:
+    """Compute Keplerian orbital frequency Omega_K = sqrt(G M_star / r^3).
+    
+    Parameters
+    ----------
+    r : Quantity
+        Spherical or cylindrical radius [length]
+    mstar : Quantity
+        Stellar mass [mass]
+        
+    Returns
+    -------
+    Quantity
+        Keplerian frequency Omega_K [1/time]
+    """
+    G = units('G')
+    return np.sqrt(G * mstar / r**3)
 
 
 class _RegionDustConfigurator:
@@ -84,27 +209,13 @@ class Disk(SubModel):
         theta_sph = sph_mesh.centers("theta")
         phi_sph = sph_mesh.centers("phi")
 
-        r_mag = r_sph.magnitude
-        theta_mag = theta_sph.magnitude
-        phi_mag = phi_sph.magnitude
-        r_units = r_sph.units
+        r_grid, phi_grid, theta_grid = spherical_grids(r_sph, phi_sph, theta_sph)
+        R_cyl, z_cyl = cylindrical_from_spherical(r_grid, theta_grid)
 
-        r_grid, phi_grid, theta_grid = np.meshgrid(
-            r_mag, phi_mag, theta_mag, indexing="ij"
-        )
-        r_grid = r_grid * r_units
-
-        z_cyl = r_grid * np.cos(theta_grid)
-
-        h_r = h0 * (r_sph / r0) ** fl
-        H = h_r * r_sph
-        H_3d = H[:, None, None] * np.ones_like(theta_grid)
-
+        H = scale_height(R_cyl, h0, r0, fl)
         Sigma_3d = Sigma[:, :, None] * np.ones(len(theta_sph))
-
-        rho_3d = Sigma_3d / (np.sqrt(2 * np.pi) * H_3d) * np.exp(
-            -z_cyl**2 / (2 * H_3d**2)
-        )
+        
+        rho_3d = rho_gaussian_from_sigma(Sigma_3d, z_cyl, H)
 
         ntheta = len(theta_sph)
         nr = len(r_sph)

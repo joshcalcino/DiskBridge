@@ -207,6 +207,34 @@ class Mesh:
         return cls("cartesian", axes)
 
     # ---------- pure transforms ----------
+    @staticmethod
+    def _theta_edges_by_scale_height(ncol: int, aspect_ratio: float, zmax_over_H: float) -> Quantity:
+        """Internal helper: compute theta edges for scale-height-based grid.
+        
+        Parameters
+        ----------
+        ncol : int
+            Number of theta cells
+        aspect_ratio : float
+            Disk aspect ratio h0 (dimensionless)
+        zmax_over_H : float
+            Maximum height in scale heights
+            
+        Returns
+        -------
+        Quantity
+            Theta edges [radian]
+        """
+        ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
+        thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
+        thmax = np.pi/2.0
+        
+        ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
+        ym_lower = -ymp + thmin + thmax
+        ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
+        tedge = np.concatenate([ym_lower[::-1], ym_upper]) * units.radian
+        return tedge
+    
     def to_spherical_by_scale_height(
         self,
         ncol: int,
@@ -217,19 +245,7 @@ class Mesh:
         Build spherical grid matching fargo2radmc3d's approach.
         Creates edges such that cells are centered near the midplane.
         """
-        ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
-        thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
-        thmax = np.pi/2.0
-        
-        # Follow fargo2radmc3d's approach (mesh.py lines 122-128)
-        # Create edges from thmin to thmax for half the grid
-        ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
-        # Transform to get lower hemisphere edges
-        ym_lower = -ymp + thmin + thmax  # = -ymp + pi/2 + thmin
-        # Mirror to upper hemisphere (skip first element to avoid duplication)
-        ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
-        # Concatenate: lower (reversed) + upper
-        tedge = np.concatenate([ym_lower[::-1], ym_upper]) * units.radian
+        tedge = self._theta_edges_by_scale_height(ncol, aspect_ratio, zmax_over_H)
 
         r_ax = self.axes.get("r", Axis())
         p_ax = self.axes.get("phi", Axis())
@@ -249,15 +265,7 @@ class Mesh:
         Add theta axis to a spherical mesh using scale height-based grid.
         Similar to to_spherical_by_scale_height but for spherical meshes without theta.
         """
-        ar = float(getattr(aspect_ratio, "magnitude", aspect_ratio))
-        thmin = np.pi/2.0 - np.arctan(zmax_over_H * ar)
-        thmax = np.pi/2.0
-        
-        # Follow fargo2radmc3d's approach
-        ymp = np.linspace(thmin, thmax, int(ncol)//2 + 1)
-        ym_lower = -ymp + thmin + thmax
-        ym_upper = np.pi - ym_lower[1:int(ncol)//2 + 1]
-        tedge = np.concatenate([ym_lower[::-1], ym_upper]) * units.radian
+        tedge = self._theta_edges_by_scale_height(ncol, aspect_ratio, zmax_over_H)
         
         # Return new mesh with theta axis added
         new_axes = dict(self.axes)

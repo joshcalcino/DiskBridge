@@ -12,7 +12,7 @@ from .utils import validate_field_against_mesh
 from .clipping import compute_clip_indexer
 
 if TYPE_CHECKING:
-    from .disk_component import Disk
+    from .disk import Disk
 
 class Model:
 
@@ -196,7 +196,7 @@ class Model:
         model.dust = Dust(model)
 
         if "disk_parameters" in snap:
-            from .disk_component import Disk
+            from .disk import Disk
             model.disk = Disk(model, snap["disk_parameters"])
 
         for name, field in snap["gas_fields"].items():
@@ -515,8 +515,7 @@ def puff_up_model(
 
     new.gas = SubModel(new)
     if getattr(model, "disk", None) is not None:
-        from .disk_component import Disk
-
+        from .disk import Disk
         new.disk = Disk(new, model.disk.parameters)
 
     for name, f in model.gas.items():

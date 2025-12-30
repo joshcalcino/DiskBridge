@@ -5,11 +5,15 @@ from typing import Callable, Optional, TYPE_CHECKING, Tuple, Union
 
 import numpy as np
 
-from diskbridge._units import Quantity, units
+from diskbridge._units import Quantity
+from diskbridge._logging import logger
+from diskbridge.model.field import Field
+from diskbridge.model.coords import spherical_grids, cylindrical_from_spherical
+from diskbridge.model.disk import scale_height
+from .core import SubModel
 
 if TYPE_CHECKING:
     from .core import Model
-    from .core import SubModel
 
 
 @dataclass
@@ -511,33 +515,31 @@ def set_mask_from_geometry(
     theta = mesh.centers('theta')
     phi = mesh.centers('phi')
     
-    r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
+    r_grid, phi_grid, theta_grid = spherical_grids(r, phi, theta)
     
     mask = np.ones_like(r_grid, dtype=bool)
     
     if r_min is not None:
-        mask &= (r_grid.magnitude >= r_min.to(r.units).magnitude)
+        mask &= (r_grid >= r_min)
     if r_max is not None:
-        mask &= (r_grid.magnitude <= r_max.to(r.units).magnitude)
+        mask &= (r_grid <= r_max)
     
     if honrmax is not None and model.disk is not None:
-        R_cyl = r_grid * np.sin(theta_grid)
-        z_cyl = r_grid * np.cos(theta_grid)
+        R_cyl, z_cyl = cylindrical_from_spherical(r_grid, theta_grid)
         
         h0 = model.disk.parameters["aspectratio"]
         fl = model.disk.parameters["flaringindex"]
         r0 = model.disk.parameters["r0"]
         
-        h = h0 * (R_cyl / r0.to(R_cyl.units)) ** fl
-        H = h * R_cyl
+        H = scale_height(R_cyl, h0, r0, fl)
         
         z_max = honrmax * H
         mask &= (np.abs(z_cyl) <= z_max)
     
     if theta_min is not None:
-        mask &= (theta_grid.magnitude >= theta_min.to(theta.units).magnitude)
+        mask &= (theta_grid >= theta_min)
     if theta_max is not None:
-        mask &= (theta_grid.magnitude <= theta_max.to(theta.units).magnitude)
+        mask &= (theta_grid <= theta_max)
     
     axis_order = ('r', 'phi', 'theta')
     

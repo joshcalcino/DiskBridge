@@ -9,11 +9,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, Optional, Callable, List, Literal
 import numpy as np
 
-from .field import Field
-from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge._logging import logger
+from diskbridge.model.field import Field
+from diskbridge.model.disk import scale_height, keplerian_frequency
 from diskbridge._params import params, canonicalize_dust_params
-from .mesh import Mesh, Axis
 
 if TYPE_CHECKING:
     from .core import Model
@@ -24,7 +24,49 @@ from .core import SubModel
 k_B = units('k_B')  # Boltzmann constant
 m_H = units('m_H')  # Hydrogen mass
 G = units('G')      # Gravitational constant
-solar_mass = units('solar_mass')  # Solar mass
+
+
+def stokes_number(
+    grain_size: Quantity,
+    gas_density: Quantity,
+    gas_temperature: Quantity,
+    keplerian_freq: Quantity,
+    grain_density: Quantity,
+    mean_molecular_weight: float,
+) -> Quantity:
+    """Compute Stokes number for Epstein drag regime.
+    
+    St = Omega_K * t_s where t_s = (rho_s * a) / (rho_g * c_s)
+    
+    Parameters
+    ----------
+    grain_size : Quantity
+        Grain radius [length]
+    gas_density : Quantity
+        Gas density [mass/volume]
+    gas_temperature : Quantity
+        Gas temperature [temperature]
+    keplerian_freq : Quantity
+        Keplerian frequency Omega_K [1/time]
+    grain_density : Quantity
+        Material density of dust grains [mass/volume]
+    mean_molecular_weight : float
+        Mean molecular weight of gas (dimensionless)
+        
+    Returns
+    -------
+    Quantity
+        Stokes number (dimensionless)
+        
+    Notes
+    -----
+    Valid in the Epstein drag regime where grain size << gas mean free path.
+    """
+    c_s = np.sqrt(k_B * gas_temperature / (mean_molecular_weight * m_H))
+    t_s = (grain_density * grain_size) / (gas_density * c_s)
+    St = keplerian_freq * t_s
+    
+    return St
 
 class DustBin:
     """Represents a single dust size bin with properties and density field.
@@ -558,47 +600,6 @@ class Dust(SubModel):
             f"dust/gas={dust_to_gas_ratio:.3e}, mode={mode}"
         )
         
-    def _compute_stokes_number(
-        self,
-        grain_size: Quantity,
-        gas_density: Quantity,
-        gas_temperature: Quantity,
-        keplerian_frequency: Quantity,
-        grain_density: Quantity,
-        mean_molecular_weight: float,
-    ) -> Quantity:
-        """Compute Stokes number for Epstein drag regime.
-        
-        St = Omega_K * t_s
-        where t_s = (rho_s * a) / (rho_g * c_s) for Epstein regime
-        
-        Args:
-            grain_size: Grain radius
-            gas_density: Gas density
-            gas_temperature: Gas temperature
-            keplerian_frequency: Keplerian frequency Omega_K
-            grain_density: Material density of dust grains
-            mean_molecular_weight: Mean molecular weight of gas
-            
-        Returns:
-            Stokes number (dimensionless)
-        """
-        # Material density
-        rho_s = grain_density
-        
-        # Sound speed: c_s = sqrt(k_B * T / (mu * m_H))
-        mu = mean_molecular_weight
-        
-        c_s = np.sqrt(k_B * gas_temperature / (mu * m_H))
-        
-        # Stopping time (Epstein regime)
-        t_s = (rho_s * grain_size) / (gas_density * c_s)
-        
-        # Stokes number
-        St = keplerian_frequency * t_s
-        
-        return St.to('dimensionless')
-        
     def _compute_dust_scale_height(
         self,
         gas_scale_height: Quantity,
@@ -637,6 +638,7 @@ class Dust(SubModel):
         return H_d
         
     def _compute_gas_scale_height(self) -> Quantity:
+        # FLAG THIS FOR FUTURE CONSIDERATION
         """Compute gas scale height H = c_s / Omega_K.
         
         Returns:
@@ -654,7 +656,7 @@ class Dust(SubModel):
             r0 = self.parent.disk.parameters.get('r0')
             
             if h0 is not None and r0 is not None:
-                H = h0 * r0 * (r / r0) ** fl
+                H = scale_height(r, h0, r0, fl)
                 return H
                 
         # Option 2: Compute from temperature and stellar mass
@@ -662,20 +664,19 @@ class Dust(SubModel):
             temp = self.parent.gas['temperature'].data
             
             # Get stellar mass
+            M_star = units('solar_mass').to('g')
             if hasattr(self.parent, 'variables'):
                 if 'mstar' in self.parent.variables:
                     M_star = self.parent.variables['mstar']
                     
             # Keplerian frequency (1D array)
-            Omega_K_1d = np.sqrt(G * M_star / r**3)
+            Omega_K_1d = keplerian_frequency(r, M_star)
             
             # Sound speed (3D array)
             mu = self.mean_molecular_weight
             c_s = np.sqrt(k_B * temp / (mu * m_H))
             
-            # Broadcast Omega_K to match c_s shape (spherical coordinates only)
-            if mesh.coord_system != 'spherical':
-                raise ValueError(f"Only spherical coordinates supported, got: {mesh.coord_system}")
+            # Broadcast Omega_K to match c_s shape 
             phi = mesh.centers('phi')
             theta = mesh.centers('theta')
             Omega_K = np.meshgrid(Omega_K_1d, phi, theta, indexing='ij')[0]
@@ -686,26 +687,6 @@ class Dust(SubModel):
             
         raise ValueError("Cannot compute scale height: no disk parameters or temperature")
     
-    def _get_keplerian_frequency(self) -> Quantity:
-        """Get Keplerian frequency Omega_K = sqrt(GM/r^3).
-        
-        Returns:
-            Keplerian frequency array
-        """
-        mesh = self.parent.mesh
-        r = mesh.centers('r')
-        
-        # Get stellar mass
-        M_star = units('solar_mass').to('g')
-        if hasattr(self.parent, 'variables'):
-            if 'mstar' in self.parent.variables:
-                M_star = self.parent.variables['mstar']
-                
-        G = units('G')
-        Omega_K = np.sqrt(G * M_star / r**3)
-        
-        return Omega_K
-        
     def _compute_bin_density(self, bin_index: int) -> Field:
         """Compute dust density field for a specific size bin.
         
@@ -786,33 +767,9 @@ class Dust(SubModel):
             
         else:
             raise ValueError(f"Unknown mode: {component.mode}")
-            
-    def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust settling-diffusion equilibrium density for a component bin.
-        
-        Implements the settling-diffusion equilibrium model where dust settles
-        toward the midplane with a scale height H_d that depends on the Stokes number:
-        
-            H_d / H_g = sqrt(delta / (St + delta))
-        
-        where St is the Stokes number and delta is the turbulent diffusion parameter.
-        
-        Args:
-            component: DustComponent instance
-            local_bin_idx: Dust bin index within the component
-            gas_density: Gas density field
-            
-        Returns:
-            Dust density field with vertical settling profile
-        """
-        mesh = self.parent.mesh
-        
-        if mesh.coord_system != 'spherical':
-            raise ValueError(f"Settling only supports spherical coordinates, got: {mesh.coord_system}")
-        
-        return self._compute_settling_density_spherical(component, local_bin_idx, gas_density)
     
-    def _compute_settling_density_spherical(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
+    
+    def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
         """Compute dust settling in spherical coordinates with mass conservation.
         
         Computes settled dust density directly in spherical coordinates by:
@@ -850,29 +807,27 @@ class Dust(SubModel):
         r_edges = mesh.edges('r')
         theta_edges = mesh.edges('theta')
         
-        # Create 3D grids - use magnitudes to avoid pint meshgrid issues, then add units
-        # Use indexing='ij' to get shape (n_r, n_phi, n_theta)
-        r_mag = r.magnitude
-        phi_mag = phi.magnitude
-        theta_mag = theta.magnitude
-        r_units = r.units
-        
-        r_grid_mag, phi_grid_mag, theta_grid_mag = np.meshgrid(r_mag, phi_mag, theta_mag, indexing='ij')
-        r_grid = r_grid_mag * r_units
+        # Create 3D grids
+        r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
         
         # Compute cylindrical coordinates for each spherical cell
-        # z inherits units from r_grid
-        z_cyl = r_grid * np.cos(theta_grid_mag)  # Height above midplane
+        z_cyl = r_grid * np.cos(theta_grid)
         
         # Find midplane index (theta closest to pi/2)
-        theta_mid_idx = np.argmin(np.abs(theta_mag - np.pi/2))
+        theta_mid_idx = np.argmin(np.abs(theta.to("radian") - np.pi/2))
         
         # Get midplane properties
         rho_g0 = gas_density.data[:, :, theta_mid_idx]
         T0 = gas_temp[:, :, theta_mid_idx]
         
-        # Compute Keplerian frequency at r (same as cylindrical method)
-        Omega_K_1d = self._get_keplerian_frequency()
+        # Get stellar mass
+        M_star = units('solar_mass')
+        if hasattr(self.parent, 'variables') and 'mstar' in self.parent.variables:
+            M_star = self.parent.variables['mstar']
+        
+        # Compute Keplerian frequency at r
+        r = self.parent.mesh.centers('r')
+        Omega_K_1d = keplerian_frequency(r, M_star)
         Omega_K = Omega_K_1d[:, None]
         
         # Sound speed at midplane
@@ -884,11 +839,11 @@ class Dust(SubModel):
         H_g0 = (c_s0 / Omega_K).to(r_units)
         
         # Stokes number at midplane
-        St0 = self._compute_stokes_number(
+        St0 = stokes_number(
             grain_size=grain_size,
             gas_density=rho_g0,
             gas_temperature=T0,
-            keplerian_frequency=Omega_K,
+            keplerian_freq=Omega_K,
             grain_density=component.distribution.grain_density,
             mean_molecular_weight=component.mean_molecular_weight,
         )
@@ -899,13 +854,10 @@ class Dust(SubModel):
         
         # Expand to 3D (H_d is function of r only, constant in theta)
         n_theta = len(theta)
-        H_d0_mag = H_d0.magnitude
-        H_d_mag = np.broadcast_to(H_d0_mag[:, :, None], (*H_d0_mag.shape, n_theta))
-        H_d = H_d_mag * H_d0.units
+        H_d = np.broadcast_to(H_d0[:, :, None], (*H_d0.shape, n_theta))
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
-        # Now z_cyl and H_d have the same units (r_units), so z^2/H_d^2 is dimensionless
-        vertical_profile = np.exp(-(z_cyl**2 / (2 * H_d**2)).to('dimensionless').magnitude)
+        vertical_profile = np.exp(-(z_cyl**2 / (2 * H_d**2)))
         
         # Compute dust density directly from analytic settling profile, without
         # additional column renormalization. This makes the dust density a
@@ -918,14 +870,12 @@ class Dust(SubModel):
 
         # Apply mask if set
         if component.mask is not None:
-            mask_array = component.mask.data.magnitude.astype(bool)
+            mask_array = component.mask.data.astype(bool)
             dust_density_data = dust_density_data * mask_array
 
         # Ensure numerical stability
-        dust_density_mag = dust_density_data.magnitude
-        dust_density_mag[~np.isfinite(dust_density_mag)] = 0.0
-        dust_density_mag[dust_density_mag < 0.0] = 0.0
-        dust_density_data = dust_density_mag * dust_density_data.units
+        dust_density_data = np.where(np.isfinite(dust_density_data), dust_density_data, 0.0)
+        dust_density_data = np.where(dust_density_data >= 0.0, dust_density_data, 0.0)
         
         axis_order = gas_density.axis_order
         
