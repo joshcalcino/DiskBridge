@@ -115,9 +115,14 @@ def run_thermal(
         'tol': config.get('tol', 0.01),
         'beta_cii': config.get('beta_cii', 1.0),
         'alpha_acc': config.get('alpha_acc', 0.3),
+        'backend': config.get('backend', 'auto'),
+        'max_bisect_iter': config.get('max_bisect_iter', 60),
+        'bisect_tol': config.get('bisect_tol', 1e-6),
+        'store_terms': config.get('store_terms', False),
     }
     
     logger.info("Solver parameters:")
+    logger.info(f"  backend: {params['backend']}")
     logger.info(f"  zeta_cr: {params['zeta_cr']}")
     logger.info(f"  pah_scale: {params['pah_scale']}")
     logger.info(f"  X_C_tot: {params['X_C_tot']}")

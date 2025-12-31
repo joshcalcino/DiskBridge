@@ -38,6 +38,10 @@ def run_thermal_balance_v1(
     
     n_iter = params.get('n_iter', 3)
     tol = params.get('tol', 0.01)
+    backend = params.get('backend', 'auto')
+    max_bisect_iter = params.get('max_bisect_iter', 60)
+    bisect_tol = params.get('bisect_tol', 1e-6)
+    store_terms = params.get('store_terms', False)
     
     return solve_thermal_balance(
         state=state,
@@ -48,6 +52,10 @@ def run_thermal_balance_v1(
         n_iter=n_iter,
         tol=tol,
         update_closure=True,
+        backend=backend,
+        max_bisect_iter=max_bisect_iter,
+        bisect_tol=bisect_tol,
+        store_terms=store_terms,
     )
 
 

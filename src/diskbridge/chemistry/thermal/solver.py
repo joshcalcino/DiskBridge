@@ -1,12 +1,15 @@
 """Thermal balance solver with modular term evaluation.
 
 Solves Gamma_tot(Tg) - Lambda_tot(Tg) = 0 for gas temperature.
+
+Supports two backends:
+- "numba": Parallel Numba-accelerated kernels (default if numba available)
+- "python": Pure Python with SciPy brentq (fallback)
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import brentq
 
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
@@ -14,6 +17,17 @@ from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.terms import HEATING_TERMS, COOLING_TERMS, EXCHANGE_TERMS
 from diskbridge.chemistry.thermal.carbon_closure import update_carbon_ions
 from diskbridge.chemistry.thermal import constants as thermal_const
+
+try:
+    from diskbridge.chemistry.thermal._kernels import (
+        carbon_closure_kernel,
+        solve_tgas_kernel,
+        compute_terms_kernel,
+        max_fractional_change,
+    )
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
 
 
 def evaluate_net_heating(
@@ -115,20 +129,212 @@ def solve_thermal_balance_cell(
     f_min = residual(T_min)
     f_max = residual(T_max)
     
+    Tdust_K = state.Tdust.to('K').magnitude
+    
     if f_min * f_max > 0:
-        if abs(f_min) < abs(f_max):
+        if T_min < Tdust_K < T_max:
+            return Tdust_K
+        elif abs(f_min) < abs(f_max):
             return T_min
         else:
             return T_max
     
     try:
+        from scipy.optimize import brentq
         T_solved = brentq(residual, T_min, T_max, xtol=1e-3)
         return T_solved
     except ValueError:
-        return 0.5 * (T_min + T_max)
+        return Tdust_K if T_min < Tdust_K < T_max else 0.5 * (T_min + T_max)
 
 
-def solve_thermal_balance(
+def _build_term_mask(
+    heating_terms: list[str],
+    cooling_terms: list[str],
+    exchange_terms: list[str],
+) -> int:
+    """Convert term lists to bitmask for kernel dispatch."""
+    mask = 0
+    if "cosmic_ray" in heating_terms:
+        mask |= thermal_const.TERM_CR
+    if "photoelectric" in heating_terms:
+        mask |= thermal_const.TERM_PE
+    if "cii" in cooling_terms:
+        mask |= thermal_const.TERM_CII
+    if "gas_dust" in exchange_terms:
+        mask |= thermal_const.TERM_GD
+    return mask
+
+
+def solve_thermal_balance_numba(
+    state: ThermalState,
+    heating_terms: list[str],
+    cooling_terms: list[str],
+    exchange_terms: list[str],
+    params: dict,
+    n_iter: int = 3,
+    tol: float = 0.01,
+    update_closure: bool = True,
+    max_bisect_iter: int = 60,
+    bisect_tol: float = 1e-6,
+    store_terms: bool = False,
+) -> ThermalResult:
+    """Numba-accelerated thermal balance solver.
+    
+    Parameters
+    ----------
+    state : ThermalState
+        Thermal state with required fields
+    heating_terms : list[str]
+        List of heating term names
+    cooling_terms : list[str]
+        List of cooling term names
+    exchange_terms : list[str]
+        List of exchange term names
+    params : dict
+        Parameters for term evaluation
+    n_iter : int
+        Maximum outer iterations (default 3)
+    tol : float
+        Convergence tolerance (fractional change in Tg, default 0.01)
+    update_closure : bool
+        Whether to update carbon closure (default True)
+    max_bisect_iter : int
+        Maximum bisection iterations per cell (default 60)
+    bisect_tol : float
+        Bisection convergence tolerance [erg cm^-3 s^-1] (default 1e-6)
+    store_terms : bool
+        Store per-term heating/cooling rates (default False)
+        
+    Returns
+    -------
+    ThermalResult
+        Result with solved Tgas and auxiliary fields
+    """
+    T_min_qty = params.get('T_min', thermal_const.T_min_solve)
+    T_max_qty = params.get('T_max', thermal_const.T_max_solve)
+    T_min = T_min_qty.to('K').magnitude if hasattr(T_min_qty, 'to') else float(T_min_qty)
+    T_max = T_max_qty.to('K').magnitude if hasattr(T_max_qty, 'to') else float(T_max_qty)
+    
+    zeta_cr_qty = params.get('zeta_cr', thermal_const.zeta_cr_default)
+    zeta_cr = zeta_cr_qty.to('s^-1').magnitude if hasattr(zeta_cr_qty, 'to') else float(zeta_cr_qty)
+    
+    Gamma_C0_qty = params.get('Gamma_C0', thermal_const.Gamma_C0_default)
+    Gamma_C0 = Gamma_C0_qty.to('s^-1').magnitude if hasattr(Gamma_C0_qty, 'to') else float(Gamma_C0_qty)
+    
+    pah_scale = float(params.get('pah_scale', thermal_const.pah_scale_default))
+    X_C_tot = float(params.get('X_C_tot', thermal_const.X_C_tot_default))
+    alpha_acc = float(params.get('alpha_acc', thermal_const.alpha_acc_default_val))
+    beta_cii = float(params.get('beta_cii', 1.0))
+    
+    mask = _build_term_mask(heating_terms, cooling_terms, exchange_terms)
+    
+    shape = state.nH.shape
+    ncells = state.nH.size
+    
+    nH_flat = np.ascontiguousarray(state.nH.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    Td_flat = np.ascontiguousarray(state.Tdust.to('K').magnitude.flatten(), dtype=np.float64)
+    chi_flat = np.ascontiguousarray(state.chi_eff.magnitude.flatten(), dtype=np.float64)
+    
+    if state.nco_gas is not None:
+        nco_gas_flat = state.nco_gas.to('cm^-3').magnitude.flatten()
+    else:
+        nco_gas_flat = np.zeros(ncells, dtype=np.float64)
+    
+    if state.nco_ice is not None:
+        nco_ice_flat = state.nco_ice.to('cm^-3').magnitude.flatten()
+    else:
+        nco_ice_flat = np.zeros(ncells, dtype=np.float64)
+    
+    nco_total = np.ascontiguousarray(nco_gas_flat + nco_ice_flat, dtype=np.float64)
+    
+    Tg_flat = np.full(ncells, 0.5 * (T_min + T_max), dtype=np.float64)
+    nCplus_flat = np.zeros(ncells, dtype=np.float64)
+    nC_flat = np.zeros(ncells, dtype=np.float64)
+    ne_flat = np.zeros(ncells, dtype=np.float64)
+    
+    converged = False
+    max_change = 1.0
+    
+    for iteration in range(n_iter):
+        logger.info(f"Thermal iteration {iteration + 1}/{n_iter} (numba backend)")
+        
+        if update_closure:
+            carbon_closure_kernel(
+                nH_flat, chi_flat, Tg_flat, nco_total,
+                X_C_tot, Gamma_C0,
+                nCplus_flat, nC_flat, ne_flat,
+            )
+            logger.info(f"  Updated carbon closure: max(nCplus)={np.max(nCplus_flat):.2e} cm^-3")
+        
+        Tg_old = Tg_flat.copy()
+        
+        solve_tgas_kernel(
+            nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat,
+            mask, T_min, T_max, max_bisect_iter, bisect_tol,
+            zeta_cr, pah_scale, alpha_acc, beta_cii,
+            Tg_flat,
+        )
+        
+        max_change = max_fractional_change(Tg_flat, Tg_old)
+        
+        logger.info(f"  Tgas: min={np.min(Tg_flat):.1f} K, "
+                   f"max={np.max(Tg_flat):.1f} K, "
+                   f"median={np.median(Tg_flat):.1f} K, "
+                   f"max_change={max_change:.3f}")
+        
+        if max_change < tol:
+            converged = True
+            logger.info(f"  Converged after {iteration + 1} iterations")
+            break
+    
+    Tgas_K = Tg_flat.reshape(shape)
+    state.Tgas = Quantity(Tgas_K, 'K')
+    state.nCplus = Quantity(nCplus_flat.reshape(shape), 'cm^-3')
+    state.nC = Quantity(nC_flat.reshape(shape), 'cm^-3')
+    state.ne = Quantity(ne_flat.reshape(shape), 'cm^-3')
+    
+    fields = {
+        'nCplus': state.nCplus,
+        'nC': state.nC,
+        'ne': state.ne,
+    }
+    
+    if store_terms:
+        rate_cr = np.zeros(ncells, dtype=np.float64)
+        rate_pe = np.zeros(ncells, dtype=np.float64)
+        rate_cii = np.zeros(ncells, dtype=np.float64)
+        rate_gd = np.zeros(ncells, dtype=np.float64)
+        
+        compute_terms_kernel(
+            Tg_flat, nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat,
+            zeta_cr, pah_scale, alpha_acc, beta_cii,
+            rate_cr, rate_pe, rate_cii, rate_gd,
+        )
+        
+        fields['rate_cosmic_ray'] = Quantity(rate_cr.reshape(shape), 'erg/(cm^3 * s)')
+        fields['rate_photoelectric'] = Quantity(rate_pe.reshape(shape), 'erg/(cm^3 * s)')
+        fields['rate_cii'] = Quantity(rate_cii.reshape(shape), 'erg/(cm^3 * s)')
+        fields['rate_gas_dust'] = Quantity(rate_gd.reshape(shape), 'erg/(cm^3 * s)')
+    
+    meta = {
+        'n_iter': iteration + 1,
+        'converged': converged,
+        'max_change': float(max_change),
+        'heating_terms': heating_terms,
+        'cooling_terms': cooling_terms,
+        'exchange_terms': exchange_terms,
+        'backend': 'numba',
+        'params': params,
+    }
+    
+    return ThermalResult(
+        tgas=state.Tgas,
+        fields=fields,
+        meta=meta,
+    )
+
+
+def solve_thermal_balance_python(
     state: ThermalState,
     heating_terms: list[str],
     cooling_terms: list[str],
@@ -138,7 +344,7 @@ def solve_thermal_balance(
     tol: float = 0.01,
     update_closure: bool = True,
 ) -> ThermalResult:
-    """Solve thermal balance with optional iteration for closure.
+    """Pure Python thermal balance solver (fallback).
     
     Parameters
     ----------
@@ -272,6 +478,7 @@ def solve_thermal_balance(
         'heating_terms': heating_terms,
         'cooling_terms': cooling_terms,
         'exchange_terms': exchange_terms,
+        'backend': 'python',
         'params': params,
     }
     
@@ -280,3 +487,88 @@ def solve_thermal_balance(
         fields=fields,
         meta=meta,
     )
+
+
+def solve_thermal_balance(
+    state: ThermalState,
+    heating_terms: list[str],
+    cooling_terms: list[str],
+    exchange_terms: list[str],
+    params: dict,
+    n_iter: int = 3,
+    tol: float = 0.01,
+    update_closure: bool = True,
+    backend: str = "auto",
+    max_bisect_iter: int = 60,
+    bisect_tol: float = 1e-6,
+    store_terms: bool = False,
+) -> ThermalResult:
+    """Solve thermal balance with backend dispatch.
+    
+    Parameters
+    ----------
+    state : ThermalState
+        Thermal state with required fields
+    heating_terms : list[str]
+        List of heating term names
+    cooling_terms : list[str]
+        List of cooling term names
+    exchange_terms : list[str]
+        List of exchange term names
+    params : dict
+        Parameters for term evaluation
+    n_iter : int
+        Maximum outer iterations (default 3)
+    tol : float
+        Convergence tolerance (fractional change in Tg, default 0.01)
+    update_closure : bool
+        Whether to update carbon closure (default True)
+    backend : str
+        Backend to use: "auto", "numba", or "python" (default "auto")
+    max_bisect_iter : int
+        Maximum bisection iterations (numba only, default 60)
+    bisect_tol : float
+        Bisection tolerance (numba only, default 1e-6)
+    store_terms : bool
+        Store per-term rates (numba only, default False)
+        
+    Returns
+    -------
+    ThermalResult
+        Result with solved Tgas and auxiliary fields
+    """
+    if backend == "auto":
+        backend = "numba" if NUMBA_AVAILABLE else "python"
+    
+    if backend == "numba":
+        if not NUMBA_AVAILABLE:
+            raise ImportError(
+                "Numba backend requested but numba is not available. "
+                "Install numba or use backend='python'."
+            )
+        return solve_thermal_balance_numba(
+            state=state,
+            heating_terms=heating_terms,
+            cooling_terms=cooling_terms,
+            exchange_terms=exchange_terms,
+            params=params,
+            n_iter=n_iter,
+            tol=tol,
+            update_closure=update_closure,
+            max_bisect_iter=max_bisect_iter,
+            bisect_tol=bisect_tol,
+            store_terms=store_terms,
+        )
+    elif backend == "python":
+        return solve_thermal_balance_python(
+            state=state,
+            heating_terms=heating_terms,
+            cooling_terms=cooling_terms,
+            exchange_terms=exchange_terms,
+            params=params,
+            n_iter=n_iter,
+            tol=tol,
+            update_closure=update_closure,
+        )
+    else:
+        raise ValueError(f"Unknown backend: {backend!r}. Use 'auto', 'numba', or 'python'.")

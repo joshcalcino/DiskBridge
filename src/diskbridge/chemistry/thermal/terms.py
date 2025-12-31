@@ -133,7 +133,7 @@ def term_gas_dust_exchange(state: ThermalState, params: dict) -> Quantity:
     Tdust_K = state.Tdust.to('K').magnitude
     
     T_mean = 0.5 * (Tgas_K + Tdust_K)
-    v_th = np.sqrt(8.0 * K_B.to('erg/K').magnitude * T_mean / (np.pi * M_H.magnitude))
+    v_th = np.sqrt(8.0 * K_B.to('erg/K').magnitude * T_mean / (np.pi * M_H.to('g').magnitude))
     
     sigma_d = 1e-21
     f_dust = 0.01
