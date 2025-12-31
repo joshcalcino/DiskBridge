@@ -105,9 +105,6 @@ class ShieldingGrid2D:
         if th.shape != (lgNco.size, lgNh2.size):
             raise ValueError("theta_grid shape mismatch with axis grids.")
 
-        if RegularGridInterpolator is None:
-            raise ImportError("scipy required for shielding interpolation.")
-
         interp = RegularGridInterpolator(
             (lgNco, lgNh2),
             th,
