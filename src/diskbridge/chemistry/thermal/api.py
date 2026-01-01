@@ -11,10 +11,10 @@ import numpy as np
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
+from diskbridge._config import resolve_model_config
 from diskbridge.model.field import Field
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.registry import get_thermal_model
-from diskbridge.chemistry.thermal import constants as thermal_const
 
 
 def run_thermal(
@@ -104,21 +104,47 @@ def run_thermal(
         state.nco_gas = rad.nco_gas
         state.nco_ice = rad.nco_ice
     
+    cfg = resolve_model_config(("thermal", model), overrides=config)
+    
+    def get_val(key, default_key=None):
+        """Get parameter from user config or defaults, converting strings to Quantity."""
+        if key in config:
+            val = config[key]
+            if isinstance(val, str):
+                return Quantity(val)
+            return val
+        default_key = default_key or key
+        if default_key in cfg:
+            val = cfg[default_key]
+            if isinstance(val, str):
+                return Quantity(val)
+            return val
+        return None
+    
     params = {
-        'zeta_cr': config.get('zeta_cr', thermal_const.zeta_cr_default),
-        'pah_scale': config.get('pah_scale', thermal_const.pah_scale_default),
-        'X_C_tot': config.get('X_C_tot', thermal_const.X_C_tot_default),
-        'Gamma_C0': config.get('Gamma_C0', thermal_const.Gamma_C0_default),
-        'T_min': config.get('T_min', thermal_const.T_min_solve),
-        'T_max': config.get('T_max', thermal_const.T_max_solve),
-        'n_iter': config.get('n_iter', 3),
-        'tol': config.get('tol', 0.01),
-        'beta_cii': config.get('beta_cii', 1.0),
-        'alpha_acc': config.get('alpha_acc', 0.3),
+        'zeta_cr': get_val('zeta_cr', 'zeta_cr_default'),
+        'pah_scale': get_val('pah_scale', 'pah_scale_default'),
+        'X_C_tot': get_val('X_C_tot', 'X_C_tot_default'),
+        'Gamma_C0': get_val('Gamma_C0', 'Gamma_C0_default'),
+        'T_min': get_val('T_min', 'T_min_solve'),
+        'T_max': get_val('T_max', 'T_max_solve'),
+        'n_iter': config.get('n_iter', cfg.get('n_iter_default', 3)),
+        'tol': config.get('tol', cfg.get('tol_default', 0.01)),
+        'beta_cii': get_val('beta_cii', 'beta_cii_default'),
+        'alpha_acc': get_val('alpha_acc', 'alpha_acc_default'),
         'backend': config.get('backend', 'auto'),
-        'max_bisect_iter': config.get('max_bisect_iter', 60),
-        'bisect_tol': config.get('bisect_tol', 1e-6),
+        'max_bisect_iter': config.get('max_bisect_iter', cfg.get('max_bisect_iter_default', 60)),
+        'bisect_tol': config.get('bisect_tol', cfg.get('bisect_tol_default', 1e-6)),
         'store_terms': config.get('store_terms', False),
+        'alpha_rec_c0': cfg['alpha_rec_c0'],
+        'T_rec_exp': cfg['T_rec_exp'],
+        'heating_per_cr': get_val('heating_per_cr', 'heating_per_cr_ionization'),
+        'pe_heating_rate_0': get_val('pe_heating_rate_0', 'pe_heating_rate_0'),
+        'gamma_cii': get_val('gamma_cii', 'gamma_cii'),
+        'E_cii': get_val('E_cii', 'E_cii'),
+        'n_crit_cii': cfg['n_crit_cii'],
+        'sigma_dust': cfg['sigma_dust'],
+        'f_dust': cfg['f_dust'],
     }
     
     logger.info("Solver parameters:")

@@ -6,20 +6,7 @@ import numpy as np
 
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
-from diskbridge.chemistry.constants import (
-    ALPHA_PD_ICE_DEFAULT,
-    E_BIND_CO_DEFAULT,
-    EPS_DEFAULT,
-    K0_CO_DEFAULT,
-    LOG_CHI_OVER_NH_PDES,
-    LOG_CHI_OVER_NH_PDISS,
-    NU0_CO_DEFAULT,
-    SIGMA_D_PER_H_DEFAULT,
-    TAU_CO_FORM_DEFAULT,
-    T_FRZ_DEFAULT,
-    XCO_TOT_DEFAULT,
-    eps_chi,
-)
+from diskbridge._config import resolve_model_config
 from diskbridge.chemistry.models.pinte_switches import (
     apply_photodissociation,
     apply_photodesorption_escape,
@@ -43,11 +30,14 @@ def compute_abundance_pinte(
     chi: Optional[Quantity],
     chi_eff: Optional[Quantity],
     X0: float,
-    eps: float | Quantity = EPS_DEFAULT,
-    Tfrz: Quantity = T_FRZ_DEFAULT,
+    eps: float | Quantity,
+    Tfrz: Quantity,
     photodissociation: bool,
     freezeout: bool,
     photodesorption: bool,
+    log_chi_over_nh_pdiss: float,
+    log_chi_over_nh_pdes: float,
+    eps_chi: float,
     smooth_log_chi_nH_dex: float = 0.0,
     smooth_Tfrz_K: float = 0.0,
     write_number_density: Optional[WriteNumberDensityFn] = None,
@@ -103,7 +93,7 @@ def compute_abundance_pinte(
 
     mask_pdes = np.zeros_like(T_vals, dtype=bool)
     if photodesorption and chi_over_nH is not None:
-        log_thr_pdes = float(LOG_CHI_OVER_NH_PDES.magnitude)
+        log_thr_pdes = float(log_chi_over_nh_pdes)
         X, mask_pdes = apply_photodesorption_escape(
             X,
             X0=float(X0),
@@ -118,7 +108,7 @@ def compute_abundance_pinte(
         logger.info(f'Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)')
 
     if photodissociation and chi_over_nH is not None:
-        log_thr_pdiss = float(LOG_CHI_OVER_NH_PDISS.magnitude)
+        log_thr_pdiss = float(log_chi_over_nh_pdiss)
         X, mask_pdiss = apply_photodissociation(
             X,
             chi_over_nH=chi_over_nH,
@@ -162,13 +152,13 @@ def compute_co_steady_state(
     T: Quantity,
     chi: Quantity,
     theta_co,
-    Xco_tot: float = XCO_TOT_DEFAULT,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
-    k0_co: Quantity = K0_CO_DEFAULT,
-    sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
-    E_bind: float = E_BIND_CO_DEFAULT,
-    nu0: float = NU0_CO_DEFAULT,
-    alpha_pd_ice: float = ALPHA_PD_ICE_DEFAULT,
+    Xco_tot: float,
+    tau_form: Quantity,
+    k0_co: Quantity,
+    sigma_d_per_H: float,
+    E_bind: float,
+    nu0: float,
+    alpha_pd_ice: float,
     write_number_density: Optional[WriteNumberDensityFn] = None,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
     X_co, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
@@ -200,13 +190,13 @@ def evolve_co_time_dependent(
     theta_co,
     t_end: Quantity,
     dt: Optional[Quantity] = None,
-    Xco_tot: float = XCO_TOT_DEFAULT,
-    tau_form: Quantity = TAU_CO_FORM_DEFAULT,
-    k0_co: Quantity = K0_CO_DEFAULT,
-    sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
-    E_bind: float = E_BIND_CO_DEFAULT,
-    nu0: float = NU0_CO_DEFAULT,
-    alpha_pd_ice: float = ALPHA_PD_ICE_DEFAULT,
+    Xco_tot: float,
+    tau_form: Quantity,
+    k0_co: Quantity,
+    sigma_d_per_H: float,
+    E_bind: float,
+    nu0: float,
+    alpha_pd_ice: float,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
     write_number_density: Optional[WriteNumberDensityFn] = None,

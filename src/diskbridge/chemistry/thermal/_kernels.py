@@ -12,23 +12,13 @@ All quantities are in CGS units:
 import numpy as np
 from numba import njit, prange
 
-from diskbridge.chemistry.thermal.constants import (
-    k_B_cgs,
-    m_H_cgs,
-    alpha_rec_c0,
-    T_rec_exp,
-    gamma_cii_val,
-    E_cii_val,
-    n_crit_cii_val,
-    heating_per_cr_ionization_val,
-    pe_heating_rate_0_val,
-    sigma_dust_val,
-    f_dust_val,
-    TERM_CR,
-    TERM_PE,
-    TERM_CII,
-    TERM_GD,
-)
+from diskbridge._constants import K_B, M_H
+
+# Term bitmask flags for kernel dispatch
+TERM_CR = 1 << 0     # cosmic ray heating
+TERM_PE = 1 << 1     # photoelectric heating
+TERM_CII = 1 << 2    # C II 158 um cooling
+TERM_GD = 1 << 3     # gas-dust exchange
 
 
 # -----------------------------------------------------------------------------
@@ -43,6 +33,8 @@ def carbon_closure_kernel(
     nco_total: np.ndarray,
     X_C_tot: float,
     Gamma_C0: float,
+    alpha_rec_c0: float,
+    T_rec_exp: float,
     nCplus_out: np.ndarray,
     nC_out: np.ndarray,
     ne_out: np.ndarray,
@@ -69,6 +61,10 @@ def carbon_closure_kernel(
         Total carbon abundance relative to H
     Gamma_C0 : float
         C photoionization rate at chi=1 [s^-1]
+    alpha_rec_c0 : float
+        Recombination rate coefficient at 300K [cm^3/s]
+    T_rec_exp : float
+        Temperature exponent for recombination
     nCplus_out : ndarray
         Output: C+ number density [cm^-3]
     nC_out : ndarray
@@ -100,7 +96,7 @@ def carbon_closure_kernel(
 # -----------------------------------------------------------------------------
 
 @njit(inline='always', fastmath=True, cache=True)
-def cosmic_ray_heating(nH: float, zeta_cr: float) -> float:
+def cosmic_ray_heating(nH: float, zeta_cr: float, heating_per_cr: float) -> float:
     """Cosmic ray heating rate.
     
     Returns
@@ -108,7 +104,7 @@ def cosmic_ray_heating(nH: float, zeta_cr: float) -> float:
     float
         Heating rate [erg cm^-3 s^-1]
     """
-    return nH * zeta_cr * heating_per_cr_ionization_val
+    return nH * zeta_cr * heating_per_cr
 
 
 @njit(inline='always', fastmath=True, cache=True)
@@ -118,6 +114,7 @@ def photoelectric_heating(
     ne: float,
     Tg: float,
     pah_scale: float,
+    pe_heating_rate_0: float,
 ) -> float:
     """Photoelectric heating on dust grains (Bakes & Tielens 1994).
     
@@ -132,7 +129,7 @@ def photoelectric_heating(
     epsilon = 0.05 * np.sqrt(Tg / 1e4) / (1.0 + 4e-3 * psi)
     epsilon = min(max(epsilon, 1e-4), 0.1)
     
-    return pah_scale * pe_heating_rate_0_val * nH * chi * epsilon
+    return pah_scale * pe_heating_rate_0 * nH * chi * epsilon
 
 
 @njit(inline='always', fastmath=True, cache=True)
@@ -142,6 +139,10 @@ def cii_cooling(
     nCplus: float,
     Tg: float,
     beta_cii: float,
+    gamma_cii: float,
+    E_cii: float,
+    n_crit_cii: float,
+    k_B: float,
 ) -> float:
     """C II 158 um fine-structure cooling.
     
@@ -154,11 +155,11 @@ def cii_cooling(
     n_coll = max(n_coll, 1e-10)
     
     Tg_safe = max(Tg, 10.0)
-    excitation = np.exp(-E_cii_val / Tg_safe)
+    excitation = np.exp(-E_cii / Tg_safe)
     
     rate = (
-        nCplus * n_coll * gamma_cii_val * E_cii_val * k_B_cgs
-        * excitation / (1.0 + n_crit_cii_val / n_coll)
+        nCplus * n_coll * gamma_cii * E_cii * k_B
+        * excitation / (1.0 + n_crit_cii / n_coll)
         * beta_cii
     )
     return rate
@@ -170,6 +171,10 @@ def gas_dust_exchange(
     Td: float,
     Tg: float,
     alpha_acc: float,
+    sigma_dust: float,
+    f_dust: float,
+    k_B: float,
+    m_H: float,
 ) -> float:
     """Gas-dust collisional energy exchange.
     
@@ -181,13 +186,13 @@ def gas_dust_exchange(
         Signed rate [erg cm^-3 s^-1]
     """
     T_mean = 0.5 * (Tg + Td)
-    v_th = np.sqrt(8.0 * k_B_cgs * T_mean / (np.pi * m_H_cgs))
+    v_th = np.sqrt(8.0 * k_B * T_mean / (np.pi * m_H))
     
-    n_dust = f_dust_val * nH
+    n_dust = f_dust * nH
     
     rate = (
-        alpha_acc * nH * n_dust * sigma_dust_val * v_th
-        * 2.0 * k_B_cgs * (Td - Tg)
+        alpha_acc * nH * n_dust * sigma_dust * v_th
+        * 2.0 * k_B * (Td - Tg)
     )
     return rate
 
@@ -209,6 +214,15 @@ def net_heating_cell(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    heating_per_cr: float,
+    pe_heating_rate_0: float,
+    gamma_cii: float,
+    E_cii: float,
+    n_crit_cii: float,
+    sigma_dust: float,
+    f_dust: float,
+    k_B: float,
+    m_H: float,
 ) -> float:
     """Compute net heating rate for a single cell.
     
@@ -220,16 +234,16 @@ def net_heating_cell(
     net = 0.0
     
     if mask & TERM_CR:
-        net += cosmic_ray_heating(nH, zeta_cr)
+        net += cosmic_ray_heating(nH, zeta_cr, heating_per_cr)
     
     if mask & TERM_PE:
-        net += photoelectric_heating(nH, chi, ne, Tg, pah_scale)
+        net += photoelectric_heating(nH, chi, ne, Tg, pah_scale, pe_heating_rate_0)
     
     if mask & TERM_CII:
-        net -= cii_cooling(nH, ne, nCplus, Tg, beta_cii)
+        net -= cii_cooling(nH, ne, nCplus, Tg, beta_cii, gamma_cii, E_cii, n_crit_cii, k_B)
     
     if mask & TERM_GD:
-        net += gas_dust_exchange(nH, Td, Tg, alpha_acc)
+        net += gas_dust_exchange(nH, Td, Tg, alpha_acc, sigma_dust, f_dust, k_B, m_H)
     
     return net
 
@@ -254,6 +268,15 @@ def bisect_solve_cell(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    heating_per_cr: float,
+    pe_heating_rate_0: float,
+    gamma_cii: float,
+    E_cii: float,
+    n_crit_cii: float,
+    sigma_dust: float,
+    f_dust: float,
+    k_B: float,
+    m_H: float,
 ) -> float:
     """Solve thermal balance for a single cell using bisection.
     
@@ -266,9 +289,15 @@ def bisect_solve_cell(
     b = T_max
     
     fa = net_heating_cell(a, nH, Td, chi, ne, nCplus, mask,
-                          zeta_cr, pah_scale, alpha_acc, beta_cii)
+                          zeta_cr, pah_scale, alpha_acc, beta_cii,
+                          heating_per_cr, pe_heating_rate_0,
+                          gamma_cii, E_cii, n_crit_cii,
+                          sigma_dust, f_dust, k_B, m_H)
     fb = net_heating_cell(b, nH, Td, chi, ne, nCplus, mask,
-                          zeta_cr, pah_scale, alpha_acc, beta_cii)
+                          zeta_cr, pah_scale, alpha_acc, beta_cii,
+                          heating_per_cr, pe_heating_rate_0,
+                          gamma_cii, E_cii, n_crit_cii,
+                          sigma_dust, f_dust, k_B, m_H)
     
     if fa == 0.0:
         return a
@@ -286,7 +315,10 @@ def bisect_solve_cell(
     for _ in range(max_iter):
         m = 0.5 * (a + b)
         fm = net_heating_cell(m, nH, Td, chi, ne, nCplus, mask,
-                              zeta_cr, pah_scale, alpha_acc, beta_cii)
+                              zeta_cr, pah_scale, alpha_acc, beta_cii,
+                              heating_per_cr, pe_heating_rate_0,
+                              gamma_cii, E_cii, n_crit_cii,
+                              sigma_dust, f_dust, k_B, m_H)
         
         if abs(fm) < tol:
             return m
@@ -321,6 +353,15 @@ def solve_tgas_kernel(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    heating_per_cr: float,
+    pe_heating_rate_0: float,
+    gamma_cii: float,
+    E_cii: float,
+    n_crit_cii: float,
+    sigma_dust: float,
+    f_dust: float,
+    k_B: float,
+    m_H: float,
     Tg_out: np.ndarray,
 ) -> None:
     """Solve thermal balance for all cells in parallel.
@@ -355,6 +396,24 @@ def solve_tgas_kernel(
         Accommodation coefficient for gas-dust
     beta_cii : float
         C II escape probability
+    heating_per_cr : float
+        Energy deposited per CR ionization [erg]
+    pe_heating_rate_0 : float
+        Base photoelectric heating rate [erg/s]
+    gamma_cii : float
+        C II collisional de-excitation rate [cm^3/s]
+    E_cii : float
+        C II excitation energy [K]
+    n_crit_cii : float
+        C II critical density [cm^-3]
+    sigma_dust : float
+        Dust cross section [cm^2]
+    f_dust : float
+        Dust-to-gas mass ratio
+    k_B : float
+        Boltzmann constant [CGS]
+    m_H : float
+        Hydrogen mass [g]
     Tg_out : ndarray
         Output: solved gas temperature [K]
     """
@@ -363,7 +422,10 @@ def solve_tgas_kernel(
         Tg_out[i] = bisect_solve_cell(
             nH[i], Td[i], chi[i], ne[i], nCplus[i],
             mask, T_min, T_max, max_iter, tol,
-            zeta_cr, pah_scale, alpha_acc, beta_cii
+            zeta_cr, pah_scale, alpha_acc, beta_cii,
+            heating_per_cr, pe_heating_rate_0,
+            gamma_cii, E_cii, n_crit_cii,
+            sigma_dust, f_dust, k_B, m_H
         )
 
 
@@ -383,6 +445,15 @@ def compute_terms_kernel(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    heating_per_cr: float,
+    pe_heating_rate_0: float,
+    gamma_cii: float,
+    E_cii: float,
+    n_crit_cii: float,
+    sigma_dust: float,
+    f_dust: float,
+    k_B: float,
+    m_H: float,
     rate_cr_out: np.ndarray,
     rate_pe_out: np.ndarray,
     rate_cii_out: np.ndarray,
@@ -395,10 +466,10 @@ def compute_terms_kernel(
     """
     N = nH.size
     for i in prange(N):
-        rate_cr_out[i] = cosmic_ray_heating(nH[i], zeta_cr)
-        rate_pe_out[i] = photoelectric_heating(nH[i], chi[i], ne[i], Tg[i], pah_scale)
-        rate_cii_out[i] = -cii_cooling(nH[i], ne[i], nCplus[i], Tg[i], beta_cii)
-        rate_gd_out[i] = gas_dust_exchange(nH[i], Td[i], Tg[i], alpha_acc)
+        rate_cr_out[i] = cosmic_ray_heating(nH[i], zeta_cr, heating_per_cr)
+        rate_pe_out[i] = photoelectric_heating(nH[i], chi[i], ne[i], Tg[i], pah_scale, pe_heating_rate_0)
+        rate_cii_out[i] = -cii_cooling(nH[i], ne[i], nCplus[i], Tg[i], beta_cii, gamma_cii, E_cii, n_crit_cii, k_B)
+        rate_gd_out[i] = gas_dust_exchange(nH[i], Td[i], Tg[i], alpha_acc, sigma_dust, f_dust, k_B, m_H)
 
 
 # -----------------------------------------------------------------------------

@@ -10,16 +10,19 @@ import numpy as np
 
 from diskbridge._units import Quantity
 from diskbridge.chemistry.thermal.types import ThermalState
-from diskbridge.chemistry.thermal import constants as thermal_const
 
 
-def alpha_rec_c(T_K: np.ndarray) -> np.ndarray:
+def alpha_rec_c(T_K: np.ndarray, alpha_rec_c0: float, T_rec_exp: float) -> np.ndarray:
     """Radiative recombination rate for C+ + e- -> C.
     
     Parameters
     ----------
     T_K : ndarray
         Gas temperature [K]
+    alpha_rec_c0 : float
+        Recombination rate coefficient at 300K [cm^3/s]
+    T_rec_exp : float
+        Temperature exponent
         
     Returns
     -------
@@ -30,7 +33,7 @@ def alpha_rec_c(T_K: np.ndarray) -> np.ndarray:
     -----
     UMIST-style fit: alpha_rec = A * (T/300)^beta
     """
-    return thermal_const.alpha_rec_c0 * (T_K / 300.0)**thermal_const.T_rec_exp
+    return alpha_rec_c0 * (T_K / 300.0)**T_rec_exp
 
 
 def update_carbon_ions(state: ThermalState, params: dict) -> None:
@@ -58,28 +61,31 @@ def update_carbon_ions(state: ThermalState, params: dict) -> None:
     This is a simplified closure for Milestone 1. Later can be replaced
     with full UMIST network without touching thermal solver.
     """
-    X_C_tot = params.get('X_C_tot', thermal_const.X_C_tot_default)
-    Gamma_C0 = params.get('Gamma_C0', thermal_const.Gamma_C0_default)
-    
-    if not hasattr(Gamma_C0, 'to'):
-        Gamma_C0 = Quantity(Gamma_C0, 's^-1')
+    X_C_tot = float(params['X_C_tot'])
+    Gamma_C0 = params['Gamma_C0']
+    if hasattr(Gamma_C0, 'to_base_units'):
+        Gamma_C0 = Gamma_C0.to_base_units().magnitude
+    else:
+        Gamma_C0 = float(Gamma_C0)
+    alpha_rec_c0 = float(params['alpha_rec_c0'])
+    T_rec_exp = float(params['T_rec_exp'])
     
     if state.Tgas is None:
         raise ValueError("update_carbon_ions requires Tgas in state")
     
-    nH_cm3 = state.nH.to('cm^-3').magnitude
+    nH_cm3 = state.nH.to_base_units().magnitude
     chi = state.chi_eff.magnitude
-    Tgas_K = state.Tgas.to('K').magnitude
+    Tgas_K = state.Tgas.to_base_units().magnitude
     
     n_C_tot = X_C_tot * nH_cm3
     
     if state.nco_gas is not None:
-        nco_gas_cm3 = state.nco_gas.to('cm^-3').magnitude
+        nco_gas_cm3 = state.nco_gas.to_base_units().magnitude
     else:
         nco_gas_cm3 = np.zeros_like(nH_cm3)
     
     if state.nco_ice is not None:
-        nco_ice_cm3 = state.nco_ice.to('cm^-3').magnitude
+        nco_ice_cm3 = state.nco_ice.to_base_units().magnitude
     else:
         nco_ice_cm3 = np.zeros_like(nH_cm3)
     
@@ -87,8 +93,8 @@ def update_carbon_ions(state: ThermalState, params: dict) -> None:
     
     n_C_available = np.maximum(n_C_tot - nco_total, 0.0)
     
-    Gamma_photo = Gamma_C0.to('s^-1').magnitude * chi
-    alpha = alpha_rec_c(Tgas_K)
+    Gamma_photo = Gamma_C0 * chi
+    alpha = alpha_rec_c(Tgas_K, alpha_rec_c0, T_rec_exp)
     
     ratio = Gamma_photo / np.maximum(alpha, 1e-30)
     

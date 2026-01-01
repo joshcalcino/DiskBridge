@@ -13,10 +13,10 @@ import numpy as np
 
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
+from diskbridge._constants import K_B, M_H
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.terms import HEATING_TERMS, COOLING_TERMS, EXCHANGE_TERMS
 from diskbridge.chemistry.thermal.carbon_closure import update_carbon_ions
-from diskbridge.chemistry.thermal import constants as thermal_const
 
 try:
     from diskbridge.chemistry.thermal._kernels import (
@@ -24,10 +24,18 @@ try:
         solve_tgas_kernel,
         compute_terms_kernel,
         max_fractional_change,
+        TERM_CR,
+        TERM_PE,
+        TERM_CII,
+        TERM_GD,
     )
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
+    TERM_CR = 1 << 0
+    TERM_PE = 1 << 1
+    TERM_CII = 1 << 2
+    TERM_GD = 1 << 3
 
 
 def evaluate_net_heating(
@@ -155,13 +163,13 @@ def _build_term_mask(
     """Convert term lists to bitmask for kernel dispatch."""
     mask = 0
     if "cosmic_ray" in heating_terms:
-        mask |= thermal_const.TERM_CR
+        mask |= TERM_CR
     if "photoelectric" in heating_terms:
-        mask |= thermal_const.TERM_PE
+        mask |= TERM_PE
     if "cii" in cooling_terms:
-        mask |= thermal_const.TERM_CII
+        mask |= TERM_CII
     if "gas_dust" in exchange_terms:
-        mask |= thermal_const.TERM_GD
+        mask |= TERM_GD
     return mask
 
 
@@ -210,21 +218,29 @@ def solve_thermal_balance_numba(
     ThermalResult
         Result with solved Tgas and auxiliary fields
     """
-    T_min_qty = params.get('T_min', thermal_const.T_min_solve)
-    T_max_qty = params.get('T_max', thermal_const.T_max_solve)
-    T_min = T_min_qty.to('K').magnitude if hasattr(T_min_qty, 'to') else float(T_min_qty)
-    T_max = T_max_qty.to('K').magnitude if hasattr(T_max_qty, 'to') else float(T_max_qty)
+    def _to_float(val):
+        """Convert Quantity or value to float magnitude in base units."""
+        if hasattr(val, 'to_base_units'):
+            return val.to_base_units().magnitude
+        return float(val)
     
-    zeta_cr_qty = params.get('zeta_cr', thermal_const.zeta_cr_default)
-    zeta_cr = zeta_cr_qty.to('s^-1').magnitude if hasattr(zeta_cr_qty, 'to') else float(zeta_cr_qty)
-    
-    Gamma_C0_qty = params.get('Gamma_C0', thermal_const.Gamma_C0_default)
-    Gamma_C0 = Gamma_C0_qty.to('s^-1').magnitude if hasattr(Gamma_C0_qty, 'to') else float(Gamma_C0_qty)
-    
-    pah_scale = float(params.get('pah_scale', thermal_const.pah_scale_default))
-    X_C_tot = float(params.get('X_C_tot', thermal_const.X_C_tot_default))
-    alpha_acc = float(params.get('alpha_acc', thermal_const.alpha_acc_default_val))
-    beta_cii = float(params.get('beta_cii', 1.0))
+    T_min = _to_float(params['T_min'])
+    T_max = _to_float(params['T_max'])
+    zeta_cr = _to_float(params['zeta_cr'])
+    Gamma_C0 = _to_float(params['Gamma_C0'])
+    pah_scale = float(params['pah_scale'])
+    X_C_tot = float(params['X_C_tot'])
+    alpha_acc = float(params['alpha_acc'])
+    beta_cii = float(params['beta_cii'])
+    alpha_rec_c0 = float(params['alpha_rec_c0'])
+    T_rec_exp = float(params['T_rec_exp'])
+    heating_per_cr = _to_float(params['heating_per_cr'])
+    pe_heating_rate_0 = _to_float(params['pe_heating_rate_0'])
+    gamma_cii = _to_float(params['gamma_cii'])
+    E_cii = _to_float(params['E_cii'])
+    n_crit_cii = float(params['n_crit_cii'])
+    sigma_dust = float(params['sigma_dust'])
+    f_dust = float(params['f_dust'])
     
     mask = _build_term_mask(heating_terms, cooling_terms, exchange_terms)
     
@@ -261,7 +277,7 @@ def solve_thermal_balance_numba(
         if update_closure:
             carbon_closure_kernel(
                 nH_flat, chi_flat, Tg_flat, nco_total,
-                X_C_tot, Gamma_C0,
+                X_C_tot, Gamma_C0, alpha_rec_c0, T_rec_exp,
                 nCplus_flat, nC_flat, ne_flat,
             )
             logger.info(f"  Updated carbon closure: max(nCplus)={np.max(nCplus_flat):.2e} cm^-3")
@@ -272,6 +288,9 @@ def solve_thermal_balance_numba(
             nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat,
             mask, T_min, T_max, max_bisect_iter, bisect_tol,
             zeta_cr, pah_scale, alpha_acc, beta_cii,
+            heating_per_cr, pe_heating_rate_0,
+            gamma_cii, E_cii, n_crit_cii,
+            sigma_dust, f_dust, K_B, M_H,
             Tg_flat,
         )
         
@@ -308,6 +327,9 @@ def solve_thermal_balance_numba(
         compute_terms_kernel(
             Tg_flat, nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat,
             zeta_cr, pah_scale, alpha_acc, beta_cii,
+            heating_per_cr, pe_heating_rate_0,
+            gamma_cii, E_cii, n_crit_cii,
+            sigma_dust, f_dust, K_B, M_H,
             rate_cr, rate_pe, rate_cii, rate_gd,
         )
         
@@ -370,10 +392,13 @@ def solve_thermal_balance_python(
     ThermalResult
         Result with solved Tgas and auxiliary fields
     """
-    T_min_qty = params.get('T_min', thermal_const.T_min_solve)
-    T_max_qty = params.get('T_max', thermal_const.T_max_solve)
-    T_min = T_min_qty.to('K').magnitude
-    T_max = T_max_qty.to('K').magnitude
+    def _to_float(val):
+        if hasattr(val, 'to_base_units'):
+            return val.to_base_units().magnitude
+        return float(val)
+    
+    T_min = _to_float(params['T_min'])
+    T_max = _to_float(params['T_max'])
     
     shape = state.nH.shape
     ncells = state.nH.size

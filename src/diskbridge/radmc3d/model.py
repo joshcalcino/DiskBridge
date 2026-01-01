@@ -32,7 +32,7 @@ C_LIGHT = units('c')
 M_H = units('m_H')
 SIGMA_SB = units('sigma_SB')
 
-from diskbridge.chemistry.constants import eps_chi, LOG_CHI_OVER_NH_PDISS
+from diskbridge._constants import EPS_CHI, LOG_CHI_OVER_NH_PDISS
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
  
@@ -350,8 +350,8 @@ class RadModel:
         nH = self.nH.to('cm^-3').magnitude
         chi = self.chi.to('dimensionless').magnitude
 
-        ratio = chi / (nH + eps_chi)
-        log_ratio = np.log10(np.maximum(ratio, eps_chi))
+        ratio = chi / (nH + EPS_CHI)
+        log_ratio = np.log10(np.maximum(ratio, EPS_CHI))
 
         hist, edges = np.histogram(log_ratio, bins=nbins, range=(log_min, log_max))
         total = log_ratio.size
@@ -365,7 +365,6 @@ class RadModel:
             )
         )
 
-        log_thr = float(LOG_CHI_OVER_NH_PDISS.magnitude)
         candidate_counts = []
         candidate_fractions = []
 

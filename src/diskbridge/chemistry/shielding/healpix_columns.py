@@ -43,18 +43,7 @@ from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
 
 
-# Import threshold constant from model module
-# Deferred import to avoid circular dependency
-_LOG_CHI_OVER_NH_PDISS = None
-
-
-def _get_log_chi_over_nH_pdiss() -> float:
-    """Get the photodissociation threshold, importing lazily to avoid circular imports."""
-    global _LOG_CHI_OVER_NH_PDISS
-    if _LOG_CHI_OVER_NH_PDISS is None:
-        from diskbridge.chemistry.constants import LOG_CHI_OVER_NH_PDISS
-        _LOG_CHI_OVER_NH_PDISS = float(LOG_CHI_OVER_NH_PDISS.magnitude)
-    return _LOG_CHI_OVER_NH_PDISS
+from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
 
 
 # =============================================================================
@@ -569,7 +558,7 @@ def compute_co_shielding_healpix(
 
     # Threshold for "interesting" cells (where simple Pinte would photodissociate)
     if log_chi_over_nH_pdiss is None:
-        log_chi_over_nH_pdiss = _get_log_chi_over_nH_pdiss()
+        log_chi_over_nH_pdiss = LOG_CHI_OVER_NH_PDISS
 
     # Check for cached results
     cache_key = None

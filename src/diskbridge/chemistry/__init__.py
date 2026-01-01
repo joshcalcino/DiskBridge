@@ -10,19 +10,15 @@ import numpy as np
 import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
+from diskbridge._constants import (
+    K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE, TAU_CO_FORM,
+    TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
+)
 from diskbridge.chemistry.api import run_chemistry, run_thermochemistry
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
 from diskbridge.chemistry.tracers import compute_chem_age
 from diskbridge.chemistry.models.co_two_phase import compute_boundary_co_ic
-from diskbridge.chemistry.constants import (
-    K0_CO_DEFAULT,
-    TAU_CO_FORM_DEFAULT,
-    SIGMA_D_PER_H_DEFAULT,
-    E_BIND_CO_DEFAULT,
-    NU0_CO_DEFAULT,
-    ALPHA_PD_ICE_DEFAULT,
-)
 from diskbridge.chemistry.tau_form import compute_tau_form_co
 from diskbridge.chemistry.processes import evolve_co_two_phase_time_dependent
 from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile, find_r_split
@@ -44,11 +40,11 @@ def evolve_co_time_dependent_infall_age(
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
     tau_form: Optional[Quantity] = None,
-    k0_co: Quantity = K0_CO_DEFAULT,
-    sigma_d_per_H: float = SIGMA_D_PER_H_DEFAULT,
-    E_bind: float = E_BIND_CO_DEFAULT,
-    nu0: float = NU0_CO_DEFAULT,
-    alpha_pd_ice: float = ALPHA_PD_ICE_DEFAULT,
+    k0_co: Optional[Quantity] = None,
+    sigma_d_per_H: Optional[float] = None,
+    E_bind: Optional[float] = None,
+    nu0: Optional[float] = None,
+    alpha_pd_ice: Optional[float] = None,
     eps_vr: float = 1e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Dict]:
     """One-call CO two-phase chemistry with UV boundary and synthetic infall ages.
@@ -143,6 +139,18 @@ def evolve_co_time_dependent_infall_age(
     if dt is not None:
         raise ValueError("This API uses per-cell t_end; dt must be None (closed-form solver).")
     
+    if k0_co is None:
+        k0_co = K0_CO
+    if sigma_d_per_H is None:
+        sigma_d_per_H = SIGMA_D_PER_H
+    if E_bind is None:
+        E_bind = E_BIND_CO
+    if nu0 is None:
+        nu0 = NU0_CO
+    if alpha_pd_ice is None:
+        alpha_pd_ice = ALPHA_PD_ICE
+    tau_form_default = TAU_CO_FORM
+    
     logger.info("=" * 60)
     logger.info("CO two-phase with infall age workflow")
     logger.info("=" * 60)
@@ -221,13 +229,13 @@ def evolve_co_time_dependent_infall_age(
         if model == "density_capped":
             tau_form_use = compute_tau_form_co(
                 nH=nH,
-                n0=diskbridge.params.co_n0,
-                tau0=diskbridge.params.co_tau0,
-                tau_min=diskbridge.params.co_tau_min,
-                alpha=float(diskbridge.params.co_alpha),
+                n0=Quantity(TAU_FORM_N0, 'cm^-3'),
+                tau0=Quantity(TAU_FORM_TAU0, 's'),
+                tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
+                alpha=TAU_FORM_ALPHA,
             )
         elif model == "off":
-            tau_form_use = TAU_CO_FORM_DEFAULT
+            tau_form_use = Quantity(tau_form_default, 's')
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     else:
