@@ -166,7 +166,7 @@ sigma_dust = "1.0e-21 cm^2"    # Dust geometric cross-section per H
 f_dust = 0.01                  # Dust-to-gas mass ratio
 
 # =============================================================================
-# THERMAL BALANCE V1 MODEL
+# THERMAL BALANCE MODEL
 # =============================================================================
 
 [thermal.thermal_balance_v1]
