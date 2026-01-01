@@ -154,13 +154,8 @@ def compute_co_steady_state(
     theta_co,
     Xco_tot: float,
     tau_form: Quantity,
-    k0_co: Quantity,
-    sigma_d_per_H: float,
-    E_bind: float,
-    nu0: float,
-    alpha_pd_ice: float,
-    write_number_density: Optional[WriteNumberDensityFn] = None,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+    """Compute CO steady-state using constants from config."""
     X_co, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
         nH=nH,
         T=T,
@@ -168,17 +163,7 @@ def compute_co_steady_state(
         theta_co=theta_co,
         Xco_tot=Xco_tot,
         tau_form=tau_form,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
-        min_rate=1.0e-30,
     )
-
-    if write_number_density is not None:
-        write_number_density('co', nco_gas)
-
     return X_co, nco_gas, nco_ice, k_pd, tau_pd
 
 
@@ -189,39 +174,22 @@ def evolve_co_time_dependent(
     chi: Quantity,
     theta_co,
     t_end: Quantity,
-    dt: Optional[Quantity] = None,
     Xco_tot: float,
     tau_form: Quantity,
-    k0_co: Quantity,
-    sigma_d_per_H: float,
-    E_bind: float,
-    nu0: float,
-    alpha_pd_ice: float,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
-    write_number_density: Optional[WriteNumberDensityFn] = None,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+    """Evolve CO time-dependent chemistry using constants from config."""
     X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
         t_end=t_end,
-        dt=dt,
         Xco_tot=Xco_tot,
         tau_form=tau_form,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,
-        min_rate=1.0e-30,
     )
-
-    if write_number_density is not None:
-        write_number_density('co', nco_gas)
-
     return X_co, nco_gas, nco_ice, k_pd, tau_pd
 

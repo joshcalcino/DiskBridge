@@ -7,9 +7,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from diskbridge._units import Quantity, units
+from diskbridge._constants import (
+    K_B, M_H, K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE
+)
 
-M_CO_CGS = (28.0 * units('m_H')).to('g').magnitude
-K_BOLTZ_CGS = units('k_B').to('erg/K').magnitude
+M_CO_CGS = 28.0 * M_H
 
 
 @dataclass(frozen=True)
@@ -70,35 +72,27 @@ def compute_co_photodissociation_rate(
     return k_diss_co, tau_diss_co
 
 
-def co_freezeout_rate(
-    T: Quantity,
-    nH: Quantity,
-    sigma_d_per_H: float,
-) -> Quantity:
+def co_freezeout_rate(T: Quantity, nH: Quantity) -> Quantity:
+    """CO freeze-out rate using SIGMA_D_PER_H from config."""
     T_K = T.to('K').magnitude
     nH_cm3 = nH.to('cm^-3').magnitude
-    v_th = np.sqrt(8.0 * K_BOLTZ_CGS * T_K / (np.pi * M_CO_CGS))
-    sigma_nd = float(sigma_d_per_H) * nH_cm3
+    v_th = np.sqrt(8.0 * K_B * T_K / (np.pi * M_CO_CGS))
+    sigma_nd = SIGMA_D_PER_H * nH_cm3
     k_fo = sigma_nd * v_th
     return Quantity(k_fo, '1/s')
 
 
-def co_thermal_desorption_rate(
-    T_d: Quantity,
-    E_bind: float,
-    nu0: float,
-) -> Quantity:
+def co_thermal_desorption_rate(T_d: Quantity) -> Quantity:
+    """CO thermal desorption rate using E_BIND_CO and NU0_CO from config."""
     T_K = T_d.to('K').magnitude
-    k_td = float(nu0) * np.exp(-float(E_bind) / np.maximum(T_K, 1e-6))
+    k_td = NU0_CO * np.exp(-E_BIND_CO / np.maximum(T_K, 1e-6))
     return Quantity(k_td, '1/s')
 
 
-def co_photodesorption_rate(
-    chi: Quantity,
-    alpha_pd: float,
-) -> Quantity:
+def co_photodesorption_rate(chi: Quantity) -> Quantity:
+    """CO photodesorption rate using ALPHA_PD_ICE from config."""
     chi_val = chi.to('dimensionless').magnitude
-    k_pd_ice = float(alpha_pd) * chi_val
+    k_pd_ice = ALPHA_PD_ICE * chi_val
     return Quantity(k_pd_ice, '1/s')
 
 
@@ -108,23 +102,19 @@ def compute_co_two_phase_rates(
     T: Quantity,
     chi: Quantity,
     theta_co,
-    k0_co: Quantity,
-    sigma_d_per_H: float,
-    E_bind: float,
-    nu0: float,
-    alpha_pd_ice: float,
     min_rate: float = 1.0e-30,
 ) -> CoTwoPhaseRates:
+    """Compute all CO two-phase chemistry rates using constants from config."""
     k_pd, tau_pd = compute_co_photodissociation_rate(
         chi=chi,
         theta_co=theta_co,
-        k0_co=k0_co,
+        k0_co=Quantity(K0_CO, '1/s'),
         candidate_mask=None,
         min_rate=min_rate,
     )
-    k_fo = co_freezeout_rate(T, nH, sigma_d_per_H)
-    k_td = co_thermal_desorption_rate(T, E_bind, nu0)
-    k_pd_ice = co_photodesorption_rate(chi, alpha_pd_ice)
+    k_fo = co_freezeout_rate(T, nH)
+    k_td = co_thermal_desorption_rate(T)
+    k_pd_ice = co_photodesorption_rate(chi)
     return CoTwoPhaseRates(k_pd=k_pd, k_fo=k_fo, k_td=k_td, k_pd_ice=k_pd_ice, tau_pd=tau_pd)
 
 
@@ -136,23 +126,14 @@ def solve_co_two_phase_steady_state(
     theta_co,
     Xco_tot: float,
     tau_form: Quantity,
-    k0_co: Quantity,
-    sigma_d_per_H: float,
-    E_bind: float,
-    nu0: float,
-    alpha_pd_ice: float,
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+    """Solve steady-state CO two-phase chemistry using constants from config."""
     rates = compute_co_two_phase_rates(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
         min_rate=min_rate,
     )
 
@@ -189,28 +170,18 @@ def evolve_co_two_phase_time_dependent(
     chi: Quantity,
     theta_co,
     t_end: Quantity,
-    dt: Optional[Quantity],
     Xco_tot: float,
     tau_form: Quantity,
-    k0_co: Quantity,
-    sigma_d_per_H: float,
-    E_bind: float,
-    nu0: float,
-    alpha_pd_ice: float,
-    Xco_gas_init: Optional[float],
-    Xco_ice_init: Optional[float],
+    Xco_gas_init: Optional[float] = None,
+    Xco_ice_init: Optional[float] = None,
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+    """Evolve CO two-phase chemistry using constants from config."""
     rates = compute_co_two_phase_rates(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
         min_rate=min_rate,
     )
 

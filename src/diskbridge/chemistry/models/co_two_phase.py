@@ -40,12 +40,6 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         Result with abundances, number_densities, and diagnostic fields
     """
     Xco_tot = config.get('Xco_tot', float(diskbridge.params.abundance))
-    k0_co = config.get('k0_co', K0_CO)
-    tau_form_default = TAU_CO_FORM
-    sigma_d_per_H = SIGMA_D_PER_H
-    E_bind = E_BIND_CO
-    nu0 = NU0_CO
-    alpha_pd_ice = ALPHA_PD_ICE
     skip_shielding = config.get('skip_shielding', False)
     nside = config.get('nside', 4)
     b_kms = config.get('b_kms', 0.3)
@@ -64,7 +58,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
                 alpha=TAU_FORM_ALPHA,
             )
         elif model == "off":
-            tau_form = Quantity(tau_form_default, 's')
+            tau_form = Quantity(TAU_CO_FORM, 's')
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     
@@ -105,12 +99,6 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         theta_co=theta_co,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
-        write_number_density=None,
     )
     
     return ChemistryResult(
@@ -150,14 +138,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         raise ValueError("t_end is required for time-dependent CO chemistry")
     
     t_end = config['t_end']
-    dt = config.get('dt', None)
     Xco_tot = config.get('Xco_tot', float(diskbridge.params.abundance))
-    k0_co = config.get('k0_co', K0_CO)
-    tau_form_default = TAU_CO_FORM
-    sigma_d_per_H = SIGMA_D_PER_H
-    E_bind = E_BIND_CO
-    nu0 = NU0_CO
-    alpha_pd_ice = ALPHA_PD_ICE
     skip_shielding = config.get('skip_shielding', False)
     nside = config.get('nside', 4)
     b_kms = config.get('b_kms', 0.3)
@@ -184,7 +165,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
                 alpha=TAU_FORM_ALPHA,
             )
         elif model == "off":
-            tau_form = Quantity(tau_form_default, 's')
+            tau_form = Quantity(TAU_CO_FORM, 's')
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     
@@ -224,17 +205,10 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         chi=chi,
         theta_co=theta_co,
         t_end=t_end,
-        dt=dt,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form,
-        k0_co=k0_co,
-        sigma_d_per_H=sigma_d_per_H,
-        E_bind=E_bind,
-        nu0=nu0,
-        alpha_pd_ice=alpha_pd_ice,
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,
-        write_number_density=None,
     )
     
     return ChemistryResult(

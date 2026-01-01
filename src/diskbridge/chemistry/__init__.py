@@ -34,17 +34,11 @@ def evolve_co_time_dependent_infall_age(
     shell_cells: int = 2,
     disc_mask: Optional[np.ndarray] = None,
     vr_field: str = "vr",
-    dt: None = None,
     skip_shielding: bool = False,
     nside: int = 4,
     b_kms: float = 0.3,
     Xco_tot: float = 1.0e-4,
     tau_form: Optional[Quantity] = None,
-    k0_co: Optional[Quantity] = None,
-    sigma_d_per_H: Optional[float] = None,
-    E_bind: Optional[float] = None,
-    nu0: Optional[float] = None,
-    alpha_pd_ice: Optional[float] = None,
     eps_vr: float = 1e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Dict]:
     """One-call CO two-phase chemistry with UV boundary and synthetic infall ages.
@@ -73,8 +67,6 @@ def evolve_co_time_dependent_infall_age(
         Boolean disc mask. If None, uses rad.model.disk.mask
     vr_field : str, optional
         Radial velocity field name, default "vr"
-    dt : None
-        Must be None (closed-form solver with per-cell t_end)
     skip_shielding : bool, optional
         Skip CO shielding computation, default False
     nside : int, optional
@@ -85,18 +77,13 @@ def evolve_co_time_dependent_infall_age(
         Total CO abundance, default 1e-4
     tau_form : Quantity, optional
         Formation timescale (auto-computed if None)
-    k0_co : Quantity, optional
-        Photodissociation rate coefficient
-    sigma_d_per_H : float, optional
-        Dust cross-section per H
-    E_bind : float, optional
-        Binding energy in K
-    nu0 : float, optional
-        Attempt frequency in Hz
-    alpha_pd_ice : float, optional
-        Photodesorption yield
     eps_vr : float, optional
         Velocity floor in cm/s, default 1e-30
+    
+    Notes
+    -----
+    Chemistry parameters (k0_co, sigma_d_per_H, E_bind, nu0, alpha_pd_ice) are
+    loaded from config.toml. Override via diskbridge.load_config(path) before import.
         
     Returns
     -------
@@ -136,21 +123,6 @@ def evolve_co_time_dependent_infall_age(
     ... )
     >>> print("UV boundary:", meta["R_boundary"])
     """
-    if dt is not None:
-        raise ValueError("This API uses per-cell t_end; dt must be None (closed-form solver).")
-    
-    if k0_co is None:
-        k0_co = K0_CO
-    if sigma_d_per_H is None:
-        sigma_d_per_H = SIGMA_D_PER_H
-    if E_bind is None:
-        E_bind = E_BIND_CO
-    if nu0 is None:
-        nu0 = NU0_CO
-    if alpha_pd_ice is None:
-        alpha_pd_ice = ALPHA_PD_ICE
-    tau_form_default = TAU_CO_FORM
-    
     logger.info("=" * 60)
     logger.info("CO two-phase with infall age workflow")
     logger.info("=" * 60)
@@ -257,17 +229,8 @@ def evolve_co_time_dependent_infall_age(
         chi=chi_shell,
         theta_co=theta_shell,
         t_end=outer_age,
-        dt=None,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form_shell,
-        k0_co=k0_co,
-        sigma_d_per_H=float(sigma_d_per_H),
-        E_bind=float(E_bind),
-        nu0=float(nu0),
-        alpha_pd_ice=float(alpha_pd_ice),
-        Xco_gas_init=None,
-        Xco_ice_init=None,
-        min_rate=1.0e-30,
     )
     
     Xco_gas0 = float(np.median(nco_gas_shell.to("cm^-3").magnitude / nH_shell.to("cm^-3").magnitude))
@@ -311,17 +274,10 @@ def evolve_co_time_dependent_infall_age(
         chi=chi,
         theta_co=theta_co,
         t_end=t_end,
-        dt=None,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form_use,
-        k0_co=k0_co,
-        sigma_d_per_H=float(sigma_d_per_H),
-        E_bind=float(E_bind),
-        nu0=float(nu0),
-        alpha_pd_ice=float(alpha_pd_ice),
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,
-        min_rate=1.0e-30,
     )
     
     meta = {
