@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
-from diskbridge._config import resolve_model_config
+from diskbridge._constants import (
+    T_FRZ, EPS_FRZ, LOG_CHI_OVER_NH_PDISS, LOG_CHI_OVER_NH_PDES, EPS_CHI
+)
 from diskbridge.chemistry.models.pinte_switches import (
     apply_photodissociation,
     apply_photodesorption_escape,
@@ -19,9 +21,6 @@ from diskbridge.chemistry.processes import (
 )
 
 
-WriteNumberDensityFn = Callable[[str, Quantity], None]
-
-
 def compute_abundance_pinte(
     *,
     molecule: str,
@@ -30,19 +29,13 @@ def compute_abundance_pinte(
     chi: Optional[Quantity],
     chi_eff: Optional[Quantity],
     X0: float,
-    eps: float | Quantity,
-    Tfrz: Quantity,
     photodissociation: bool,
     freezeout: bool,
     photodesorption: bool,
-    log_chi_over_nh_pdiss: float,
-    log_chi_over_nh_pdes: float,
-    eps_chi: float,
     smooth_log_chi_nH_dex: float = 0.0,
     smooth_Tfrz_K: float = 0.0,
-    write_number_density: Optional[WriteNumberDensityFn] = None,
 ) -> Tuple[Quantity, Quantity]:
-    """Pinte-style abundance switches.
+    """Pinte-style abundance switches using constants from config.
 
     Assumes prerequisites are already satisfied:
     - Temperature `T`
@@ -50,23 +43,12 @@ def compute_abundance_pinte(
     - UV field `chi` if photodissociation or photodesorption is enabled
     - Effective UV field `chi_eff` if self-shielding is enabled by the caller
     """
-
     T_K = T.to('K')
     nH_cm3 = nH.to('cm^-3')
-
     T_vals = T_K.magnitude
-    Tfrz_val = float(Tfrz.to('K').magnitude)
-
-    if isinstance(eps, Quantity):
-        eps_val = float(eps.to('dimensionless').magnitude)
-    else:
-        eps_val = float(eps)
 
     if photodissociation or photodesorption:
-        if chi_eff is None:
-            chi_eff_use = chi
-        else:
-            chi_eff_use = chi_eff
+        chi_eff_use = chi_eff if chi_eff is not None else chi
     else:
         chi_eff_use = None
 
@@ -74,10 +56,7 @@ def compute_abundance_pinte(
 
     if freezeout:
         freeze_factor, mask_frz = compute_freezeout_factor(
-            T_vals,
-            Tfrz_val,
-            eps_val,
-            float(smooth_Tfrz_K),
+            T_vals, T_FRZ, EPS_FRZ, float(smooth_Tfrz_K),
         )
         X *= freeze_factor
         n_frz = int(np.sum(mask_frz))
@@ -88,12 +67,11 @@ def compute_abundance_pinte(
 
     chi_over_nH = None
     if chi_eff_use is not None and (photodissociation or photodesorption):
-        ratio = chi_eff_use.to('dimensionless').magnitude / (nH_cm3.magnitude + eps_chi)
-        chi_over_nH = np.log10(np.maximum(ratio, eps_chi))
+        ratio = chi_eff_use.to('dimensionless').magnitude / (nH_cm3.magnitude + EPS_CHI)
+        chi_over_nH = np.log10(np.maximum(ratio, EPS_CHI))
 
     mask_pdes = np.zeros_like(T_vals, dtype=bool)
     if photodesorption and chi_over_nH is not None:
-        log_thr_pdes = float(log_chi_over_nh_pdes)
         X, mask_pdes = apply_photodesorption_escape(
             X,
             X0=float(X0),
@@ -101,18 +79,17 @@ def compute_abundance_pinte(
             freeze_factor=freeze_factor,
             mask_frz=mask_frz,
             chi_over_nH=chi_over_nH,
-            log_thr_pdes=log_thr_pdes,
+            log_thr_pdes=LOG_CHI_OVER_NH_PDES,
             smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
         )
         n_pdes = int(np.sum(mask_pdes))
         logger.info(f'Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)')
 
     if photodissociation and chi_over_nH is not None:
-        log_thr_pdiss = float(log_chi_over_nh_pdiss)
         X, mask_pdiss = apply_photodissociation(
             X,
             chi_over_nH=chi_over_nH,
-            log_thr_pdiss=log_thr_pdiss,
+            log_thr_pdiss=LOG_CHI_OVER_NH_PDISS,
             smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
         )
         n_pdiss = int(np.sum(mask_pdiss))
@@ -122,10 +99,6 @@ def compute_abundance_pinte(
     logger.info(
         f'Computed {molecule} abundance: X_mean={np.mean(X):.2e}, n_mean={np.mean(n_mol):.2e}'
     )
-
-    if write_number_density is not None:
-        write_number_density(str(molecule).lower(), n_mol)
-
     return X, n_mol
 
 

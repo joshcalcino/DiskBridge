@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
 import diskbridge
-from diskbridge._units import Quantity
-from diskbridge._constants import (
-    T_FRZ, EPS_FRZ, LOG_CHI_OVER_NH_PDISS, LOG_CHI_OVER_NH_PDES, EPS_CHI
-)
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.driver import compute_abundance_pinte
 
@@ -25,8 +21,6 @@ def run(rad: 'RadModel', config: dict) -> ChemistryResult:
         Configuration with keys:
         - molecule: str (default: 'co')
         - X0: float (default: from diskbridge.params.abundance)
-        - eps: float (default: from config)
-        - Tfrz: float in K (default: from config)
         - photodissociation: bool (default: from diskbridge.params)
         - freezeout: bool (default: from diskbridge.params)
         - photodesorption: bool (default: from diskbridge.params)
@@ -37,11 +31,14 @@ def run(rad: 'RadModel', config: dict) -> ChemistryResult:
     -------
     ChemistryResult
         Result with abundances and number_densities
+        
+    Notes
+    -----
+    Chemistry constants (T_FRZ, EPS_FRZ, LOG_CHI_OVER_NH_PDISS, etc.) are
+    loaded from config.toml. Override via diskbridge.load_config(path).
     """
     molecule = config.get('molecule', 'co')
     X0 = config.get('X0', float(diskbridge.params.abundance))
-    eps = config.get('eps', EPS_FRZ)
-    Tfrz = config.get('Tfrz', Quantity(T_FRZ, 'K'))
     photodissociation = config.get('photodissociation', diskbridge.params.photodissociation)
     freezeout = config.get('freezeout', diskbridge.params.freezeout)
     photodesorption = config.get('photodesorption', diskbridge.params.photodesorption)
@@ -61,17 +58,11 @@ def run(rad: 'RadModel', config: dict) -> ChemistryResult:
         chi=chi,
         chi_eff=None,
         X0=float(X0),
-        eps=eps,
-        Tfrz=Tfrz,
         photodissociation=bool(photodissociation),
         freezeout=bool(freezeout),
         photodesorption=bool(photodesorption),
-        log_chi_over_nh_pdiss=LOG_CHI_OVER_NH_PDISS,
-        log_chi_over_nh_pdes=LOG_CHI_OVER_NH_PDES,
-        eps_chi=EPS_CHI,
         smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
         smooth_Tfrz_K=float(smooth_Tfrz_K),
-        write_number_density=None,
     )
     
     mol_lower = str(molecule).lower()

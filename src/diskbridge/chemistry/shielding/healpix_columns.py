@@ -77,7 +77,6 @@ def _compute_cache_key(
     chi_arr: np.ndarray,
     Xco_guess: float,
     XH2_guess: float,
-    log_chi_over_nH_pdiss: float,
 ) -> str:
     """Compute a unique cache key for healpix column computation.
     
@@ -126,7 +125,7 @@ def _compute_cache_key(
         "chi_hash": _compute_field_hash(chi_arr),
         "Xco_guess": Xco_guess,
         "XH2_guess": XH2_guess,
-        "log_threshold": log_chi_over_nH_pdiss,
+        "log_threshold": LOG_CHI_OVER_NH_PDISS,
     }
     
     # Create deterministic JSON string and hash it
@@ -228,7 +227,6 @@ def find_compatible_cache(
     chi_arr: np.ndarray,
     Xco_guess: float,
     XH2_guess: float,
-    log_chi_over_nH_pdiss: float,
 ) -> tuple[np.ndarray, np.ndarray, dict | None] | None:
     """Find and load a compatible cache file if one exists.
     
@@ -242,7 +240,6 @@ def find_compatible_cache(
     """
     cache_key = _compute_cache_key(
         mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
-        log_chi_over_nH_pdiss,
     )
     return load_healpix_cache(cache_dir, cache_key)  
 
@@ -474,7 +471,6 @@ def compute_co_shielding_healpix(
     nside: int = 4,
     b_kms: Optional[float] = None,
     candidate_mask: Optional[np.ndarray] = None,
-    log_chi_over_nH_pdiss: Optional[float] = None,
     Xco_guess: float = 5e-5,
     XH2_guess: float = 0.5,
     progress_chunks: Optional[int] = None,
@@ -503,8 +499,6 @@ def compute_co_shielding_healpix(
         Microturbulent Doppler b (km/s). Must match the Visser file if given.
     candidate_mask : ndarray of bool, optional
         Mask of cells to process. If None, constructed from chi/nH threshold.
-    log_chi_over_nH_pdiss : float, optional
-        Photodissociation threshold log10(chi/nH). Defaults to Pinte+18 value.
     Xco_guess : float, optional
         Default CO abundance relative to nH when nCO is not supplied.
     XH2_guess : float, optional
@@ -556,16 +550,11 @@ def compute_co_shielding_healpix(
     Xco_field = nCO_cgs / (nH_cgs + 1.0e-99)
     XH2_field = 2.0 * nH2_cgs / (nH_cgs + 1.0e-99)
 
-    # Threshold for "interesting" cells (where simple Pinte would photodissociate)
-    if log_chi_over_nH_pdiss is None:
-        log_chi_over_nH_pdiss = LOG_CHI_OVER_NH_PDISS
-
     # Check for cached results
     cache_key = None
     if cache_dir is not None:
         cache_key = _compute_cache_key(
             mesh, nside, nH_cgs, chi_arr, Xco_guess, XH2_guess,
-            log_chi_over_nH_pdiss,
         )
         cached = load_healpix_cache(cache_dir, cache_key)
         if cached is not None:
@@ -582,14 +571,14 @@ def compute_co_shielding_healpix(
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
         log_ratio = np.log10(np.maximum(ratio, 1e-99))
-        candidate_mask = log_ratio > log_chi_over_nH_pdiss
+        candidate_mask = log_ratio > LOG_CHI_OVER_NH_PDISS
 
     candidate_idx = np.argwhere(candidate_mask)
     n_candidates = candidate_idx.shape[0]
 
     logger.info(
         f"compute_co_shielding_healpix: {n_candidates} candidate cells "
-        f"(log10(chi/nH) > {log_chi_over_nH_pdiss:.2f})."
+        f"(log10(chi/nH) > {LOG_CHI_OVER_NH_PDISS:.2f})."
     )
 
     # Prepare ray tracer (spherical or cartesian)
