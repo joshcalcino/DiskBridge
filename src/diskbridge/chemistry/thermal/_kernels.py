@@ -32,13 +32,11 @@ from diskbridge.chemistry.thermal.lamda import (
     CPLUS_COLL_H_T, CPLUS_COLL_H_Q,
     CPLUS_COLL_E_T, CPLUS_COLL_E_Q,
     C_E_LEVELS_K, C_G_LEVELS, C_TRANS_U, C_TRANS_L, C_A_UL, C_HNU,
-    C_COLL_PH2_T, C_COLL_PH2_Q,
-    C_COLL_OH2_T, C_COLL_OH2_Q,
+    C_COLL_H2_T, C_COLL_H2_Q,
     C_COLL_H_T, C_COLL_H_Q,
     C_COLL_E_T, C_COLL_E_Q,
     O_E_LEVELS_K, O_G_LEVELS, O_TRANS_U, O_TRANS_L, O_A_UL, O_HNU,
-    O_COLL_PH2_T, O_COLL_PH2_Q,
-    O_COLL_OH2_T, O_COLL_OH2_Q,
+    O_COLL_H2_T, O_COLL_H2_Q,
     O_COLL_H_T, O_COLL_H_Q,
     O_COLL_E_T, O_COLL_E_Q,
     CO_N_LEVELS, CO_E_LEVELS_K, CO_G_LEVELS, CO_N_TRANS,
@@ -1462,6 +1460,7 @@ def ci_cooling_lamda(
     """[C I] 609 um and 370 um cooling using 3-level SE with LAMDA rates.
     
     Uses collision rates from Launay & Roueff (1977) and Schroeder et al. (1991).
+    H2 rates are precomputed as 50/50 ortho/para average.
     
     Parameters
     ----------
@@ -1486,23 +1485,11 @@ def ci_cooling_lamda(
     if nC <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    q_H2 = np.zeros((3, len(C_COLL_PH2_T)), dtype=np.float64)
-    q_HI = np.zeros((3, len(C_COLL_H_T)), dtype=np.float64)
-    q_e = np.zeros((3, len(C_COLL_E_T)), dtype=np.float64)
-    
-    for t in range(3):
-        for j in range(len(C_COLL_PH2_T)):
-            q_H2[t, j] = 0.5 * (C_COLL_PH2_Q[t, j] + C_COLL_OH2_Q[t, j])
-        for j in range(len(C_COLL_H_T)):
-            q_HI[t, j] = C_COLL_H_Q[t, j]
-        for j in range(len(C_COLL_E_T)):
-            q_e[t, j] = C_COLL_E_Q[t, j]
-    
     return solve_3level_se(
         nC, Tg, nH2, nHI, ne,
         beta_10, beta_20, beta_21,
         C_E_LEVELS_K, C_G_LEVELS, C_TRANS_U, C_TRANS_L, C_A_UL, C_HNU,
-        C_COLL_PH2_T, q_H2, C_COLL_H_T, q_HI, C_COLL_E_T, q_e
+        C_COLL_H2_T, C_COLL_H2_Q, C_COLL_H_T, C_COLL_H_Q, C_COLL_E_T, C_COLL_E_Q
     )
 
 
@@ -1520,6 +1507,7 @@ def oi_cooling_lamda(
     """[O I] 63 um and 145 um cooling using 3-level SE with LAMDA rates.
     
     Uses collision rates from Abrahamsson et al. (2007) and Jaquet et al. (1992).
+    H2 rates are precomputed as 50/50 ortho/para average.
     
     Parameters
     ----------
@@ -1544,23 +1532,11 @@ def oi_cooling_lamda(
     if nO <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    q_H2 = np.zeros((3, len(O_COLL_PH2_T)), dtype=np.float64)
-    q_HI = np.zeros((3, len(O_COLL_H_T)), dtype=np.float64)
-    q_e = np.zeros((3, len(O_COLL_E_T)), dtype=np.float64)
-    
-    for t in range(3):
-        for j in range(len(O_COLL_PH2_T)):
-            q_H2[t, j] = 0.5 * (O_COLL_PH2_Q[t, j] + O_COLL_OH2_Q[t, j])
-        for j in range(len(O_COLL_H_T)):
-            q_HI[t, j] = O_COLL_H_Q[t, j]
-        for j in range(len(O_COLL_E_T)):
-            q_e[t, j] = O_COLL_E_Q[t, j]
-    
     return solve_3level_se(
         nO, Tg, nH2, nHI, ne,
         beta_10, beta_20, beta_21,
         O_E_LEVELS_K, O_G_LEVELS, O_TRANS_U, O_TRANS_L, O_A_UL, O_HNU,
-        O_COLL_PH2_T, q_H2, O_COLL_H_T, q_HI, O_COLL_E_T, q_e
+        O_COLL_H2_T, O_COLL_H2_Q, O_COLL_H_T, O_COLL_H_Q, O_COLL_E_T, O_COLL_E_Q
     )
 
 

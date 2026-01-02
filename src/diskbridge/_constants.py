@@ -131,6 +131,9 @@ GAMMA_C0 = Quantity(_thermal['Gamma_C0']).to_base_units().magnitude      # s^-1
 # Accretion heating
 ALPHA_ACC = float(_thermal['alpha_acc'])                                 # dimensionless
 
+# Ortho/para H2 ratio for collision rates
+F_ORTHO = float(_thermal['f_ortho'])                                     # dimensionless (0.75 = 3:1 OPR)
+
 # Escape probabilities (for 3-level SE cooling)
 BETA_CII = float(_thermal['beta_cii'])                                   # dimensionless
 BETA_CI10 = float(_thermal['beta_ci10'])                                 # C I 1->0 (609um)

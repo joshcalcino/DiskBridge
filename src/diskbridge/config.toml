@@ -208,6 +208,9 @@ Gamma_C0 = "3.0e-10 s^-1"      # C photoionization rate at chi=1
 # Accretion heating
 alpha_acc = 0.3                # Accretion heating efficiency
 
+# Ortho/para H2 ratio for collision rates
+f_ortho = 0.75                 # Ortho-H2 fraction (0.75 = 3:1 OPR at high T)
+
 # Escape probabilities for all cooling lines
 beta_cii = 1.0                 # C+ 158um escape probability
 beta_ci10 = 1.0                # C I 1->0 (609um) escape probability

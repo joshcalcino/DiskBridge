@@ -121,17 +121,19 @@ def solve_thermal_balance_numba(
     Td_flat = np.ascontiguousarray(state.Tdust.to('K').magnitude.flatten(), dtype=np.float64)
     chi_flat = np.ascontiguousarray(state.chi_eff.magnitude.flatten(), dtype=np.float64)
     
-    if state.nH2 is not None:
-        nH2_flat = np.ascontiguousarray(state.nH2.to('cm^-3').magnitude.flatten(), dtype=np.float64)
-    else:
-        nH2_flat = np.ascontiguousarray(0.5 * nH_flat, dtype=np.float64)
-        logger.warning("nH2 not provided, assuming nH2 = 0.5 * nH")
+    if state.nH2 is None:
+        raise ValueError(
+            "ThermalState.nH2 is required for SE-based cooling. "
+            "Provide H2 number density explicitly."
+        )
+    nH2_flat = np.ascontiguousarray(state.nH2.to('cm^-3').magnitude.flatten(), dtype=np.float64)
     
-    if state.nH_atom is not None:
-        nHI_flat = np.ascontiguousarray(state.nH_atom.to('cm^-3').magnitude.flatten(), dtype=np.float64)
-    else:
-        nHI_flat = np.ascontiguousarray(nH_flat - 2.0 * nH2_flat, dtype=np.float64)
-        nHI_flat = np.maximum(nHI_flat, 0.0)
+    if state.nH_atom is None:
+        raise ValueError(
+            "ThermalState.nH_atom is required for SE-based cooling. "
+            "Provide atomic H number density explicitly."
+        )
+    nHI_flat = np.ascontiguousarray(state.nH_atom.to('cm^-3').magnitude.flatten(), dtype=np.float64)
     
     if state.nco_gas is not None:
         nco_gas_flat = state.nco_gas.to('cm^-3').magnitude.flatten()

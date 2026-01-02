@@ -305,7 +305,7 @@ C_TRANS_L = C.trans_l
 C_A_UL = C.A_ul
 C_HNU = C.h_nu
 
-# C collision rates
+# C collision rates (raw pH2/oH2)
 C_COLL_PH2_T = C.colliders['pH2'].temps
 C_COLL_PH2_Q = C.colliders['pH2'].rates
 C_COLL_OH2_T = C.colliders['oH2'].temps
@@ -314,6 +314,12 @@ C_COLL_H_T = C.colliders['H'].temps
 C_COLL_H_Q = C.colliders['H'].rates
 C_COLL_E_T = C.colliders['e'].temps
 C_COLL_E_Q = C.colliders['e'].rates
+
+# C precomputed combined H2 rates using F_ORTHO from config
+# q_H2 = (1 - f_ortho) * q_pH2 + f_ortho * q_oH2
+from diskbridge._constants import F_ORTHO
+C_COLL_H2_T = C_COLL_PH2_T  # Same grid for pH2 and oH2
+C_COLL_H2_Q = (1.0 - F_ORTHO) * C_COLL_PH2_Q + F_ORTHO * C_COLL_OH2_Q
 
 # O arrays
 O_N_LEVELS = O.n_levels
@@ -325,7 +331,7 @@ O_TRANS_L = O.trans_l
 O_A_UL = O.A_ul
 O_HNU = O.h_nu
 
-# O collision rates
+# O collision rates (raw pH2/oH2)
 O_COLL_PH2_T = O.colliders['pH2'].temps
 O_COLL_PH2_Q = O.colliders['pH2'].rates
 O_COLL_OH2_T = O.colliders['oH2'].temps
@@ -334,6 +340,10 @@ O_COLL_H_T = O.colliders['H'].temps
 O_COLL_H_Q = O.colliders['H'].rates
 O_COLL_E_T = O.colliders['e'].temps
 O_COLL_E_Q = O.colliders['e'].rates
+
+# O precomputed combined H2 rates using F_ORTHO from config
+O_COLL_H2_T = O_COLL_PH2_T  # Same grid for pH2 and oH2
+O_COLL_H2_Q = (1.0 - F_ORTHO) * O_COLL_PH2_Q + F_ORTHO * O_COLL_OH2_Q
 
 # CO arrays
 CO_N_LEVELS = CO.n_levels
