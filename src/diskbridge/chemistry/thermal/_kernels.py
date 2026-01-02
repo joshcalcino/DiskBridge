@@ -25,7 +25,7 @@ from numba import njit, prange
 
 from diskbridge._constants import K_B, M_H
 
-from diskbridge.chemistry.thermal._line_data import (
+from diskbridge.chemistry.thermal.lamda import (
     CPLUS_E_UL_K, CPLUS_G_LEVELS, CPLUS_A_UL, CPLUS_HNU,
     CPLUS_COLL_PH2_T, CPLUS_COLL_PH2_Q,
     CPLUS_COLL_OH2_T, CPLUS_COLL_OH2_Q,
