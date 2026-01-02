@@ -174,6 +174,7 @@ def evolve_co_two_phase_time_dependent(
     tau_form: Quantity,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
+    dt: Optional[Quantity] = None,
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
     """Evolve CO two-phase chemistry using constants from config."""

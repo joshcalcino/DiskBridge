@@ -19,7 +19,7 @@ from diskbridge.chemistry.thermal.registry import get_thermal_model
 
 def run_thermal(
     rad: "RadModel",
-    model: str = "thermal_balance_v1",
+    model: str = "thermal_balance",
     config: Optional[dict] = None,
     write: bool = True,
 ) -> ThermalResult:
@@ -121,39 +121,29 @@ def run_thermal(
             return val
         return None
     
+    # Only pass solver control parameters and user overrides
     params = {
-        'zeta_cr': get_val('zeta_cr', 'zeta_cr_default'),
-        'pah_scale': get_val('pah_scale', 'pah_scale_default'),
-        'X_C_tot': get_val('X_C_tot', 'X_C_tot_default'),
-        'Gamma_C0': get_val('Gamma_C0', 'Gamma_C0_default'),
-        'T_min': get_val('T_min', 'T_min_solve'),
-        'T_max': get_val('T_max', 'T_max_solve'),
-        'n_iter': config.get('n_iter', cfg.get('n_iter_default', 3)),
-        'tol': config.get('tol', cfg.get('tol_default', 0.01)),
-        'beta_cii': get_val('beta_cii', 'beta_cii_default'),
-        'alpha_acc': get_val('alpha_acc', 'alpha_acc_default'),
-        'backend': config.get('backend', 'auto'),
-        'max_bisect_iter': config.get('max_bisect_iter', cfg.get('max_bisect_iter_default', 60)),
-        'bisect_tol': config.get('bisect_tol', cfg.get('bisect_tol_default', 1e-6)),
+        'n_iter': config.get('n_iter', cfg.get('n_iter', 3)),
+        'tol': config.get('tol', cfg.get('tol', 0.01)),
+        'max_bisect_iter': config.get('max_bisect_iter', cfg.get('max_bisect_iter', 60)),
+        'bisect_tol': config.get('bisect_tol', cfg.get('bisect_tol', 1e-6)),
         'store_terms': config.get('store_terms', False),
-        'alpha_rec_c0': cfg['alpha_rec_c0'],
-        'T_rec_exp': cfg['T_rec_exp'],
-        'heating_per_cr': get_val('heating_per_cr', 'heating_per_cr_ionization'),
-        'pe_heating_rate_0': get_val('pe_heating_rate_0', 'pe_heating_rate_0'),
-        'gamma_cii': get_val('gamma_cii', 'gamma_cii'),
-        'E_cii': get_val('E_cii', 'E_cii'),
-        'n_crit_cii': cfg['n_crit_cii'],
-        'sigma_dust': cfg['sigma_dust'],
-        'f_dust': cfg['f_dust'],
+        'heating_terms': config.get('heating_terms', cfg.get('heating_terms')),
+        'cooling_terms': config.get('cooling_terms', cfg.get('cooling_terms')),
+        'exchange_terms': config.get('exchange_terms', cfg.get('exchange_terms')),
     }
     
+    from diskbridge._constants import ZETA_CR, PAH_SCALE, X_C_TOT
+    
     logger.info("Solver parameters:")
-    logger.info(f"  backend: {params['backend']}")
-    logger.info(f"  zeta_cr: {params['zeta_cr']}")
-    logger.info(f"  pah_scale: {params['pah_scale']}")
-    logger.info(f"  X_C_tot: {params['X_C_tot']}")
+    logger.info(f"  heating: {params.get('heating_terms', 'default')}")
+    logger.info(f"  cooling: {params.get('cooling_terms', 'default')}")
+    logger.info(f"  zeta_cr: {ZETA_CR:.2e} s^-1")
+    logger.info(f"  pah_scale: {PAH_SCALE}")
+    logger.info(f"  X_C_tot: {X_C_TOT}")
     logger.info(f"  n_iter: {params['n_iter']}")
     logger.info(f"  tol: {params['tol']}")
+    logger.info(f"  backend: numba")
     
     thermal_func = get_thermal_model(model)
     

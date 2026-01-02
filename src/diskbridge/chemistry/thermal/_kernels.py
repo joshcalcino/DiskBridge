@@ -19,6 +19,9 @@ TERM_CR = 1 << 0     # cosmic ray heating
 TERM_PE = 1 << 1     # photoelectric heating
 TERM_CII = 1 << 2    # C II 158 um cooling
 TERM_GD = 1 << 3     # gas-dust exchange
+TERM_CI = 1 << 4     # C I 609/370 um cooling
+TERM_OI = 1 << 5     # O I 63/145 um cooling
+TERM_CO = 1 << 6     # CO rotational cooling
 
 
 # -----------------------------------------------------------------------------
@@ -197,11 +200,129 @@ def gas_dust_exchange(
     return rate
 
 
+@njit(inline='always', fastmath=True, cache=True)
+def ci_cooling(
+    nH: float,
+    ne: float,
+    nC: float,
+    Tg: float,
+    beta_ci10: float,
+    gamma_ci10: float,
+    E_ci10: float,
+    n_crit_ci10: float,
+    beta_ci21: float,
+    gamma_ci21: float,
+    E_ci21: float,
+    n_crit_ci21: float,
+    k_B: float,
+) -> float:
+    """C I 609 um and 370 um fine-structure cooling.
+    
+    Returns
+    -------
+    float
+        Cooling rate [erg cm^-3 s^-1] (positive)
+    """
+    n_coll = ne + 0.1 * nH
+    n_coll = max(n_coll, 1e-10)
+    
+    Tg_safe = max(Tg, 10.0)
+    
+    excitation_10 = np.exp(-E_ci10 / Tg_safe)
+    rate_10 = (
+        nC * n_coll * gamma_ci10 * E_ci10 * k_B
+        * excitation_10 / (1.0 + n_crit_ci10 / n_coll)
+        * beta_ci10
+    )
+    
+    excitation_21 = np.exp(-E_ci21 / Tg_safe)
+    rate_21 = (
+        nC * n_coll * gamma_ci21 * E_ci21 * k_B
+        * excitation_21 / (1.0 + n_crit_ci21 / n_coll)
+        * beta_ci21
+    )
+    
+    return rate_10 + rate_21
+
+
+@njit(inline='always', fastmath=True, cache=True)
+def oi_cooling(
+    nH: float,
+    ne: float,
+    nO: float,
+    Tg: float,
+    beta_oi63: float,
+    gamma_oi63: float,
+    E_oi63: float,
+    n_crit_oi63: float,
+    beta_oi145: float,
+    gamma_oi145: float,
+    E_oi145: float,
+    n_crit_oi145: float,
+    k_B: float,
+) -> float:
+    """O I 63 um and 145 um fine-structure cooling.
+    
+    Returns
+    -------
+    float
+        Cooling rate [erg cm^-3 s^-1] (positive)
+    """
+    n_coll = ne + 0.1 * nH
+    n_coll = max(n_coll, 1e-10)
+    
+    Tg_safe = max(Tg, 10.0)
+    
+    excitation_63 = np.exp(-E_oi63 / Tg_safe)
+    rate_63 = (
+        nO * n_coll * gamma_oi63 * E_oi63 * k_B
+        * excitation_63 / (1.0 + n_crit_oi63 / n_coll)
+        * beta_oi63
+    )
+    
+    excitation_145 = np.exp(-E_oi145 / Tg_safe)
+    rate_145 = (
+        nO * n_coll * gamma_oi145 * E_oi145 * k_B
+        * excitation_145 / (1.0 + n_crit_oi145 / n_coll)
+        * beta_oi145
+    )
+    
+    return rate_63 + rate_145
+
+
+@njit(inline='always', fastmath=True, cache=True)
+def co_rot_cooling(
+    nH: float,
+    ne: float,
+    nco_gas: float,
+    Tg: float,
+    beta_co: float,
+    L_co_coeff: float,
+) -> float:
+    """CO rotational cooling.
+    
+    Returns
+    -------
+    float
+        Cooling rate [erg cm^-3 s^-1] (positive)
+    """
+    n_coll = ne + 0.5 * nH
+    n_coll = max(n_coll, 1e-10)
+    
+    Tg_safe = max(Tg, 10.0)
+    
+    L_co = L_co_coeff * np.sqrt(Tg_safe / 100.0)
+    
+    rate = nco_gas * n_coll * L_co * beta_co
+    
+    return rate
+
+
 # -----------------------------------------------------------------------------
 # Net heating function for a single cell
 # -----------------------------------------------------------------------------
 
-@njit(inline='always', fastmath=True, cache=True)
+@njit(fastmath=True, cache=True)
 def net_heating_cell(
     Tg: float,
     nH: float,
@@ -209,16 +330,37 @@ def net_heating_cell(
     chi: float,
     ne: float,
     nCplus: float,
+    nC: float,
+    nO: float,
+    nco_gas: float,
     mask: int,
     zeta_cr: float,
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    beta_ci10: float,
+    beta_ci21: float,
+    beta_oi63: float,
+    beta_oi145: float,
+    beta_co: float,
     heating_per_cr: float,
     pe_heating_rate_0: float,
     gamma_cii: float,
     E_cii: float,
     n_crit_cii: float,
+    gamma_ci10: float,
+    E_ci10: float,
+    n_crit_ci10: float,
+    gamma_ci21: float,
+    E_ci21: float,
+    n_crit_ci21: float,
+    gamma_oi63: float,
+    E_oi63: float,
+    n_crit_oi63: float,
+    gamma_oi145: float,
+    E_oi145: float,
+    n_crit_oi145: float,
+    L_co_coeff: float,
     sigma_dust: float,
     f_dust: float,
     k_B: float,
@@ -242,6 +384,17 @@ def net_heating_cell(
     if mask & TERM_CII:
         net -= cii_cooling(nH, ne, nCplus, Tg, beta_cii, gamma_cii, E_cii, n_crit_cii, k_B)
     
+    if mask & TERM_CI:
+        net -= ci_cooling(nH, ne, nC, Tg, beta_ci10, gamma_ci10, E_ci10, n_crit_ci10,
+                         beta_ci21, gamma_ci21, E_ci21, n_crit_ci21, k_B)
+    
+    if mask & TERM_OI:
+        net -= oi_cooling(nH, ne, nO, Tg, beta_oi63, gamma_oi63, E_oi63, n_crit_oi63,
+                         beta_oi145, gamma_oi145, E_oi145, n_crit_oi145, k_B)
+    
+    if mask & TERM_CO:
+        net -= co_rot_cooling(nH, ne, nco_gas, Tg, beta_co, L_co_coeff)
+    
     if mask & TERM_GD:
         net += gas_dust_exchange(nH, Td, Tg, alpha_acc, sigma_dust, f_dust, k_B, m_H)
     
@@ -252,13 +405,16 @@ def net_heating_cell(
 # Bisection solver for a single cell
 # -----------------------------------------------------------------------------
 
-@njit(inline='always', fastmath=True, cache=True)
+@njit(fastmath=True, cache=True)
 def bisect_solve_cell(
     nH: float,
     Td: float,
     chi: float,
     ne: float,
     nCplus: float,
+    nC: float,
+    nO: float,
+    nco_gas: float,
     mask: int,
     T_min: float,
     T_max: float,
@@ -268,11 +424,29 @@ def bisect_solve_cell(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    beta_ci10: float,
+    beta_ci21: float,
+    beta_oi63: float,
+    beta_oi145: float,
+    beta_co: float,
     heating_per_cr: float,
     pe_heating_rate_0: float,
     gamma_cii: float,
     E_cii: float,
     n_crit_cii: float,
+    gamma_ci10: float,
+    E_ci10: float,
+    n_crit_ci10: float,
+    gamma_ci21: float,
+    E_ci21: float,
+    n_crit_ci21: float,
+    gamma_oi63: float,
+    E_oi63: float,
+    n_crit_oi63: float,
+    gamma_oi145: float,
+    E_oi145: float,
+    n_crit_oi145: float,
+    L_co_coeff: float,
     sigma_dust: float,
     f_dust: float,
     k_B: float,
@@ -288,16 +462,26 @@ def bisect_solve_cell(
     a = T_min
     b = T_max
     
-    fa = net_heating_cell(a, nH, Td, chi, ne, nCplus, mask,
+    fa = net_heating_cell(a, nH, Td, chi, ne, nCplus, nC, nO, nco_gas, mask,
                           zeta_cr, pah_scale, alpha_acc, beta_cii,
+                          beta_ci10, beta_ci21, beta_oi63, beta_oi145, beta_co,
                           heating_per_cr, pe_heating_rate_0,
                           gamma_cii, E_cii, n_crit_cii,
-                          sigma_dust, f_dust, k_B, m_H)
-    fb = net_heating_cell(b, nH, Td, chi, ne, nCplus, mask,
+                          gamma_ci10, E_ci10, n_crit_ci10,
+                          gamma_ci21, E_ci21, n_crit_ci21,
+                          gamma_oi63, E_oi63, n_crit_oi63,
+                          gamma_oi145, E_oi145, n_crit_oi145,
+                          L_co_coeff, sigma_dust, f_dust, k_B, m_H)
+    fb = net_heating_cell(b, nH, Td, chi, ne, nCplus, nC, nO, nco_gas, mask,
                           zeta_cr, pah_scale, alpha_acc, beta_cii,
+                          beta_ci10, beta_ci21, beta_oi63, beta_oi145, beta_co,
                           heating_per_cr, pe_heating_rate_0,
                           gamma_cii, E_cii, n_crit_cii,
-                          sigma_dust, f_dust, k_B, m_H)
+                          gamma_ci10, E_ci10, n_crit_ci10,
+                          gamma_ci21, E_ci21, n_crit_ci21,
+                          gamma_oi63, E_oi63, n_crit_oi63,
+                          gamma_oi145, E_oi145, n_crit_oi145,
+                          L_co_coeff, sigma_dust, f_dust, k_B, m_H)
     
     if fa == 0.0:
         return a
@@ -314,11 +498,16 @@ def bisect_solve_cell(
     
     for _ in range(max_iter):
         m = 0.5 * (a + b)
-        fm = net_heating_cell(m, nH, Td, chi, ne, nCplus, mask,
+        fm = net_heating_cell(m, nH, Td, chi, ne, nCplus, nC, nO, nco_gas, mask,
                               zeta_cr, pah_scale, alpha_acc, beta_cii,
+                              beta_ci10, beta_ci21, beta_oi63, beta_oi145, beta_co,
                               heating_per_cr, pe_heating_rate_0,
                               gamma_cii, E_cii, n_crit_cii,
-                              sigma_dust, f_dust, k_B, m_H)
+                              gamma_ci10, E_ci10, n_crit_ci10,
+                              gamma_ci21, E_ci21, n_crit_ci21,
+                              gamma_oi63, E_oi63, n_crit_oi63,
+                              gamma_oi145, E_oi145, n_crit_oi145,
+                              L_co_coeff, sigma_dust, f_dust, k_B, m_H)
         
         if abs(fm) < tol:
             return m
@@ -344,6 +533,9 @@ def solve_tgas_kernel(
     chi: np.ndarray,
     ne: np.ndarray,
     nCplus: np.ndarray,
+    nC: np.ndarray,
+    nO: np.ndarray,
+    nco_gas: np.ndarray,
     mask: int,
     T_min: float,
     T_max: float,
@@ -353,11 +545,29 @@ def solve_tgas_kernel(
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    beta_ci10: float,
+    beta_ci21: float,
+    beta_oi63: float,
+    beta_oi145: float,
+    beta_co: float,
     heating_per_cr: float,
     pe_heating_rate_0: float,
     gamma_cii: float,
     E_cii: float,
     n_crit_cii: float,
+    gamma_ci10: float,
+    E_ci10: float,
+    n_crit_ci10: float,
+    gamma_ci21: float,
+    E_ci21: float,
+    n_crit_ci21: float,
+    gamma_oi63: float,
+    E_oi63: float,
+    n_crit_oi63: float,
+    gamma_oi145: float,
+    E_oi145: float,
+    n_crit_oi145: float,
+    L_co_coeff: float,
     sigma_dust: float,
     f_dust: float,
     k_B: float,
@@ -420,12 +630,17 @@ def solve_tgas_kernel(
     N = nH.size
     for i in prange(N):
         Tg_out[i] = bisect_solve_cell(
-            nH[i], Td[i], chi[i], ne[i], nCplus[i],
+            nH[i], Td[i], chi[i], ne[i], nCplus[i], nC[i], nO[i], nco_gas[i],
             mask, T_min, T_max, max_iter, tol,
             zeta_cr, pah_scale, alpha_acc, beta_cii,
+            beta_ci10, beta_ci21, beta_oi63, beta_oi145, beta_co,
             heating_per_cr, pe_heating_rate_0,
             gamma_cii, E_cii, n_crit_cii,
-            sigma_dust, f_dust, k_B, m_H
+            gamma_ci10, E_ci10, n_crit_ci10,
+            gamma_ci21, E_ci21, n_crit_ci21,
+            gamma_oi63, E_oi63, n_crit_oi63,
+            gamma_oi145, E_oi145, n_crit_oi145,
+            L_co_coeff, sigma_dust, f_dust, k_B, m_H
         )
 
 
@@ -441,15 +656,36 @@ def compute_terms_kernel(
     chi: np.ndarray,
     ne: np.ndarray,
     nCplus: np.ndarray,
+    nC: np.ndarray,
+    nO: np.ndarray,
+    nco_gas: np.ndarray,
     zeta_cr: float,
     pah_scale: float,
     alpha_acc: float,
     beta_cii: float,
+    beta_ci10: float,
+    beta_ci21: float,
+    beta_oi63: float,
+    beta_oi145: float,
+    beta_co: float,
     heating_per_cr: float,
     pe_heating_rate_0: float,
     gamma_cii: float,
     E_cii: float,
     n_crit_cii: float,
+    gamma_ci10: float,
+    E_ci10: float,
+    n_crit_ci10: float,
+    gamma_ci21: float,
+    E_ci21: float,
+    n_crit_ci21: float,
+    gamma_oi63: float,
+    E_oi63: float,
+    n_crit_oi63: float,
+    gamma_oi145: float,
+    E_oi145: float,
+    n_crit_oi145: float,
+    L_co_coeff: float,
     sigma_dust: float,
     f_dust: float,
     k_B: float,
@@ -457,6 +693,9 @@ def compute_terms_kernel(
     rate_cr_out: np.ndarray,
     rate_pe_out: np.ndarray,
     rate_cii_out: np.ndarray,
+    rate_ci_out: np.ndarray,
+    rate_oi_out: np.ndarray,
+    rate_co_out: np.ndarray,
     rate_gd_out: np.ndarray,
 ) -> None:
     """Compute individual heating/cooling rates for diagnostics.
@@ -469,6 +708,11 @@ def compute_terms_kernel(
         rate_cr_out[i] = cosmic_ray_heating(nH[i], zeta_cr, heating_per_cr)
         rate_pe_out[i] = photoelectric_heating(nH[i], chi[i], ne[i], Tg[i], pah_scale, pe_heating_rate_0)
         rate_cii_out[i] = -cii_cooling(nH[i], ne[i], nCplus[i], Tg[i], beta_cii, gamma_cii, E_cii, n_crit_cii, k_B)
+        rate_ci_out[i] = -ci_cooling(nH[i], ne[i], nC[i], Tg[i], beta_ci10, gamma_ci10, E_ci10, n_crit_ci10,
+                                      beta_ci21, gamma_ci21, E_ci21, n_crit_ci21, k_B)
+        rate_oi_out[i] = -oi_cooling(nH[i], ne[i], nO[i], Tg[i], beta_oi63, gamma_oi63, E_oi63, n_crit_oi63,
+                                      beta_oi145, gamma_oi145, E_oi145, n_crit_oi145, k_B)
+        rate_co_out[i] = -co_rot_cooling(nH[i], ne[i], nco_gas[i], Tg[i], beta_co, L_co_coeff)
         rate_gd_out[i] = gas_dust_exchange(nH[i], Td[i], Tg[i], alpha_acc, sigma_dust, f_dust, k_B, m_H)
 
 

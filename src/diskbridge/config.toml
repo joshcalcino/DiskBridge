@@ -161,6 +161,25 @@ n_crit_cii = "3.0e3 cm^-3"     # Critical density for C+ cooling
 alpha_rec_c0 = "4.67e-12 cm^3/s"  # C+ recombination rate at 300K
 T_rec_exp = -0.6               # Temperature exponent for recombination
 
+# C I cooling (609 um and 370 um lines)
+gamma_ci10 = "2.8e-10 cm^3/s"  # C I (1-0) 609um excitation rate coefficient
+E_ci10 = "23.6 K"              # C I (1-0) excitation energy
+n_crit_ci10 = "5.0e2 cm^-3"    # Critical density for CI 609um
+gamma_ci21 = "7.1e-10 cm^3/s"  # C I (2-1) 370um excitation rate coefficient
+E_ci21 = "62.5 K"              # C I (2-1) excitation energy
+n_crit_ci21 = "3.0e3 cm^-3"    # Critical density for CI 370um
+
+# O I cooling (63 um and 145 um lines)
+gamma_oi63 = "5.0e-10 cm^3/s"  # O I 63um excitation rate coefficient
+E_oi63 = "228.0 K"             # O I 63um excitation energy
+n_crit_oi63 = "5.0e5 cm^-3"    # Critical density for OI 63um
+gamma_oi145 = "1.4e-10 cm^3/s" # O I 145um excitation rate coefficient
+E_oi145 = "326.0 K"            # O I 145um excitation energy
+n_crit_oi145 = "1.0e5 cm^-3"   # Critical density for OI 145um
+
+# CO rotational cooling
+L_co_coeff = "1.0e-27 erg cm^3/s"  # CO cooling function coefficient
+
 # Dust properties for gas-dust coupling
 sigma_dust = "1.0e-21 cm^2"    # Dust geometric cross-section per H
 f_dust = 0.01                  # Dust-to-gas mass ratio
@@ -169,7 +188,12 @@ f_dust = 0.01                  # Dust-to-gas mass ratio
 # THERMAL BALANCE MODEL
 # =============================================================================
 
-[thermal.thermal_balance_v1]
+[thermal.thermal_balance]
+# Term selection (default: all available terms)
+heating_terms = ["photoelectric", "cosmic_ray"]
+cooling_terms = ["cii", "ci", "oi", "co"]
+exchange_terms = ["gas_dust"]
+
 # Cosmic ray heating
 zeta_cr = "1.0e-17 s^-1"       # Cosmic ray ionization rate
 heating_per_cr = "3.204e-11 erg"  # Heating per CR ionization (20 eV)
@@ -184,11 +208,18 @@ Gamma_C0 = "3.0e-10 s^-1"      # C photoionization rate at chi=1
 # Accretion heating
 alpha_acc = 0.3                # Accretion heating efficiency
 
+# Escape probabilities for all cooling lines
+beta_cii = 1.0                 # C+ escape probability
+beta_ci10 = 1.0                # C I 609um escape probability
+beta_ci21 = 1.0                # C I 370um escape probability
+beta_oi63 = 1.0                # O I 63um escape probability
+beta_oi145 = 1.0               # O I 145um escape probability
+beta_co = 1.0                  # CO rotational escape probability
+
 # Solver parameters
-T_min_solve = "2.0 K"          # Minimum temperature for solver
-T_max_solve = "5000.0 K"       # Maximum temperature for solver
+T_min = "2.0 K"          # Minimum temperature for solver
+T_max = "5000.0 K"       # Maximum temperature for solver
 n_iter = 3                     # Number of thermal iterations
 tol = 0.01                     # Convergence tolerance
-beta_cii = 1.0                 # C+ cooling efficiency factor
 max_bisect_iter = 60           # Maximum bisection iterations
 bisect_tol = 1.0e-6            # Bisection tolerance

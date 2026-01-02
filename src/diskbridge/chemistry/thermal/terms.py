@@ -220,8 +220,255 @@ HEATING_TERMS = {
     "photoelectric": term_photoelectric,
 }
 
+def term_ci_cooling(state: ThermalState, params: dict) -> Quantity:
+    """[C I] fine-structure cooling (609 um and 370 um lines).
+    
+    Parameters
+    ----------
+    state : ThermalState
+        Thermal state with nH, Tgas, nC
+    params : dict
+        Must contain parameters for both CI(1-0) 609um and CI(2-1) 370um transitions:
+        'E_ci10', 'gamma_ci10', 'n_crit_ci10', 'beta_ci10' for 609um line
+        'E_ci21', 'gamma_ci21', 'n_crit_ci21', 'beta_ci21' for 370um line
+        
+    Returns
+    -------
+    Quantity
+        Cooling rate [erg cm^-3 s^-1] (positive)
+        
+    Notes (physics)
+    -----
+    Cooling is computed as radiative loss from collisionally excited line emission.
+    We use a two-level approximation with an escape-probability factor (beta) to mimic
+    optical-depth effects. This approach is widely used in thermo-chemical disk and PDR
+    modeling to compute T_gas from a local heating-cooling balance without performing
+    full line radiative transfer inside the thermal solver. [C I] is a key coolant in
+    intermediate layers where carbon transitions from C+ to CO (Tielens & Hollenbach 1985).
+    """
+    if state.Tgas is None:
+        raise ValueError("term_ci_cooling requires Tgas in state")
+    if state.nC is None:
+        return Quantity(np.zeros_like(state.nH.magnitude), 'erg/(cm^3 * s)')
+    
+    nC_cm3 = state.nC.to_base_units().magnitude
+    nH_cm3 = state.nH.to_base_units().magnitude
+    Tgas_K = state.Tgas.to_base_units().magnitude
+    
+    if state.ne is not None:
+        ne_cm3 = state.ne.to_base_units().magnitude
+    else:
+        ne_cm3 = 1e-4 * nH_cm3
+    
+    n_coll = ne_cm3 + 0.1 * nH_cm3
+    n_coll = np.maximum(n_coll, 1e-10)
+    
+    Tgas_safe = np.maximum(Tgas_K, 10.0)
+    
+    beta_ci10 = float(params['beta_ci10'])
+    gamma_ci10 = params['gamma_ci10']
+    if hasattr(gamma_ci10, 'to_base_units'):
+        gamma_ci10 = gamma_ci10.to_base_units().magnitude
+    else:
+        gamma_ci10 = float(gamma_ci10)
+    E_ci10 = params['E_ci10']
+    if hasattr(E_ci10, 'to_base_units'):
+        E_ci10_K = E_ci10.to_base_units().magnitude
+    else:
+        E_ci10_K = float(E_ci10)
+    n_crit_ci10 = float(params['n_crit_ci10'])
+    
+    excitation_10 = np.exp(-E_ci10_K / Tgas_safe)
+    rate_10 = (
+        nC_cm3 * n_coll * gamma_ci10 * E_ci10_K * K_B
+        * excitation_10 / (1.0 + n_crit_ci10 / n_coll)
+        * beta_ci10
+    )
+    
+    beta_ci21 = float(params['beta_ci21'])
+    gamma_ci21 = params['gamma_ci21']
+    if hasattr(gamma_ci21, 'to_base_units'):
+        gamma_ci21 = gamma_ci21.to_base_units().magnitude
+    else:
+        gamma_ci21 = float(gamma_ci21)
+    E_ci21 = params['E_ci21']
+    if hasattr(E_ci21, 'to_base_units'):
+        E_ci21_K = E_ci21.to_base_units().magnitude
+    else:
+        E_ci21_K = float(E_ci21)
+    n_crit_ci21 = float(params['n_crit_ci21'])
+    
+    excitation_21 = np.exp(-E_ci21_K / Tgas_safe)
+    rate_21 = (
+        nC_cm3 * n_coll * gamma_ci21 * E_ci21_K * K_B
+        * excitation_21 / (1.0 + n_crit_ci21 / n_coll)
+        * beta_ci21
+    )
+    
+    return Quantity(rate_10 + rate_21, 'erg/(cm^3 * s)')
+
+
+def term_oi_cooling(state: ThermalState, params: dict) -> Quantity:
+    """[O I] fine-structure cooling (63 um and 145 um lines).
+    
+    Parameters
+    ----------
+    state : ThermalState
+        Thermal state with nH, Tgas, nco_gas, nco_ice (or nO if available)
+    params : dict
+        Must contain parameters for OI transitions:
+        'E_oi63', 'gamma_oi63', 'n_crit_oi63', 'beta_oi63' for 63um line
+        'E_oi145', 'gamma_oi145', 'n_crit_oi145', 'beta_oi145' for 145um line
+        'X_O_tot' for total oxygen abundance if nO not in state
+        
+    Returns
+    -------
+    Quantity
+        Cooling rate [erg cm^-3 s^-1] (positive)
+        
+    Notes (physics)
+    -----
+    Cooling is computed as radiative loss from collisionally excited line emission.
+    We use a two-level approximation with an escape-probability factor (beta) to mimic
+    optical-depth effects. This approach is widely used in thermo-chemical disk and PDR
+    modeling to compute T_gas from a local heating-cooling balance without performing
+    full line radiative transfer inside the thermal solver. [O I] 63um is a principal
+    coolant in warm neutral gas / PDR surfaces (Hollenbach & Tielens 1997).
+    """
+    if state.Tgas is None:
+        raise ValueError("term_oi_cooling requires Tgas in state")
+    
+    nH_cm3 = state.nH.to_base_units().magnitude
+    Tgas_K = state.Tgas.to_base_units().magnitude
+    
+    if state.nO is not None:
+        nO_cm3 = state.nO.to_base_units().magnitude
+    else:
+        X_O_tot = float(params['X_O_tot'])
+        if state.nco_gas is not None and state.nco_ice is not None:
+            nco_gas_cm3 = state.nco_gas.to_base_units().magnitude
+            nco_ice_cm3 = state.nco_ice.to_base_units().magnitude
+            nco_total_cm3 = nco_gas_cm3 + nco_ice_cm3
+        else:
+            nco_total_cm3 = 0.0
+        
+        nO_cm3 = np.maximum(X_O_tot * nH_cm3 - nco_total_cm3, 0.0)
+    
+    if state.ne is not None:
+        ne_cm3 = state.ne.to_base_units().magnitude
+    else:
+        ne_cm3 = 1e-4 * nH_cm3
+    
+    n_coll = ne_cm3 + 0.1 * nH_cm3
+    n_coll = np.maximum(n_coll, 1e-10)
+    
+    Tgas_safe = np.maximum(Tgas_K, 10.0)
+    
+    beta_oi63 = float(params['beta_oi63'])
+    gamma_oi63 = params['gamma_oi63']
+    if hasattr(gamma_oi63, 'to_base_units'):
+        gamma_oi63 = gamma_oi63.to_base_units().magnitude
+    else:
+        gamma_oi63 = float(gamma_oi63)
+    E_oi63 = params['E_oi63']
+    if hasattr(E_oi63, 'to_base_units'):
+        E_oi63_K = E_oi63.to_base_units().magnitude
+    else:
+        E_oi63_K = float(E_oi63)
+    n_crit_oi63 = float(params['n_crit_oi63'])
+    
+    excitation_63 = np.exp(-E_oi63_K / Tgas_safe)
+    rate_63 = (
+        nO_cm3 * n_coll * gamma_oi63 * E_oi63_K * K_B
+        * excitation_63 / (1.0 + n_crit_oi63 / n_coll)
+        * beta_oi63
+    )
+    
+    beta_oi145 = float(params['beta_oi145'])
+    gamma_oi145 = params['gamma_oi145']
+    if hasattr(gamma_oi145, 'to_base_units'):
+        gamma_oi145 = gamma_oi145.to_base_units().magnitude
+    else:
+        gamma_oi145 = float(gamma_oi145)
+    E_oi145 = params['E_oi145']
+    if hasattr(E_oi145, 'to_base_units'):
+        E_oi145_K = E_oi145.to_base_units().magnitude
+    else:
+        E_oi145_K = float(E_oi145)
+    n_crit_oi145 = float(params['n_crit_oi145'])
+    
+    excitation_145 = np.exp(-E_oi145_K / Tgas_safe)
+    rate_145 = (
+        nO_cm3 * n_coll * gamma_oi145 * E_oi145_K * K_B
+        * excitation_145 / (1.0 + n_crit_oi145 / n_coll)
+        * beta_oi145
+    )
+    
+    return Quantity(rate_63 + rate_145, 'erg/(cm^3 * s)')
+
+
+def term_co_rot_cooling(state: ThermalState, params: dict) -> Quantity:
+    """CO rotational cooling (multi-level).
+    
+    Parameters
+    ----------
+    state : ThermalState
+        Thermal state with nH, Tgas, nco_gas
+    params : dict
+        Must contain 'L_co_coeff' and 'beta_co'
+        
+    Returns
+    -------
+    Quantity
+        Cooling rate [erg cm^-3 s^-1] (positive)
+        
+    Notes (physics)
+    -----
+    CO has many rotational levels, so "two-level" is too crude. Standard practice is to
+    use tabulated/fitted cooling functions derived from escape-probability/LVG calculations
+    (Neufeld & Kaufman 1993). This implementation uses a simple optically-thin fit:
+    Lambda_CO = n(CO) * n_coll * L_CO(T) * beta_CO
+    where L_CO is a cooling function. For v1, we use a power-law approximation:
+    L_CO ~ T^0.5 scaled to match typical LVG results at T~100K.
+    """
+    if state.Tgas is None:
+        raise ValueError("term_co_rot_cooling requires Tgas in state")
+    if state.nco_gas is None:
+        return Quantity(np.zeros_like(state.nH.magnitude), 'erg/(cm^3 * s)')
+    
+    nco_gas_cm3 = state.nco_gas.to_base_units().magnitude
+    nH_cm3 = state.nH.to_base_units().magnitude
+    Tgas_K = state.Tgas.to_base_units().magnitude
+    
+    if state.ne is not None:
+        ne_cm3 = state.ne.to_base_units().magnitude
+    else:
+        ne_cm3 = 1e-4 * nH_cm3
+    
+    n_coll = ne_cm3 + 0.5 * nH_cm3
+    n_coll = np.maximum(n_coll, 1e-10)
+    
+    Tgas_safe = np.maximum(Tgas_K, 10.0)
+    
+    beta_co = float(params['beta_co'])
+    L_co_coeff = params['L_co_coeff']
+    if hasattr(L_co_coeff, 'to_base_units'):
+        L_co_coeff = L_co_coeff.to_base_units().magnitude
+    else:
+        L_co_coeff = float(L_co_coeff)
+    
+    L_co = L_co_coeff * np.sqrt(Tgas_safe / 100.0)
+    
+    rate_erg_cm3_s = nco_gas_cm3 * n_coll * L_co * beta_co
+    
+    return Quantity(rate_erg_cm3_s, 'erg/(cm^3 * s)')
+
+
 COOLING_TERMS = {
     "cii": term_cii_cooling,
+    "ci": term_ci_cooling,
+    "oi": term_oi_cooling,
+    "co": term_co_rot_cooling,
 }
 
 EXCHANGE_TERMS = {

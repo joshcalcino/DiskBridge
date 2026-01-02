@@ -112,30 +112,56 @@ SIGMA_DUST = Quantity(_therm_common['sigma_dust']).to_base_units().magnitude  # 
 F_DUST = float(_therm_common['f_dust'])                                     # dimensionless
 
 # =============================================================================
-# THERMAL BALANCE V1 MODEL
+# THERMAL BALANCE MODEL
 # =============================================================================
 
-_thermal_v1 = _cfg['thermal']['thermal_balance_v1']
+_thermal = _cfg['thermal']['thermal_balance']
 
 # Cosmic ray heating
-ZETA_CR = Quantity(_thermal_v1['zeta_cr']).to_base_units().magnitude        # s^-1
-HEATING_PER_CR = Quantity(_thermal_v1['heating_per_cr']).to_base_units().magnitude  # erg
+ZETA_CR = Quantity(_thermal['zeta_cr']).to_base_units().magnitude        # s^-1
+HEATING_PER_CR = Quantity(_thermal['heating_per_cr']).to_base_units().magnitude  # erg
 
 # Photoelectric heating
-PE_HEATING_RATE_0 = Quantity(_thermal_v1['pe_heating_rate_0']).to_base_units().magnitude  # erg/s
-PAH_SCALE = float(_thermal_v1['pah_scale'])                                 # dimensionless
+PE_HEATING_RATE_0 = Quantity(_thermal['pe_heating_rate_0']).to_base_units().magnitude  # erg/s
+PAH_SCALE = float(_thermal['pah_scale'])                                 # dimensionless
 
 # Carbon photoionization
-GAMMA_C0 = Quantity(_thermal_v1['Gamma_C0']).to_base_units().magnitude      # s^-1
+GAMMA_C0 = Quantity(_thermal['Gamma_C0']).to_base_units().magnitude      # s^-1
 
 # Accretion heating
-ALPHA_ACC = float(_thermal_v1['alpha_acc'])                                 # dimensionless
+ALPHA_ACC = float(_thermal['alpha_acc'])                                 # dimensionless
+
+# Escape probabilities
+BETA_CII = float(_thermal['beta_cii'])                                   # dimensionless
+BETA_CI10 = float(_thermal['beta_ci10'])                                 # dimensionless
+BETA_CI21 = float(_thermal['beta_ci21'])                                 # dimensionless
+BETA_OI63 = float(_thermal['beta_oi63'])                                 # dimensionless
+BETA_OI145 = float(_thermal['beta_oi145'])                               # dimensionless
+BETA_CO = float(_thermal['beta_co'])                                     # dimensionless
+
+# [C I] cooling parameters
+GAMMA_CI10 = Quantity(_therm_common['gamma_ci10']).to_base_units().magnitude  # cm^3/s
+E_CI10 = Quantity(_therm_common['E_ci10']).to_base_units().magnitude    # K
+N_CRIT_CI10 = Quantity(_therm_common['n_crit_ci10']).to_base_units().magnitude  # cm^-3
+GAMMA_CI21 = Quantity(_therm_common['gamma_ci21']).to_base_units().magnitude  # cm^3/s
+E_CI21 = Quantity(_therm_common['E_ci21']).to_base_units().magnitude    # K
+N_CRIT_CI21 = Quantity(_therm_common['n_crit_ci21']).to_base_units().magnitude  # cm^-3
+
+# [O I] cooling parameters
+GAMMA_OI63 = Quantity(_therm_common['gamma_oi63']).to_base_units().magnitude  # cm^3/s
+E_OI63 = Quantity(_therm_common['E_oi63']).to_base_units().magnitude    # K
+N_CRIT_OI63 = Quantity(_therm_common['n_crit_oi63']).to_base_units().magnitude  # cm^-3
+GAMMA_OI145 = Quantity(_therm_common['gamma_oi145']).to_base_units().magnitude  # cm^3/s
+E_OI145 = Quantity(_therm_common['E_oi145']).to_base_units().magnitude  # K
+N_CRIT_OI145 = Quantity(_therm_common['n_crit_oi145']).to_base_units().magnitude  # cm^-3
+
+# CO rotational cooling
+L_CO_COEFF = Quantity(_therm_common['L_co_coeff']).to_base_units().magnitude  # erg cm^3/s
 
 # Solver parameters
-T_MIN_SOLVE = Quantity(_thermal_v1['T_min_solve']).to_base_units().magnitude  # K
-T_MAX_SOLVE = Quantity(_thermal_v1['T_max_solve']).to_base_units().magnitude  # K
-N_ITER_THERMAL = int(_thermal_v1['n_iter'])
-TOL_THERMAL = float(_thermal_v1['tol'])
-BETA_CII = float(_thermal_v1['beta_cii'])
-MAX_BISECT_ITER = int(_thermal_v1['max_bisect_iter'])
-BISECT_TOL = float(_thermal_v1['bisect_tol'])
+T_MIN_SOLVE = Quantity(_thermal['T_min']).to_base_units().magnitude  # K
+T_MAX_SOLVE = Quantity(_thermal['T_max']).to_base_units().magnitude  # K
+N_ITER_THERMAL = int(_thermal['n_iter'])
+TOL_THERMAL = float(_thermal['tol'])
+MAX_BISECT_ITER = int(_thermal['max_bisect_iter'])
+BISECT_TOL = float(_thermal['bisect_tol'])

@@ -38,6 +38,8 @@ class ThermalState:
         C+ ion number density [cm^-3]
     nC : Quantity, optional
         Neutral carbon number density [cm^-3]
+    nO : Quantity, optional
+        Atomic oxygen number density [cm^-3]
     ne : Quantity, optional
         Electron number density [cm^-3]
     nH2 : Quantity, optional
@@ -65,6 +67,7 @@ class ThermalState:
     nco_ice: Optional[Quantity] = None
     nCplus: Optional[Quantity] = None
     nC: Optional[Quantity] = None
+    nO: Optional[Quantity] = None
     ne: Optional[Quantity] = None
     nH2: Optional[Quantity] = None
     nH_atom: Optional[Quantity] = None
