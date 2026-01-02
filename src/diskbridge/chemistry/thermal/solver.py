@@ -11,13 +11,11 @@ from diskbridge._units import Quantity
 from diskbridge._logging import logger
 from diskbridge._constants import K_B, M_H
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
-from diskbridge.chemistry.thermal.terms import HEATING_TERMS, COOLING_TERMS, EXCHANGE_TERMS
-from diskbridge.chemistry.thermal.carbon_closure import update_carbon_ions
 
 from diskbridge.chemistry.thermal._kernels import (
     carbon_closure_kernel,
-    solve_tgas_kernel,
-    compute_terms_kernel,
+    solve_tgas_kernel_se,
+    compute_terms_kernel_se,
     max_fractional_change,
     TERM_CR,
     TERM_PE,
@@ -86,7 +84,7 @@ def solve_thermal_balance_numba(
     exchange_terms : list[str]
         List of exchange term names
     params : dict
-        Solver control parameters only
+        Solver control parameters 
     n_iter : int
         Maximum outer iterations (default 3)
     tol : float
@@ -107,13 +105,12 @@ def solve_thermal_balance_numba(
     """
     from diskbridge._constants import (
         T_MIN_SOLVE, T_MAX_SOLVE, ZETA_CR, GAMMA_C0, PAH_SCALE,
-        X_C_TOT, X_O_TOT, ALPHA_ACC, BETA_CII, BETA_CI10, BETA_CI21,
-        BETA_OI63, BETA_OI145, BETA_CO, ALPHA_REC_C0, T_REC_EXP,
-        HEATING_PER_CR, PE_HEATING_RATE_0, GAMMA_CII, E_CII, N_CRIT_CII,
-        GAMMA_CI10, E_CI10, N_CRIT_CI10, GAMMA_CI21, E_CI21, N_CRIT_CI21,
-        GAMMA_OI63, E_OI63, N_CRIT_OI63, GAMMA_OI145, E_OI145, N_CRIT_OI145,
-        L_CO_COEFF, SIGMA_DUST, F_DUST, K_B, M_H,
+        X_C_TOT, X_O_TOT, ALPHA_ACC, BETA_CII, BETA_CI10, BETA_CI20, BETA_CI21,
+        BETA_OI10, BETA_OI20, BETA_OI21, BETA_CO, ALPHA_REC_C0, T_REC_EXP,
+        HEATING_PER_CR, PE_HEATING_RATE_0, SIGMA_DUST, F_DUST,
     )
+    
+    CO_JMAX = 15
     
     mask = _build_term_mask(heating_terms, cooling_terms, exchange_terms)
     
@@ -123,6 +120,18 @@ def solve_thermal_balance_numba(
     nH_flat = np.ascontiguousarray(state.nH.to('cm^-3').magnitude.flatten(), dtype=np.float64)
     Td_flat = np.ascontiguousarray(state.Tdust.to('K').magnitude.flatten(), dtype=np.float64)
     chi_flat = np.ascontiguousarray(state.chi_eff.magnitude.flatten(), dtype=np.float64)
+    
+    if state.nH2 is not None:
+        nH2_flat = np.ascontiguousarray(state.nH2.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    else:
+        nH2_flat = np.ascontiguousarray(0.5 * nH_flat, dtype=np.float64)
+        logger.warning("nH2 not provided, assuming nH2 = 0.5 * nH")
+    
+    if state.nH_atom is not None:
+        nHI_flat = np.ascontiguousarray(state.nH_atom.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    else:
+        nHI_flat = np.ascontiguousarray(nH_flat - 2.0 * nH2_flat, dtype=np.float64)
+        nHI_flat = np.maximum(nHI_flat, 0.0)
     
     if state.nco_gas is not None:
         nco_gas_flat = state.nco_gas.to('cm^-3').magnitude.flatten()
@@ -161,18 +170,15 @@ def solve_thermal_balance_numba(
         
         Tg_old = Tg_flat.copy()
         
-        solve_tgas_kernel(
-            nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat, nC_flat, nO_flat, nco_gas_flat,
+        solve_tgas_kernel_se(
+            nH_flat, nH2_flat, nHI_flat, Td_flat, chi_flat, ne_flat,
+            nCplus_flat, nC_flat, nO_flat, nco_gas_flat,
             mask, T_MIN_SOLVE, T_MAX_SOLVE, max_bisect_iter, bisect_tol,
             ZETA_CR, PAH_SCALE, ALPHA_ACC, BETA_CII,
-            BETA_CI10, BETA_CI21, BETA_OI63, BETA_OI145, BETA_CO,
-            HEATING_PER_CR, PE_HEATING_RATE_0,
-            GAMMA_CII, E_CII, N_CRIT_CII,
-            GAMMA_CI10, E_CI10, N_CRIT_CI10,
-            GAMMA_CI21, E_CI21, N_CRIT_CI21,
-            GAMMA_OI63, E_OI63, N_CRIT_OI63,
-            GAMMA_OI145, E_OI145, N_CRIT_OI145,
-            L_CO_COEFF, SIGMA_DUST, F_DUST, K_B, M_H,
+            BETA_CI10, BETA_CI20, BETA_CI21,
+            BETA_OI10, BETA_OI20, BETA_OI21,
+            BETA_CO, CO_JMAX,
+            HEATING_PER_CR, PE_HEATING_RATE_0, SIGMA_DUST, F_DUST,
             Tg_flat,
         )
         
@@ -209,17 +215,14 @@ def solve_thermal_balance_numba(
         rate_co = np.zeros(ncells, dtype=np.float64)
         rate_gd = np.zeros(ncells, dtype=np.float64)
         
-        compute_terms_kernel(
-            Tg_flat, nH_flat, Td_flat, chi_flat, ne_flat, nCplus_flat, nC_flat, nO_flat, nco_gas_flat,
+        compute_terms_kernel_se(
+            Tg_flat, nH_flat, nH2_flat, nHI_flat, Td_flat, chi_flat, ne_flat,
+            nCplus_flat, nC_flat, nO_flat, nco_gas_flat,
             ZETA_CR, PAH_SCALE, ALPHA_ACC, BETA_CII,
-            BETA_CI10, BETA_CI21, BETA_OI63, BETA_OI145, BETA_CO,
-            HEATING_PER_CR, PE_HEATING_RATE_0,
-            GAMMA_CII, E_CII, N_CRIT_CII,
-            GAMMA_CI10, E_CI10, N_CRIT_CI10,
-            GAMMA_CI21, E_CI21, N_CRIT_CI21,
-            GAMMA_OI63, E_OI63, N_CRIT_OI63,
-            GAMMA_OI145, E_OI145, N_CRIT_OI145,
-            L_CO_COEFF, SIGMA_DUST, F_DUST, K_B, M_H,
+            BETA_CI10, BETA_CI20, BETA_CI21,
+            BETA_OI10, BETA_OI20, BETA_OI21,
+            BETA_CO, CO_JMAX, HEATING_PER_CR, PE_HEATING_RATE_0,
+            SIGMA_DUST, F_DUST,
             rate_cr, rate_pe, rate_cii, rate_ci, rate_oi, rate_co, rate_gd,
         )
         

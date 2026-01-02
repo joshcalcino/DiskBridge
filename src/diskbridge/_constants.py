@@ -131,12 +131,14 @@ GAMMA_C0 = Quantity(_thermal['Gamma_C0']).to_base_units().magnitude      # s^-1
 # Accretion heating
 ALPHA_ACC = float(_thermal['alpha_acc'])                                 # dimensionless
 
-# Escape probabilities
+# Escape probabilities (for 3-level SE cooling)
 BETA_CII = float(_thermal['beta_cii'])                                   # dimensionless
-BETA_CI10 = float(_thermal['beta_ci10'])                                 # dimensionless
-BETA_CI21 = float(_thermal['beta_ci21'])                                 # dimensionless
-BETA_OI63 = float(_thermal['beta_oi63'])                                 # dimensionless
-BETA_OI145 = float(_thermal['beta_oi145'])                               # dimensionless
+BETA_CI10 = float(_thermal['beta_ci10'])                                 # C I 1->0 (609um)
+BETA_CI20 = float(_thermal['beta_ci20'])                                 # C I 2->0 (forbidden)
+BETA_CI21 = float(_thermal['beta_ci21'])                                 # C I 2->1 (370um)
+BETA_OI10 = float(_thermal['beta_oi10'])                                 # O I 1->0 (63um)
+BETA_OI20 = float(_thermal['beta_oi20'])                                 # O I 2->0 (forbidden)
+BETA_OI21 = float(_thermal['beta_oi21'])                                 # O I 2->1 (145um)
 BETA_CO = float(_thermal['beta_co'])                                     # dimensionless
 
 # [C I] cooling parameters

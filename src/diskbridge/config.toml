@@ -209,11 +209,13 @@ Gamma_C0 = "3.0e-10 s^-1"      # C photoionization rate at chi=1
 alpha_acc = 0.3                # Accretion heating efficiency
 
 # Escape probabilities for all cooling lines
-beta_cii = 1.0                 # C+ escape probability
-beta_ci10 = 1.0                # C I 609um escape probability
-beta_ci21 = 1.0                # C I 370um escape probability
-beta_oi63 = 1.0                # O I 63um escape probability
-beta_oi145 = 1.0               # O I 145um escape probability
+beta_cii = 1.0                 # C+ 158um escape probability
+beta_ci10 = 1.0                # C I 1->0 (609um) escape probability
+beta_ci20 = 1.0                # C I 2->0 (forbidden) escape probability
+beta_ci21 = 1.0                # C I 2->1 (370um) escape probability
+beta_oi10 = 1.0                # O I 1->0 (63um) escape probability
+beta_oi20 = 1.0                # O I 2->0 (forbidden) escape probability
+beta_oi21 = 1.0                # O I 2->1 (145um) escape probability
 beta_co = 1.0                  # CO rotational escape probability
 
 # Solver parameters
