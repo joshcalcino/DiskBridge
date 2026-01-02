@@ -131,8 +131,13 @@ GAMMA_C0 = Quantity(_thermal['Gamma_C0']).to_base_units().magnitude      # s^-1
 # Accretion heating
 ALPHA_ACC = float(_thermal['alpha_acc'])                                 # dimensionless
 
-# Ortho/para H2 ratio for collision rates
-F_ORTHO = float(_thermal['f_ortho'])                                     # dimensionless (0.75 = 3:1 OPR)
+# Blended ortho/para H2 ratio model parameters
+OPR_DIFFUSE = float(_thermal['opr_diffuse'])                             # OPR in diffuse/warm gas (3.0)
+OPR_T0 = float(_thermal['opr_t0'])                                       # K, below this push toward LTE
+OPR_T1 = float(_thermal['opr_t1'])                                       # K, above this push toward diffuse
+OPR_F0 = float(_thermal['opr_f0'])                                       # molecular fraction threshold low
+OPR_F1 = float(_thermal['opr_f1'])                                       # molecular fraction threshold high
+OPR_CAP = float(_thermal['opr_cap'])                                     # maximum OPR (statistical limit)
 
 # Escape probabilities (for 3-level SE cooling)
 BETA_CII = float(_thermal['beta_cii'])                                   # dimensionless

@@ -32,16 +32,22 @@ from diskbridge.chemistry.thermal.lamda import (
     CPLUS_COLL_H_T, CPLUS_COLL_H_Q,
     CPLUS_COLL_E_T, CPLUS_COLL_E_Q,
     C_E_LEVELS_K, C_G_LEVELS, C_TRANS_U, C_TRANS_L, C_A_UL, C_HNU,
-    C_COLL_H2_T, C_COLL_H2_Q,
+    C_COLL_PH2_T, C_COLL_PH2_Q,
+    C_COLL_OH2_T, C_COLL_OH2_Q,
     C_COLL_H_T, C_COLL_H_Q,
     C_COLL_E_T, C_COLL_E_Q,
     O_E_LEVELS_K, O_G_LEVELS, O_TRANS_U, O_TRANS_L, O_A_UL, O_HNU,
-    O_COLL_H2_T, O_COLL_H2_Q,
+    O_COLL_PH2_T, O_COLL_PH2_Q,
+    O_COLL_OH2_T, O_COLL_OH2_Q,
     O_COLL_H_T, O_COLL_H_Q,
     O_COLL_E_T, O_COLL_E_Q,
     CO_N_LEVELS, CO_E_LEVELS_K, CO_G_LEVELS, CO_N_TRANS,
     CO_TRANS_U, CO_TRANS_L, CO_A_UL, CO_HNU,
     CO_COLL_PH2_T, CO_COLL_PH2_Q,
+)
+
+from diskbridge._constants import (
+    OPR_DIFFUSE, OPR_T0, OPR_T1, OPR_F0, OPR_F1, OPR_CAP,
 )
 
 # Term bitmask flags for kernel dispatch
@@ -52,6 +58,136 @@ TERM_GD = 1 << 3     # gas-dust exchange
 TERM_CI = 1 << 4     # C I 609/370 um cooling
 TERM_OI = 1 << 5     # O I 63/145 um cooling
 TERM_CO = 1 << 6     # CO rotational cooling
+
+
+# -----------------------------------------------------------------------------
+# Blended ortho/para H2 ratio model
+# -----------------------------------------------------------------------------
+# Uses environment-dependent OPR: diffuse/warm -> OPR=3, cold+molecular -> LTE
+# No H2 chemistry required - just mixes collision rates based on T and fH2
+
+@njit(fastmath=True, cache=True)
+def h2_molecular_fraction(nH2: float, nH_atom: float) -> float:
+    """Compute molecular hydrogen fraction fH2 = 2*nH2 / (2*nH2 + nH_atom)."""
+    denom = 2.0 * nH2 + nH_atom
+    if denom <= 0.0:
+        return 0.0
+    return (2.0 * nH2) / denom
+
+
+@njit(fastmath=True, cache=True)
+def opr_lte(T: float) -> float:
+    """LTE ortho/para ratio approximation: OPR_LTE(T) ~ 9*exp(-170.5/T).
+    
+    This is a cheap approximation valid for collider mixing purposes.
+    Capped at OPR_CAP (statistical limit = 3).
+    """
+    if T <= 0.0:
+        return 0.0
+    opr = 9.0 * np.exp(-170.5 / T)
+    if opr > OPR_CAP:
+        opr = OPR_CAP
+    return opr
+
+
+@njit(fastmath=True, cache=True)
+def clamp01(x: float) -> float:
+    """Clamp value to [0, 1] range."""
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+@njit(fastmath=True, cache=True)
+def f_ortho_h2(T: float, nH2: float, nH_atom: float) -> float:
+    """Compute effective ortho-H2 fraction using blended OPR model.
+    
+    Blends between:
+    - Diffuse/warm limit: OPR = OPR_DIFFUSE (3.0, statistical)
+    - Cold molecular limit: OPR -> LTE(T)
+    
+    The blend weight depends on:
+    - Molecular fraction fH2 (high fH2 -> push toward LTE)
+    - Temperature (low T -> push toward LTE)
+    
+    Returns f_ortho = OPR / (1 + OPR), i.e. ortho fraction.
+    """
+    fH2 = h2_molecular_fraction(nH2, nH_atom)
+    
+    # Weight for molecular fraction: 0 if fH2 < F0, 1 if fH2 > F1
+    wf = clamp01((fH2 - OPR_F0) / (OPR_F1 - OPR_F0))
+    
+    # Weight for temperature: 1 if T < T0 (cold), 0 if T > T1 (warm)
+    wT = clamp01((OPR_T1 - T) / (OPR_T1 - OPR_T0))
+    
+    # Combined weight: push toward LTE only if both molecular AND cold
+    w = wf * wT
+    
+    # Blend OPR
+    opr = (1.0 - w) * OPR_DIFFUSE + w * opr_lte(T)
+    if opr < 0.0:
+        opr = 0.0
+    if opr > OPR_CAP:
+        opr = OPR_CAP
+    
+    # Convert OPR to ortho fraction: f = OPR / (1 + OPR)
+    return opr / (1.0 + opr)
+
+
+@njit(fastmath=True, cache=True)
+def interp_rate_mix(
+    T: float,
+    T_grid: np.ndarray,
+    q_p: np.ndarray,
+    q_o: np.ndarray,
+    f_ortho: float,
+) -> float:
+    """Interpolate and mix para-H2 and ortho-H2 collision rates.
+    
+    q_mixed = (1 - f_ortho) * q_para + f_ortho * q_ortho
+    
+    Parameters
+    ----------
+    T : float
+        Temperature [K]
+    T_grid : ndarray
+        Temperature grid (same for both p and o)
+    q_p : ndarray
+        Para-H2 collision rate at each grid point [cm^3/s]
+    q_o : ndarray
+        Ortho-H2 collision rate at each grid point [cm^3/s]
+    f_ortho : float
+        Ortho-H2 fraction (from f_ortho_h2)
+        
+    Returns
+    -------
+    float
+        Mixed collision rate [cm^3/s]
+    """
+    # Interpolate both rates
+    n = len(T_grid)
+    
+    # Clamp to grid bounds
+    if T <= T_grid[0]:
+        qp = q_p[0]
+        qo = q_o[0]
+    elif T >= T_grid[n - 1]:
+        qp = q_p[n - 1]
+        qo = q_o[n - 1]
+    else:
+        # Find bracketing indices
+        i = 0
+        while i < n - 1 and T_grid[i + 1] < T:
+            i += 1
+        # Linear interpolation
+        t = (T - T_grid[i]) / (T_grid[i + 1] - T_grid[i])
+        qp = q_p[i] + t * (q_p[i + 1] - q_p[i])
+        qo = q_o[i] + t * (q_o[i + 1] - q_o[i])
+    
+    # Mix
+    return (1.0 - f_ortho) * qp + f_ortho * qo
 
 
 # -----------------------------------------------------------------------------
@@ -363,6 +499,168 @@ def solve_3level_se(
     M[2, 2] = 1.0
     b[2] = n_X
     
+    for col in range(2):
+        pivot = col
+        for row in range(col + 1, 3):
+            if abs(M[row, col]) > abs(M[pivot, col]):
+                pivot = row
+        if pivot != col:
+            for k in range(3):
+                M[col, k], M[pivot, k] = M[pivot, k], M[col, k]
+            b[col], b[pivot] = b[pivot], b[col]
+        
+        if abs(M[col, col]) < 1e-30:
+            continue
+            
+        for row in range(col + 1, 3):
+            factor = M[row, col] / M[col, col]
+            for k in range(col, 3):
+                M[row, k] -= factor * M[col, k]
+            b[row] -= factor * b[col]
+    
+    n = np.zeros(3, dtype=np.float64)
+    for i in range(2, -1, -1):
+        if abs(M[i, i]) < 1e-30:
+            n[i] = 0.0
+        else:
+            s = b[i]
+            for j in range(i + 1, 3):
+                s -= M[i, j] * n[j]
+            n[i] = s / M[i, i]
+    
+    n[0] = max(n[0], 0.0)
+    n[1] = max(n[1], 0.0)
+    n[2] = max(n[2], 0.0)
+    
+    cooling = 0.0
+    for t in range(n_trans):
+        u = trans_u[t]
+        l = trans_l[t]
+        if u == 1 and l == 0:
+            beta_t = beta_01
+        elif u == 2 and l == 0:
+            beta_t = beta_02
+        else:
+            beta_t = beta_12
+        cooling += n[u] * A_ul[t] * h_nu[t] * beta_t
+    
+    return cooling
+
+
+@njit(fastmath=True, cache=True)
+def solve_3level_se_blended(
+    n_X: float,
+    Tg: float,
+    n_H2: float,
+    n_HI: float,
+    ne: float,
+    f_ortho: float,
+    beta_01: float,
+    beta_02: float,
+    beta_12: float,
+    E_levels: np.ndarray,
+    g_levels: np.ndarray,
+    trans_u: np.ndarray,
+    trans_l: np.ndarray,
+    A_ul: np.ndarray,
+    h_nu: np.ndarray,
+    T_pH2: np.ndarray,
+    q_pH2: np.ndarray,
+    T_oH2: np.ndarray,
+    q_oH2: np.ndarray,
+    T_HI: np.ndarray,
+    q_HI: np.ndarray,
+    T_e: np.ndarray,
+    q_e: np.ndarray,
+) -> float:
+    """Solve 3-level SE with blended ortho/para H2 collision rates.
+    
+    Mixes pH2 and oH2 rates at runtime using f_ortho. No pre-allocation needed.
+    
+    Parameters
+    ----------
+    n_X : float
+        Total species number density [cm^-3]
+    Tg : float
+        Gas temperature [K]
+    n_H2, n_HI, ne : float
+        Collider densities [cm^-3]
+    f_ortho : float
+        Ortho-H2 fraction from blended OPR model
+    beta_01, beta_02, beta_12 : float
+        Escape probabilities for each transition
+    E_levels, g_levels : ndarray (3,)
+        Level energies [K] and statistical weights
+    trans_u, trans_l : ndarray
+        Upper and lower level indices
+    A_ul, h_nu : ndarray
+        Einstein A coefficients and photon energies
+    T_pH2, q_pH2 : ndarray
+        Para-H2 collision rate table
+    T_oH2, q_oH2 : ndarray
+        Ortho-H2 collision rate table
+    T_HI, q_HI : ndarray
+        Atomic H collision rate table
+    T_e, q_e : ndarray
+        Electron collision rate table
+        
+    Returns
+    -------
+    float
+        Total cooling rate [erg cm^-3 s^-1]
+    """
+    if n_X <= 0.0 or Tg <= 0.0:
+        return 0.0
+    
+    C = np.zeros((3, 3), dtype=np.float64)
+    
+    n_trans = len(trans_u)
+    for t in range(n_trans):
+        u = trans_u[t]
+        l = trans_l[t]
+        
+        E_ul = E_levels[u] - E_levels[l]
+        g_ratio = g_levels[u] / g_levels[l]
+        boltz = np.exp(-E_ul / max(Tg, 1.0))
+        
+        # Mix pH2 and oH2 rates at runtime
+        q_ul_H2 = interp_rate_mix(Tg, T_pH2, q_pH2[t], q_oH2[t], f_ortho) if len(T_pH2) > 0 else 0.0
+        q_ul_HI = interp_rate(Tg, T_HI, q_HI[t]) if len(T_HI) > 0 else 0.0
+        q_ul_e = interp_rate(Tg, T_e, q_e[t]) if len(T_e) > 0 else 0.0
+        
+        q_lu_H2 = q_ul_H2 * g_ratio * boltz
+        q_lu_HI = q_ul_HI * g_ratio * boltz
+        q_lu_e = q_ul_e * g_ratio * boltz
+        
+        C_ul = n_H2 * q_ul_H2 + n_HI * q_ul_HI + ne * q_ul_e
+        C_lu = n_H2 * q_lu_H2 + n_HI * q_lu_HI + ne * q_lu_e
+        
+        if u == 1 and l == 0:
+            beta_t = beta_01
+        elif u == 2 and l == 0:
+            beta_t = beta_02
+        else:
+            beta_t = beta_12
+        
+        R_ul = A_ul[t] * beta_t + C_ul
+        R_lu = C_lu
+        
+        C[l, u] += R_ul
+        C[u, l] += R_lu
+        C[u, u] -= R_ul
+        C[l, l] -= R_lu
+    
+    M = np.zeros((3, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    
+    M[0, :] = C[0, :]
+    M[1, :] = C[1, :]
+    M[2, 0] = 1.0
+    M[2, 1] = 1.0
+    M[2, 2] = 1.0
+    b[2] = n_X
+    
+    # Gaussian elimination with partial pivoting
     for col in range(2):
         pivot = col
         for row in range(col + 1, 3):
@@ -1393,6 +1691,7 @@ def cii_cooling_lamda(
     
     Uses collision rates from Wiesenfeld & Goldsmith (2014) for H2,
     Barinovs et al. (2005) for H, and Wilson & Bell (2002) for electrons.
+    H2 rates are mixed using blended OPR model based on T and fH2.
     
     Parameters
     ----------
@@ -1401,7 +1700,7 @@ def cii_cooling_lamda(
     Tg : float
         Gas temperature [K]
     nH2 : float
-        H2 number density [cm^-3] (used as sum of para + ortho)
+        H2 number density [cm^-3]
     nHI : float
         Atomic H number density [cm^-3]
     ne : float
@@ -1417,8 +1716,11 @@ def cii_cooling_lamda(
     if nCplus <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    q_ul_H2 = 0.5 * (interp_rate(Tg, CPLUS_COLL_PH2_T, CPLUS_COLL_PH2_Q[0]) +
-                     interp_rate(Tg, CPLUS_COLL_OH2_T, CPLUS_COLL_OH2_Q[0]))
+    # Compute blended ortho fraction based on T and molecular fraction
+    f_o = f_ortho_h2(Tg, nH2, nHI)
+    
+    # Mix pH2 and oH2 collision rates
+    q_ul_H2 = interp_rate_mix(Tg, CPLUS_COLL_PH2_T, CPLUS_COLL_PH2_Q[0], CPLUS_COLL_OH2_Q[0], f_o)
     q_ul_HI = interp_rate(Tg, CPLUS_COLL_H_T, CPLUS_COLL_H_Q[0])
     q_ul_e = interp_rate(Tg, CPLUS_COLL_E_T, CPLUS_COLL_E_Q[0])
     
@@ -1460,7 +1762,7 @@ def ci_cooling_lamda(
     """[C I] 609 um and 370 um cooling using 3-level SE with LAMDA rates.
     
     Uses collision rates from Launay & Roueff (1977) and Schroeder et al. (1991).
-    H2 rates are precomputed as 50/50 ortho/para average.
+    H2 rates are mixed at runtime using blended OPR model.
     
     Parameters
     ----------
@@ -1485,11 +1787,15 @@ def ci_cooling_lamda(
     if nC <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    return solve_3level_se(
-        nC, Tg, nH2, nHI, ne,
+    # Compute blended ortho fraction
+    f_o = f_ortho_h2(Tg, nH2, nHI)
+    
+    return solve_3level_se_blended(
+        nC, Tg, nH2, nHI, ne, f_o,
         beta_10, beta_20, beta_21,
         C_E_LEVELS_K, C_G_LEVELS, C_TRANS_U, C_TRANS_L, C_A_UL, C_HNU,
-        C_COLL_H2_T, C_COLL_H2_Q, C_COLL_H_T, C_COLL_H_Q, C_COLL_E_T, C_COLL_E_Q
+        C_COLL_PH2_T, C_COLL_PH2_Q, C_COLL_OH2_T, C_COLL_OH2_Q,
+        C_COLL_H_T, C_COLL_H_Q, C_COLL_E_T, C_COLL_E_Q
     )
 
 
@@ -1507,7 +1813,7 @@ def oi_cooling_lamda(
     """[O I] 63 um and 145 um cooling using 3-level SE with LAMDA rates.
     
     Uses collision rates from Abrahamsson et al. (2007) and Jaquet et al. (1992).
-    H2 rates are precomputed as 50/50 ortho/para average.
+    H2 rates are mixed at runtime using blended OPR model.
     
     Parameters
     ----------
@@ -1532,11 +1838,15 @@ def oi_cooling_lamda(
     if nO <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    return solve_3level_se(
-        nO, Tg, nH2, nHI, ne,
+    # Compute blended ortho fraction
+    f_o = f_ortho_h2(Tg, nH2, nHI)
+    
+    return solve_3level_se_blended(
+        nO, Tg, nH2, nHI, ne, f_o,
         beta_10, beta_20, beta_21,
         O_E_LEVELS_K, O_G_LEVELS, O_TRANS_U, O_TRANS_L, O_A_UL, O_HNU,
-        O_COLL_H2_T, O_COLL_H2_Q, O_COLL_H_T, O_COLL_H_Q, O_COLL_E_T, O_COLL_E_Q
+        O_COLL_PH2_T, O_COLL_PH2_Q, O_COLL_OH2_T, O_COLL_OH2_Q,
+        O_COLL_H_T, O_COLL_H_Q, O_COLL_E_T, O_COLL_E_Q
     )
 
 

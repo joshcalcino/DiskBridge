@@ -315,11 +315,9 @@ C_COLL_H_Q = C.colliders['H'].rates
 C_COLL_E_T = C.colliders['e'].temps
 C_COLL_E_Q = C.colliders['e'].rates
 
-# C precomputed combined H2 rates using F_ORTHO from config
-# q_H2 = (1 - f_ortho) * q_pH2 + f_ortho * q_oH2
-from diskbridge._constants import F_ORTHO
-C_COLL_H2_T = C_COLL_PH2_T  # Same grid for pH2 and oH2
-C_COLL_H2_Q = (1.0 - F_ORTHO) * C_COLL_PH2_Q + F_ORTHO * C_COLL_OH2_Q
+# NOTE: pH2 and oH2 rates are NOT pre-mixed here.
+# The blended OPR model mixes them at runtime based on T and fH2.
+# See _kernels.py: f_ortho_h2() and interp_rate_mix()
 
 # O arrays
 O_N_LEVELS = O.n_levels
@@ -341,9 +339,8 @@ O_COLL_H_Q = O.colliders['H'].rates
 O_COLL_E_T = O.colliders['e'].temps
 O_COLL_E_Q = O.colliders['e'].rates
 
-# O precomputed combined H2 rates using F_ORTHO from config
-O_COLL_H2_T = O_COLL_PH2_T  # Same grid for pH2 and oH2
-O_COLL_H2_Q = (1.0 - F_ORTHO) * O_COLL_PH2_Q + F_ORTHO * O_COLL_OH2_Q
+# NOTE: pH2 and oH2 rates are NOT pre-mixed here.
+# The blended OPR model mixes them at runtime based on T and fH2.
 
 # CO arrays
 CO_N_LEVELS = CO.n_levels
