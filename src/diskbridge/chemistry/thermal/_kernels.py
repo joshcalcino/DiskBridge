@@ -454,7 +454,7 @@ def solve_3level_se(
 ) -> float:
     """Solve 3-level statistical equilibrium and return total cooling rate.
     
-    Solves the coupled rate equations for a 3-level system using Gaussian elimination.
+    Fully unrolled to scalar variables - NO array allocations.
     
     Parameters
     ----------
@@ -491,11 +491,24 @@ def solve_3level_se(
     if n_X <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    # Use np.empty + manual zeroing to minimize allocation overhead
-    C = np.empty((3, 3), dtype=np.float64)
-    for i in range(3):
-        for j in range(3):
-            C[i, j] = 0.0
+    # Rate matrix C as scalars (NO allocation)
+    c00 = 0.0
+    c01 = 0.0
+    c02 = 0.0
+    c10 = 0.0
+    c11 = 0.0
+    c12 = 0.0
+    c20 = 0.0
+    c21 = 0.0
+    c22 = 0.0
+    
+    # Store A*beta and h_nu for each transition for cooling calculation
+    A_beta_01 = 0.0
+    A_beta_02 = 0.0
+    A_beta_12 = 0.0
+    hnu_01 = 0.0
+    hnu_02 = 0.0
+    hnu_12 = 0.0
     
     n_trans = len(trans_u)
     for t in range(n_trans):
@@ -519,79 +532,121 @@ def solve_3level_se(
         
         if u == 1 and l == 0:
             beta_t = beta_01
+            A_beta_01 = A_ul[t] * beta_t
+            hnu_01 = h_nu[t]
         elif u == 2 and l == 0:
             beta_t = beta_02
+            A_beta_02 = A_ul[t] * beta_t
+            hnu_02 = h_nu[t]
         else:
             beta_t = beta_12
+            A_beta_12 = A_ul[t] * beta_t
+            hnu_12 = h_nu[t]
         
         R_ul = A_ul[t] * beta_t + C_ul
         R_lu = C_lu
         
-        C[l, u] += R_ul
-        C[u, l] += R_lu
-        C[u, u] -= R_ul
-        C[l, l] -= R_lu
-    
-    # Use np.empty + explicit initialization
-    M = np.empty((3, 3), dtype=np.float64)
-    b = np.empty(3, dtype=np.float64)
-    b[0] = 0.0
-    b[1] = 0.0
-    
-    M[0, :] = C[0, :]
-    M[1, :] = C[1, :]
-    M[2, 0] = 1.0
-    M[2, 1] = 1.0
-    M[2, 2] = 1.0
-    b[2] = n_X
-    
-    for col in range(2):
-        pivot = col
-        for row in range(col + 1, 3):
-            if abs(M[row, col]) > abs(M[pivot, col]):
-                pivot = row
-        if pivot != col:
-            for k in range(3):
-                M[col, k], M[pivot, k] = M[pivot, k], M[col, k]
-            b[col], b[pivot] = b[pivot], b[col]
-        
-        if abs(M[col, col]) < 1e-30:
-            continue
-            
-        for row in range(col + 1, 3):
-            factor = M[row, col] / M[col, col]
-            for k in range(col, 3):
-                M[row, k] -= factor * M[col, k]
-            b[row] -= factor * b[col]
-    
-    n = np.empty(3, dtype=np.float64)
-    n[0] = 0.0
-    n[1] = 0.0
-    n[2] = 0.0
-    for i in range(2, -1, -1):
-        if abs(M[i, i]) < 1e-30:
-            n[i] = 0.0
-        else:
-            s = b[i]
-            for j in range(i + 1, 3):
-                s -= M[i, j] * n[j]
-            n[i] = s / M[i, i]
-    
-    n[0] = max(n[0], 0.0)
-    n[1] = max(n[1], 0.0)
-    n[2] = max(n[2], 0.0)
-    
-    cooling = 0.0
-    for t in range(n_trans):
-        u = trans_u[t]
-        l = trans_l[t]
+        # Update rate matrix: C[l,u] += R_ul, C[u,l] += R_lu, C[u,u] -= R_ul, C[l,l] -= R_lu
         if u == 1 and l == 0:
-            beta_t = beta_01
+            c01 += R_ul
+            c10 += R_lu
+            c11 -= R_ul
+            c00 -= R_lu
         elif u == 2 and l == 0:
-            beta_t = beta_02
+            c02 += R_ul
+            c20 += R_lu
+            c22 -= R_ul
+            c00 -= R_lu
+        else:  # u == 2, l == 1
+            c12 += R_ul
+            c21 += R_lu
+            c22 -= R_ul
+            c11 -= R_lu
+    
+    # Build augmented matrix M and b for Gaussian elimination
+    # M = [C[0,:]; C[1,:]; 1,1,1], b = [0; 0; n_X]
+    m00 = c00
+    m01 = c01
+    m02 = c02
+    m10 = c10
+    m11 = c11
+    m12 = c12
+    m20 = 1.0
+    m21 = 1.0
+    m22 = 1.0
+    b0 = 0.0
+    b1 = 0.0
+    b2 = n_X
+    
+    # Gaussian elimination with partial pivoting - column 0
+    # Find pivot
+    if abs(m10) > abs(m00):
+        if abs(m20) > abs(m10):
+            # swap row 0 and row 2
+            m00, m20 = m20, m00
+            m01, m21 = m21, m01
+            m02, m22 = m22, m02
+            b0, b2 = b2, b0
         else:
-            beta_t = beta_12
-        cooling += n[u] * A_ul[t] * h_nu[t] * beta_t
+            # swap row 0 and row 1
+            m00, m10 = m10, m00
+            m01, m11 = m11, m01
+            m02, m12 = m12, m02
+            b0, b1 = b1, b0
+    elif abs(m20) > abs(m00):
+        # swap row 0 and row 2
+        m00, m20 = m20, m00
+        m01, m21 = m21, m01
+        m02, m22 = m22, m02
+        b0, b2 = b2, b0
+    
+    if abs(m00) > 1e-30:
+        factor = m10 / m00
+        m10 = 0.0
+        m11 -= factor * m01
+        m12 -= factor * m02
+        b1 -= factor * b0
+        
+        factor = m20 / m00
+        m20 = 0.0
+        m21 -= factor * m01
+        m22 -= factor * m02
+        b2 -= factor * b0
+    
+    # Column 1 pivot
+    if abs(m21) > abs(m11):
+        m11, m21 = m21, m11
+        m12, m22 = m22, m12
+        b1, b2 = b2, b1
+    
+    if abs(m11) > 1e-30:
+        factor = m21 / m11
+        m21 = 0.0
+        m22 -= factor * m12
+        b2 -= factor * b1
+    
+    # Back substitution
+    if abs(m22) > 1e-30:
+        n2 = b2 / m22
+    else:
+        n2 = 0.0
+    
+    if abs(m11) > 1e-30:
+        n1 = (b1 - m12 * n2) / m11
+    else:
+        n1 = 0.0
+    
+    if abs(m00) > 1e-30:
+        n0 = (b0 - m01 * n1 - m02 * n2) / m00
+    else:
+        n0 = 0.0
+    
+    n0 = max(n0, 0.0)
+    n1 = max(n1, 0.0)
+    n2 = max(n2, 0.0)
+    
+    # Cooling: sum over transitions
+    cooling = n1 * A_beta_01 * hnu_01 + n2 * A_beta_02 * hnu_02 + n2 * A_beta_12 * hnu_12
     
     return cooling
 
@@ -624,7 +679,8 @@ def solve_3level_se_blended(
 ) -> float:
     """Solve 3-level SE with blended ortho/para H2 collision rates.
     
-    Mixes pH2 and oH2 rates at runtime using f_ortho. No pre-allocation needed.
+    Fully unrolled to scalar variables - NO array allocations.
+    Mixes pH2 and oH2 rates at runtime using f_ortho.
     
     Parameters
     ----------
@@ -661,11 +717,24 @@ def solve_3level_se_blended(
     if n_X <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    # Use np.empty + manual zeroing to minimize allocation overhead
-    C = np.empty((3, 3), dtype=np.float64)
-    for i in range(3):
-        for j in range(3):
-            C[i, j] = 0.0
+    # Rate matrix C as scalars (NO allocation)
+    c00 = 0.0
+    c01 = 0.0
+    c02 = 0.0
+    c10 = 0.0
+    c11 = 0.0
+    c12 = 0.0
+    c20 = 0.0
+    c21 = 0.0
+    c22 = 0.0
+    
+    # Store A*beta and h_nu for each transition for cooling calculation
+    A_beta_01 = 0.0
+    A_beta_02 = 0.0
+    A_beta_12 = 0.0
+    hnu_01 = 0.0
+    hnu_02 = 0.0
+    hnu_12 = 0.0
     
     n_trans = len(trans_u)
     for t in range(n_trans):
@@ -676,8 +745,8 @@ def solve_3level_se_blended(
         g_ratio = g_levels[u] / g_levels[l]
         boltz = np.exp(-E_ul / max(Tg, 1.0))
         
-        # Mix pH2 and oH2 rates at runtime
-        q_ul_H2 = interp_rate_mix(Tg, T_pH2, q_pH2[t], q_oH2[t], f_ortho) if len(T_pH2) > 0 else 0.0
+        # Mix pH2 and oH2 rates at runtime using 2-grid interpolation
+        q_ul_H2 = interp_rate_mix_2grid(Tg, T_pH2, q_pH2[t], T_oH2, q_oH2[t], f_ortho) if len(T_pH2) > 0 else 0.0
         q_ul_HI = interp_rate(Tg, T_HI, q_HI[t]) if len(T_HI) > 0 else 0.0
         q_ul_e = interp_rate(Tg, T_e, q_e[t]) if len(T_e) > 0 else 0.0
         
@@ -690,80 +759,116 @@ def solve_3level_se_blended(
         
         if u == 1 and l == 0:
             beta_t = beta_01
+            A_beta_01 = A_ul[t] * beta_t
+            hnu_01 = h_nu[t]
         elif u == 2 and l == 0:
             beta_t = beta_02
+            A_beta_02 = A_ul[t] * beta_t
+            hnu_02 = h_nu[t]
         else:
             beta_t = beta_12
+            A_beta_12 = A_ul[t] * beta_t
+            hnu_12 = h_nu[t]
         
         R_ul = A_ul[t] * beta_t + C_ul
         R_lu = C_lu
         
-        C[l, u] += R_ul
-        C[u, l] += R_lu
-        C[u, u] -= R_ul
-        C[l, l] -= R_lu
-    
-    # Use np.empty + explicit initialization
-    M = np.empty((3, 3), dtype=np.float64)
-    b = np.empty(3, dtype=np.float64)
-    b[0] = 0.0
-    b[1] = 0.0
-    
-    M[0, :] = C[0, :]
-    M[1, :] = C[1, :]
-    M[2, 0] = 1.0
-    M[2, 1] = 1.0
-    M[2, 2] = 1.0
-    b[2] = n_X
-    
-    # Gaussian elimination with partial pivoting
-    for col in range(2):
-        pivot = col
-        for row in range(col + 1, 3):
-            if abs(M[row, col]) > abs(M[pivot, col]):
-                pivot = row
-        if pivot != col:
-            for k in range(3):
-                M[col, k], M[pivot, k] = M[pivot, k], M[col, k]
-            b[col], b[pivot] = b[pivot], b[col]
-        
-        if abs(M[col, col]) < 1e-30:
-            continue
-            
-        for row in range(col + 1, 3):
-            factor = M[row, col] / M[col, col]
-            for k in range(col, 3):
-                M[row, k] -= factor * M[col, k]
-            b[row] -= factor * b[col]
-    
-    n = np.empty(3, dtype=np.float64)
-    n[0] = 0.0
-    n[1] = 0.0
-    n[2] = 0.0
-    for i in range(2, -1, -1):
-        if abs(M[i, i]) < 1e-30:
-            n[i] = 0.0
-        else:
-            s = b[i]
-            for j in range(i + 1, 3):
-                s -= M[i, j] * n[j]
-            n[i] = s / M[i, i]
-    
-    n[0] = max(n[0], 0.0)
-    n[1] = max(n[1], 0.0)
-    n[2] = max(n[2], 0.0)
-    
-    cooling = 0.0
-    for t in range(n_trans):
-        u = trans_u[t]
-        l = trans_l[t]
+        # Update rate matrix
         if u == 1 and l == 0:
-            beta_t = beta_01
+            c01 += R_ul
+            c10 += R_lu
+            c11 -= R_ul
+            c00 -= R_lu
         elif u == 2 and l == 0:
-            beta_t = beta_02
+            c02 += R_ul
+            c20 += R_lu
+            c22 -= R_ul
+            c00 -= R_lu
+        else:  # u == 2, l == 1
+            c12 += R_ul
+            c21 += R_lu
+            c22 -= R_ul
+            c11 -= R_lu
+    
+    # Build augmented matrix M and b for Gaussian elimination
+    m00 = c00
+    m01 = c01
+    m02 = c02
+    m10 = c10
+    m11 = c11
+    m12 = c12
+    m20 = 1.0
+    m21 = 1.0
+    m22 = 1.0
+    b0 = 0.0
+    b1 = 0.0
+    b2 = n_X
+    
+    # Gaussian elimination with partial pivoting - column 0
+    if abs(m10) > abs(m00):
+        if abs(m20) > abs(m10):
+            m00, m20 = m20, m00
+            m01, m21 = m21, m01
+            m02, m22 = m22, m02
+            b0, b2 = b2, b0
         else:
-            beta_t = beta_12
-        cooling += n[u] * A_ul[t] * h_nu[t] * beta_t
+            m00, m10 = m10, m00
+            m01, m11 = m11, m01
+            m02, m12 = m12, m02
+            b0, b1 = b1, b0
+    elif abs(m20) > abs(m00):
+        m00, m20 = m20, m00
+        m01, m21 = m21, m01
+        m02, m22 = m22, m02
+        b0, b2 = b2, b0
+    
+    if abs(m00) > 1e-30:
+        factor = m10 / m00
+        m10 = 0.0
+        m11 -= factor * m01
+        m12 -= factor * m02
+        b1 -= factor * b0
+        
+        factor = m20 / m00
+        m20 = 0.0
+        m21 -= factor * m01
+        m22 -= factor * m02
+        b2 -= factor * b0
+    
+    # Column 1 pivot
+    if abs(m21) > abs(m11):
+        m11, m21 = m21, m11
+        m12, m22 = m22, m12
+        b1, b2 = b2, b1
+    
+    if abs(m11) > 1e-30:
+        factor = m21 / m11
+        m21 = 0.0
+        m22 -= factor * m12
+        b2 -= factor * b1
+    
+    # Back substitution
+    if abs(m22) > 1e-30:
+        n2 = b2 / m22
+    else:
+        n2 = 0.0
+    
+    if abs(m11) > 1e-30:
+        n1 = (b1 - m12 * n2) / m11
+    else:
+        n1 = 0.0
+    
+    if abs(m00) > 1e-30:
+        n0 = (b0 - m01 * n1 - m02 * n2) / m00
+    else:
+        n0 = 0.0
+    
+    n0 = max(n0, 0.0)
+    n1 = max(n1, 0.0)
+    n2 = max(n2, 0.0)
+    
+    # Cooling: sum over transitions
+    cooling = n1 * A_beta_01 * hnu_01 + n2 * A_beta_02 * hnu_02 + n2 * A_beta_12 * hnu_12
     
     return cooling
 
@@ -922,7 +1027,7 @@ def solve_nlevel_se_blended(
     n_H2: float,
     n_HI: float,
     f_ortho: float,
-    beta_arr: np.ndarray,
+    beta: float,
     n_levels: int,
     E_levels: np.ndarray,
     g_levels: np.ndarray,
@@ -939,6 +1044,7 @@ def solve_nlevel_se_blended(
     """Solve N-level SE with blended ortho/para H2 collision rates.
     
     For CO, mixes pH2 and oH2 rates at runtime using f_ortho.
+    Uses uniform escape probability (no array allocation).
     
     Parameters
     ----------
@@ -952,8 +1058,8 @@ def solve_nlevel_se_blended(
         Atomic H number density [cm^-3] (used to compute f_ortho)
     f_ortho : float
         Ortho-H2 fraction from blended OPR model
-    beta_arr : ndarray (n_trans,)
-        Escape probabilities for each transition
+    beta : float
+        Uniform escape probability for all transitions
     n_levels : int
         Number of levels to include
     E_levels, g_levels : ndarray
@@ -981,7 +1087,7 @@ def solve_nlevel_se_blended(
     if n_levels > MAX_LEVELS:
         n_levels = MAX_LEVELS
     
-    # Use np.empty + manual zeroing to minimize allocation overhead
+    # Use np.empty + manual zeroing (still needed for N-level, but no beta_arr)
     M = np.empty((MAX_LEVELS, MAX_LEVELS), dtype=np.float64)
     b = np.empty(MAX_LEVELS, dtype=np.float64)
     n = np.empty(MAX_LEVELS, dtype=np.float64)
@@ -1010,8 +1116,7 @@ def solve_nlevel_se_blended(
         C_ul = n_H2 * q_ul
         C_lu = n_H2 * q_lu
         
-        beta_t = beta_arr[t] if t < len(beta_arr) else 1.0
-        R_ul = A_ul[t] * beta_t + C_ul
+        R_ul = A_ul[t] * beta + C_ul
         R_lu = C_lu
         
         M[l, u] += R_ul
@@ -1058,8 +1163,7 @@ def solve_nlevel_se_blended(
         l = trans_l[t]
         if u >= n_levels or l >= n_levels:
             continue
-        beta_t = beta_arr[t] if t < len(beta_arr) else 1.0
-        cooling += n[u] * A_ul[t] * h_nu[t] * beta_t
+        cooling += n[u] * A_ul[t] * h_nu[t] * beta
     
     return cooling
 
@@ -1882,7 +1986,7 @@ def max_fractional_change(Tg_new: np.ndarray, Tg_old: np.ndarray) -> float:
 # =============================================================================
 #
 # These kernels use statistical equilibrium with LAMDA collision rates.
-# They require explicit collider densities (nH2, nHI, ne) - no hidden hacks.
+# They require explicit collider densities (nH2, nHI, ne).
 #
 # References:
 #   - Schoier et al. 2005, A&A 432, 369 (LAMDA database)
@@ -1933,8 +2037,9 @@ def cii_cooling_lamda(
     # Compute blended ortho fraction based on T and molecular fraction
     f_o = f_ortho_h2(Tg, nH2, nHI)
     
-    # Mix pH2 and oH2 collision rates
-    q_ul_H2 = interp_rate_mix(Tg, CPLUS_COLL_PH2_T, CPLUS_COLL_PH2_Q[0], CPLUS_COLL_OH2_Q[0], f_o)
+    # Mix pH2 and oH2 collision rates using 2-grid interpolation for robustness
+    q_ul_H2 = interp_rate_mix_2grid(Tg, CPLUS_COLL_PH2_T, CPLUS_COLL_PH2_Q[0], 
+                                     CPLUS_COLL_OH2_T, CPLUS_COLL_OH2_Q[0], f_o)
     q_ul_HI = interp_rate(Tg, CPLUS_COLL_H_T, CPLUS_COLL_H_Q[0])
     q_ul_e = interp_rate(Tg, CPLUS_COLL_E_T, CPLUS_COLL_E_Q[0])
     
@@ -2113,10 +2218,9 @@ def co_cooling_lamda(
     n_levels = min(co_jmax + 1, CO_N_LEVELS, 21)
     n_trans = min(n_levels - 1, CO_N_TRANS)
     
-    beta_arr = np.full(n_trans, beta_co, dtype=np.float64)
-    
+    # Pass beta_co directly - no array allocation needed
     return solve_nlevel_se_blended(
-        nco, Tg, nH2, nHI, f_o, beta_arr,
+        nco, Tg, nH2, nHI, f_o, beta_co,
         n_levels, CO_E_LEVELS_K, CO_G_LEVELS,
         n_trans, CO_TRANS_U, CO_TRANS_L, CO_A_UL, CO_HNU,
         CO_COLL_PH2_T, CO_COLL_PH2_Q,
