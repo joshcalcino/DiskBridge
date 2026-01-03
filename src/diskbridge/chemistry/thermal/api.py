@@ -15,6 +15,11 @@ from diskbridge._config import resolve_model_config
 from diskbridge.model.field import Field
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.registry import get_thermal_model
+from diskbridge.chemistry.thermal._h2_closure import (
+    compute_h_partition_array,
+    check_h_conservation,
+    AU_CM,
+)
 
 
 def run_thermal(
@@ -105,6 +110,69 @@ def run_thermal(
         state.nco_ice = rad.nco_ice
     
     cfg = resolve_model_config(("thermal", model), overrides=config)
+    
+    # --- Hydrogen partition closure ---
+    h2_cfg = resolve_model_config(("thermal", "hydrogen"), overrides=config)
+    h2_mode = config.get("h2_mode", h2_cfg.get("mode", "input"))
+    
+    if h2_mode == "closure":
+        logger.info("Computing H/H2 partition via closure model...")
+        
+        # Get closure parameters
+        R_form = config.get("R_form", h2_cfg.get("R_form", 3.0e-17))
+        k0_diss = config.get("k0_diss", h2_cfg.get("k0_diss", 4.2e-11))
+        use_dust_attn = config.get("use_dust_attn", h2_cfg.get("use_dust_attn", False))
+        sigma_d = config.get("sigma_d", h2_cfg.get("sigma_d", 2.0e-21))
+        b5 = config.get("db96_b5", h2_cfg.get("db96_b5", 2.0))
+        alpha = config.get("db96_alpha", h2_cfg.get("db96_alpha", -0.75))
+        
+        # Get shielding length
+        shield_mode = config.get("shield_length_mode", h2_cfg.get("shield_length_mode", "cell"))
+        if shield_mode == "fixed":
+            L_shield_au = config.get("L_shield_au", h2_cfg.get("L_shield_au", 10.0))
+            L_shield = np.full(nH.magnitude.flatten().shape, L_shield_au * AU_CM)
+            logger.info(f"  Using fixed shielding length: {L_shield_au} AU")
+        else:
+            # Use cell size from mesh
+            cell_sizes = rad.model.mesh.cell_sizes()
+            if hasattr(cell_sizes, 'magnitude'):
+                L_shield = cell_sizes.to('cm').magnitude.flatten()
+            else:
+                L_shield = np.asarray(cell_sizes).flatten() * AU_CM
+            logger.info(f"  Using cell-based shielding length")
+        
+        # Flatten arrays for closure calculation
+        nH_flat = nH.to('cm^-3').magnitude.flatten()
+        chi_flat = chi_eff.magnitude.flatten() if hasattr(chi_eff, 'magnitude') else np.asarray(chi_eff).flatten()
+        
+        # Compute H/H2 partition
+        nH2_flat, nHI_flat, fH2_flat = compute_h_partition_array(
+            nH_flat, chi_flat, L_shield,
+            R_form, k0_diss, use_dust_attn, sigma_d, b5, alpha
+        )
+        
+        # Check conservation
+        check_h_conservation(nH2_flat, nHI_flat, nH_flat, rtol=1e-4)
+        
+        # Reshape and assign to state
+        orig_shape = nH.magnitude.shape
+        state.nH2 = Quantity(nH2_flat.reshape(orig_shape), 'cm^-3')
+        state.nH_atom = Quantity(nHI_flat.reshape(orig_shape), 'cm^-3')
+        
+        fH2_median = np.median(fH2_flat)
+        fH2_max = np.max(fH2_flat)
+        logger.info(f"  fH2: median={fH2_median:.3f}, max={fH2_max:.3f}")
+        
+    elif h2_mode == "input":
+        # Check if nH2 and nH_atom are provided
+        if state.nH2 is None or state.nH_atom is None:
+            # Default: assume fully molecular (for backwards compatibility)
+            logger.warning("H2 mode='input' but nH2/nH_atom not provided. "
+                          "Assuming fully molecular (nH2 = 0.5*nH, nH_atom = 0).")
+            state.nH2 = Quantity(0.5 * nH.to('cm^-3').magnitude, 'cm^-3')
+            state.nH_atom = Quantity(np.zeros_like(nH.magnitude), 'cm^-3')
+    else:
+        raise ValueError(f"Unknown h2_mode: {h2_mode}. Must be 'input' or 'closure'.")
     
     def get_val(key, default_key=None):
         """Get parameter from user config or defaults, converting strings to Quantity."""

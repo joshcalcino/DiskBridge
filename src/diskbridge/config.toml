@@ -234,3 +234,33 @@ n_iter = 3                     # Number of thermal iterations
 tol = 0.01                     # Convergence tolerance
 max_bisect_iter = 60           # Maximum bisection iterations
 bisect_tol = 1.0e-6            # Bisection tolerance
+
+# =============================================================================
+# HYDROGEN PARTITION CLOSURE
+# Local steady-state H/H2 balance (grain formation vs FUV dissociation)
+# NOT a time-dependent chemistry network - just a local equilibrium closure.
+# =============================================================================
+
+[thermal.hydrogen]
+# Mode: "input" = require nH2, nHI from caller; "closure" = compute from balance
+mode = "input"
+
+# Shielding length for column density estimation
+shield_length_mode = "cell"   # "cell" = use cell size; "fixed" = use L_shield_au
+L_shield_au = 10.0            # AU, only used if shield_length_mode="fixed"
+
+# H2 formation rate on grains (Hollenbach & McKee 1979)
+R_form = 3.0e-17              # cm^3 s^-1, grain-surface formation rate coefficient
+
+# H2 photodissociation (unshielded rate in Draine-like FUV field)
+k0_diss = 4.2e-11             # s^-1, unshielded H2 dissociation rate at chi=1
+
+# Dust attenuation of FUV
+# Set use_dust_attn=false if chi_eff already includes dust from RT (avoid double-counting)
+use_dust_attn = false
+sigma_d = 2.0e-21             # cm^2 per H, dust FUV absorption cross-section
+
+# Self-shielding fit coefficients (Draine & Bertoldi 1996)
+# f_shield = (1 + x/b5)^alpha * exp(-5e-4 * sqrt(1 + x)) where x = N_H2 / 5e14
+db96_b5 = 2.0                 # Doppler parameter in units of 10^5 cm/s
+db96_alpha = -0.75            # Power-law exponent
