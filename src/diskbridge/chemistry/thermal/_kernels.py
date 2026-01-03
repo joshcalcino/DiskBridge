@@ -44,6 +44,7 @@ from diskbridge.chemistry.thermal.lamda import (
     CO_N_LEVELS, CO_E_LEVELS_K, CO_G_LEVELS, CO_N_TRANS,
     CO_TRANS_U, CO_TRANS_L, CO_A_UL, CO_HNU,
     CO_COLL_PH2_T, CO_COLL_PH2_Q,
+    CO_COLL_OH2_T, CO_COLL_OH2_Q,
 )
 
 from diskbridge._constants import (
@@ -187,6 +188,44 @@ def interp_rate_mix(
         qo = q_o[i] + t * (q_o[i + 1] - q_o[i])
     
     # Mix
+    return (1.0 - f_ortho) * qp + f_ortho * qo
+
+
+@njit(fastmath=True, cache=True)
+def interp_rate_mix_2grid(
+    T: float,
+    T_p: np.ndarray,
+    q_p: np.ndarray,
+    T_o: np.ndarray,
+    q_o: np.ndarray,
+    f_ortho: float,
+) -> float:
+    """Interpolate and mix para-H2 and ortho-H2 rates with different T-grids.
+    
+    For species like CO where pH2 and oH2 may have different temperature grids.
+    
+    Parameters
+    ----------
+    T : float
+        Temperature [K]
+    T_p : ndarray
+        Temperature grid for para-H2
+    q_p : ndarray
+        Para-H2 collision rate at each grid point [cm^3/s]
+    T_o : ndarray
+        Temperature grid for ortho-H2
+    q_o : ndarray
+        Ortho-H2 collision rate at each grid point [cm^3/s]
+    f_ortho : float
+        Ortho-H2 fraction (from f_ortho_h2)
+        
+    Returns
+    -------
+    float
+        Mixed collision rate [cm^3/s]
+    """
+    qp = interp_rate(T, T_p, q_p)
+    qo = interp_rate(T, T_o, q_o)
     return (1.0 - f_ortho) * qp + f_ortho * qo
 
 
@@ -452,7 +491,11 @@ def solve_3level_se(
     if n_X <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    C = np.zeros((3, 3), dtype=np.float64)
+    # Use np.empty + manual zeroing to minimize allocation overhead
+    C = np.empty((3, 3), dtype=np.float64)
+    for i in range(3):
+        for j in range(3):
+            C[i, j] = 0.0
     
     n_trans = len(trans_u)
     for t in range(n_trans):
@@ -489,8 +532,11 @@ def solve_3level_se(
         C[u, u] -= R_ul
         C[l, l] -= R_lu
     
-    M = np.zeros((3, 3), dtype=np.float64)
-    b = np.zeros(3, dtype=np.float64)
+    # Use np.empty + explicit initialization
+    M = np.empty((3, 3), dtype=np.float64)
+    b = np.empty(3, dtype=np.float64)
+    b[0] = 0.0
+    b[1] = 0.0
     
     M[0, :] = C[0, :]
     M[1, :] = C[1, :]
@@ -518,7 +564,10 @@ def solve_3level_se(
                 M[row, k] -= factor * M[col, k]
             b[row] -= factor * b[col]
     
-    n = np.zeros(3, dtype=np.float64)
+    n = np.empty(3, dtype=np.float64)
+    n[0] = 0.0
+    n[1] = 0.0
+    n[2] = 0.0
     for i in range(2, -1, -1):
         if abs(M[i, i]) < 1e-30:
             n[i] = 0.0
@@ -612,7 +661,11 @@ def solve_3level_se_blended(
     if n_X <= 0.0 or Tg <= 0.0:
         return 0.0
     
-    C = np.zeros((3, 3), dtype=np.float64)
+    # Use np.empty + manual zeroing to minimize allocation overhead
+    C = np.empty((3, 3), dtype=np.float64)
+    for i in range(3):
+        for j in range(3):
+            C[i, j] = 0.0
     
     n_trans = len(trans_u)
     for t in range(n_trans):
@@ -650,8 +703,11 @@ def solve_3level_se_blended(
         C[u, u] -= R_ul
         C[l, l] -= R_lu
     
-    M = np.zeros((3, 3), dtype=np.float64)
-    b = np.zeros(3, dtype=np.float64)
+    # Use np.empty + explicit initialization
+    M = np.empty((3, 3), dtype=np.float64)
+    b = np.empty(3, dtype=np.float64)
+    b[0] = 0.0
+    b[1] = 0.0
     
     M[0, :] = C[0, :]
     M[1, :] = C[1, :]
@@ -680,7 +736,10 @@ def solve_3level_se_blended(
                 M[row, k] -= factor * M[col, k]
             b[row] -= factor * b[col]
     
-    n = np.zeros(3, dtype=np.float64)
+    n = np.empty(3, dtype=np.float64)
+    n[0] = 0.0
+    n[1] = 0.0
+    n[2] = 0.0
     for i in range(2, -1, -1):
         if abs(M[i, i]) < 1e-30:
             n[i] = 0.0
@@ -775,9 +834,15 @@ def solve_nlevel_se(
     if n_levels > MAX_LEVELS:
         n_levels = MAX_LEVELS
     
-    M = np.zeros((MAX_LEVELS, MAX_LEVELS), dtype=np.float64)
-    b = np.zeros(MAX_LEVELS, dtype=np.float64)
-    n = np.zeros(MAX_LEVELS, dtype=np.float64)
+    # Use np.empty + manual zeroing to minimize allocation overhead
+    M = np.empty((MAX_LEVELS, MAX_LEVELS), dtype=np.float64)
+    b = np.empty(MAX_LEVELS, dtype=np.float64)
+    n = np.empty(MAX_LEVELS, dtype=np.float64)
+    for i in range(n_levels):
+        b[i] = 0.0
+        n[i] = 0.0
+        for j in range(n_levels):
+            M[i, j] = 0.0
     
     n_coll_trans = q_coll.shape[0]
     
@@ -809,6 +874,155 @@ def solve_nlevel_se(
     M[n_levels - 1, :n_levels] = 1.0
     b[n_levels - 1] = n_X
     
+    for col in range(n_levels - 1):
+        pivot = col
+        for row in range(col + 1, n_levels):
+            if abs(M[row, col]) > abs(M[pivot, col]):
+                pivot = row
+        if pivot != col:
+            for k in range(n_levels):
+                M[col, k], M[pivot, k] = M[pivot, k], M[col, k]
+            b[col], b[pivot] = b[pivot], b[col]
+        
+        if abs(M[col, col]) < 1e-30:
+            continue
+            
+        for row in range(col + 1, n_levels):
+            factor = M[row, col] / M[col, col]
+            for k in range(col, n_levels):
+                M[row, k] -= factor * M[col, k]
+            b[row] -= factor * b[col]
+    
+    for i in range(n_levels - 1, -1, -1):
+        if abs(M[i, i]) < 1e-30:
+            n[i] = 0.0
+        else:
+            s = b[i]
+            for j in range(i + 1, n_levels):
+                s -= M[i, j] * n[j]
+            n[i] = s / M[i, i]
+        n[i] = max(n[i], 0.0)
+    
+    cooling = 0.0
+    for t in range(min(n_trans, n_levels - 1)):
+        u = trans_u[t]
+        l = trans_l[t]
+        if u >= n_levels or l >= n_levels:
+            continue
+        beta_t = beta_arr[t] if t < len(beta_arr) else 1.0
+        cooling += n[u] * A_ul[t] * h_nu[t] * beta_t
+    
+    return cooling
+
+
+@njit(fastmath=True, cache=True)
+def solve_nlevel_se_blended(
+    n_X: float,
+    Tg: float,
+    n_H2: float,
+    n_HI: float,
+    f_ortho: float,
+    beta_arr: np.ndarray,
+    n_levels: int,
+    E_levels: np.ndarray,
+    g_levels: np.ndarray,
+    n_trans: int,
+    trans_u: np.ndarray,
+    trans_l: np.ndarray,
+    A_ul: np.ndarray,
+    h_nu: np.ndarray,
+    T_pH2: np.ndarray,
+    q_pH2: np.ndarray,
+    T_oH2: np.ndarray,
+    q_oH2: np.ndarray,
+) -> float:
+    """Solve N-level SE with blended ortho/para H2 collision rates.
+    
+    For CO, mixes pH2 and oH2 rates at runtime using f_ortho.
+    
+    Parameters
+    ----------
+    n_X : float
+        Total species number density [cm^-3]
+    Tg : float
+        Gas temperature [K]
+    n_H2 : float
+        H2 number density [cm^-3]
+    n_HI : float
+        Atomic H number density [cm^-3] (used to compute f_ortho)
+    f_ortho : float
+        Ortho-H2 fraction from blended OPR model
+    beta_arr : ndarray (n_trans,)
+        Escape probabilities for each transition
+    n_levels : int
+        Number of levels to include
+    E_levels, g_levels : ndarray
+        Level energies [K] and statistical weights
+    n_trans : int
+        Number of radiative transitions
+    trans_u, trans_l : ndarray
+        Upper and lower level indices
+    A_ul, h_nu : ndarray
+        Einstein A coefficients and photon energies
+    T_pH2, q_pH2 : ndarray
+        Para-H2 collision rate table
+    T_oH2, q_oH2 : ndarray
+        Ortho-H2 collision rate table
+        
+    Returns
+    -------
+    float
+        Total cooling rate [erg cm^-3 s^-1]
+    """
+    if n_X <= 0.0 or Tg <= 0.0 or n_H2 <= 0.0:
+        return 0.0
+    
+    MAX_LEVELS = 21
+    if n_levels > MAX_LEVELS:
+        n_levels = MAX_LEVELS
+    
+    # Use np.empty + manual zeroing to minimize allocation overhead
+    M = np.empty((MAX_LEVELS, MAX_LEVELS), dtype=np.float64)
+    b = np.empty(MAX_LEVELS, dtype=np.float64)
+    n = np.empty(MAX_LEVELS, dtype=np.float64)
+    for i in range(n_levels):
+        b[i] = 0.0
+        n[i] = 0.0
+        for j in range(n_levels):
+            M[i, j] = 0.0
+    
+    n_coll_trans = q_pH2.shape[0]
+    
+    for t in range(min(n_trans, n_coll_trans)):
+        u = trans_u[t]
+        l = trans_l[t]
+        if u >= n_levels or l >= n_levels:
+            continue
+        
+        E_ul = E_levels[u] - E_levels[l]
+        g_ratio = g_levels[u] / g_levels[l]
+        boltz = np.exp(-E_ul / max(Tg, 1.0))
+        
+        # Mix pH2 and oH2 rates at runtime using different T-grids
+        q_ul = interp_rate_mix_2grid(Tg, T_pH2, q_pH2[t], T_oH2, q_oH2[t], f_ortho)
+        q_lu = q_ul * g_ratio * boltz
+        
+        C_ul = n_H2 * q_ul
+        C_lu = n_H2 * q_lu
+        
+        beta_t = beta_arr[t] if t < len(beta_arr) else 1.0
+        R_ul = A_ul[t] * beta_t + C_ul
+        R_lu = C_lu
+        
+        M[l, u] += R_ul
+        M[u, l] += R_lu
+        M[u, u] -= R_ul
+        M[l, l] -= R_lu
+    
+    M[n_levels - 1, :n_levels] = 1.0
+    b[n_levels - 1] = n_X
+    
+    # Gaussian elimination with partial pivoting
     for col in range(n_levels - 1):
         pivot = col
         for row in range(col + 1, n_levels):
@@ -1855,12 +2069,14 @@ def co_cooling_lamda(
     nco: float,
     Tg: float,
     nH2: float,
+    nHI: float,
     beta_co: float,
     co_jmax: int,
 ) -> float:
     """CO rotational cooling using N-level SE with LAMDA rates.
     
     Uses collision rates from Yang et al. (2010).
+    H2 rates are mixed at runtime using blended OPR model.
     
     Parameters
     ----------
@@ -1870,6 +2086,8 @@ def co_cooling_lamda(
         Gas temperature [K]
     nH2 : float
         H2 number density [cm^-3] (primary collider for CO)
+    nHI : float
+        Atomic H number density [cm^-3] (for blended OPR model)
     beta_co : float
         Escape probability (uniform for all lines, 1.0 = optically thin)
     co_jmax : int
@@ -1889,16 +2107,20 @@ def co_cooling_lamda(
     if nco <= 0.0 or Tg <= 0.0 or nH2 <= 0.0:
         return 0.0
     
+    # Compute blended ortho fraction
+    f_o = f_ortho_h2(Tg, nH2, nHI)
+    
     n_levels = min(co_jmax + 1, CO_N_LEVELS, 21)
     n_trans = min(n_levels - 1, CO_N_TRANS)
     
     beta_arr = np.full(n_trans, beta_co, dtype=np.float64)
     
-    return solve_nlevel_se(
-        nco, Tg, nH2, beta_arr,
+    return solve_nlevel_se_blended(
+        nco, Tg, nH2, nHI, f_o, beta_arr,
         n_levels, CO_E_LEVELS_K, CO_G_LEVELS,
         n_trans, CO_TRANS_U, CO_TRANS_L, CO_A_UL, CO_HNU,
-        CO_COLL_PH2_T, CO_COLL_PH2_Q
+        CO_COLL_PH2_T, CO_COLL_PH2_Q,
+        CO_COLL_OH2_T, CO_COLL_OH2_Q
     )
 
 
@@ -2017,7 +2239,7 @@ def net_heating_cell_se(
         net -= oi_cooling_lamda(nO, Tg, nH2, nHI, ne, beta_oi10, beta_oi20, beta_oi21)
     
     if mask & TERM_CO:
-        net -= co_cooling_lamda(nco_gas, Tg, nH2, beta_co, co_jmax)
+        net -= co_cooling_lamda(nco_gas, Tg, nH2, nHI, beta_co, co_jmax)
     
     if mask & TERM_GD:
         net += gas_dust_exchange(nH, Td, Tg, alpha_acc, sigma_dust, f_dust, K_B, M_H)
@@ -2283,5 +2505,5 @@ def compute_terms_kernel_se(
         rate_cii_out[i] = -cii_cooling_lamda(nCplus[i], Tg[i], nH2[i], nHI[i], ne[i], beta_cii)
         rate_ci_out[i] = -ci_cooling_lamda(nC[i], Tg[i], nH2[i], nHI[i], ne[i], beta_ci10, beta_ci20, beta_ci21)
         rate_oi_out[i] = -oi_cooling_lamda(nO[i], Tg[i], nH2[i], nHI[i], ne[i], beta_oi10, beta_oi20, beta_oi21)
-        rate_co_out[i] = -co_cooling_lamda(nco_gas[i], Tg[i], nH2[i], beta_co, co_jmax)
+        rate_co_out[i] = -co_cooling_lamda(nco_gas[i], Tg[i], nH2[i], nHI[i], beta_co, co_jmax)
         rate_gd_out[i] = gas_dust_exchange(nH[i], Td[i], Tg[i], alpha_acc, sigma_dust, f_dust, K_B, M_H)

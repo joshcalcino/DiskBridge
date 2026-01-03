@@ -11,6 +11,7 @@ References
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -244,16 +245,60 @@ def parse_lamda_file(filepath: Path) -> LAMDAData:
     )
 
 
-def _get_data_dir() -> Path:
-    """Get the path to the moldata directory."""
-    # Navigate from this file to data/moldata
-    this_file = Path(__file__)
-    return this_file.parent.parent.parent.parent.parent / 'data' / 'moldata'
+def _find_moldata_dir() -> Path:
+    """Find the LAMDA moldata directory.
+    
+    Resolution order:
+    1. DISKBRIDGE_MOLDATA_DIR environment variable (explicit override)
+    2. Repo checkout layout: DiskBridge/data/moldata relative to repo root
+    
+    Returns
+    -------
+    Path
+        Resolved path to moldata directory
+        
+    Raises
+    ------
+    FileNotFoundError
+        If moldata directory cannot be found
+    """
+    # 1) Explicit override via environment variable
+    env = os.getenv("DISKBRIDGE_MOLDATA_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if p.is_dir():
+            return p
+        raise FileNotFoundError(
+            f"DISKBRIDGE_MOLDATA_DIR set but not a directory: {p}"
+        )
+    
+    # 2) Repo checkout layout
+    # lamda.py lives at src/diskbridge/chemistry/thermal/lamda.py
+    # Repo root is 5 levels up: thermal -> chemistry -> diskbridge -> src -> repo
+    here = Path(__file__).resolve()
+    repo_root = here.parents[4]  # src/diskbridge/chemistry/thermal -> repo root
+    
+    # Try DiskBridge/data/moldata (if repo is inside DiskBridge folder)
+    p = repo_root / "data" / "moldata"
+    if p.is_dir():
+        return p
+    
+    # Also try if DiskBridge is the repo name itself
+    p = repo_root.parent / "DiskBridge" / "data" / "moldata"
+    if p.is_dir():
+        return p
+    
+    raise FileNotFoundError(
+        "LAMDA moldata directory not found. "
+        "Set DISKBRIDGE_MOLDATA_DIR to the folder containing "
+        "co.dat, c+.dat, catom.dat, oatom.dat. "
+        f"Searched: {repo_root / 'data' / 'moldata'}"
+    )
 
 
 def _load_species(filename: str) -> LAMDAData:
     """Load a species from the moldata directory."""
-    data_dir = _get_data_dir()
+    data_dir = _find_moldata_dir()
     filepath = data_dir / filename
     if not filepath.exists():
         raise FileNotFoundError(f"LAMDA file not found: {filepath}")
@@ -352,6 +397,12 @@ CO_TRANS_L = CO.trans_l
 CO_A_UL = CO.A_ul
 CO_HNU = CO.h_nu
 
-# CO collision rates (only pH2 available in standard LAMDA CO file)
+# Defensive check: CO must have both pH2 and oH2 colliders
+assert 'pH2' in CO.colliders and 'oH2' in CO.colliders, \
+    f"CO LAMDA file must have both pH2 and oH2 colliders, got: {list(CO.colliders.keys())}"
+
+# CO collision rates (both pH2 and oH2 for blended OPR model)
 CO_COLL_PH2_T = CO.colliders['pH2'].temps
 CO_COLL_PH2_Q = CO.colliders['pH2'].rates
+CO_COLL_OH2_T = CO.colliders['oH2'].temps
+CO_COLL_OH2_Q = CO.colliders['oH2'].rates
