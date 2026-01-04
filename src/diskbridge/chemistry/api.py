@@ -169,6 +169,13 @@ def run_thermochemistry(
                 rad.nco_gas = chem_result.number_densities["co_gas"]
             if "co_ice" in chem_result.number_densities:
                 rad.nco_ice = chem_result.number_densities["co_ice"]
+            # Store carbon closure products from chemistry
+            if "cplus" in chem_result.number_densities:
+                rad.nCplus = chem_result.number_densities["cplus"]
+            if "c" in chem_result.number_densities:
+                rad.nC = chem_result.number_densities["c"]
+            if "e" in chem_result.number_densities:
+                rad.ne = chem_result.number_densities["e"]
         
         logger.info("Step 2: Thermal balance")
         therm_result = run_thermal(

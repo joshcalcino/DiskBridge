@@ -79,21 +79,21 @@ def run_thermal(
     nH = rad.ensure_nH()
     Tdust = rad.ensure_dust_temperature()
     
-    if rad.chi_eff is not None:
-        logger.info("Using chi_eff from shielding calculation")
-        chi_eff = rad.chi_eff
-    elif rad.chi is not None:
-        logger.info("Using chi (no shielding correction)")
-        chi_eff = rad.chi
+    # Use dust-attenuated chi for thermal (NOT CO-shielded chi_eff)
+    # Carbon photoionization and PE heating use FUV continuum attenuated by dust
+    # chi_eff = chi * theta_co is for CO chemistry only
+    if rad.chi is not None:
+        logger.info("Using chi (dust-attenuated UV field)")
+        chi_for_thermal = rad.chi
     else:
         logger.info("Computing chi from mean intensity")
-        chi_eff = rad.ensure_chi()
+        chi_for_thermal = rad.ensure_chi()
     
     logger.info("Building thermal state...")
     state = ThermalState(
         nH=nH,
         Tdust=Tdust,
-        chi_eff=chi_eff,
+        chi_eff=chi_for_thermal,  # Note: ThermalState.chi_eff holds dust-attenuated chi
         mesh=rad.model.mesh,
     )
     
@@ -101,13 +101,19 @@ def run_thermal(
         logger.info("Including CO shielding factor")
         state.theta_co = rad.theta_co
     
-    if rad.chi is not None:
-        state.chi = rad.chi
+    state.chi = chi_for_thermal
     
     if rad.nco_gas is not None and rad.nco_ice is not None:
         logger.info("Including CO number densities from chemistry")
         state.nco_gas = rad.nco_gas
         state.nco_ice = rad.nco_ice
+    
+    # Carbon closure products from chemistry (required)
+    if rad.nCplus is not None:
+        logger.info("Including carbon closure from chemistry (nCplus, nC, ne)")
+        state.nCplus = rad.nCplus
+        state.nC = rad.nC
+        state.ne = rad.ne
     
     cfg = resolve_model_config(("thermal", model), overrides=config)
     
@@ -240,36 +246,8 @@ def run_thermal(
         ),
     )
     
-    if 'nCplus' in result.fields:
-        logger.info("Storing auxiliary fields (nCplus, nC, ne)...")
-        rad.model.gas_register(
-            'nCplus',
-            Field(
-                quantity='number_density',
-                data=result.fields['nCplus'],
-                axis_order=axis_order,
-            ),
-        )
-    
-    if 'nC' in result.fields:
-        rad.model.gas_register(
-            'nC',
-            Field(
-                quantity='number_density',
-                data=result.fields['nC'],
-                axis_order=axis_order,
-            ),
-        )
-    
-    if 'ne' in result.fields:
-        rad.model.gas_register(
-            'ne',
-            Field(
-                quantity='number_density',
-                data=result.fields['ne'],
-                axis_order=axis_order,
-            ),
-        )
+    # Note: nCplus/nC/ne are computed by chemistry, not thermal
+    # They are registered by chemistry if needed
     
     if write:
         logger.info(f"Writing gas_temperature.inp to {rad.model_dir}")

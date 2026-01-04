@@ -13,7 +13,6 @@ from diskbridge._constants import K_B, M_H
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 
 from diskbridge.chemistry.thermal._kernels import (
-    carbon_closure_kernel,
     solve_tgas_kernel_se,
     compute_terms_kernel_se,
     max_fractional_change,
@@ -63,7 +62,6 @@ def solve_thermal_balance_numba(
     params: dict,
     n_iter: int = 3,
     tol: float = 0.01,
-    update_closure: bool = True,
     max_bisect_iter: int = 60,
     bisect_tol: float = 1e-6,
     store_terms: bool = False,
@@ -89,8 +87,6 @@ def solve_thermal_balance_numba(
         Maximum outer iterations (default 3)
     tol : float
         Convergence tolerance (fractional change in Tg, default 0.01)
-    update_closure : bool
-        Whether to update carbon closure (default True)
     max_bisect_iter : int
         Maximum bisection iterations per cell (default 60)
     bisect_tol : float
@@ -104,9 +100,9 @@ def solve_thermal_balance_numba(
         Result with solved Tgas and auxiliary fields
     """
     from diskbridge._constants import (
-        T_MIN_SOLVE, T_MAX_SOLVE, ZETA_CR, GAMMA_C0, PAH_SCALE,
-        X_C_TOT, X_O_TOT, ALPHA_ACC, BETA_CII, BETA_CI10, BETA_CI20, BETA_CI21,
-        BETA_OI10, BETA_OI20, BETA_OI21, BETA_CO, ALPHA_REC_C0, T_REC_EXP,
+        T_MIN_SOLVE, T_MAX_SOLVE, ZETA_CR, PAH_SCALE,
+        X_O_TOT, ALPHA_ACC, BETA_CII, BETA_CI10, BETA_CI20, BETA_CI21,
+        BETA_OI10, BETA_OI20, BETA_OI21, BETA_CO,
         HEATING_PER_CR, PE_HEATING_RATE_0, SIGMA_DUST, F_DUST,
     )
     
@@ -151,24 +147,34 @@ def solve_thermal_balance_numba(
     nO_flat = np.maximum(X_O_TOT * nH_flat - nco_total, 0.0)
     nO_flat = np.ascontiguousarray(nO_flat, dtype=np.float64)
     
+    # Require carbon closure products from chemistry (not computed here)
+    if state.nCplus is None:
+        raise ValueError(
+            "ThermalState.nCplus is required. Run chemistry first to compute "
+            "carbon closure, or provide C+ number density explicitly."
+        )
+    if state.nC is None:
+        raise ValueError(
+            "ThermalState.nC is required. Run chemistry first to compute "
+            "carbon closure, or provide neutral C number density explicitly."
+        )
+    if state.ne is None:
+        raise ValueError(
+            "ThermalState.ne is required. Run chemistry first to compute "
+            "carbon closure, or provide electron number density explicitly."
+        )
+    
+    nCplus_flat = np.ascontiguousarray(state.nCplus.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    nC_flat = np.ascontiguousarray(state.nC.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    ne_flat = np.ascontiguousarray(state.ne.to('cm^-3').magnitude.flatten(), dtype=np.float64)
+    
     Tg_flat = np.full(ncells, 0.5 * (T_MIN_SOLVE + T_MAX_SOLVE), dtype=np.float64)
-    nCplus_flat = np.zeros(ncells, dtype=np.float64)
-    nC_flat = np.zeros(ncells, dtype=np.float64)
-    ne_flat = np.zeros(ncells, dtype=np.float64)
     
     converged = False
     max_change = 1.0
     
     for iteration in range(n_iter):
         logger.info(f"Thermal iteration {iteration + 1}/{n_iter}")
-        
-        if update_closure:
-            carbon_closure_kernel(
-                nH_flat, chi_flat, Tg_flat, nco_total,
-                X_C_TOT, GAMMA_C0, ALPHA_REC_C0, T_REC_EXP,
-                nCplus_flat, nC_flat, ne_flat,
-            )
-            logger.info(f"  Updated carbon closure: max(nCplus)={np.max(nCplus_flat):.2e} cm^-3")
         
         Tg_old = Tg_flat.copy()
         
@@ -198,15 +204,11 @@ def solve_thermal_balance_numba(
     
     Tgas_K = Tg_flat.reshape(shape)
     state.Tgas = Quantity(Tgas_K, 'K')
-    state.nCplus = Quantity(nCplus_flat.reshape(shape), 'cm^-3')
-    state.nC = Quantity(nC_flat.reshape(shape), 'cm^-3')
-    state.ne = Quantity(ne_flat.reshape(shape), 'cm^-3')
     
-    fields = {
-        'nCplus': state.nCplus,
-        'nC': state.nC,
-        'ne': state.ne,
-    }
+    # Note: nCplus/nC/ne are inputs from chemistry, not outputs from thermal
+    # They are not modified or overwritten here
+    
+    fields = {}
     
     if store_terms:
         rate_cr = np.zeros(ncells, dtype=np.float64)
@@ -262,7 +264,6 @@ def solve_thermal_balance(
     params: dict,
     n_iter: int = 3,
     tol: float = 0.01,
-    update_closure: bool = True,
     max_bisect_iter: int = 60,
     bisect_tol: float = 1e-6,
     store_terms: bool = False,
@@ -272,7 +273,7 @@ def solve_thermal_balance(
     Parameters
     ----------
     state : ThermalState
-        Thermal state with required fields
+        Thermal state with required fields (including nCplus, nC, ne from chemistry)
     heating_terms : list[str]
         List of heating term names
     cooling_terms : list[str]
@@ -285,8 +286,6 @@ def solve_thermal_balance(
         Maximum outer iterations (default 3)
     tol : float
         Convergence tolerance (fractional change in Tg, default 0.01)
-    update_closure : bool
-        Whether to update carbon closure (default True)
     max_bisect_iter : int
         Maximum bisection iterations (default 60)
     bisect_tol : float
@@ -308,7 +307,6 @@ def solve_thermal_balance(
         params=params,
         n_iter=n_iter,
         tol=tol,
-        update_closure=update_closure,
         max_bisect_iter=max_bisect_iter,
         bisect_tol=bisect_tol,
         store_terms=store_terms,

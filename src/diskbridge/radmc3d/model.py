@@ -136,6 +136,11 @@ class RadModel:
         self.nco_gas: Optional[Quantity] = None
         self.nco_ice: Optional[Quantity] = None
         
+        # Carbon closure products (from chemistry, not thermal)
+        self.nCplus: Optional[Quantity] = None
+        self.nC: Optional[Quantity] = None
+        self.ne: Optional[Quantity] = None
+        
         self.inputs_dir = self.model_dir / 'radmc3d_inputs'
         self.outputs_dir = self.model_dir / 'radmc3d_outputs'
         

@@ -16,6 +16,8 @@ from diskbridge._constants import (
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.driver import compute_co_steady_state, evolve_co_time_dependent
 from diskbridge.chemistry.tau_form import compute_tau_form_co
+from diskbridge.chemistry.closures.carbon import compute_carbon_closure
+from diskbridge._logging import logger
 
 
 def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
@@ -101,9 +103,35 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         tau_form=tau_form,
     )
     
+    # Compute carbon closure using dust-attenuated UV (NOT CO-shielded chi_eff)
+    nco_total = Quantity(
+        nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
+        'cm^-3'
+    )
+    
+    # Use gas temperature if available, else dust temperature
+    if rad.gas_temperature is not None:
+        Tg = rad.gas_temperature
+        logger.info("Carbon closure using gas temperature")
+    else:
+        Tg = T
+        logger.info("Carbon closure using dust temperature (gas T not available)")
+    
+    # IMPORTANT: Use chi (dust-attenuated), NOT chi_eff (CO-shielded)
+    # Carbon photoionization is in FUV continuum, attenuated by dust but not CO
+    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
+    logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
+    
     return ChemistryResult(
         abundances={'co': X_co},
-        number_densities={'co_gas': nco_gas, 'co_ice': nco_ice, 'co': nco_gas},
+        number_densities={
+            'co_gas': nco_gas,
+            'co_ice': nco_ice,
+            'co': nco_gas,
+            'cplus': nCplus,
+            'c': nC,
+            'e': ne,
+        },
         fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
         meta={'model': 'co_two_phase_steady'},
     )
@@ -211,9 +239,35 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         Xco_ice_init=Xco_ice_init,
     )
     
+    # Compute carbon closure using dust-attenuated UV (NOT CO-shielded chi_eff)
+    nco_total = Quantity(
+        nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
+        'cm^-3'
+    )
+    
+    # Use gas temperature if available, else dust temperature
+    if rad.gas_temperature is not None:
+        Tg = rad.gas_temperature
+        logger.info("Carbon closure using gas temperature")
+    else:
+        Tg = T
+        logger.info("Carbon closure using dust temperature (gas T not available)")
+    
+    # IMPORTANT: Use chi (dust-attenuated), NOT chi_eff (CO-shielded)
+    # Carbon photoionization is in FUV continuum, attenuated by dust but not CO
+    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
+    logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
+    
     return ChemistryResult(
         abundances={'co': X_co},
-        number_densities={'co_gas': nco_gas, 'co_ice': nco_ice, 'co': nco_gas},
+        number_densities={
+            'co_gas': nco_gas,
+            'co_ice': nco_ice,
+            'co': nco_gas,
+            'cplus': nCplus,
+            'c': nC,
+            'e': ne,
+        },
         fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
         meta={'model': 'co_two_phase_time_dependent'},
     )
