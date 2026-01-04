@@ -64,7 +64,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     
-    T = rad.ensure_temperature()
+    T = rad.ensure_dust_temperature()
     nH = rad.ensure_nH()
     chi = rad.ensure_chi()
     
@@ -197,7 +197,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     
-    T = rad.ensure_temperature()
+    T = rad.ensure_dust_temperature()
     nH = rad.ensure_nH()
     chi = rad.ensure_chi()
     

@@ -149,7 +149,11 @@ def run_thermal(
         
         # Flatten arrays for closure calculation
         nH_flat = nH.to('cm^-3').magnitude.flatten()
-        chi_flat = chi_eff.magnitude.flatten() if hasattr(chi_eff, 'magnitude') else np.asarray(chi_eff).flatten()
+        chi_flat = (
+            chi_for_thermal.magnitude.flatten()
+            if hasattr(chi_for_thermal, 'magnitude')
+            else np.asarray(chi_for_thermal).flatten()
+        )
         
         # Compute H/H2 partition
         nH2_flat, nHI_flat, fH2_flat = compute_h_partition_array(
@@ -172,11 +176,10 @@ def run_thermal(
     elif h2_mode == "input":
         # Check if nH2 and nH_atom are provided
         if state.nH2 is None or state.nH_atom is None:
-            # Default: assume fully molecular (for backwards compatibility)
-            logger.warning("H2 mode='input' but nH2/nH_atom not provided. "
-                          "Assuming fully molecular (nH2 = 0.5*nH, nH_atom = 0).")
-            state.nH2 = Quantity(0.5 * nH.to('cm^-3').magnitude, 'cm^-3')
-            state.nH_atom = Quantity(np.zeros_like(nH.magnitude), 'cm^-3')
+            raise ValueError(
+                "h2_mode='input' requires ThermalState.nH2 and ThermalState.nH_atom. "
+                "Provide them explicitly, or use h2_mode='closure'."
+            )
     else:
         raise ValueError(f"Unknown h2_mode: {h2_mode}. Must be 'input' or 'closure'.")
     

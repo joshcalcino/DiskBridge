@@ -78,16 +78,31 @@ def carbon_closure_kernel(
     for i in prange(N):
         n_C_tot = X_C_tot * nH[i]
         n_C_available = max(n_C_tot - nco_total[i], 0.0)
-        
+
         Gamma_photo = Gamma_C0 * chi[i]
         alpha = alpha_rec_c0 * (Tg[i] / 300.0) ** T_rec_exp
-        
-        ratio = Gamma_photo / max(alpha, 1e-30)
-        sqrt_ratio = np.sqrt(ratio)
-        
-        nCplus = n_C_available * sqrt_ratio / (1.0 + sqrt_ratio)
+
+        # Solve equilibrium with closure ne = n(C+):
+        #   Gamma * n(C) = alpha * n(C+)^2
+        # and n(C) = n_C_available - n(C+)
+        # => alpha * x^2 + Gamma * x - Gamma * n_C_available = 0
+        # Use a numerically stable form for the positive root:
+        #   x = (2 Gamma n_C_available) / (Gamma + sqrt(Gamma^2 + 4 alpha Gamma n_C_available))
+        if Gamma_photo <= 0.0 or n_C_available <= 0.0:
+            nCplus = 0.0
+        elif alpha <= 0.0:
+            nCplus = n_C_available
+        else:
+            disc = Gamma_photo * Gamma_photo + 4.0 * alpha * Gamma_photo * n_C_available
+            sqrt_disc = np.sqrt(disc)
+            nCplus = (2.0 * Gamma_photo * n_C_available) / (Gamma_photo + sqrt_disc)
+            if nCplus < 0.0:
+                nCplus = 0.0
+            elif nCplus > n_C_available:
+                nCplus = n_C_available
+
         nC = n_C_available - nCplus
-        
+
         nCplus_out[i] = nCplus
         nC_out[i] = nC
         ne_out[i] = nCplus
