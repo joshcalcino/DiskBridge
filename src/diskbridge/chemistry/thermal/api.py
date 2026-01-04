@@ -15,11 +15,6 @@ from diskbridge._config import resolve_model_config
 from diskbridge.model.field import Field
 from diskbridge.chemistry.thermal.types import ThermalState, ThermalResult
 from diskbridge.chemistry.thermal.registry import get_thermal_model
-from diskbridge.chemistry.thermal._h2_closure import (
-    compute_h_partition_array,
-    check_h_conservation,
-    AU_CM,
-)
 
 
 def run_thermal(
@@ -111,93 +106,31 @@ def run_thermal(
     # Carbon closure products from chemistry (required)
     if rad.nCplus is not None:
         logger.info("Including carbon closure from chemistry (nCplus, nC, ne)")
+        missing = []
+        if rad.nC is None:
+            missing.append("rad.nC")
+        if rad.ne is None:
+            missing.append("rad.ne")
+        if missing:
+            raise ValueError(
+                "Carbon closure incomplete on RadModel. Missing: "
+                + ", ".join(missing)
+                + ". Chemistry must provide nCplus, nC, and ne together."
+            )
         state.nCplus = rad.nCplus
         state.nC = rad.nC
         state.ne = rad.ne
     
     cfg = resolve_model_config(("thermal", model), overrides=config)
-    
-    # --- Hydrogen partition closure ---
-    h2_cfg = resolve_model_config(("thermal", "hydrogen"), overrides=config)
-    h2_mode = config.get("h2_mode", h2_cfg.get("mode", "input"))
-    
-    if h2_mode == "closure":
-        logger.info("Computing H/H2 partition via closure model...")
-        
-        # Get closure parameters
-        R_form = config.get("R_form", h2_cfg.get("R_form", 3.0e-17))
-        k0_diss = config.get("k0_diss", h2_cfg.get("k0_diss", 4.2e-11))
-        use_dust_attn = config.get("use_dust_attn", h2_cfg.get("use_dust_attn", False))
-        sigma_d = config.get("sigma_d", h2_cfg.get("sigma_d", 2.0e-21))
-        b5 = config.get("db96_b5", h2_cfg.get("db96_b5", 2.0))
-        alpha = config.get("db96_alpha", h2_cfg.get("db96_alpha", -0.75))
-        
-        # Get shielding length
-        shield_mode = config.get("shield_length_mode", h2_cfg.get("shield_length_mode", "cell"))
-        if shield_mode == "fixed":
-            L_shield_au = config.get("L_shield_au", h2_cfg.get("L_shield_au", 10.0))
-            L_shield = np.full(nH.magnitude.flatten().shape, L_shield_au * AU_CM)
-            logger.info(f"  Using fixed shielding length: {L_shield_au} AU")
-        else:
-            # Use cell size from mesh
-            cell_sizes = rad.model.mesh.cell_sizes()
-            if hasattr(cell_sizes, 'magnitude'):
-                L_shield = cell_sizes.to('cm').magnitude.flatten()
-            else:
-                L_shield = np.asarray(cell_sizes).flatten() * AU_CM
-            logger.info(f"  Using cell-based shielding length")
-        
-        # Flatten arrays for closure calculation
-        nH_flat = nH.to('cm^-3').magnitude.flatten()
-        chi_flat = (
-            chi_for_thermal.magnitude.flatten()
-            if hasattr(chi_for_thermal, 'magnitude')
-            else np.asarray(chi_for_thermal).flatten()
+
+    if rad.nH2 is None or rad.nH_atom is None:
+        raise ValueError(
+            "Missing hydrogen partition on RadModel (nH2/nH_atom). "
+            "Compute it in chemistry and store it on rad before calling run_thermal."
         )
-        
-        # Compute H/H2 partition
-        nH2_flat, nHI_flat, fH2_flat = compute_h_partition_array(
-            nH_flat, chi_flat, L_shield,
-            R_form, k0_diss, use_dust_attn, sigma_d, b5, alpha
-        )
-        
-        # Check conservation
-        check_h_conservation(nH2_flat, nHI_flat, nH_flat, rtol=1e-4)
-        
-        # Reshape and assign to state
-        orig_shape = nH.magnitude.shape
-        state.nH2 = Quantity(nH2_flat.reshape(orig_shape), 'cm^-3')
-        state.nH_atom = Quantity(nHI_flat.reshape(orig_shape), 'cm^-3')
-        
-        fH2_median = np.median(fH2_flat)
-        fH2_max = np.max(fH2_flat)
-        logger.info(f"  fH2: median={fH2_median:.3f}, max={fH2_max:.3f}")
-        
-    elif h2_mode == "input":
-        # Check if nH2 and nH_atom are provided
-        if state.nH2 is None or state.nH_atom is None:
-            raise ValueError(
-                "h2_mode='input' requires ThermalState.nH2 and ThermalState.nH_atom. "
-                "Provide them explicitly, or use h2_mode='closure'."
-            )
-    else:
-        raise ValueError(f"Unknown h2_mode: {h2_mode}. Must be 'input' or 'closure'.")
-    
-    def get_val(key, default_key=None):
-        """Get parameter from user config or defaults, converting strings to Quantity."""
-        if key in config:
-            val = config[key]
-            if isinstance(val, str):
-                return Quantity(val)
-            return val
-        default_key = default_key or key
-        if default_key in cfg:
-            val = cfg[default_key]
-            if isinstance(val, str):
-                return Quantity(val)
-            return val
-        return None
-    
+    state.nH2 = rad.nH2
+    state.nH_atom = rad.nH_atom
+
     # Only pass solver control parameters and user overrides
     params = {
         'n_iter': config.get('n_iter', cfg.get('n_iter', 3)),

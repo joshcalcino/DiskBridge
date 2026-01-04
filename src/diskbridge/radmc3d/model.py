@@ -135,6 +135,10 @@ class RadModel:
         
         self.nco_gas: Optional[Quantity] = None
         self.nco_ice: Optional[Quantity] = None
+
+        # Hydrogen partition (from chemistry, not thermal)
+        self.nH2: Optional[Quantity] = None
+        self.nH_atom: Optional[Quantity] = None
         
         # Carbon closure products (from chemistry, not thermal)
         self.nCplus: Optional[Quantity] = None

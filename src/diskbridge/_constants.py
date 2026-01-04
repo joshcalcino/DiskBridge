@@ -95,6 +95,17 @@ TAU_FORM_TAU_MIN = Quantity(_co2p['tau_form_tau_min']).to_base_units().magnitude
 TAU_FORM_ALPHA = float(_co2p['tau_form_alpha'])                         # dimensionless
 
 # =============================================================================
+# H2 PARTITION (HEALPix-based)
+# =============================================================================
+
+_h2p = _cfg['chemistry']['h2_partition']
+
+H2P_NSIDE = int(_h2p['nside'])
+H2P_N_ITER = int(_h2p['n_iter'])
+H2P_R_FORM = Quantity(_h2p['R_form']).to_base_units().magnitude
+H2P_K0_DISS = Quantity(_h2p['k0_diss']).to_base_units().magnitude
+
+# =============================================================================
 # COMMON THERMAL PARAMETERS (shared across thermal models)
 # =============================================================================
 
