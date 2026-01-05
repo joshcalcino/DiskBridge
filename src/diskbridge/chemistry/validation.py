@@ -17,7 +17,7 @@ def check_hydrogen_conservation(
     rtol: float = 1e-4,
 ) -> None:
     """Check H nuclei conservation: nHI + 2*nH2 == nH.
-    
+
     Parameters
     ----------
     nH2 : Quantity
@@ -28,7 +28,7 @@ def check_hydrogen_conservation(
         Total H nuclei density [cm^-3]
     rtol : float
         Relative tolerance
-        
+
     Raises
     ------
     ValueError
@@ -37,11 +37,11 @@ def check_hydrogen_conservation(
     nH2_flat = nH2.to('cm^-3').magnitude.flatten()
     nHI_flat = nHI.to('cm^-3').magnitude.flatten()
     nH_flat = nH.to('cm^-3').magnitude.flatten()
-    
+
     computed = nHI_flat + 2.0 * nH2_flat
     rel_err = np.abs(computed - nH_flat) / np.maximum(nH_flat, 1e-30)
     max_err = np.max(rel_err)
-    
+
     if max_err > rtol:
         idx = np.argmax(rel_err)
         raise ValueError(
@@ -60,7 +60,7 @@ def check_carbon_budget(
     rtol: float = 1e-4,
 ) -> None:
     """Check carbon budget: nC + nCplus + nCO <= X_C_tot * nH.
-    
+
     Parameters
     ----------
     nC : Quantity
@@ -75,29 +75,29 @@ def check_carbon_budget(
         Total carbon abundance. If None, uses value from _constants.
     rtol : float
         Relative tolerance
-        
+
     Raises
     ------
     ValueError
         If carbon budget is violated
     """
     from diskbridge._constants import X_C_TOT as _X_C_TOT
-    
+
     if X_C_tot is None:
         X_C_tot = _X_C_TOT
-    
+
     nC_flat = nC.to('cm^-3').magnitude.flatten()
     nCplus_flat = nCplus.to('cm^-3').magnitude.flatten()
     nco_flat = nco_total.to('cm^-3').magnitude.flatten()
     nH_flat = nH.to('cm^-3').magnitude.flatten()
-    
+
     n_C_total = nC_flat + nCplus_flat + nco_flat
     n_C_max = X_C_tot * nH_flat
-    
+
     excess = n_C_total - n_C_max
     rel_excess = excess / np.maximum(n_C_max, 1e-30)
     max_excess = np.max(rel_excess)
-    
+
     if max_excess > rtol:
         idx = np.argmax(rel_excess)
         raise ValueError(
@@ -112,12 +112,12 @@ def check_non_negative(
     *quantities: tuple[Quantity, str],
 ) -> None:
     """Check that all quantities are non-negative.
-    
+
     Parameters
     ----------
     *quantities : tuple[Quantity, str]
         Pairs of (quantity, name) to check
-        
+
     Raises
     ------
     ValueError
@@ -145,7 +145,7 @@ def validate_chemistry_state(
     rtol: float = 1e-4,
 ) -> None:
     """Validate chemistry state for consistency.
-    
+
     Parameters
     ----------
     nH : Quantity
@@ -166,13 +166,12 @@ def validate_chemistry_state(
         Check C budget (requires nC, nCplus, nco_total)
     rtol : float
         Relative tolerance
-        
+
     Raises
     ------
     ValueError
         If any validation fails
     """
-    # Check non-negativity
     to_check = [(nH, 'nH')]
     if nH2 is not None:
         to_check.append((nH2, 'nH2'))
@@ -184,13 +183,11 @@ def validate_chemistry_state(
         to_check.append((nCplus, 'nCplus'))
     if nco_total is not None:
         to_check.append((nco_total, 'nco_total'))
-    
+
     check_non_negative(*to_check)
-    
-    # Check H conservation
+
     if check_h and nH2 is not None and nHI is not None:
         check_hydrogen_conservation(nH2, nHI, nH, rtol=rtol)
-    
-    # Check C budget
+
     if check_c and nC is not None and nCplus is not None and nco_total is not None:
         check_carbon_budget(nC, nCplus, nco_total, nH, rtol=rtol)

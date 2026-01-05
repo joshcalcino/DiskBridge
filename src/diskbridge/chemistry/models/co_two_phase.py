@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
 import numpy as np
+from numba import njit, prange
 
 import diskbridge
 from diskbridge._units import Quantity
@@ -19,8 +20,110 @@ from diskbridge.chemistry.models._co_two_phase_math import (
     evolve_co_two_phase_time_dependent,
 )
 from diskbridge.chemistry.tau_form import compute_tau_form_co
-from diskbridge.chemistry.closures.carbon import compute_carbon_closure
+from diskbridge.chemistry.validation import validate_chemistry_state
 from diskbridge._logging import logger
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _carbon_closure_kernel(
+    nH: np.ndarray,
+    chi: np.ndarray,
+    Tg: np.ndarray,
+    nco_total: np.ndarray,
+    X_C_tot: float,
+    Gamma_C0: float,
+    alpha_rec_c0: float,
+    T_rec_exp: float,
+    nCplus_out: np.ndarray,
+    nC_out: np.ndarray,
+    ne_out: np.ndarray,
+) -> None:
+    ncells = nH.size
+    for i in prange(ncells):
+        n_C_tot = X_C_tot * nH[i]
+        n_C_available = max(n_C_tot - nco_total[i], 0.0)
+
+        Gamma_photo = Gamma_C0 * chi[i]
+        alpha = alpha_rec_c0 * (Tg[i] / 300.0) ** T_rec_exp
+
+        if Gamma_photo <= 0.0 or n_C_available <= 0.0:
+            nCplus = 0.0
+        elif alpha <= 0.0:
+            nCplus = n_C_available
+        else:
+            disc = Gamma_photo * Gamma_photo + 4.0 * alpha * Gamma_photo * n_C_available
+            sqrt_disc = np.sqrt(disc)
+            nCplus = (2.0 * Gamma_photo * n_C_available) / (Gamma_photo + sqrt_disc)
+            if nCplus < 0.0:
+                nCplus = 0.0
+            elif nCplus > n_C_available:
+                nCplus = n_C_available
+
+        nC = n_C_available - nCplus
+
+        nCplus_out[i] = nCplus
+        nC_out[i] = nC
+        ne_out[i] = nCplus
+
+
+def _carbon_closure(
+    *,
+    nH: Quantity,
+    chi: Quantity,
+    Tg: Quantity,
+    nco_total: Quantity,
+    X_C_tot: float = None,
+    Gamma_C0: float = None,
+    alpha_rec_c0: float = None,
+    T_rec_exp: float = None,
+) -> tuple[Quantity, Quantity, Quantity]:
+    from diskbridge._constants import (
+        X_C_TOT as _X_C_TOT,
+        GAMMA_C0 as _GAMMA_C0,
+        ALPHA_REC_C0 as _ALPHA_REC_C0,
+        T_REC_EXP as _T_REC_EXP,
+    )
+
+    if X_C_tot is None:
+        X_C_tot = _X_C_TOT
+    if Gamma_C0 is None:
+        Gamma_C0 = _GAMMA_C0
+    if alpha_rec_c0 is None:
+        alpha_rec_c0 = _ALPHA_REC_C0
+    if T_rec_exp is None:
+        T_rec_exp = _T_REC_EXP
+
+    orig_shape = nH.magnitude.shape
+    ncells = nH.magnitude.size
+
+    nH_flat = np.ascontiguousarray(nH.to('cm^-3').magnitude.reshape(ncells), dtype=np.float64)
+    chi_flat = np.ascontiguousarray(chi.to('dimensionless').magnitude.reshape(ncells), dtype=np.float64)
+    Tg_flat = np.ascontiguousarray(Tg.to('K').magnitude.reshape(ncells), dtype=np.float64)
+    nco_flat = np.ascontiguousarray(nco_total.to('cm^-3').magnitude.reshape(ncells), dtype=np.float64)
+
+    nCplus_flat = np.zeros(ncells, dtype=np.float64)
+    nC_flat = np.zeros(ncells, dtype=np.float64)
+    ne_flat = np.zeros(ncells, dtype=np.float64)
+
+    _carbon_closure_kernel(
+        nH_flat,
+        chi_flat,
+        Tg_flat,
+        nco_flat,
+        float(X_C_tot),
+        float(Gamma_C0),
+        float(alpha_rec_c0),
+        float(T_rec_exp),
+        nCplus_flat,
+        nC_flat,
+        ne_flat,
+    )
+
+    nCplus = Quantity(nCplus_flat.reshape(orig_shape), 'cm^-3')
+    nC = Quantity(nC_flat.reshape(orig_shape), 'cm^-3')
+    ne = Quantity(ne_flat.reshape(orig_shape), 'cm^-3')
+
+    return nCplus, nC, ne
 
 
 def _resolve_tau_form(rad: 'RadModel', *, config: dict, nH: Quantity) -> Quantity:
@@ -87,7 +190,7 @@ def _run_carbon_closure(
     Tdust: Quantity,
     nco_gas: Quantity,
     nco_ice: Quantity,
-) -> tuple[Quantity, Quantity, Quantity]:
+) -> tuple[Quantity, Quantity, Quantity, Quantity]:
     nco_total = Quantity(
         nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
         'cm^-3'
@@ -100,9 +203,9 @@ def _run_carbon_closure(
         Tg = Tdust
         logger.info("Carbon closure using dust temperature (gas T not available)")
 
-    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
+    nCplus, nC, ne = _carbon_closure(nH=nH, chi=chi, Tg=Tg, nco_total=nco_total)
     logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
-    return nCplus, nC, ne
+    return nCplus, nC, ne, nco_total
 
 
 def _prepare_common(rad: 'RadModel', config: dict) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity, float]:
@@ -161,13 +264,22 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         tau_form=tau_form,
     )
 
-    nCplus, nC, ne = _run_carbon_closure(
+    nCplus, nC, ne, nco_total = _run_carbon_closure(
         rad=rad,
         nH=nH,
         chi=chi,
         Tdust=Tdust,
         nco_gas=nco_gas,
         nco_ice=nco_ice,
+    )
+
+    validate_chemistry_state(
+        nH=nH,
+        nC=nC,
+        nCplus=nCplus,
+        nco_total=nco_total,
+        check_h=False,
+        check_c=True,
     )
     
     return ChemistryResult(
@@ -238,13 +350,22 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         dt=dt,
     )
 
-    nCplus, nC, ne = _run_carbon_closure(
+    nCplus, nC, ne, nco_total = _run_carbon_closure(
         rad=rad,
         nH=nH,
         chi=chi,
         Tdust=Tdust,
         nco_gas=nco_gas,
         nco_ice=nco_ice,
+    )
+
+    validate_chemistry_state(
+        nH=nH,
+        nC=nC,
+        nCplus=nCplus,
+        nco_total=nco_total,
+        check_h=False,
+        check_c=True,
     )
     
     return ChemistryResult(
