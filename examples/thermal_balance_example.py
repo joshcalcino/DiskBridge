@@ -63,7 +63,7 @@ def run_coupled_thermochemistry_example(rad, disc_mask):
     
     chem_result, therm_result = run_thermochemistry(
         rad,
-        chemistry_model="co_two_phase_time",
+        chemistry_model="co_two_phase",
         chemistry_config={
             "Xco_tot": 1e-4,
             "nside": 4,

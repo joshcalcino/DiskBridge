@@ -20,7 +20,7 @@ from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
 from diskbridge.chemistry.tracers import compute_chem_age
 from diskbridge.chemistry.models.co_two_phase import compute_boundary_co_ic
 from diskbridge.chemistry.tau_form import compute_tau_form_co
-from diskbridge.chemistry.processes import evolve_co_two_phase_time_dependent
+from diskbridge.chemistry.models._co_two_phase_math import evolve_co_two_phase_time_dependent
 from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile, find_r_split
 
 

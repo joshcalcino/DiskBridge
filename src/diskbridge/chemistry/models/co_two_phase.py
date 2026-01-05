@@ -14,7 +14,10 @@ from diskbridge._constants import (
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.driver import compute_co_steady_state, evolve_co_time_dependent
+from diskbridge.chemistry.models._co_two_phase_math import (
+    solve_co_two_phase_steady_state,
+    evolve_co_two_phase_time_dependent,
+)
 from diskbridge.chemistry.tau_form import compute_tau_form_co
 from diskbridge.chemistry.closures.carbon import compute_carbon_closure
 from diskbridge._logging import logger
@@ -94,7 +97,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         else:
             theta_co = rad.theta_co
     
-    X_co, nco_gas, nco_ice, k_pd, tau_pd = compute_co_steady_state(
+    X_co, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
         nH=nH,
         T=T,
         chi=chi,
@@ -133,7 +136,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
             'e': ne,
         },
         fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
-        meta={'model': 'co_two_phase_steady'},
+        meta={'model': 'co_two_phase'},
     )
 
 
@@ -227,7 +230,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         else:
             theta_co = rad.theta_co
     
-    X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_time_dependent(
+    X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
         nH=nH,
         T=T,
         chi=chi,
@@ -269,7 +272,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
             'e': ne,
         },
         fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
-        meta={'model': 'co_two_phase_time_dependent'},
+        meta={'model': 'co_two_phase'},
     )
 
 
@@ -392,3 +395,14 @@ def compute_boundary_co_ic(
     )
     
     return xco_gas0, xco_ice0
+
+
+def run_co_two_phase(rad: 'RadModel', config: dict) -> ChemistryResult:
+    if 't_end' in config:
+        return run_time_dependent(rad, config)
+    return run_steady(rad, config)
+
+
+__all__ = [
+    'run_co_two_phase',
+]

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from diskbridge.radmc3d.model import RadModel
+
+import diskbridge
+from diskbridge._units import Quantity
+from diskbridge._logging import logger
+from diskbridge._constants import (
+    T_FRZ, EPS_FRZ, LOG_CHI_OVER_NH_PDISS, LOG_CHI_OVER_NH_PDES, EPS_CHI
+)
+from diskbridge.chemistry.types import ChemistryResult
 
 
 def _smoothstep01(x: np.ndarray) -> np.ndarray:
@@ -109,3 +120,128 @@ def apply_photodissociation(
         X[mask_pdiss] = 0.0
 
     return X, mask_pdiss
+
+
+def compute_abundance_pinte(
+    *,
+    molecule: str,
+    T: Quantity,
+    nH: Quantity,
+    chi: Optional[Quantity],
+    chi_eff: Optional[Quantity],
+    X0: float,
+    photodissociation: bool,
+    freezeout: bool,
+    photodesorption: bool,
+    smooth_log_chi_nH_dex: float = 0.0,
+    smooth_Tfrz_K: float = 0.0,
+) -> Tuple[Quantity, Quantity]:
+    """Pinte-style abundance switches using constants from config.
+
+    Assumes prerequisites are already satisfied:
+    - Temperature `T`
+    - nH field `nH`
+    - UV field `chi` if photodissociation or photodesorption is enabled
+    - Effective UV field `chi_eff` if self-shielding is enabled by the caller
+    """
+    T_K = T.to('K')
+    nH_cm3 = nH.to('cm^-3')
+    T_vals = T_K.magnitude
+
+    if photodissociation or photodesorption:
+        chi_eff_use = chi_eff if chi_eff is not None else chi
+    else:
+        chi_eff_use = None
+
+    X = Quantity(np.full_like(T_vals, float(X0), dtype=float), 'dimensionless')
+
+    if freezeout:
+        freeze_factor, mask_frz = compute_freezeout_factor(
+            T_vals, T_FRZ, EPS_FRZ, float(smooth_Tfrz_K),
+        )
+        X *= freeze_factor
+        n_frz = int(np.sum(mask_frz))
+        logger.info(f'Freeze-out: {n_frz} cells ({100*n_frz/X.size:.1f}%)')
+    else:
+        freeze_factor = np.ones_like(T_vals, dtype=float)
+        mask_frz = np.zeros_like(T_vals, dtype=bool)
+
+    chi_over_nH = None
+    if chi_eff_use is not None and (photodissociation or photodesorption):
+        ratio = chi_eff_use.to('dimensionless').magnitude / (nH_cm3.magnitude + EPS_CHI)
+        chi_over_nH = np.log10(np.maximum(ratio, EPS_CHI))
+
+    mask_pdes = np.zeros_like(T_vals, dtype=bool)
+    if photodesorption and chi_over_nH is not None:
+        X, mask_pdes = apply_photodesorption_escape(
+            X,
+            X0=float(X0),
+            freezeout=bool(freezeout),
+            freeze_factor=freeze_factor,
+            mask_frz=mask_frz,
+            chi_over_nH=chi_over_nH,
+            log_thr_pdes=LOG_CHI_OVER_NH_PDES,
+            smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
+        )
+        n_pdes = int(np.sum(mask_pdes))
+        logger.info(f'Photodesorption: {n_pdes} cells ({100*n_pdes/X.size:.1f}%)')
+
+    if photodissociation and chi_over_nH is not None:
+        X, mask_pdiss = apply_photodissociation(
+            X,
+            chi_over_nH=chi_over_nH,
+            log_thr_pdiss=LOG_CHI_OVER_NH_PDISS,
+            smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
+        )
+        n_pdiss = int(np.sum(mask_pdiss))
+        logger.info(f'Photodissociation: {n_pdiss} cells ({100*n_pdiss/X.size:.1f}%)')
+
+    n_mol = X * nH_cm3
+    X_mean = float(X.to('dimensionless').magnitude.mean())
+    n_mean = float(n_mol.to('cm^-3').magnitude.mean())
+    logger.info(f'Computed {molecule} abundance: X_mean={X_mean:.2e}, n_mean={n_mean:.2e}')
+    return X, n_mol
+
+
+def run_pinte_switches(rad: 'RadModel', config: dict) -> ChemistryResult:
+    molecule = config.get('molecule', 'co')
+    X0 = config.get('X0', float(diskbridge.params.abundance))
+    photodissociation = config.get('photodissociation', diskbridge.params.photodissociation)
+    freezeout = config.get('freezeout', diskbridge.params.freezeout)
+    photodesorption = config.get('photodesorption', diskbridge.params.photodesorption)
+    smooth_log_chi_nH_dex = config.get('smooth_log_chi_nH_dex', 0.0)
+    smooth_Tfrz_K = config.get('smooth_Tfrz_K', 0.0)
+
+    T = rad.ensure_temperature()
+    nH = rad.ensure_nH()
+
+    needs_chi = bool(photodissociation or photodesorption)
+    chi = rad.ensure_chi() if needs_chi else None
+
+    X, n_mol = compute_abundance_pinte(
+        molecule=str(molecule).lower(),
+        T=T,
+        nH=nH,
+        chi=chi,
+        chi_eff=None,
+        X0=float(X0),
+        photodissociation=bool(photodissociation),
+        freezeout=bool(freezeout),
+        photodesorption=bool(photodesorption),
+        smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
+        smooth_Tfrz_K=float(smooth_Tfrz_K),
+    )
+
+    mol_lower = str(molecule).lower()
+
+    return ChemistryResult(
+        abundances={mol_lower: X},
+        number_densities={mol_lower: n_mol},
+        fields={},
+        meta={'model': 'pinte_switches'},
+    )
+
+
+__all__ = [
+    'run_pinte_switches',
+]

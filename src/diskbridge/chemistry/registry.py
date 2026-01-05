@@ -6,11 +6,10 @@ if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
     from diskbridge.chemistry.types import ChemistryResult
 
-from diskbridge.chemistry.models import pinte, co_two_phase
+from diskbridge.chemistry.models import pinte_switches, co_two_phase
 
 
 REGISTRY: dict[str, Callable[['RadModel', dict], 'ChemistryResult']] = {
-    'pinte_switches': pinte.run,
-    'co_two_phase_steady': co_two_phase.run_steady,
-    'co_two_phase_time': co_two_phase.run_time_dependent,
+    'co_two_phase': co_two_phase.run_co_two_phase,
+    'pinte_switches': pinte_switches.run_pinte_switches,
 }
