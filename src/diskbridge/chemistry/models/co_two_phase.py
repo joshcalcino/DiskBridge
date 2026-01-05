@@ -10,7 +10,7 @@ import numpy as np
 import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._constants import (
-    TAU_CO_FORM, K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE,
+    TAU_CO_FORM,
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
 from diskbridge.chemistry.types import ChemistryResult
@@ -23,6 +23,113 @@ from diskbridge.chemistry.closures.carbon import compute_carbon_closure
 from diskbridge._logging import logger
 
 
+def _resolve_tau_form(rad: 'RadModel', *, config: dict, nH: Quantity) -> Quantity:
+    if 'tau_form' in config:
+        return config['tau_form']
+
+    model = str(diskbridge.params.co_tau_form_model).lower()
+    if model == "density_capped":
+        return compute_tau_form_co(
+            nH=nH,
+            n0=Quantity(TAU_FORM_N0, 'cm^-3'),
+            tau0=Quantity(TAU_FORM_TAU0, 's'),
+            tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
+            alpha=TAU_FORM_ALPHA,
+        )
+    if model == "off":
+        return Quantity(TAU_CO_FORM, 's')
+    raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
+
+
+def _resolve_theta_co(
+    rad: 'RadModel',
+    *,
+    nH: Quantity,
+    chi: Quantity,
+    Xco_tot: float,
+    skip_shielding: bool,
+    nside: int,
+    b_kms: float,
+) -> Quantity:
+    if skip_shielding:
+        return Quantity(np.ones_like(chi.magnitude), 'dimensionless')
+
+    if rad.theta_co is None:
+        from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+        from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+
+        visser = VisserShielding(b_kms=float(b_kms))
+        theta_co, chi_eff = compute_co_shielding_healpix(
+            mesh=rad.model.mesh,
+            nH=nH,
+            chi=chi,
+            visser=visser,
+            nCO=None,
+            nH2=rad.nH2,
+            nside=int(nside),
+            b_kms=float(b_kms),
+            Xco_guess=float(Xco_tot),
+            XH2_guess=0.5,
+            progress_chunks=None,
+        )
+        rad.theta_co = theta_co
+        rad.chi_eff = chi_eff
+        return theta_co
+
+    return rad.theta_co
+
+
+def _run_carbon_closure(
+    *,
+    rad: 'RadModel',
+    nH: Quantity,
+    chi: Quantity,
+    Tdust: Quantity,
+    nco_gas: Quantity,
+    nco_ice: Quantity,
+) -> tuple[Quantity, Quantity, Quantity]:
+    nco_total = Quantity(
+        nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
+        'cm^-3'
+    )
+
+    if rad.gas_temperature is not None:
+        Tg = rad.gas_temperature
+        logger.info("Carbon closure using gas temperature")
+    else:
+        Tg = Tdust
+        logger.info("Carbon closure using dust temperature (gas T not available)")
+
+    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
+    logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
+    return nCplus, nC, ne
+
+
+def _prepare_common(rad: 'RadModel', config: dict) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity, float]:
+    Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
+    skip_shielding = bool(config.get('skip_shielding', False))
+    nside = int(config.get('nside', 4))
+    b_kms = float(config.get('b_kms', 0.3))
+
+    nH = rad.ensure_nH()
+    tau_form = _resolve_tau_form(rad, config=config, nH=nH)
+
+    Tdust = rad.ensure_dust_temperature()
+    chi = rad.ensure_chi()
+
+    theta_co = _resolve_theta_co(
+        rad,
+        nH=nH,
+        chi=chi,
+        Xco_tot=float(Xco_tot),
+        skip_shielding=skip_shielding,
+        nside=nside,
+        b_kms=b_kms,
+    )
+
+    return nH, Tdust, chi, theta_co, tau_form, Xco_tot
+
+
 def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     """Run steady-state CO two-phase chemistry.
     
@@ -33,8 +140,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     config : dict
         Configuration with keys:
         - Xco_tot: float (default: from diskbridge.params.abundance)
-        - tau_form: Quantity (default: from config)
-        - k0_co: float in s^-1 (default: from config)
+        - tau_form: Quantity (optional; if absent uses diskbridge.params.co_tau_form_model)
         - skip_shielding: bool (default: False)
         - nside: int (default: 4)
         - b_kms: float (default: 0.3)
@@ -44,89 +150,28 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     ChemistryResult
         Result with abundances, number_densities, and diagnostic fields
     """
-    Xco_tot = config.get('Xco_tot', float(diskbridge.params.abundance))
-    skip_shielding = config.get('skip_shielding', False)
-    nside = config.get('nside', 4)
-    b_kms = config.get('b_kms', 0.3)
-    
-    if 'tau_form' in config:
-        tau_form = config['tau_form']
-    else:
-        model = str(diskbridge.params.co_tau_form_model).lower()
-        if model == "density_capped":
-            nH = rad.ensure_nH()
-            tau_form = compute_tau_form_co(
-                nH=nH,
-                n0=Quantity(TAU_FORM_N0, 'cm^-3'),
-                tau0=Quantity(TAU_FORM_TAU0, 's'),
-                tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
-                alpha=TAU_FORM_ALPHA,
-            )
-        elif model == "off":
-            tau_form = Quantity(TAU_CO_FORM, 's')
-        else:
-            raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
-    
-    T = rad.ensure_dust_temperature()
-    nH = rad.ensure_nH()
-    chi = rad.ensure_chi()
-    
-    if skip_shielding:
-        theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
-    else:
-        if rad.theta_co is None:
-            from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
-            from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-            
-            visser = VisserShielding(b_kms=float(b_kms))
-            theta_co, chi_eff = compute_co_shielding_healpix(
-                mesh=rad.model.mesh,
-                nH=nH,
-                chi=chi,
-                visser=visser,
-                nCO=None,
-                nH2=rad.nH2,
-                nside=int(nside),
-                b_kms=float(b_kms),
-                Xco_guess=float(Xco_tot),
-                XH2_guess=0.5,
-                progress_chunks=None,
-            )
-            rad.theta_co = theta_co
-            rad.chi_eff = chi_eff
-        else:
-            theta_co = rad.theta_co
-    
-    X_co, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
+    nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
+
+    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
         nH=nH,
-        T=T,
+        T=Tdust,
         chi=chi,
         theta_co=theta_co,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form,
     )
-    
-    # Compute carbon closure using dust-attenuated UV (NOT CO-shielded chi_eff)
-    nco_total = Quantity(
-        nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
-        'cm^-3'
+
+    nCplus, nC, ne = _run_carbon_closure(
+        rad=rad,
+        nH=nH,
+        chi=chi,
+        Tdust=Tdust,
+        nco_gas=nco_gas,
+        nco_ice=nco_ice,
     )
     
-    # Use gas temperature if available, else dust temperature
-    if rad.gas_temperature is not None:
-        Tg = rad.gas_temperature
-        logger.info("Carbon closure using gas temperature")
-    else:
-        Tg = T
-        logger.info("Carbon closure using dust temperature (gas T not available)")
-    
-    # IMPORTANT: Use chi (dust-attenuated), NOT chi_eff (CO-shielded)
-    # Carbon photoionization is in FUV continuum, attenuated by dust but not CO
-    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
-    logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
-    
     return ChemistryResult(
-        abundances={'co': X_co},
+        abundances={'co': Xco_gas},
         number_densities={
             'co_gas': nco_gas,
             'co_ice': nco_ice,
@@ -152,8 +197,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         - t_end: Quantity (required, scalar or array for per-cell time)
         - dt: Quantity (optional)
         - Xco_tot: float (default: from diskbridge.params.abundance)
-        - tau_form: Quantity (default: from diskbridge.params.co_tau_form_model)
-        - k0_co: Quantity (default: K0_CO_DEFAULT)
+        - tau_form: Quantity (optional; if absent uses diskbridge.params.co_tau_form_model)
         - skip_shielding: bool (default: False)
         - nside: int (default: 4)
         - b_kms: float (default: 0.3)
@@ -169,10 +213,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         raise ValueError("t_end is required for time-dependent CO chemistry")
     
     t_end = config['t_end']
-    Xco_tot = config.get('Xco_tot', float(diskbridge.params.abundance))
-    skip_shielding = config.get('skip_shielding', False)
-    nside = config.get('nside', 4)
-    b_kms = config.get('b_kms', 0.3)
+    dt = config.get('dt', None)
     
     Xco_gas_init = config.get('Xco_gas_init', None)
     if Xco_gas_init is not None and hasattr(Xco_gas_init, 'magnitude'):
@@ -182,57 +223,11 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     if Xco_ice_init is not None and hasattr(Xco_ice_init, 'magnitude'):
         Xco_ice_init = Xco_ice_init.magnitude
     
-    if 'tau_form' in config:
-        tau_form = config['tau_form']
-    else:
-        model = str(diskbridge.params.co_tau_form_model).lower()
-        if model == "density_capped":
-            nH = rad.ensure_nH()
-            tau_form = compute_tau_form_co(
-                nH=nH,
-                n0=Quantity(TAU_FORM_N0, 'cm^-3'),
-                tau0=Quantity(TAU_FORM_TAU0, 's'),
-                tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
-                alpha=TAU_FORM_ALPHA,
-            )
-        elif model == "off":
-            tau_form = Quantity(TAU_CO_FORM, 's')
-        else:
-            raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
-    
-    T = rad.ensure_dust_temperature()
-    nH = rad.ensure_nH()
-    chi = rad.ensure_chi()
-    
-    if skip_shielding:
-        theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
-    else:
-        if rad.theta_co is None:
-            from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
-            from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-            
-            visser = VisserShielding(b_kms=float(b_kms))
-            theta_co, chi_eff = compute_co_shielding_healpix(
-                mesh=rad.model.mesh,
-                nH=nH,
-                chi=chi,
-                visser=visser,
-                nCO=None,
-                nH2=rad.nH2,
-                nside=int(nside),
-                b_kms=float(b_kms),
-                Xco_guess=float(Xco_tot),
-                XH2_guess=0.5,
-                progress_chunks=None,
-            )
-            rad.theta_co = theta_co
-            rad.chi_eff = chi_eff
-        else:
-            theta_co = rad.theta_co
-    
-    X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
+    nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
+
+    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
         nH=nH,
-        T=T,
+        T=Tdust,
         chi=chi,
         theta_co=theta_co,
         t_end=t_end,
@@ -240,29 +235,20 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         tau_form=tau_form,
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,
+        dt=dt,
     )
-    
-    # Compute carbon closure using dust-attenuated UV (NOT CO-shielded chi_eff)
-    nco_total = Quantity(
-        nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude,
-        'cm^-3'
+
+    nCplus, nC, ne = _run_carbon_closure(
+        rad=rad,
+        nH=nH,
+        chi=chi,
+        Tdust=Tdust,
+        nco_gas=nco_gas,
+        nco_ice=nco_ice,
     )
-    
-    # Use gas temperature if available, else dust temperature
-    if rad.gas_temperature is not None:
-        Tg = rad.gas_temperature
-        logger.info("Carbon closure using gas temperature")
-    else:
-        Tg = T
-        logger.info("Carbon closure using dust temperature (gas T not available)")
-    
-    # IMPORTANT: Use chi (dust-attenuated), NOT chi_eff (CO-shielded)
-    # Carbon photoionization is in FUV continuum, attenuated by dust but not CO
-    nCplus, nC, ne = compute_carbon_closure(nH, chi, Tg, nco_total)
-    logger.info(f"Carbon closure: max(nCplus)={np.max(nCplus.magnitude):.2e} cm^-3")
     
     return ChemistryResult(
-        abundances={'co': X_co},
+        abundances={'co': Xco_gas},
         number_densities={
             'co_gas': nco_gas,
             'co_ice': nco_ice,

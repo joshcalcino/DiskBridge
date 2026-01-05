@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from diskbridge._units import Quantity, units
+from diskbridge._units import Quantity
 from diskbridge._constants import (
     K_B, M_H, K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE
 )
@@ -24,39 +24,22 @@ class CoTwoPhaseRates:
 
 
 def compute_co_photodissociation_rate(
-    chi,
-    theta_co,
-    k0_co,
+    chi: Quantity,
+    theta_co: Optional[Quantity],
+    k0_co: Quantity,
     *,
-    candidate_mask=None,
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Optional[Quantity]]:
-    if isinstance(chi, Quantity):
-        chi_arr = chi.to('dimensionless').magnitude
-    else:
-        chi_arr = np.asarray(chi, dtype=float)
+    chi_arr = chi.to('dimensionless').magnitude
 
     if theta_co is None:
         theta_arr = np.ones_like(chi_arr, dtype=float)
-    elif isinstance(theta_co, Quantity):
-        theta_arr = theta_co.to('dimensionless').magnitude
     else:
-        theta_arr = np.asarray(theta_co, dtype=float)
-
-    if candidate_mask is not None:
-        mask = np.asarray(candidate_mask, dtype=bool)
-        if mask.shape != theta_arr.shape:
-            raise ValueError(
-                f'candidate_mask shape {mask.shape} does not match theta_co shape {theta_arr.shape}'
-            )
-        theta_arr = np.where(mask, theta_arr, 1.0)
+        theta_arr = theta_co.to('dimensionless').magnitude
 
     theta_arr = np.clip(theta_arr, 0.0, 1.0)
 
-    if isinstance(k0_co, Quantity):
-        k0_val = k0_co.to('1/s').magnitude
-    else:
-        k0_val = float(k0_co)
+    k0_val = k0_co.to('1/s').magnitude
 
     k_diss_arr = k0_val * chi_arr * theta_arr
     k_diss_co = Quantity(k_diss_arr, '1/s')
@@ -101,7 +84,7 @@ def compute_co_two_phase_rates(
     nH: Quantity,
     T: Quantity,
     chi: Quantity,
-    theta_co,
+    theta_co: Optional[Quantity],
     min_rate: float = 1.0e-30,
 ) -> CoTwoPhaseRates:
     """Compute all CO two-phase chemistry rates using constants from config."""
@@ -109,7 +92,6 @@ def compute_co_two_phase_rates(
         chi=chi,
         theta_co=theta_co,
         k0_co=Quantity(K0_CO, '1/s'),
-        candidate_mask=None,
         min_rate=min_rate,
     )
     k_fo = co_freezeout_rate(T, nH)
