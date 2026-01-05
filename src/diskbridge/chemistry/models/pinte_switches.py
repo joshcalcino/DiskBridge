@@ -240,8 +240,3 @@ def run_pinte_switches(rad: 'RadModel', config: dict) -> ChemistryResult:
         fields={},
         meta={'model': 'pinte_switches'},
     )
-
-
-__all__ = [
-    'run_pinte_switches',
-]
