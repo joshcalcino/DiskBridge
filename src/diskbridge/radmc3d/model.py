@@ -340,6 +340,59 @@ class RadModel:
                    f"min={np.min(self.nH):.2e}, max={np.max(self.nH):.2e}")
         
         return self.nH
+
+    def compute_sigma_d_per_H_from_dust(self) -> Quantity:
+        if self.model.dust is None:
+            raise RuntimeError("Model has no dust submodel; cannot compute sigma_d_per_H")
+
+        nH = self.ensure_nH().to('cm^-3')
+        nH_cm3 = nH.magnitude
+
+        axis_order = None
+        if 'density' in self.model.gas:
+            axis_order = self.model.gas['density'].axis_order
+        else:
+            axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+
+        A_d = None
+        for i in range(self.model.dust.nbin):
+            bin_obj = self.model.dust[f'bin_{i}']
+            rho_d_i = bin_obj['density'].data.to('g/cm^3')
+            a_i = bin_obj.size.to('cm').magnitude
+            rho_s = bin_obj.density_material.to('g/cm^3').magnitude
+
+            if float(a_i) <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive grain size a={a_i}")
+            if float(rho_s) <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive material density rho_s={rho_s}")
+
+            A_i = (3.0 * rho_d_i.magnitude) / (4.0 * float(a_i) * float(rho_s))
+            if A_d is None:
+                A_d = np.asarray(A_i, dtype=float)
+            else:
+                A_d = A_d + np.asarray(A_i, dtype=float)
+
+        if A_d is None:
+            raise RuntimeError("No dust bins available to compute sigma_d_per_H")
+
+        sigma = A_d / (nH_cm3 + 1.0e-99)
+        sigma_q = Quantity(sigma, 'cm^2')
+
+        self.model.gas_register(
+            'sigma_d_per_H',
+            Field(
+                quantity='sigma_d_per_H',
+                data=sigma_q,
+                axis_order=axis_order,
+            ),
+        )
+        return sigma_q
+
+    def ensure_sigma_d_per_H(self, force: bool = False) -> Quantity:
+        if (not force) and ('sigma_d_per_H' in self.model.gas):
+            return self.model.gas['sigma_d_per_H'].data
+
+        return self.compute_sigma_d_per_H_from_dust()
     
     def summarize_chi_over_nH(
         self,

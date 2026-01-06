@@ -133,6 +133,48 @@ def check_non_negative(
             )
 
 
+def check_photodesorption_diagnostics(
+    n_ice_act_max: Quantity,
+    n_ice_act: Quantity,
+    k_pd_surf: Quantity,
+    R_pd: Quantity,
+    rtol: float = 1e-8,
+) -> None:
+    nmax = n_ice_act_max.to('cm^-3').magnitude.flatten()
+    nact = n_ice_act.to('cm^-3').magnitude.flatten()
+    ksurf = k_pd_surf.to('1/s').magnitude.flatten()
+    rpd = R_pd.to('cm^-3/s').magnitude.flatten()
+
+    if nmax.shape != nact.shape or nmax.shape != rpd.shape:
+        raise ValueError(
+            f"Photodesorption diagnostic shapes must match: "
+            f"n_ice_act_max={nmax.shape}, n_ice_act={nact.shape}, R_pd={rpd.shape}"
+        )
+
+    if np.any(nmax < 0.0) or np.any(nact < 0.0) or np.any(rpd < 0.0) or np.any(ksurf < 0.0):
+        check_non_negative(
+            (n_ice_act_max, 'n_ice_act_max'),
+            (n_ice_act, 'n_ice_act'),
+            (k_pd_surf, 'k_pd_surf'),
+            (R_pd, 'R_pd'),
+        )
+
+    if np.any(nact > nmax * (1.0 + float(rtol))):
+        idx = int(np.argmax(nact - nmax))
+        raise ValueError(
+            f"n_ice_act exceeds n_ice_act_max at index {idx}: "
+            f"n_ice_act={nact[idx]:.3e}, n_ice_act_max={nmax[idx]:.3e}"
+        )
+
+    rpd_max = ksurf * nmax
+    if np.any(rpd > rpd_max * (1.0 + float(rtol))):
+        idx = int(np.argmax(rpd - rpd_max))
+        raise ValueError(
+            f"R_pd exceeds k_pd_surf*n_ice_act_max at index {idx}: "
+            f"R_pd={rpd[idx]:.3e}, limit={rpd_max[idx]:.3e}"
+        )
+
+
 def validate_chemistry_state(
     nH: Quantity,
     nH2: Quantity = None,
@@ -142,6 +184,11 @@ def validate_chemistry_state(
     nco_total: Quantity = None,
     check_h: bool = True,
     check_c: bool = True,
+    check_pd: bool = False,
+    n_ice_act_max: Quantity = None,
+    n_ice_act: Quantity = None,
+    k_pd_surf: Quantity = None,
+    R_pd: Quantity = None,
     rtol: float = 1e-4,
 ) -> None:
     """Validate chemistry state for consistency.
@@ -191,3 +238,14 @@ def validate_chemistry_state(
 
     if check_c and nC is not None and nCplus is not None and nco_total is not None:
         check_carbon_budget(nC, nCplus, nco_total, nH, rtol=rtol)
+
+    if check_pd:
+        if n_ice_act_max is None or n_ice_act is None or k_pd_surf is None or R_pd is None:
+            raise ValueError("check_pd=True requires n_ice_act_max, n_ice_act, k_pd_surf, and R_pd")
+        check_photodesorption_diagnostics(
+            n_ice_act_max=n_ice_act_max,
+            n_ice_act=n_ice_act,
+            k_pd_surf=k_pd_surf,
+            R_pd=R_pd,
+            rtol=rtol,
+        )

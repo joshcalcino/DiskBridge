@@ -11,16 +11,11 @@ import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
 from diskbridge._constants import (
-    K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE, TAU_CO_FORM,
+    K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, TAU_CO_FORM,
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
 from diskbridge.chemistry.api import run_chemistry, run_thermochemistry
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
-from diskbridge.chemistry.tracers import compute_chem_age
-from diskbridge.chemistry.models.co_two_phase import compute_boundary_co_ic
-from diskbridge.chemistry.tau_form import compute_tau_form_co
-from diskbridge.chemistry.models._co_two_phase_math import evolve_co_two_phase_time_dependent
 from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile, find_r_split
 
 
@@ -82,7 +77,7 @@ def evolve_co_time_dependent_infall_age(
     
     Notes
     -----
-    Chemistry parameters (k0_co, sigma_d_per_H, E_bind, nu0, alpha_pd_ice) are
+    Chemistry parameters (k0_co, sigma_d_per_H, E_bind, nu0) are
     loaded from config.toml. Override via diskbridge.load_config(path) before import.
         
     Returns
@@ -123,6 +118,11 @@ def evolve_co_time_dependent_infall_age(
     ... )
     >>> print("UV boundary:", meta["R_boundary"])
     """
+    from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
+    from diskbridge.chemistry.tracers import compute_chem_age
+    from diskbridge.chemistry.models.co_two_phase import compute_boundary_co_ic
+    from diskbridge.chemistry.tau_form import compute_tau_form_co
+    from diskbridge.chemistry.models._co_two_phase_math import evolve_co_two_phase_time_dependent
     logger.info("=" * 60)
     logger.info("CO two-phase with infall age workflow")
     logger.info("=" * 60)

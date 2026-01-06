@@ -140,9 +140,12 @@ eps_chi = 1.0e-99              # Numerical floor for chi/nH ratio
 [chemistry.co_two_phase]
 tau_co_form = "1.0e5 yr"       # CO formation timescale
 k0_co = "2.0e-10 s^-1"         # Unshielded CO photodissociation rate
-alpha_pd_ice = 1.0e-12         # Photodesorption yield (molecules per photon)
+F_DRAINE = "2.0e8 1/(cm^2 s)"  # Draine UV photon flux for chi=1
+N_LAY = 2                      # Number of active ice layers
+n_surf = "1.5e15 1/cm^2"       # Surface site density
+Y_CO = 1.0e-3                  # CO photodesorption yield (molecules/photon)
 
-# Density-capped tau_form model parameters
+# Density-capped tau_form model param eters
 tau_form_n0 = "1.0e4 cm^-3"    # Reference density for density-capped model
 tau_form_tau0 = "1.0e5 yr"     # tau_form at reference density
 tau_form_tau_min = "1.0e3 yr"  # Minimum tau_form in dense gas

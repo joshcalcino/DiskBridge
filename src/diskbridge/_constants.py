@@ -86,7 +86,10 @@ _co2p = _cfg['chemistry']['co_two_phase']
 
 TAU_CO_FORM = Quantity(_co2p['tau_co_form']).to_base_units().magnitude  # s
 K0_CO = Quantity(_co2p['k0_co']).to_base_units().magnitude              # s^-1
-ALPHA_PD_ICE = float(_co2p['alpha_pd_ice'])                             # dimensionless
+F_DRAINE = Quantity(_co2p['F_DRAINE']).to_base_units().magnitude         # 1/(cm^2 s)
+N_LAY = int(_co2p['N_LAY'])                                             # dimensionless
+N_SURF = Quantity(_co2p['n_surf']).to_base_units().magnitude            # 1/cm^2
+Y_CO = float(_co2p['Y_CO'])                                             # molecules/photon
 
 # Density-capped tau_form model
 TAU_FORM_N0 = Quantity(_co2p['tau_form_n0']).to_base_units().magnitude      # cm^-3

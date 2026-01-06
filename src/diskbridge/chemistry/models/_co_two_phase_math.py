@@ -8,9 +8,10 @@ import numpy as np
 
 from diskbridge._units import Quantity
 from diskbridge._constants import (
-    K_B, M_H, K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, ALPHA_PD_ICE
+    K_B, M_H, K0_CO, E_BIND_CO, NU0_CO, F_DRAINE, N_LAY, N_SURF, Y_CO
 )
 
+# constant below should probably be in _constants.py 
 M_CO_CGS = 28.0 * M_H
 
 
@@ -19,7 +20,7 @@ class CoTwoPhaseRates:
     k_pd: Quantity
     k_fo: Quantity
     k_td: Quantity
-    k_pd_ice: Quantity
+    k_pd_surf: Quantity
     tau_pd: Optional[Quantity]
 
 
@@ -55,12 +56,12 @@ def compute_co_photodissociation_rate(
     return k_diss_co, tau_diss_co
 
 
-def co_freezeout_rate(T: Quantity, nH: Quantity) -> Quantity:
-    """CO freeze-out rate using SIGMA_D_PER_H from config."""
+def co_freezeout_rate(T: Quantity, nH: Quantity, sigma_d_per_H: Quantity) -> Quantity:
+    """CO freeze-out rate using mesh sigma_d_per_H."""
     T_K = T.to('K').magnitude
     nH_cm3 = nH.to('cm^-3').magnitude
     v_th = np.sqrt(8.0 * K_B * T_K / (np.pi * M_CO_CGS))
-    sigma_nd = SIGMA_D_PER_H * nH_cm3
+    sigma_nd = sigma_d_per_H.to('cm^2').magnitude * nH_cm3
     k_fo = sigma_nd * v_th
     return Quantity(k_fo, '1/s')
 
@@ -72,11 +73,36 @@ def co_thermal_desorption_rate(T_d: Quantity) -> Quantity:
     return Quantity(k_td, '1/s')
 
 
-def co_photodesorption_rate(chi: Quantity) -> Quantity:
-    """CO photodesorption rate using ALPHA_PD_ICE from config."""
+def co_photodesorption_rate_surface(chi: Quantity) -> Quantity:
     chi_val = chi.to('dimensionless').magnitude
-    k_pd_ice = ALPHA_PD_ICE * chi_val
-    return Quantity(k_pd_ice, '1/s')
+    k_pd_surf = (chi_val * F_DRAINE) * (Y_CO / (4.0 * N_SURF * float(N_LAY)))
+    return Quantity(k_pd_surf, '1/s')
+
+
+def co_photodesorption_sink(
+    *,
+    nH: Quantity,
+    nco_ice: Quantity,
+    sigma_d_per_H: Quantity,
+    k_pd_surf: Quantity,
+) -> tuple[Quantity, Quantity, Quantity, Quantity]:
+    nH_cm3 = nH.to('cm^-3').magnitude
+    nco_ice_cm3 = nco_ice.to('cm^-3').magnitude
+    sigma = sigma_d_per_H.to('cm^2').magnitude
+    A_d = sigma * nH_cm3
+
+    n_ice_act_max = A_d * N_SURF * float(N_LAY)
+    n_ice_act = np.minimum(nco_ice_cm3, n_ice_act_max)
+
+    k_pd_s = k_pd_surf.to('1/s').magnitude
+    R_pd = k_pd_s * n_ice_act
+
+    return (
+        Quantity(n_ice_act_max, 'cm^-3'),
+        Quantity(n_ice_act, 'cm^-3'),
+        k_pd_surf,
+        Quantity(R_pd, 'cm^-3/s'),
+    )
 
 
 def compute_co_two_phase_rates(
@@ -85,6 +111,7 @@ def compute_co_two_phase_rates(
     T: Quantity,
     chi: Quantity,
     theta_co: Optional[Quantity],
+    sigma_d_per_H: Quantity,
     min_rate: float = 1.0e-30,
 ) -> CoTwoPhaseRates:
     """Compute all CO two-phase chemistry rates using constants from config."""
@@ -94,10 +121,10 @@ def compute_co_two_phase_rates(
         k0_co=Quantity(K0_CO, '1/s'),
         min_rate=min_rate,
     )
-    k_fo = co_freezeout_rate(T, nH)
+    k_fo = co_freezeout_rate(T, nH, sigma_d_per_H)
     k_td = co_thermal_desorption_rate(T)
-    k_pd_ice = co_photodesorption_rate(chi)
-    return CoTwoPhaseRates(k_pd=k_pd, k_fo=k_fo, k_td=k_td, k_pd_ice=k_pd_ice, tau_pd=tau_pd)
+    k_pd_surf = co_photodesorption_rate_surface(chi)
+    return CoTwoPhaseRates(k_pd=k_pd, k_fo=k_fo, k_td=k_td, k_pd_surf=k_pd_surf, tau_pd=tau_pd)
 
 
 def solve_co_two_phase_steady_state(
@@ -108,14 +135,16 @@ def solve_co_two_phase_steady_state(
     theta_co,
     Xco_tot: float,
     tau_form: Quantity,
+    sigma_d_per_H: Quantity,
     min_rate: float = 1.0e-30,
-) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
     """Solve steady-state CO two-phase chemistry using constants from config."""
     rates = compute_co_two_phase_rates(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
+        sigma_d_per_H=sigma_d_per_H,
         min_rate=min_rate,
     )
 
@@ -123,26 +152,79 @@ def solve_co_two_phase_steady_state(
     tau_pd = rates.tau_pd
     k_fo = rates.k_fo
     k_td = rates.k_td
-    k_pd_ice = rates.k_pd_ice
-
-    k_td_plus = k_td.to('1/s').magnitude + k_pd_ice.to('1/s').magnitude
-    k_td_plus_safe = np.maximum(k_td_plus, 1e-60)
-    eta = k_fo.to('1/s').magnitude / k_td_plus_safe
+    k_pd_surf = rates.k_pd_surf
 
     nH_cm3 = nH.to('cm^-3').magnitude
     nco_max = float(Xco_tot) * nH_cm3
     tau_s = tau_form.to('s').magnitude
 
+    k_fo_s = k_fo.to('1/s').magnitude
+    k_td_s = k_td.to('1/s').magnitude
     k_pd_s = k_pd.to('1/s').magnitude
-    denom = (1.0 + eta) + k_pd_s * tau_s
-    nco_gas_arr = nco_max / denom
-    nco_ice_arr = eta * nco_gas_arr
 
-    nco_gas = Quantity(nco_gas_arr, 'cm^-3')
-    nco_ice = Quantity(nco_ice_arr, 'cm^-3')
-    X_co = Quantity(nco_gas_arr / (nH_cm3 + 1e-99), 'dimensionless')
+    nco_gas = nco_max.copy()
+    nco_ice = np.zeros_like(nco_gas)
 
-    return X_co, nco_gas, nco_ice, k_pd, tau_pd
+    t_end_s = np.maximum(tau_s, 0.0)
+    dt_step = 0.05 * tau_s
+    dt_step = np.maximum(dt_step, 0.0)
+
+    n_steps = 20
+    if np.ndim(tau_s) != 0:
+        tau_med = float(np.median(tau_s))
+        if tau_med > 0.0:
+            dt_step = 0.05 * tau_med
+        else:
+            dt_step = 0.0
+    else:
+        dt_step = float(dt_step)
+
+    if dt_step <= 0.0:
+        dt_step = float(np.max(tau_s)) if np.ndim(tau_s) != 0 else float(tau_s)
+        dt_step = max(dt_step, 1.0)
+
+    def _rhs(nco_g, nco_i):
+        R_form = (nco_max - nco_g - nco_i) / tau_s
+        nco_ice_q = Quantity(nco_i, 'cm^-3')
+        n_ice_act_max, n_ice_act, _, R_pd_q = co_photodesorption_sink(
+            nH=nH,
+            nco_ice=nco_ice_q,
+            sigma_d_per_H=sigma_d_per_H,
+            k_pd_surf=k_pd_surf,
+        )
+        R_pd = R_pd_q.to('cm^-3/s').magnitude
+
+        dnco_g_dt = (
+            R_form
+            + k_td_s * nco_i
+            + R_pd
+            - k_fo_s * nco_g
+            - k_pd_s * nco_g
+        )
+        dnco_i_dt = k_fo_s * nco_g - k_td_s * nco_i - R_pd
+        return dnco_g_dt, dnco_i_dt, n_ice_act_max, n_ice_act, R_pd_q
+
+    for _ in range(n_steps):
+        dt = dt_step
+        k1g, k1i, n_ice_act_max, n_ice_act, R_pd_q = _rhs(nco_gas, nco_ice)
+        g_mid = np.maximum(nco_gas + 0.5 * dt * k1g, 0.0)
+        i_mid = np.maximum(nco_ice + 0.5 * dt * k1i, 0.0)
+        k2g, k2i, n_ice_act_max, n_ice_act, R_pd_q = _rhs(g_mid, i_mid)
+        nco_gas = np.maximum(nco_gas + dt * k2g, 0.0)
+        nco_ice = np.maximum(nco_ice + dt * k2i, 0.0)
+
+    nco_gas_q = Quantity(nco_gas, 'cm^-3')
+    nco_ice_q = Quantity(nco_ice, 'cm^-3')
+    X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), 'dimensionless')
+
+    diag = {
+        'n_ice_act_max': n_ice_act_max,
+        'n_ice_act': n_ice_act,
+        'k_pd_surf': k_pd_surf,
+        'R_pd': R_pd_q,
+    }
+
+    return X_co, nco_gas_q, nco_ice_q, k_pd, tau_pd, diag
 
 
 def evolve_co_two_phase_time_dependent(
@@ -154,17 +236,19 @@ def evolve_co_two_phase_time_dependent(
     t_end: Quantity,
     Xco_tot: float,
     tau_form: Quantity,
+    sigma_d_per_H: Quantity,
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
     dt: Optional[Quantity] = None,
     min_rate: float = 1.0e-30,
-) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity]]:
+) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
     """Evolve CO two-phase chemistry using constants from config."""
     rates = compute_co_two_phase_rates(
         nH=nH,
         T=T,
         chi=chi,
         theta_co=theta_co,
+        sigma_d_per_H=sigma_d_per_H,
         min_rate=min_rate,
     )
 
@@ -172,12 +256,11 @@ def evolve_co_two_phase_time_dependent(
     tau_pd = rates.tau_pd
     k_fo = rates.k_fo
     k_td = rates.k_td
-    k_pd_ice = rates.k_pd_ice
+    k_pd_surf = rates.k_pd_surf
 
     k_fo_s = k_fo.to('1/s').magnitude
     k_td_s = k_td.to('1/s').magnitude
     k_pd_s = k_pd.to('1/s').magnitude
-    k_pd_ice_s = k_pd_ice.to('1/s').magnitude
     tau_s = tau_form.to('s').magnitude
     t_end_s = t_end.to('s').magnitude
 
@@ -229,106 +312,72 @@ def evolve_co_two_phase_time_dependent(
         nco_ice = X_init_ice * nH_cm3
 
     if dt is None:
-        inv_tau = 1.0 / tau_s
-        b_des = k_td_s + k_pd_ice_s
-
-        a = -(inv_tau + k_fo_s + k_pd_s)
-        b = b_des - inv_tau
-        c = k_fo_s
-        d = -b_des
-
-        f0 = nco_max * inv_tau
-
-        det = a * d - b * c
-        if np.any(det == 0.0):
-            raise ZeroDivisionError('Singular CO two-phase linear system (determinant is zero)')
-
-        nco_gas_ss = (-d * f0) / det
-        nco_ice_ss = (c * f0) / det
-
-        m = 0.5 * (a + d)
-        b11 = a - m
-        b12 = b
-        b21 = c
-        b22 = d - m
-
-        disc = b11 * b11 + b12 * b21
-
-        mask_pos = disc > 0.0
-        mask_neg = disc < 0.0
-        mask_zero = disc == 0.0
-
-        e11 = np.empty_like(disc, dtype=float)
-        e12 = np.empty_like(disc, dtype=float)
-        e21 = np.empty_like(disc, dtype=float)
-        e22 = np.empty_like(disc, dtype=float)
-
-        if np.any(mask_pos):
-            delta = np.sqrt(disc[mask_pos])
-            l1 = (m[mask_pos] + delta)
-            l2 = (m[mask_pos] - delta)
-            denom = (l1 - l2)
-            e1 = np.exp(l1 * t_end_s_arr[mask_pos])
-            e2 = np.exp(l2 * t_end_s_arr[mask_pos])
-
-            e11[mask_pos] = (e1 * (a[mask_pos] - l2) - e2 * (a[mask_pos] - l1)) / denom
-            e22[mask_pos] = (e1 * (d[mask_pos] - l2) - e2 * (d[mask_pos] - l1)) / denom
-            e12[mask_pos] = b[mask_pos] * (e1 - e2) / denom
-            e21[mask_pos] = c[mask_pos] * (e1 - e2) / denom
-
-        if np.any(mask_neg):
-            omega = np.sqrt(-disc[mask_neg])
-            x = omega * t_end_s_arr[mask_neg]
-            cosx = np.cos(x)
-            sin_over = np.sin(x) / omega
-            exp_mt = np.exp(m[mask_neg] * t_end_s_arr[mask_neg])
-
-            e11[mask_neg] = exp_mt * (cosx + sin_over * b11[mask_neg])
-            e22[mask_neg] = exp_mt * (cosx + sin_over * b22[mask_neg])
-            e12[mask_neg] = exp_mt * (sin_over * b12[mask_neg])
-            e21[mask_neg] = exp_mt * (sin_over * b21[mask_neg])
-
-        if np.any(mask_zero):
-            exp_mt = np.exp(m[mask_zero] * t_end_s_arr[mask_zero])
-            t = t_end_s_arr[mask_zero]
-            e11[mask_zero] = exp_mt * (1.0 + b11[mask_zero] * t)
-            e22[mask_zero] = exp_mt * (1.0 + b22[mask_zero] * t)
-            e12[mask_zero] = exp_mt * (b12[mask_zero] * t)
-            e21[mask_zero] = exp_mt * (b21[mask_zero] * t)
-
-        dg = nco_gas - nco_gas_ss
-        di = nco_ice - nco_ice_ss
-
-        nco_gas = nco_gas_ss + e11 * dg + e12 * di
-        nco_ice = nco_ice_ss + e21 * dg + e22 * di
-
-        nco_gas = np.maximum(nco_gas, 0.0)
-        nco_ice = np.maximum(nco_ice, 0.0)
+        if np.ndim(t_end_s) != 0:
+            raise ValueError("dt is required when evolving with per-cell t_end")
+        dt_s = 0.05 * float(np.median(tau_s)) if np.ndim(tau_s) != 0 else 0.05 * float(tau_s)
+        dt_s = max(dt_s, 0.0)
     else:
-        dt_s = dt.to('s').magnitude
-        t = 0.0
-        n_steps = 0
-        max_steps = int(1e8)
-        while t < t_end_s and n_steps < max_steps:
-            dt_step = min(dt_s, t_end_s - t)
-            R_form = (nco_max - nco_gas - nco_ice) / tau_s
+        dt_s = float(dt.to('s').magnitude)
+
+    if float(dt_s) <= 0.0:
+        dt_s = 1.0
+
+    t = 0.0
+    n_steps = 0
+    max_steps = int(1e8)
+
+    n_ice_act_max_last = None
+    n_ice_act_last = None
+    R_pd_last = None
+
+    while t < float(t_end_s) and n_steps < max_steps:
+        dt_step = min(float(dt_s), float(t_end_s) - t)
+
+        def _rhs(nco_g, nco_i):
+            R_form = (nco_max - nco_g - nco_i) / tau_s
+
+            nco_ice_q = Quantity(nco_i, 'cm^-3')
+            n_ice_act_max_q, n_ice_act_q, _, R_pd_q = co_photodesorption_sink(
+                nH=nH,
+                nco_ice=nco_ice_q,
+                sigma_d_per_H=sigma_d_per_H,
+                k_pd_surf=k_pd_surf,
+            )
+            R_pd = R_pd_q.to('cm^-3/s').magnitude
+
             dnco_gas_dt = (
                 R_form
-                + k_td_s * nco_ice
-                + k_pd_ice_s * nco_ice
-                - k_fo_s * nco_gas
-                - k_pd_s * nco_gas
+                + k_td_s * nco_i
+                + R_pd
+                - k_fo_s * nco_g
+                - k_pd_s * nco_g
             )
-            dnco_ice_dt = k_fo_s * nco_gas - k_td_s * nco_ice - k_pd_ice_s * nco_ice
-            nco_gas = nco_gas + dt_step * dnco_gas_dt
-            nco_ice = nco_ice + dt_step * dnco_ice_dt
-            nco_gas = np.maximum(nco_gas, 0.0)
-            nco_ice = np.maximum(nco_ice, 0.0)
-            t += dt_step
-            n_steps += 1
+            dnco_ice_dt = k_fo_s * nco_g - k_td_s * nco_i - R_pd
+            return dnco_gas_dt, dnco_ice_dt, n_ice_act_max_q, n_ice_act_q, R_pd_q
+
+        k1g, k1i, n_ice_act_max_q, n_ice_act_q, R_pd_q = _rhs(nco_gas, nco_ice)
+        g_mid = np.maximum(nco_gas + 0.5 * dt_step * k1g, 0.0)
+        i_mid = np.maximum(nco_ice + 0.5 * dt_step * k1i, 0.0)
+        k2g, k2i, n_ice_act_max_q, n_ice_act_q, R_pd_q = _rhs(g_mid, i_mid)
+        nco_gas = np.maximum(nco_gas + dt_step * k2g, 0.0)
+        nco_ice = np.maximum(nco_ice + dt_step * k2i, 0.0)
+
+        n_ice_act_max_last = n_ice_act_max_q
+        n_ice_act_last = n_ice_act_q
+        R_pd_last = R_pd_q
+
+        t += dt_step
+        n_steps += 1
 
     nco_gas_q = Quantity(nco_gas, 'cm^-3')
     nco_ice_q = Quantity(nco_ice, 'cm^-3')
     X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), 'dimensionless')
 
-    return X_co, nco_gas_q, nco_ice_q, k_pd, tau_pd
+    diag = {
+        'n_ice_act_max': n_ice_act_max_last,
+        'n_ice_act': n_ice_act_last,
+        'k_pd_surf': k_pd_surf,
+        'R_pd': R_pd_last,
+    }
+
+    return X_co, nco_gas_q, nco_ice_q, k_pd, tau_pd, diag

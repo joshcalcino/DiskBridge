@@ -255,13 +255,16 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     """
     nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
 
-    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd = solve_co_two_phase_steady_state(
+    sigma_d_per_H = rad.ensure_sigma_d_per_H()
+
+    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = solve_co_two_phase_steady_state(
         nH=nH,
         T=Tdust,
         chi=chi,
         theta_co=theta_co,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form,
+        sigma_d_per_H=sigma_d_per_H,
     )
 
     nCplus, nC, ne, nco_total = _run_carbon_closure(
@@ -280,6 +283,11 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         nco_total=nco_total,
         check_h=False,
         check_c=True,
+        check_pd=True,
+        n_ice_act_max=diag.get('n_ice_act_max'),
+        n_ice_act=diag.get('n_ice_act'),
+        k_pd_surf=diag.get('k_pd_surf'),
+        R_pd=diag.get('R_pd'),
     )
     
     return ChemistryResult(
@@ -292,7 +300,15 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
             'c': nC,
             'e': ne,
         },
-        fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
+        fields={
+            'k_diss_co': k_pd,
+            'tau_diss_co': tau_pd,
+            'theta_co': theta_co,
+            'n_ice_act_max': diag.get('n_ice_act_max'),
+            'n_ice_act': diag.get('n_ice_act'),
+            'k_pd_surf': diag.get('k_pd_surf'),
+            'R_pd': diag.get('R_pd'),
+        },
         meta={'model': 'co_two_phase'},
     )
 
@@ -337,7 +353,9 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     
     nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
 
-    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
+    sigma_d_per_H = rad.ensure_sigma_d_per_H()
+
+    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = evolve_co_two_phase_time_dependent(
         nH=nH,
         T=Tdust,
         chi=chi,
@@ -345,6 +363,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         t_end=t_end,
         Xco_tot=float(Xco_tot),
         tau_form=tau_form,
+        sigma_d_per_H=sigma_d_per_H,
         Xco_gas_init=Xco_gas_init,
         Xco_ice_init=Xco_ice_init,
         dt=dt,
@@ -366,6 +385,11 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         nco_total=nco_total,
         check_h=False,
         check_c=True,
+        check_pd=True,
+        n_ice_act_max=diag.get('n_ice_act_max'),
+        n_ice_act=diag.get('n_ice_act'),
+        k_pd_surf=diag.get('k_pd_surf'),
+        R_pd=diag.get('R_pd'),
     )
     
     return ChemistryResult(
@@ -378,7 +402,15 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
             'c': nC,
             'e': ne,
         },
-        fields={'k_diss_co': k_pd, 'tau_diss_co': tau_pd, 'theta_co': theta_co},
+        fields={
+            'k_diss_co': k_pd,
+            'tau_diss_co': tau_pd,
+            'theta_co': theta_co,
+            'n_ice_act_max': diag.get('n_ice_act_max'),
+            'n_ice_act': diag.get('n_ice_act'),
+            'k_pd_surf': diag.get('k_pd_surf'),
+            'R_pd': diag.get('R_pd'),
+        },
         meta={'model': 'co_two_phase'},
     )
 
