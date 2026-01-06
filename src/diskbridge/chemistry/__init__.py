@@ -120,9 +120,10 @@ def evolve_co_time_dependent_infall_age(
     """
     from diskbridge.chemistry.shielding.uv_boundary import find_uv_boundary_radius
     from diskbridge.chemistry.tracers import compute_chem_age
-    from diskbridge.chemistry.models.co_two_phase import compute_boundary_co_ic
+    from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
+    from diskbridge.chemistry.models.carbon_reduced import compute_boundary_co_ic
     from diskbridge.chemistry.tau_form import compute_tau_form_co
-    from diskbridge.chemistry.models._co_two_phase_math import evolve_co_two_phase_time_dependent
+    from diskbridge.chemistry.models._carbon_reduced_math import evolve_carbon_reduced_time_dependent
     logger.info("=" * 60)
     logger.info("CO two-phase with infall age workflow")
     logger.info("=" * 60)
@@ -130,6 +131,8 @@ def evolve_co_time_dependent_infall_age(
     T = rad.ensure_temperature()
     nH = rad.ensure_nH()
     chi = rad.ensure_chi()
+
+    ensure_h2_partition(rad, nH=nH, chi_dust=chi)
     
     if skip_shielding:
         theta_co = Quantity(np.ones_like(chi.magnitude), "dimensionless")
@@ -146,7 +149,7 @@ def evolve_co_time_dependent_infall_age(
                 chi=chi,
                 visser=visser,
                 nCO=None,
-                nH2=None,
+                nH2=rad.nH2,
                 nside=int(nside),
                 b_kms=float(b_kms),
                 Xco_guess=float(Xco_tot),
@@ -223,7 +226,7 @@ def evolve_co_time_dependent_infall_age(
     else:
         tau_form_shell = tau_form_use
     
-    _, nco_gas_shell, nco_ice_shell, _, _ = evolve_co_two_phase_time_dependent(
+    _, nco_gas_shell, nco_ice_shell, _, _ = evolve_carbon_reduced_time_dependent(
         nH=nH_shell,
         T=T_shell,
         chi=chi_shell,
@@ -268,7 +271,7 @@ def evolve_co_time_dependent_infall_age(
     Xco_ice_init = np.full_like(nH_cm3, Xco_ice0, dtype=float)
     
     logger.info("Running time-dependent CO chemistry...")
-    X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_co_two_phase_time_dependent(
+    X_co, nco_gas, nco_ice, k_pd, tau_pd = evolve_carbon_reduced_time_dependent(
         nH=nH,
         T=T,
         chi=chi,

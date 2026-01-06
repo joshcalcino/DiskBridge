@@ -15,9 +15,10 @@ from diskbridge._constants import (
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.models._co_two_phase_math import (
-    solve_co_two_phase_steady_state,
-    evolve_co_two_phase_time_dependent,
+from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
+from diskbridge.chemistry.models._carbon_reduced_math import (
+    solve_carbon_reduced_steady_state,
+    evolve_carbon_reduced_time_dependent,
 )
 from diskbridge.chemistry.tau_form import compute_tau_form_co
 from diskbridge.chemistry.validation import validate_chemistry_state
@@ -126,14 +127,20 @@ def _carbon_closure(
     return nCplus, nC, ne
 
 
-def _resolve_tau_form(rad: 'RadModel', *, config: dict, nH: Quantity) -> Quantity:
+def _resolve_tau_form(
+    rad: 'RadModel',
+    *,
+    config: dict,
+    nH: Quantity,
+    nH2: Quantity,
+) -> Quantity:
     if 'tau_form' in config:
         return config['tau_form']
 
     model = str(diskbridge.params.co_tau_form_model).lower()
     if model == "density_capped":
         return compute_tau_form_co(
-            nH=nH,
+            nH2=nH2,
             n0=Quantity(TAU_FORM_N0, 'cm^-3'),
             tau0=Quantity(TAU_FORM_TAU0, 's'),
             tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
@@ -144,42 +151,33 @@ def _resolve_tau_form(rad: 'RadModel', *, config: dict, nH: Quantity) -> Quantit
     raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
 
 
-def _resolve_theta_co(
-    rad: 'RadModel',
+def _compute_co_shielding(
     *,
+    rad: 'RadModel',
     nH: Quantity,
     chi: Quantity,
-    Xco_tot: float,
-    skip_shielding: bool,
+    nCO: Quantity,
+    nH2: Quantity,
     nside: int,
     b_kms: float,
-) -> Quantity:
-    if skip_shielding:
-        return Quantity(np.ones_like(chi.magnitude), 'dimensionless')
+) -> tuple[Quantity, Quantity]:
+    from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+    from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
-    if rad.theta_co is None:
-        from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
-        from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-
-        visser = VisserShielding(b_kms=float(b_kms))
-        theta_co, chi_eff = compute_co_shielding_healpix(
-            mesh=rad.model.mesh,
-            nH=nH,
-            chi=chi,
-            visser=visser,
-            nCO=None,
-            nH2=rad.nH2,
-            nside=int(nside),
-            b_kms=float(b_kms),
-            Xco_guess=float(Xco_tot),
-            XH2_guess=0.5,
-            progress_chunks=None,
-        )
-        rad.theta_co = theta_co
-        rad.chi_eff = chi_eff
-        return theta_co
-
-    return rad.theta_co
+    visser = VisserShielding(b_kms=float(b_kms))
+    theta_co, chi_eff = compute_co_shielding_healpix(
+        mesh=rad.model.mesh,
+        nH=nH,
+        chi=chi,
+        visser=visser,
+        nCO=nCO,
+        nH2=nH2,
+        nside=int(nside),
+        b_kms=float(b_kms),
+        progress_chunks=None,
+        cache_dir=None,
+    )
+    return theta_co, chi_eff
 
 
 def _run_carbon_closure(
@@ -208,29 +206,24 @@ def _run_carbon_closure(
     return nCplus, nC, ne, nco_total
 
 
-def _prepare_common(rad: 'RadModel', config: dict) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity, float]:
+def _prepare_common(
+    rad: 'RadModel',
+    config: dict,
+) -> tuple[Quantity, Quantity, Quantity, Quantity, float, bool, int, float, int]:
     Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
     skip_shielding = bool(config.get('skip_shielding', False))
     nside = int(config.get('nside', 4))
     b_kms = float(config.get('b_kms', 0.3))
+    shielding_iter = int(config.get('shielding_iter', 1))
 
     nH = rad.ensure_nH()
-    tau_form = _resolve_tau_form(rad, config=config, nH=nH)
-
     Tdust = rad.ensure_dust_temperature()
     chi = rad.ensure_chi()
 
-    theta_co = _resolve_theta_co(
-        rad,
-        nH=nH,
-        chi=chi,
-        Xco_tot=float(Xco_tot),
-        skip_shielding=skip_shielding,
-        nside=nside,
-        b_kms=b_kms,
-    )
+    ensure_h2_partition(rad, nH=nH, chi_dust=chi)
+    tau_form = _resolve_tau_form(rad, config=config, nH=nH, nH2=rad.nH2)
 
-    return nH, Tdust, chi, theta_co, tau_form, Xco_tot
+    return nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter
 
 
 def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
@@ -253,19 +246,49 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     ChemistryResult
         Result with abundances, number_densities, and diagnostic fields
     """
-    nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
+    nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
-    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = solve_co_two_phase_steady_state(
-        nH=nH,
-        T=Tdust,
-        chi=chi,
-        theta_co=theta_co,
-        Xco_tot=float(Xco_tot),
-        tau_form=tau_form,
-        sigma_d_per_H=sigma_d_per_H,
-    )
+    nco_guess = Quantity(float(Xco_tot) * nH.to('cm^-3').magnitude, 'cm^-3')
+    if getattr(rad, 'nco_gas', None) is not None:
+        nco_guess = rad.nco_gas
+
+    theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
+    chi_eff = chi
+    diag = {}
+    k_pd = None
+    tau_pd = None
+    Xco_gas = None
+    nco_gas = None
+    nco_ice = None
+
+    if bool(skip_shielding):
+        shielding_iter = 0
+
+    for k in range(int(shielding_iter) + 1):
+        if not bool(skip_shielding):
+            theta_co, chi_eff = _compute_co_shielding(
+                rad=rad,
+                nH=nH,
+                chi=chi,
+                nCO=nco_guess,
+                nH2=rad.nH2,
+                nside=nside,
+                b_kms=b_kms,
+            )
+
+        Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = solve_carbon_reduced_steady_state(
+            nH=nH,
+            T=Tdust,
+            chi=chi,
+            theta_co=theta_co,
+            Xco_tot=float(Xco_tot),
+            tau_form=tau_form,
+            sigma_d_per_H=sigma_d_per_H,
+        )
+
+        nco_guess = nco_gas
 
     nCplus, nC, ne, nco_total = _run_carbon_closure(
         rad=rad,
@@ -278,10 +301,12 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
 
     validate_chemistry_state(
         nH=nH,
+        nH2=rad.nH2,
+        nHI=rad.nH_atom,
         nC=nC,
         nCplus=nCplus,
         nco_total=nco_total,
-        check_h=False,
+        check_h=True,
         check_c=True,
         check_pd=True,
         n_ice_act_max=diag.get('n_ice_act_max'),
@@ -290,26 +315,38 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         R_pd=diag.get('R_pd'),
     )
     
+    rad.nco_gas = nco_gas
+    rad.nco_ice = nco_ice
+    rad.theta_co = theta_co
+    rad.chi_eff = chi_eff
+    rad.k_diss_co = k_pd
+    rad.tau_diss_co = tau_pd
+    rad.nCplus = nCplus
+    rad.nC = nC
+    rad.ne = ne
+
     return ChemistryResult(
         abundances={'co': Xco_gas},
         number_densities={
-            'co_gas': nco_gas,
-            'co_ice': nco_ice,
             'co': nco_gas,
-            'cplus': nCplus,
-            'c': nC,
+            'h2': rad.nH2,
+            'h': rad.nH_atom,
             'e': ne,
+            'c+': nCplus,
+            'catom': nC,
         },
         fields={
             'k_diss_co': k_pd,
             'tau_diss_co': tau_pd,
             'theta_co': theta_co,
+            'chi_eff': chi_eff,
+            'co_ice': nco_ice,
             'n_ice_act_max': diag.get('n_ice_act_max'),
             'n_ice_act': diag.get('n_ice_act'),
             'k_pd_surf': diag.get('k_pd_surf'),
             'R_pd': diag.get('R_pd'),
         },
-        meta={'model': 'co_two_phase'},
+        meta={'model': 'carbon_reduced'},
     )
 
 
@@ -350,12 +387,33 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     Xco_ice_init = config.get('Xco_ice_init', None)
     if Xco_ice_init is not None and hasattr(Xco_ice_init, 'magnitude'):
         Xco_ice_init = Xco_ice_init.magnitude
-    
-    nH, Tdust, chi, theta_co, tau_form, Xco_tot = _prepare_common(rad, config)
+
+    nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+
+    if int(shielding_iter) != 0:
+        raise ValueError("shielding_iter must be 0 for time-dependent carbon_reduced")
+
+    if bool(skip_shielding):
+        theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
+        chi_eff = chi
+    else:
+        nco_guess = Quantity(float(Xco_tot) * nH.to('cm^-3').magnitude, 'cm^-3')
+        if getattr(rad, 'nco_gas', None) is not None:
+            nco_guess = rad.nco_gas
+
+        theta_co, chi_eff = _compute_co_shielding(
+            rad=rad,
+            nH=nH,
+            chi=chi,
+            nCO=nco_guess,
+            nH2=rad.nH2,
+            nside=nside,
+            b_kms=b_kms,
+        )
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
-    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = evolve_co_two_phase_time_dependent(
+    Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = evolve_carbon_reduced_time_dependent(
         nH=nH,
         T=Tdust,
         chi=chi,
@@ -380,10 +438,12 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
 
     validate_chemistry_state(
         nH=nH,
+        nH2=rad.nH2,
+        nHI=rad.nH_atom,
         nC=nC,
         nCplus=nCplus,
         nco_total=nco_total,
-        check_h=False,
+        check_h=True,
         check_c=True,
         check_pd=True,
         n_ice_act_max=diag.get('n_ice_act_max'),
@@ -391,27 +451,39 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         k_pd_surf=diag.get('k_pd_surf'),
         R_pd=diag.get('R_pd'),
     )
-    
+
+    rad.nco_gas = nco_gas
+    rad.nco_ice = nco_ice
+    rad.theta_co = theta_co
+    rad.chi_eff = chi_eff
+    rad.k_diss_co = k_pd
+    rad.tau_diss_co = tau_pd
+    rad.nCplus = nCplus
+    rad.nC = nC
+    rad.ne = ne
+
     return ChemistryResult(
         abundances={'co': Xco_gas},
         number_densities={
-            'co_gas': nco_gas,
-            'co_ice': nco_ice,
             'co': nco_gas,
-            'cplus': nCplus,
-            'c': nC,
+            'h2': rad.nH2,
+            'h': rad.nH_atom,
             'e': ne,
+            'c+': nCplus,
+            'catom': nC,
         },
         fields={
             'k_diss_co': k_pd,
             'tau_diss_co': tau_pd,
             'theta_co': theta_co,
+            'chi_eff': chi_eff,
+            'co_ice': nco_ice,
             'n_ice_act_max': diag.get('n_ice_act_max'),
             'n_ice_act': diag.get('n_ice_act'),
             'k_pd_surf': diag.get('k_pd_surf'),
             'R_pd': diag.get('R_pd'),
         },
-        meta={'model': 'co_two_phase'},
+        meta={'model': 'carbon_reduced'},
     )
 
 
@@ -503,17 +575,11 @@ def compute_boundary_co_ic(
     else:
         nH_cm3 = nH
     
-    nco_gas = result.number_densities['co_gas']
-    if hasattr(nco_gas, 'magnitude'):
-        nco_gas_cm3 = nco_gas.to('cm^-3').magnitude
-    else:
-        nco_gas_cm3 = nco_gas
-    
-    nco_ice = result.number_densities['co_ice']
-    if hasattr(nco_ice, 'magnitude'):
-        nco_ice_cm3 = nco_ice.to('cm^-3').magnitude
-    else:
-        nco_ice_cm3 = nco_ice
+    nco_gas = result.number_densities['co']
+    nco_gas_cm3 = nco_gas.to('cm^-3').magnitude
+
+    nco_ice = result.fields['co_ice']
+    nco_ice_cm3 = nco_ice.to('cm^-3').magnitude
     
     xco_gas = nco_gas_cm3 / (nH_cm3 + 1e-99)
     xco_ice = nco_ice_cm3 / (nH_cm3 + 1e-99)
@@ -536,12 +602,12 @@ def compute_boundary_co_ic(
     return xco_gas0, xco_ice0
 
 
-def run_co_two_phase(rad: 'RadModel', config: dict) -> ChemistryResult:
+def run_carbon_reduced(rad: 'RadModel', config: dict) -> ChemistryResult:
     if 't_end' in config:
         return run_time_dependent(rad, config)
     return run_steady(rad, config)
 
 
 __all__ = [
-    'run_co_two_phase',
+    'run_carbon_reduced',
 ]

@@ -63,7 +63,7 @@ def run_coupled_thermochemistry_example(rad, disc_mask):
     
     chem_result, therm_result = run_thermochemistry(
         rad,
-        chemistry_model="co_two_phase",
+        chemistry_model="carbon_reduced",
         chemistry_config={
             "Xco_tot": 1e-4,
             "nside": 4,
@@ -80,7 +80,7 @@ def run_coupled_thermochemistry_example(rad, disc_mask):
     )
     
     print("\nCoupled Thermochemistry Results:")
-    print(f"  CO gas: {chem_result.number_densities['co_gas'].to('cm^-3').magnitude.max():.2e} cm^-3")
+    print(f"  CO gas: {chem_result.number_densities['co'].to('cm^-3').magnitude.max():.2e} cm^-3")
     print(f"  Tgas: {therm_result.tgas.to('K').magnitude.min():.1f} - "
           f"{therm_result.tgas.to('K').magnitude.max():.1f} K")
     

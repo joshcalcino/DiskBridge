@@ -16,7 +16,7 @@ M_CO_CGS = 28.0 * M_H
 
 
 @dataclass(frozen=True)
-class CoTwoPhaseRates:
+class CarbonReducedRates:
     k_pd: Quantity
     k_fo: Quantity
     k_td: Quantity
@@ -105,7 +105,7 @@ def co_photodesorption_sink(
     )
 
 
-def compute_co_two_phase_rates(
+def compute_carbon_reduced_rates(
     *,
     nH: Quantity,
     T: Quantity,
@@ -113,7 +113,7 @@ def compute_co_two_phase_rates(
     theta_co: Optional[Quantity],
     sigma_d_per_H: Quantity,
     min_rate: float = 1.0e-30,
-) -> CoTwoPhaseRates:
+) -> CarbonReducedRates:
     """Compute all CO two-phase chemistry rates using constants from config."""
     k_pd, tau_pd = compute_co_photodissociation_rate(
         chi=chi,
@@ -124,10 +124,10 @@ def compute_co_two_phase_rates(
     k_fo = co_freezeout_rate(T, nH, sigma_d_per_H)
     k_td = co_thermal_desorption_rate(T)
     k_pd_surf = co_photodesorption_rate_surface(chi)
-    return CoTwoPhaseRates(k_pd=k_pd, k_fo=k_fo, k_td=k_td, k_pd_surf=k_pd_surf, tau_pd=tau_pd)
+    return CarbonReducedRates(k_pd=k_pd, k_fo=k_fo, k_td=k_td, k_pd_surf=k_pd_surf, tau_pd=tau_pd)
 
 
-def solve_co_two_phase_steady_state(
+def solve_carbon_reduced_steady_state(
     *,
     nH: Quantity,
     T: Quantity,
@@ -138,8 +138,8 @@ def solve_co_two_phase_steady_state(
     sigma_d_per_H: Quantity,
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
-    """Solve steady-state CO two-phase chemistry using constants from config."""
-    rates = compute_co_two_phase_rates(
+    """Solve steady-state CO chemistry using an analytic reduced model."""
+    rates = compute_carbon_reduced_rates(
         nH=nH,
         T=T,
         chi=chi,
@@ -162,64 +162,58 @@ def solve_co_two_phase_steady_state(
     k_td_s = k_td.to('1/s').magnitude
     k_pd_s = k_pd.to('1/s').magnitude
 
-    nco_gas = nco_max.copy()
-    nco_ice = np.zeros_like(nco_gas)
+    k_pd_surf_s = k_pd_surf.to('1/s').magnitude
 
-    t_end_s = np.maximum(tau_s, 0.0)
-    dt_step = 0.05 * tau_s
-    dt_step = np.maximum(dt_step, 0.0)
+    # Surface-active ice cap, i_max (cm^-3)
+    n_ice_act_max = (
+        sigma_d_per_H.to('cm^2').magnitude
+        * nH.to('cm^-3').magnitude
+        * N_SURF
+        * float(N_LAY)
+    )
 
-    n_steps = 20
-    if np.ndim(tau_s) != 0:
-        tau_med = float(np.median(tau_s))
-        if tau_med > 0.0:
-            dt_step = 0.05 * tau_med
-        else:
-            dt_step = 0.0
-    else:
-        dt_step = float(dt_step)
+    # Thin-ice regime: R_pd = k_surf * i
+    denom_thin = (k_td_s + k_pd_surf_s)
+    a = np.where(denom_thin > 0.0, k_fo_s / denom_thin, 0.0)
+    denom_g_thin = 1.0 + tau_s * k_pd_s + a
+    g_thin = np.where(denom_g_thin > 0.0, nco_max / denom_g_thin, 0.0)
+    g_thin = np.clip(g_thin, 0.0, nco_max)
+    i_thin = a * g_thin
+    i_thin = np.maximum(i_thin, 0.0)
 
-    if dt_step <= 0.0:
-        dt_step = float(np.max(tau_s)) if np.ndim(tau_s) != 0 else float(tau_s)
-        dt_step = max(dt_step, 1.0)
+    # Thick-ice regime: R_pd saturates at k_surf * i_max
+    R0 = k_pd_surf_s * n_ice_act_max
+    denom_g_thick = 1.0 + tau_s * k_pd_s + np.where(k_td_s > 0.0, (k_fo_s / k_td_s), 0.0)
+    numer_g_thick = nco_max + np.where(k_td_s > 0.0, (R0 / k_td_s), 0.0)
+    g_thick = np.where(denom_g_thick > 0.0, numer_g_thick / denom_g_thick, 0.0)
+    g_thick = np.clip(g_thick, 0.0, nco_max)
+    i_thick = np.where(k_td_s > 0.0, (k_fo_s * g_thick - R0) / k_td_s, 0.0)
+    i_thick = np.maximum(i_thick, 0.0)
 
-    def _rhs(nco_g, nco_i):
-        R_form = (nco_max - nco_g - nco_i) / tau_s
-        nco_ice_q = Quantity(nco_i, 'cm^-3')
-        n_ice_act_max, n_ice_act, _, R_pd_q = co_photodesorption_sink(
-            nH=nH,
-            nco_ice=nco_ice_q,
-            sigma_d_per_H=sigma_d_per_H,
-            k_pd_surf=k_pd_surf,
-        )
-        R_pd = R_pd_q.to('cm^-3/s').magnitude
+    use_thin = i_thin < n_ice_act_max
+    nco_gas = np.where(use_thin, g_thin, g_thick)
+    nco_ice = np.where(use_thin, i_thin, i_thick)
 
-        dnco_g_dt = (
-            R_form
-            + k_td_s * nco_i
-            + R_pd
-            - k_fo_s * nco_g
-            - k_pd_s * nco_g
-        )
-        dnco_i_dt = k_fo_s * nco_g - k_td_s * nco_i - R_pd
-        return dnco_g_dt, dnco_i_dt, n_ice_act_max, n_ice_act, R_pd_q
+    nco_total = nco_gas + nco_ice
+    excess = nco_total - nco_max
+    if np.any(excess > 0.0):
+        # Clamp by reducing ice (preferred) then gas if needed.
+        reduce_ice = np.minimum(nco_ice, excess)
+        nco_ice = nco_ice - reduce_ice
+        excess2 = excess - reduce_ice
+        nco_gas = np.maximum(nco_gas - excess2, 0.0)
 
-    for _ in range(n_steps):
-        dt = dt_step
-        k1g, k1i, n_ice_act_max, n_ice_act, R_pd_q = _rhs(nco_gas, nco_ice)
-        g_mid = np.maximum(nco_gas + 0.5 * dt * k1g, 0.0)
-        i_mid = np.maximum(nco_ice + 0.5 * dt * k1i, 0.0)
-        k2g, k2i, n_ice_act_max, n_ice_act, R_pd_q = _rhs(g_mid, i_mid)
-        nco_gas = np.maximum(nco_gas + dt * k2g, 0.0)
-        nco_ice = np.maximum(nco_ice + dt * k2i, 0.0)
+    n_ice_act = np.minimum(nco_ice, n_ice_act_max)
+    R_pd = k_pd_surf_s * n_ice_act
+    R_pd_q = Quantity(R_pd, 'cm^-3/s')
 
     nco_gas_q = Quantity(nco_gas, 'cm^-3')
     nco_ice_q = Quantity(nco_ice, 'cm^-3')
     X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), 'dimensionless')
 
     diag = {
-        'n_ice_act_max': n_ice_act_max,
-        'n_ice_act': n_ice_act,
+        'n_ice_act_max': Quantity(n_ice_act_max, 'cm^-3'),
+        'n_ice_act': Quantity(n_ice_act, 'cm^-3'),
         'k_pd_surf': k_pd_surf,
         'R_pd': R_pd_q,
     }
@@ -227,7 +221,7 @@ def solve_co_two_phase_steady_state(
     return X_co, nco_gas_q, nco_ice_q, k_pd, tau_pd, diag
 
 
-def evolve_co_two_phase_time_dependent(
+def evolve_carbon_reduced_time_dependent(
     *,
     nH: Quantity,
     T: Quantity,
@@ -243,7 +237,7 @@ def evolve_co_two_phase_time_dependent(
     min_rate: float = 1.0e-30,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
     """Evolve CO two-phase chemistry using constants from config."""
-    rates = compute_co_two_phase_rates(
+    rates = compute_carbon_reduced_rates(
         nH=nH,
         T=T,
         chi=chi,

@@ -142,7 +142,7 @@ def run_thermochemistry(
     ... )
     """
     from diskbridge.chemistry.thermal import run_thermal
-    from diskbridge.chemistry.hydrogen.partition import compute_h2_partition
+    from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
     
     if chemistry_config is None:
         chemistry_config = {}
@@ -159,12 +159,7 @@ def run_thermochemistry(
     chi_dust = rad.chi if rad.chi is not None else rad.ensure_chi()
     nH = rad.ensure_nH()
 
-    rad.nH2, rad.nH_atom = compute_h2_partition(
-        rad=rad,
-        mesh=rad.model.mesh,
-        nH=nH,
-        chi_dust=chi_dust,
-    )
+    ensure_h2_partition(rad, nH=nH, chi_dust=chi_dust)
 
     enable_convergence = convergence is not None
     if enable_convergence:
@@ -204,18 +199,19 @@ def run_thermochemistry(
         )
         
         if chem_result.number_densities:
-            if "co_gas" in chem_result.number_densities:
-                rad.nco_gas = chem_result.number_densities["co_gas"]
-            if "co_ice" in chem_result.number_densities:
-                rad.nco_ice = chem_result.number_densities["co_ice"]
-            # Store carbon closure products from chemistry
-            if "cplus" in chem_result.number_densities:
-                rad.nCplus = chem_result.number_densities["cplus"]
-            if "c" in chem_result.number_densities:
-                rad.nC = chem_result.number_densities["c"]
+            if "co" in chem_result.number_densities:
+                rad.nco_gas = chem_result.number_densities["co"]
+            if "c+" in chem_result.number_densities:
+                rad.nCplus = chem_result.number_densities["c+"]
+            if "catom" in chem_result.number_densities:
+                rad.nC = chem_result.number_densities["catom"]
             if "e" in chem_result.number_densities:
                 rad.ne = chem_result.number_densities["e"]
-        
+
+        if chem_result.fields:
+            if "co_ice" in chem_result.fields:
+                rad.nco_ice = chem_result.fields["co_ice"]
+
         logger.info("Step 2: Thermal balance")
         therm_result = run_thermal(
             rad,
