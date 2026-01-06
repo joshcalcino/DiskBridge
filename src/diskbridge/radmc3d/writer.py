@@ -20,6 +20,7 @@ from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 import diskbridge
 from .opacities import DustOpacityCalculator
+from diskbridge.model.utils import transpose_to_axis_order
 
 # Physical constants from config
 G_CGS = units('G')
@@ -362,8 +363,8 @@ class RadWriter:
         """Write binary dust density file.
         
         RADMC-3D expects data in (nsec, ncol, nrad) order for spherical grids.
-        DiskBridge stores data in (r, phi, theta) = (nrad, nsec, ncol) order.
-        We need to transpose before writing.
+        DiskBridge stores fields in the canonical mesh.axis_names() order.
+        We reorder explicitly via Field.axis_order before writing.
         """
         with open(filepath, 'wb') as f:
             # Header: format_number, precision(8=double), ncells, nbin
@@ -374,14 +375,22 @@ class RadWriter:
             for ibin in range(nbin):
                 bin_data = self.model.dust.bins[f"bin_{ibin}"]
                 rho_field = bin_data['density']  # Field object
-                rho_cgs = rho_field.data.to_base_units()
-                
-                # Transpose from DiskBridge order (nrad, nsec, ncol) 
-                # to RADMC-3D order (nsec, ncol, nrad)
-                if rho_field.axis_order == ('r', 'phi', 'theta'):
-                    rho_cgs = np.transpose(rho_cgs, (1, 2, 0))  # (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-                
-                rho_cgs.flatten().astype(np.float64).tofile(f)
+                rho_cgs = rho_field.data.to_base_units().magnitude
+
+                if self.model.mesh is None:
+                    raise ValueError("Model has no mesh defined")
+                if self.model.mesh.coord_system != 'spherical':
+                    raise ValueError(
+                        f"dust density writer supports spherical only, got {self.model.mesh.coord_system}"
+                    )
+
+                rho_out = transpose_to_axis_order(
+                    np.asarray(rho_cgs),
+                    from_order=rho_field.axis_order,
+                    to_order=('phi', 'theta', 'r'),
+                )
+
+                rho_out.flatten().astype(np.float64).tofile(f)
     
     def _write_dust_density_ascii(
         self,
@@ -392,8 +401,8 @@ class RadWriter:
         """Write ASCII dust density file.
         
         RADMC-3D expects data in (nsec, ncol, nrad) order for spherical grids.
-        DiskBridge stores data in (r, phi, theta) = (nrad, nsec, ncol) order.
-        We need to transpose before writing.
+        DiskBridge stores fields in the canonical mesh.axis_names() order.
+        We reorder explicitly via Field.axis_order before writing.
         """
         with open(filepath, 'w') as f:
             # Header
@@ -405,14 +414,22 @@ class RadWriter:
             for ibin in range(nbin):
                 bin_data = self.model.dust.bins[f"bin_{ibin}"]
                 rho_field = bin_data['density']  # Field object
-                rho_cgs = rho_field.data.to_base_units()
-                
-                # Transpose from DiskBridge order (nrad, nsec, ncol) 
-                # to RADMC-3D order (nsec, ncol, nrad)
-                if rho_field.axis_order == ('r', 'phi', 'theta'):
-                    rho_cgs = np.transpose(rho_cgs, (1, 2, 0))  # (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-                
-                rho_flat = rho_cgs.flatten()
+                rho_cgs = rho_field.data.to_base_units().magnitude
+
+                if self.model.mesh is None:
+                    raise ValueError("Model has no mesh defined")
+                if self.model.mesh.coord_system != 'spherical':
+                    raise ValueError(
+                        f"dust density writer supports spherical only, got {self.model.mesh.coord_system}"
+                    )
+
+                rho_out = transpose_to_axis_order(
+                    np.asarray(rho_cgs),
+                    from_order=rho_field.axis_order,
+                    to_order=('phi', 'theta', 'r'),
+                )
+
+                rho_flat = rho_out.flatten()
                 for val in rho_flat:
                     f.write(f'{val:13.6e}\n')
     
@@ -858,25 +875,29 @@ class RadWriter:
         
         RADMC-3D expects cells in the same order as the grid.
         For spherical grids, cells are ordered as (nsec, ncol, nrad) = (phi, theta, r).
-        DiskBridge stores data in (r, phi, theta) order, so we transpose before writing.
+        DiskBridge stores fields in the canonical mesh.axis_names() order.
+        We reorder explicitly before writing.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         fpath = output_dir / 'gas_temperature.inp'
         
-        temp = temperature.to('K')
-        
-        # Transpose from DiskBridge order to RADMC-3D order
-        # This matches the approach used in write_dust_density and write_gas_velocity
+        temp = temperature.to('K').magnitude
+
         mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
         if mesh.coord_system == 'spherical':
-            # DiskBridge: (r, phi, theta) = (nrad, nsec, ncol)
-            # RADMC-3D:   (phi, theta, r) = (nsec, ncol, nrad)
-            # Transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-            temp = np.transpose(temp, (1, 2, 0))
+            temp = transpose_to_axis_order(
+                np.asarray(temp),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+        elif mesh.coord_system != 'cartesian':
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
         
         # Flatten in C order (row-major) to match RADMC-3D cell ordering
-        temp_flat = temp.flatten()
+        temp_flat = np.asarray(temp).flatten()
         ncells = temp_flat.size
         
         logger.info(f"Writing gas temperature to {fpath}: {ncells} cells, "
@@ -908,7 +929,11 @@ class RadWriter:
             raise ValueError('Model has no mesh defined')
 
         if mesh.coord_system == 'spherical':
-            n_dens = np.transpose(n_dens, (2, 1, 0))
+            n_dens = transpose_to_axis_order(
+                np.asarray(n_dens),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
         elif mesh.coord_system != 'cartesian':
             raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
 
@@ -963,7 +988,8 @@ class RadWriter:
         
         RADMC-3D expects velocities in cell order matching the grid.
         For spherical grids, cells are ordered as (nsec, ncol, nrad) = (phi, theta, r).
-        DiskBridge stores data in (r, phi, theta) order, so we transpose before writing.
+        DiskBridge stores fields in the canonical mesh.axis_names() order.
+        We reorder explicitly before writing.
         """
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'gas')
@@ -976,13 +1002,26 @@ class RadWriter:
         # Transpose from DiskBridge order to RADMC-3D order
         # This matches the approach used in write_dust_density
         mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
         if mesh.coord_system == 'spherical':
-            # DiskBridge: (r, phi, theta) = (nrad, nsec, ncol)
-            # RADMC-3D:   (phi, theta, r) = (nsec, ncol, nrad)
-            # Transpose: (nrad, nsec, ncol) -> (nsec, ncol, nrad)
-            vr_cgs = np.transpose(vr_cgs, (1, 2, 0))
-            vtheta_cgs = np.transpose(vtheta_cgs, (1, 2, 0))
-            vphi_cgs = np.transpose(vphi_cgs, (1, 2, 0))
+            vr_cgs = transpose_to_axis_order(
+                np.asarray(vr_cgs),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+            vtheta_cgs = transpose_to_axis_order(
+                np.asarray(vtheta_cgs),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+            vphi_cgs = transpose_to_axis_order(
+                np.asarray(vphi_cgs),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+        elif mesh.coord_system != 'cartesian':
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
         
         # Flatten in C order (row-major) to match RADMC-3D cell ordering
         vr_flat = vr_cgs.flatten()

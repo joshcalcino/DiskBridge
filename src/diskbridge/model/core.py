@@ -318,6 +318,7 @@ class Model:
         self,
         mask_array: np.ndarray,
         is_a_disk: bool = False,
+        axis_order: Optional[tuple[str, ...]] = None,
     ) -> SubModel:
         """Define a masked region from a custom boolean array.
         
@@ -345,24 +346,25 @@ class Model:
             target_region = SubModel(self)
         
         # Verify shape
-        expected_shape = (
-            len(mesh.axes['r'].centers),
-            len(mesh.axes['phi'].centers),
-            len(mesh.axes['theta'].centers)
-        )
-        
+        canonical = mesh.axis_names()
+        provided = canonical if axis_order is None else axis_order
+        expected_shape = tuple(mesh.ncell(a) for a in provided)
+
         if mask_array.shape != expected_shape:
             raise ValueError(
-                f"Mask shape {mask_array.shape} doesn't match grid shape {expected_shape}"
+                f"Mask shape {mask_array.shape} doesn't match grid shape {expected_shape} for axis_order={provided}"
             )
-        
-        axis_order = ('r', 'phi', 'theta')
+
+        if provided != canonical:
+            from .utils import transpose_to_axis_order
+
+            mask_array = transpose_to_axis_order(mask_array, provided, canonical)
         
         mask_quantity = Quantity(mask_array.astype(bool), 'dimensionless')
         mask_field = Field(
             data=mask_quantity,
             quantity='mask',
-            axis_order=axis_order,
+            axis_order=canonical,
         )
         
         target_region.mask = mask_field

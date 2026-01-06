@@ -160,7 +160,7 @@ class SegmentedRadmcRunner:
         mesh = self.base_model.mesh
         if mesh is None:
             raise ValueError("Base model has no mesh")
-        axis_order = ('r', 'phi', 'theta') if mesh.coord_system == 'spherical' else mesh.axis_names()
+        axis_order = mesh.axis_names()
 
         segments: list[dict[str, Any]] = []
         split_radii_au: list[float] = []
@@ -265,6 +265,8 @@ class SegmentedRadmcRunner:
                 Field(quantity='chi', data=merged_chi, axis_order=axis_order),
             )
 
+            self.base_model.validate_canonical_axis_orders(include_dust=False)
+
             r_au, chi_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'chi')
             _, T_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'temperature')
             r_edges_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
@@ -345,6 +347,8 @@ class SegmentedRadmcRunner:
             'chi',
             Field(quantity='chi', data=merged_chi, axis_order=axis_order),
         )
+
+        self.base_model.validate_canonical_axis_orders(include_dust=False)
 
         logger.info(
             f"Segmented RT complete. splits={len(split_radii_au)} max_splits={max_splits}"

@@ -10,11 +10,12 @@ dataset from DiskBridge Model and RadModel objects. It handles:
 
 Data Shape Conventions:
 -----------------------
-- DiskBridge Model: (nr, nphi, ntheta) with axis_order ('r', 'phi', 'theta')
-- RADMC-3D/RadData: (nr, ntheta, nphi) - RADMC-3D native order  
+- DiskBridge Model: stored in mesh.axis_names() (canonical in-memory order)
+- RADMC-3D/RadData: (nr, ntheta, nphi) - RADMC-3D native order
 - yt spherical: (nr, ntheta, nphi) - same as RADMC-3D
 
-When loading data, Model fields are transposed to match yt/RADMC-3D order.
+When loading data, Model fields are reordered explicitly using Field.axis_order
+metadata to match yt/RADMC-3D order.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import yt
 from yt.loaders import load_uniform_grid
 
 from .units import pint_to_unyt_cgs
+from diskbridge.model.utils import field_data_as_order
 
 
 class DiskBridgeDataset:
@@ -137,21 +139,13 @@ class DiskBridgeDataset:
         
         return r_edges, theta_edges, phi_edges, shape
     
-    def _transpose_model_to_yt(self, data: np.ndarray) -> np.ndarray:
-        """Transpose Model data from (r, phi, theta) to yt order (r, theta, phi).
-        
-        Parameters
-        ----------
-        data : ndarray
-            Data array in DiskBridge order (nr, nphi, ntheta)
-            
-        Returns
-        -------
-        ndarray
-            Data array in yt order (nr, ntheta, nphi)
-        """
-        # (nr, nphi, ntheta) -> (nr, ntheta, nphi)
-        return np.transpose(data, (0, 2, 1))
+    def _field_to_yt_cgs(self, field) -> np.ndarray:
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh defined")
+        yt_order = ('r', 'theta', 'phi')
+        data = field_data_as_order(field, yt_order)
+        return data.to_base_units().magnitude
     
     def _collect_fields(self) -> Dict[str, np.ndarray]:
         """Collect all field data from Model and RadModel.
@@ -167,16 +161,8 @@ class DiskBridgeDataset:
         if hasattr(self.model, 'gas') and self.model.gas is not None:
             for field_name in self.model.gas.keys():
                 field = self.model.gas[field_name]
-                data = field.data
-                
-                # Convert Pint to numpy array in CGS
-                if hasattr(data, 'magnitude'):
-                    data_cgs = data.to_base_units().magnitude
-                else:
-                    data_cgs = np.asarray(data)
-                
-                # Transpose from (r, phi, theta) to (r, theta, phi)
-                data_yt = self._transpose_model_to_yt(data_cgs)
+
+                data_yt = self._field_to_yt_cgs(field)
                 
                 # Map field names to yt conventions
                 yt_field_name = self._map_field_name(field_name)
@@ -227,8 +213,7 @@ class DiskBridgeDataset:
                     total_dust = None
                     for i in range(dust.nbin):
                         bin_field = dust._compute_bin_density(i)
-                        bin_data = bin_field.data.to_base_units().magnitude
-                        bin_yt = self._transpose_model_to_yt(bin_data)
+                        bin_yt = self._field_to_yt_cgs(bin_field)
                         
                         if total_dust is None:
                             total_dust = bin_yt.copy()
