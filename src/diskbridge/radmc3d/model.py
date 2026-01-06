@@ -327,13 +327,7 @@ class RadModel:
         rho_gas = self.model.gas['density'].data.to('g/cm^3')
         MU_HNUC = 1.4
         nH = rho_gas / (MU_HNUC * M_H)
-        
-        field = self.model.gas['density']
-        if hasattr(field, 'axis_order'):
-            axis_order = field.axis_order
-            if axis_order == ('r', 'phi', 'theta'):
-                nH = np.transpose(nH, (0, 2, 1))
-        
+
         self.nH = nH.to('cm^-3')
         
         logger.info(f"Computed nH from gas density: "
@@ -345,19 +339,48 @@ class RadModel:
         if self.model.dust is None:
             raise RuntimeError("Model has no dust submodel; cannot compute sigma_d_per_H")
 
-        nH = self.ensure_nH().to('cm^-3')
-        nH_cm3 = nH.magnitude
+        def _transpose_to_axis_order(
+            arr: np.ndarray,
+            source_axis_order: tuple[str, ...],
+            target_axis_order: tuple[str, ...],
+        ) -> np.ndarray:
+            if source_axis_order == target_axis_order:
+                return arr
+            perm = tuple(source_axis_order.index(ax) for ax in target_axis_order)
+            return np.transpose(arr, perm)
 
-        axis_order = None
         if 'density' in self.model.gas:
-            axis_order = self.model.gas['density'].axis_order
+            target_axis_order = self.model.gas['density'].axis_order
         else:
-            axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+            target_axis_order = (
+                ('r', 'phi', 'theta')
+                if self.model.mesh.coord_system == 'spherical'
+                else self.model.mesh.axis_names()
+            )
+
+        mesh = self.model.mesh
+        expected_shape = tuple(mesh.ncell(a) for a in target_axis_order)
+
+        nH = self.ensure_nH().to('cm^-3')
+        nH_cm3 = np.asarray(nH.magnitude)
+        if tuple(nH_cm3.shape) != expected_shape:
+            if (
+                mesh.coord_system == 'spherical'
+                and target_axis_order == ('r', 'phi', 'theta')
+                and tuple(nH_cm3.shape) == (mesh.ncell('r'), mesh.ncell('theta'), mesh.ncell('phi'))
+            ):
+                nH_cm3 = np.transpose(nH_cm3, (0, 2, 1))
+            else:
+                raise ValueError(
+                    f"nH shape {tuple(nH_cm3.shape)} does not match expected {expected_shape} "
+                    f"for axis_order={target_axis_order}"
+                )
 
         A_d = None
         for i in range(self.model.dust.nbin):
             bin_obj = self.model.dust[f'bin_{i}']
-            rho_d_i = bin_obj['density'].data.to('g/cm^3')
+            dust_density_field = bin_obj['density']
+            rho_d_i = dust_density_field.data.to('g/cm^3')
             a_i = bin_obj.size.to('cm').magnitude
             rho_s = bin_obj.density_material.to('g/cm^3').magnitude
 
@@ -366,7 +389,19 @@ class RadModel:
             if float(rho_s) <= 0.0:
                 raise ValueError(f"Dust bin {i} has non-positive material density rho_s={rho_s}")
 
-            A_i = (3.0 * rho_d_i.magnitude) / (4.0 * float(a_i) * float(rho_s))
+            rho_arr = np.asarray(rho_d_i.magnitude)
+            rho_arr = _transpose_to_axis_order(
+                rho_arr,
+                source_axis_order=dust_density_field.axis_order,
+                target_axis_order=target_axis_order,
+            )
+            if tuple(rho_arr.shape) != expected_shape:
+                raise ValueError(
+                    f"dust bin {i} density shape {tuple(rho_arr.shape)} does not match expected {expected_shape} "
+                    f"after transpose to axis_order={target_axis_order}"
+                )
+
+            A_i = (3.0 * rho_arr) / (4.0 * float(a_i) * float(rho_s))
             if A_d is None:
                 A_d = np.asarray(A_i, dtype=float)
             else:
@@ -375,7 +410,7 @@ class RadModel:
         if A_d is None:
             raise RuntimeError("No dust bins available to compute sigma_d_per_H")
 
-        sigma = A_d / (nH_cm3 + 1.0e-99)
+        sigma = np.divide(A_d, nH_cm3, out=np.zeros_like(A_d), where=(nH_cm3 > 0.0))
         sigma_q = Quantity(sigma, 'cm^2')
 
         self.model.gas_register(
@@ -383,7 +418,7 @@ class RadModel:
             Field(
                 quantity='sigma_d_per_H',
                 data=sigma_q,
-                axis_order=axis_order,
+                axis_order=target_axis_order,
             ),
         )
         return sigma_q
