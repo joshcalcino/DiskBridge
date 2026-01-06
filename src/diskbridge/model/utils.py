@@ -1,6 +1,7 @@
 import numpy as np
 from .mesh import Mesh
 from .field import Field
+from diskbridge._units import Quantity
 
 
 def validate_field_against_mesh(field: Field, mesh: Mesh) -> None:
@@ -15,3 +16,23 @@ def validate_field_against_mesh(field: Field, mesh: Mesh) -> None:
         raise ValueError(
             f"{field.quantity}: data shape {actual} != expected {expected} for {field.axis_order}"
         )
+
+
+def transpose_to_axis_order(
+    arr: np.ndarray,
+    from_order: tuple[str, ...],
+    to_order: tuple[str, ...],
+) -> np.ndarray:
+    if from_order == to_order:
+        return arr
+    if set(from_order) != set(to_order):
+        raise ValueError(f"Cannot reorder {from_order} -> {to_order}: different axis sets")
+    perm = tuple(from_order.index(ax) for ax in to_order)
+    return np.transpose(arr, perm)
+
+
+def field_data_as_order(field: Field, to_order: tuple[str, ...]) -> Quantity:
+    data = field.data
+    arr = np.asarray(data.magnitude)
+    out = transpose_to_axis_order(arr, field.axis_order, to_order)
+    return Quantity(out, str(data.units))

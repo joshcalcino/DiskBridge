@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge.model.field import Field
+from diskbridge.model.utils import field_data_as_order
 from .data import RadData
 from .cache import should_use_cache, find_cached_output
 from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperature_symlink
@@ -335,52 +336,25 @@ class RadModel:
         
         return self.nH
 
+    def _chem_axis_order(self) -> Tuple[str, ...]:
+        if 'density' in self.model.gas:
+            return self.model.gas['density'].axis_order
+        return self.model.mesh.axis_names()
+
     def compute_sigma_d_per_H_from_dust(self) -> Quantity:
         if self.model.dust is None:
             raise RuntimeError("Model has no dust submodel; cannot compute sigma_d_per_H")
 
-        def _transpose_to_axis_order(
-            arr: np.ndarray,
-            source_axis_order: tuple[str, ...],
-            target_axis_order: tuple[str, ...],
-        ) -> np.ndarray:
-            if source_axis_order == target_axis_order:
-                return arr
-            perm = tuple(source_axis_order.index(ax) for ax in target_axis_order)
-            return np.transpose(arr, perm)
-
-        if 'density' in self.model.gas:
-            target_axis_order = self.model.gas['density'].axis_order
-        else:
-            target_axis_order = (
-                ('r', 'phi', 'theta')
-                if self.model.mesh.coord_system == 'spherical'
-                else self.model.mesh.axis_names()
-            )
-
-        mesh = self.model.mesh
-        expected_shape = tuple(mesh.ncell(a) for a in target_axis_order)
+        target = self._chem_axis_order()
 
         nH = self.ensure_nH().to('cm^-3')
         nH_cm3 = np.asarray(nH.magnitude)
-        if tuple(nH_cm3.shape) != expected_shape:
-            if (
-                mesh.coord_system == 'spherical'
-                and target_axis_order == ('r', 'phi', 'theta')
-                and tuple(nH_cm3.shape) == (mesh.ncell('r'), mesh.ncell('theta'), mesh.ncell('phi'))
-            ):
-                nH_cm3 = np.transpose(nH_cm3, (0, 2, 1))
-            else:
-                raise ValueError(
-                    f"nH shape {tuple(nH_cm3.shape)} does not match expected {expected_shape} "
-                    f"for axis_order={target_axis_order}"
-                )
 
         A_d = None
         for i in range(self.model.dust.nbin):
             bin_obj = self.model.dust[f'bin_{i}']
             dust_density_field = bin_obj['density']
-            rho_d_i = dust_density_field.data.to('g/cm^3')
+            rho_d_i = field_data_as_order(dust_density_field, target).to('g/cm^3')
             a_i = bin_obj.size.to('cm').magnitude
             rho_s = bin_obj.density_material.to('g/cm^3').magnitude
 
@@ -389,19 +363,8 @@ class RadModel:
             if float(rho_s) <= 0.0:
                 raise ValueError(f"Dust bin {i} has non-positive material density rho_s={rho_s}")
 
-            rho_arr = np.asarray(rho_d_i.magnitude)
-            rho_arr = _transpose_to_axis_order(
-                rho_arr,
-                source_axis_order=dust_density_field.axis_order,
-                target_axis_order=target_axis_order,
-            )
-            if tuple(rho_arr.shape) != expected_shape:
-                raise ValueError(
-                    f"dust bin {i} density shape {tuple(rho_arr.shape)} does not match expected {expected_shape} "
-                    f"after transpose to axis_order={target_axis_order}"
-                )
-
-            A_i = (3.0 * rho_arr) / (4.0 * float(a_i) * float(rho_s))
+            rho = np.asarray(rho_d_i.magnitude)
+            A_i = (3.0 * rho) / (4.0 * float(a_i) * float(rho_s))
             if A_d is None:
                 A_d = np.asarray(A_i, dtype=float)
             else:
@@ -418,14 +381,17 @@ class RadModel:
             Field(
                 quantity='sigma_d_per_H',
                 data=sigma_q,
-                axis_order=target_axis_order,
+                axis_order=target,
             ),
         )
         return sigma_q
 
     def ensure_sigma_d_per_H(self, force: bool = False) -> Quantity:
+        target = self._chem_axis_order()
+
         if (not force) and ('sigma_d_per_H' in self.model.gas):
-            return self.model.gas['sigma_d_per_H'].data
+            f = self.model.gas['sigma_d_per_H']
+            return field_data_as_order(f, target).to('cm^2')
 
         return self.compute_sigma_d_per_H_from_dust()
     
