@@ -679,7 +679,7 @@ class Dust(SubModel):
             # Broadcast Omega_K to match c_s shape 
             phi = mesh.centers('phi')
             theta = mesh.centers('theta')
-            Omega_K = np.meshgrid(Omega_K_1d, phi, theta, indexing='ij')[0]
+            Omega_K = np.meshgrid(Omega_K_1d, theta, phi, indexing='ij')[0]
             
             # Scale height (3D array)
             H = c_s / Omega_K
@@ -808,7 +808,7 @@ class Dust(SubModel):
         theta_edges = mesh.edges('theta')
         
         # Create 3D grids
-        r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing='ij')
+        r_grid, theta_grid, phi_grid = np.meshgrid(r, theta, phi, indexing='ij')
         
         # Compute cylindrical coordinates for each spherical cell
         z_cyl = r_grid * np.cos(theta_grid)
@@ -817,8 +817,8 @@ class Dust(SubModel):
         theta_mid_idx = np.argmin(np.abs(theta.to("radian") - np.pi/2))
         
         # Get midplane properties
-        rho_g0 = gas_density.data[:, :, theta_mid_idx]
-        T0 = gas_temp[:, :, theta_mid_idx]
+        rho_g0 = gas_density.data[:, theta_mid_idx, :]
+        T0 = gas_temp[:, theta_mid_idx, :]
         
         # Get stellar mass
         M_star = units('solar_mass')
@@ -852,9 +852,10 @@ class Dust(SubModel):
         delta = component.delta
         H_d0 = H_g0 * np.sqrt(delta / (St0 + delta))
         
-        # Expand to 3D (H_d is function of r only, constant in theta)
+        # Expand to 3D (midplane values expanded over theta)
         n_theta = len(theta)
-        H_d = np.broadcast_to(H_d0[:, :, None], (*H_d0.shape, n_theta))
+        n_phi = len(phi)
+        H_d = np.broadcast_to(H_d0[:, None, :], (H_d0.shape[0], n_theta, n_phi))
         
         # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
         expo = (-(z_cyl**2) / (2 * H_d**2)).to("dimensionless").magnitude
@@ -866,12 +867,12 @@ class Dust(SubModel):
         # profile, and is useful for inspecting the raw behaviour.
 
         dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
-        prefactor = dust_to_gas_local * (H_g0[:, :, None] / H_d)
-        dust_density_data = rho_g0[:, :, None] * prefactor * vertical_profile
+        prefactor = dust_to_gas_local * (H_g0[:, None, :] / H_d)
+        dust_density_data = rho_g0[:, None, :] * prefactor * vertical_profile
 
         # Apply mask if set
         if component.mask is not None:
-            mask_array = component.mask.data.astype(bool)
+            mask_array = component.mask.data.magnitude.astype(bool)
             dust_density_data = dust_density_data * mask_array
 
         # Ensure numerical stability
@@ -923,7 +924,24 @@ class Dust(SubModel):
             name: Field name
             field: Field object
         """
-        self._dust_fields[name] = field
+        from .utils import validate_field_against_mesh, field_data_as_order
+
+        validate_field_against_mesh(field, self.mesh)  # type: ignore[arg-type]
+        target = self.mesh.axis_names()  # type: ignore[union-attr]
+        if field.axis_order != target:
+            logger.warning(
+                "dust.register canonicalizing field '%s' axis_order %s -> %s",
+                name,
+                field.axis_order,
+                target,
+            )
+        data = field_data_as_order(field, target)
+        self._dust_fields[name] = Field(
+            quantity=field.quantity,
+            data=data,
+            axis_order=target,
+            attrs=field.attrs,
+        )
         
     def __getitem__(self, key: str):
         """Access dust fields or bins by name.

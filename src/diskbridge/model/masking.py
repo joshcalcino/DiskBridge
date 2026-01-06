@@ -513,7 +513,7 @@ def set_mask_from_geometry(
     theta = mesh.centers('theta')
     phi = mesh.centers('phi')
     
-    r_grid, phi_grid, theta_grid = spherical_grids(r, phi, theta)
+    r_grid, theta_grid, phi_grid = spherical_grids(r, theta, phi)
     
     mask = np.ones_like(r_grid, dtype=bool)
     
@@ -539,7 +539,7 @@ def set_mask_from_geometry(
     if theta_max is not None:
         mask &= (theta_grid <= theta_max)
     
-    axis_order = ('r', 'phi', 'theta')
+    axis_order = mesh.axis_names()
     
     mask_quantity = Quantity(mask, 'dimensionless')
     mask_field = Field(

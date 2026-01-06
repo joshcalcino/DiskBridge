@@ -15,8 +15,8 @@ from diskbridge._units import Quantity
 
 def spherical_grids(
     r: Quantity,
-    phi: Quantity,
     theta: Quantity,
+    phi: Quantity,
 ) -> Tuple[Quantity, Quantity, Quantity]:
     """Create 3D meshgrids for spherical coordinates.
     
@@ -43,9 +43,9 @@ def spherical_grids(
     Uses indexing='ij' for consistent axis ordering.
     Numpy meshgrid works directly with Quantity objects.
     """
-    r_grid, phi_grid, theta_grid = np.meshgrid(r, phi, theta, indexing="ij")
-    
-    return r_grid, phi_grid, theta_grid
+    r_grid, theta_grid, phi_grid = np.meshgrid(r, theta, phi, indexing="ij")
+
+    return r_grid, theta_grid, phi_grid
 
 
 def cylindrical_from_spherical(

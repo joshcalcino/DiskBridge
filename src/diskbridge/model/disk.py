@@ -209,11 +209,11 @@ class Disk(SubModel):
         theta_sph = sph_mesh.centers("theta")
         phi_sph = sph_mesh.centers("phi")
 
-        r_grid, phi_grid, theta_grid = spherical_grids(r_sph, phi_sph, theta_sph)
+        r_grid, theta_grid, phi_grid = spherical_grids(r_sph, theta_sph, phi_sph)
         R_cyl, z_cyl = cylindrical_from_spherical(r_grid, theta_grid)
 
         H = scale_height(R_cyl, h0, r0, fl)
-        Sigma_3d = Sigma[:, :, None] * np.ones(len(theta_sph))
+        Sigma_3d = Sigma[:, None, :] * np.ones(len(theta_sph))[None, :, None]
         
         rho_3d = rho_gaussian_from_sigma(Sigma_3d, z_cyl, H)
 
@@ -225,17 +225,17 @@ class Disk(SubModel):
         vphi_sph = None
         if "vr" in self.parent.gas:
             vr_2d = self.parent.gas["vr"].data
-            vr_sph = vr_2d[:, :, None] * np.ones(ntheta)
+            vr_sph = vr_2d[:, None, :] * np.ones(ntheta)[None, :, None]
         if "vphi" in self.parent.gas:
             vphi_2d = self.parent.gas["vphi"].data
-            vphi_sph = vphi_2d[:, :, None] * np.ones(ntheta)
+            vphi_sph = vphi_2d[:, None, :] * np.ones(ntheta)[None, :, None]
 
         vunit = None
         if "vr" in self.parent.gas:
             vunit = getattr(self.parent.gas["vr"].data, "units", None)
         elif "vphi" in self.parent.gas:
             vunit = getattr(self.parent.gas["vphi"].data, "units", None)
-        vtheta = np.zeros((nr, nphi, ntheta))
+        vtheta = np.zeros((nr, ntheta, nphi))
         if vunit is not None:
             vtheta = vtheta * vunit
 
@@ -246,12 +246,13 @@ class Disk(SubModel):
         self.coord_system = "spherical"
 
         self.parent.gas.clear()
+        axis_order = self.parent.mesh.axis_names()
         self.parent.gas_register(
             "density",
             Field(
                 quantity="density",
                 data=rho_3d,
-                axis_order=("r", "phi", "theta"),
+                axis_order=axis_order,
             ),
         )
         if vr_sph is not None:
@@ -260,7 +261,7 @@ class Disk(SubModel):
                 Field(
                     quantity="vr",
                     data=vr_sph,
-                    axis_order=("r", "phi", "theta"),
+                    axis_order=axis_order,
                 ),
             )
         if vphi_sph is not None:
@@ -269,7 +270,7 @@ class Disk(SubModel):
                 Field(
                     quantity="vphi",
                     data=vphi_sph,
-                    axis_order=("r", "phi", "theta"),
+                    axis_order=axis_order,
                 ),
             )
         self.parent.gas_register(
@@ -277,7 +278,7 @@ class Disk(SubModel):
             Field(
                 quantity="vtheta",
                 data=vtheta,
-                axis_order=("r", "phi", "theta"),
+                axis_order=axis_order,
             ),
         )
         return self

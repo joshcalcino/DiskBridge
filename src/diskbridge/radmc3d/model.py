@@ -242,8 +242,8 @@ class RadModel:
             Temperature field in Kelvin with shape matching model mesh
         """
         self.gas_temperature = self.data.readGasTemp()
-        
-        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+
+        axis_order = self.model.mesh.axis_names()
         self.model.gas_register(
             'gas_temperature',
             Field(
@@ -272,10 +272,7 @@ class RadModel:
         """
         self.dust_temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
 
-        if self.model.mesh.coord_system == 'spherical':
-            self.dust_temperature = np.transpose(self.dust_temperature, (0, 2, 1))
-
-        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+        axis_order = self.model.mesh.axis_names()
         self.model.gas_register(
             'dust_temperature',
             Field(
@@ -551,14 +548,11 @@ class RadModel:
         nu_sorted = nu_uv[sort_idx]
         u_nu_sorted = u_nu[:, sort_idx]
 
-        u_band = np.trapz(u_nu_sorted, nu_sorted, axis=1)
+        u_band = np.trapezoid(u_nu_sorted, nu_sorted, axis=1)
 
         chi_flat = (u_band / u_draine).to('dimensionless')
 
         chi_3d = chi_flat.reshape(mesh_shape, order='F')
-
-        if self.model.mesh.coord_system == 'spherical':
-            chi_3d = np.transpose(chi_3d, (0, 2, 1))
 
         return chi_3d, int(np.count_nonzero(uv_mask))
     
@@ -587,7 +581,7 @@ class RadModel:
         )
         self.chi = chi_3d
         
-        axis_order = ('r', 'phi', 'theta') if self.model.mesh.coord_system == 'spherical' else self.model.mesh.axis_names()
+        axis_order = self.model.mesh.axis_names()
         self.model.gas_register(
             'chi',
             Field(

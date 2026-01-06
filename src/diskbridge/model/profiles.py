@@ -21,7 +21,7 @@ def compute_cell_volumes(model: "Model") -> np.ndarray:
     dcos_theta = np.cos(theta_edges[:-1].magnitude) - np.cos(theta_edges[1:].magnitude)
     dphi = np.diff(phi_edges.magnitude)
 
-    volumes = (dr3[:, None, None] * dphi[None, :, None] * dcos_theta[None, None, :]).magnitude
+    volumes = (dr3[:, None, None] * dcos_theta[None, :, None] * dphi[None, None, :]).magnitude
     return volumes
 
 
@@ -48,26 +48,16 @@ def compute_volume_weighted_mean_radial_profile(
     axis_order = getattr(field, 'axis_order', None)
     if axis_order is None:
         raise ValueError(f"Field '{field_name}' is missing axis_order")
-    if axis_order[0] != 'r':
+    if axis_order != mesh.axis_names():
         raise ValueError(
-            f"Field '{field_name}' has unsupported axis_order={axis_order}; expected 'r' as first axis"
+            f"Field '{field_name}' has axis_order={axis_order}; expected canonical {mesh.axis_names()}"
         )
 
     nr, _, _ = data.shape
-    volumes = compute_cell_volumes(model)
-    if axis_order == ('r', 'phi', 'theta'):
-        volumes_use = volumes
-    elif axis_order == ('r', 'theta', 'phi'):
-        volumes_use = volumes.transpose((0, 2, 1))
-    else:
-        raise ValueError(
-            f"Field '{field_name}' has unsupported axis_order={axis_order}; "
-            "expected ('r','phi','theta') or ('r','theta','phi')"
-        )
+    volumes_use = compute_cell_volumes(model)
     if volumes_use.shape != data.shape:
         raise ValueError(
-            f"Field '{field_name}' data shape {data.shape} does not match volume shape {volumes_use.shape} "
-            f"for axis_order={axis_order}"
+            f"Field '{field_name}' data shape {data.shape} does not match volume shape {volumes_use.shape}"
         )
 
     profile = np.zeros(nr)

@@ -8,7 +8,7 @@ from .mesh import Mesh, Axis
 from .field import Field
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
-from .utils import validate_field_against_mesh
+from .utils import validate_field_against_mesh, field_data_as_order
 from .clipping import compute_clip_indexer
 
 if TYPE_CHECKING:
@@ -42,10 +42,64 @@ class Model:
     def gas_register(self, name: str, field: Field) -> None:
         # validate against the model's single mesh
         validate_field_against_mesh(field, self.mesh)  # type: ignore[arg-type]
-        self.gas.register(name, field)
+        target = self.mesh.axis_names()  # type: ignore[union-attr]
+        if field.axis_order != target:
+            logger.warning(
+                "gas_register canonicalizing field '%s' axis_order %s -> %s",
+                name,
+                field.axis_order,
+                target,
+            )
+        data = field_data_as_order(field, target)
+        self.gas.register(
+            name,
+            Field(
+                quantity=field.quantity,
+                data=data,
+                axis_order=target,
+                attrs=field.attrs,
+            ),
+        )
 
     def gas_register_lazy(self, name: str, builder: Callable[[], Field]) -> None:
-        self.gas.register_lazy(name, builder)
+        def _builder() -> Field:
+            field = builder()
+            validate_field_against_mesh(field, self.mesh)  # type: ignore[arg-type]
+            target = self.mesh.axis_names()  # type: ignore[union-attr]
+            if field.axis_order != target:
+                logger.warning(
+                    "gas_register_lazy canonicalizing field '%s' axis_order %s -> %s",
+                    name,
+                    field.axis_order,
+                    target,
+                )
+            data = field_data_as_order(field, target)
+            return Field(
+                quantity=field.quantity,
+                data=data,
+                axis_order=target,
+                attrs=field.attrs,
+            )
+
+        self.gas.register_lazy(name, _builder)
+
+    def validate_canonical_axis_orders(self, *, include_dust: bool = True) -> None:
+        target = self.mesh.axis_names()  # type: ignore[union-attr]
+
+        for name, field in list(self.gas.items()):
+            if field.axis_order != target:
+                raise ValueError(
+                    f"gas field '{name}' has axis_order={field.axis_order}; expected {target}"
+                )
+
+        if include_dust and self.dust is not None:
+            dust_fields = getattr(self.dust, '_dust_fields', None)
+            if isinstance(dust_fields, dict):
+                for name, field in list(dust_fields.items()):
+                    if isinstance(field, Field) and field.axis_order != target:
+                        raise ValueError(
+                            f"dust field '{name}' has axis_order={field.axis_order}; expected {target}"
+                        )
 
     def _apply_rescaling(self, length_scale=None, mass_scale=None) -> None:
         """
