@@ -142,7 +142,7 @@ def run_thermochemistry(
     ... )
     """
     from diskbridge.chemistry.thermal import run_thermal
-    from diskbridge.chemistry.shielding.h2_partition import compute_h2_partition
+    from diskbridge.chemistry.hydrogen.partition import compute_h2_partition
     
     if chemistry_config is None:
         chemistry_config = {}

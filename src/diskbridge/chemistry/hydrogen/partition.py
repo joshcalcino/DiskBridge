@@ -12,11 +12,6 @@ from diskbridge._constants import (
     H2P_NSIDE,
     H2P_R_FORM,
 )
-from diskbridge.chemistry.shielding.healpix_columns import (
-    CartesianHealpixRayTracer,
-    SphericalHealpixRayTracer,
-)
-from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
 
 if TYPE_CHECKING:
     from diskbridge.model.mesh import Mesh
@@ -40,6 +35,18 @@ def compute_h2_partition(
     nH: Quantity,
     chi_dust: Quantity,
 ) -> Tuple[Quantity, Quantity]:
+    try:
+        from diskbridge.chemistry.shielding.healpix_columns import (
+            CartesianHealpixRayTracer,
+            SphericalHealpixRayTracer,
+        )
+        from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "H2 partition via HEALPix columns requires optional dependency 'healpy'. "
+            "Install healpy to use compute_h2_partition()."
+        ) from e
+
     nside = H2P_NSIDE
     n_iter = H2P_N_ITER
     R_form = H2P_R_FORM
