@@ -57,7 +57,7 @@ def run_chemistry(
     --------
     >>> res = run_chemistry(
     ...     rad,
-    ...     model="co_two_phase_steady",
+    ...     model="carbon_reduced",
     ...     config=dict(Xco_tot=1e-4, nside=8, b_kms=0.3),
     ...     write=True,
     ... )
@@ -134,7 +134,7 @@ def run_thermochemistry(
     >>> 
     >>> chem, therm = run_thermochemistry(
     ...     rad,
-    ...     chemistry_model="co_two_phase_time",
+    ...     chemistry_model="carbon_reduced",
     ...     chemistry_config={"Xco_tot": 1e-4, "nside": 4},
     ...     thermal_model="thermal_balance_v1",
     ...     thermal_config={"pah_scale": 0.5},

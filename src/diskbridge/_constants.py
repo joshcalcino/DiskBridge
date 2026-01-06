@@ -8,7 +8,7 @@ Constants are organized into sections:
 - Physical constants (from Pint registry)
 - Astronomical constants (from config)
 - Common chemistry parameters (shared across models)
-- Model-specific parameters (pinte_switches, co_two_phase, thermal_balance_v1)
+- Model-specific parameters (pinte_switches, carbon_reduced, thermal_balance_v1)
 
 Users can override defaults by calling diskbridge.load_config(path) before
 importing this module.
@@ -82,7 +82,7 @@ EPS_CHI = float(_pinte['eps_chi'])                            # dimensionless
 # CO TWO-PHASE MODEL
 # =============================================================================
 
-_co2p = _cfg['chemistry']['co_two_phase']
+_co2p = _cfg['chemistry']['carbon_reduced']
 
 TAU_CO_FORM = Quantity(_co2p['tau_co_form']).to_base_units().magnitude  # s
 K0_CO = Quantity(_co2p['k0_co']).to_base_units().magnitude              # s^-1

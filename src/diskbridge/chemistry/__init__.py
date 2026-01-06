@@ -203,14 +203,14 @@ def evolve_co_time_dependent_infall_age(
         model = str(diskbridge.params.co_tau_form_model).lower()
         if model == "density_capped":
             tau_form_use = compute_tau_form_co(
-                nH=nH,
+                nH2=rad.nH2,
                 n0=Quantity(TAU_FORM_N0, 'cm^-3'),
                 tau0=Quantity(TAU_FORM_TAU0, 's'),
                 tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
                 alpha=TAU_FORM_ALPHA,
             )
         elif model == "off":
-            tau_form_use = Quantity(tau_form_default, 's')
+            tau_form_use = Quantity(TAU_CO_FORM, 's')
         else:
             raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
     else:

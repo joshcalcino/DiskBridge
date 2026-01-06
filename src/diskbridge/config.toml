@@ -133,11 +133,11 @@ log_chi_over_nH_pdes = -7.0    # log10(chi/nH) threshold for photodesorption
 eps_chi = 1.0e-99              # Numerical floor for chi/nH ratio
 
 # =============================================================================
-# CO TWO-PHASE MODEL
+# CO REDUCED CARBON MODEL
 # Time-dependent gas-ice partitioning with formation/destruction rates
 # =============================================================================
 
-[chemistry.co_two_phase]
+[chemistry.carbon_reduced]
 tau_co_form = "1.0e5 yr"       # CO formation timescale
 k0_co = "2.0e-10 s^-1"         # Unshielded CO photodissociation rate
 F_DRAINE = "2.0e8 1/(cm^2 s)"  # Draine UV photon flux for chi=1
