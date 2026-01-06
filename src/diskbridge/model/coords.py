@@ -24,19 +24,18 @@ def spherical_grids(
     ----------
     r : Quantity
         Radial coordinate array [length]
-    phi : Quantity
-        Azimuthal coordinate array [angle]
     theta : Quantity
         Polar coordinate array [angle]
+    phi : Quantity
+        Azimuthal coordinate array [angle]
         
     Returns
     -------
     r_grid : Quantity
-        3D radial grid with shape (nr, nphi, ntheta) [length]
-    phi_grid : Quantity
-        3D azimuthal grid with shape (nr, nphi, ntheta) [angle]
     theta_grid : Quantity
-        3D polar grid with shape (nr, nphi, ntheta) [angle]
+        3D polar grid with shape (nr, ntheta, nphi) [angle]
+    phi_grid : Quantity
+        3D azimuthal grid with shape (nr, ntheta, nphi) [angle]
         
     Notes
     -----

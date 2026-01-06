@@ -25,6 +25,8 @@ from diskbridge._logging import logger
 from diskbridge.model.field import Field
 import matplotlib.pyplot as plt
 
+from diskbridge.model.utils import field_data_as_order
+
 from diskbridge.model.profiles import (
     compute_cell_volumes as _compute_cell_volumes,
     compute_volume_weighted_mean_radial_profile as _compute_volume_weighted_mean_radial_profile,
@@ -43,7 +45,7 @@ def azimuthal_average(
     data : ndarray
         3D data array
     axis : int, optional
-        Axis to average over (default: 1, the phi axis in DiskBridge order)
+        Axis to average over (default: 1)
         
     Returns
     -------
@@ -52,10 +54,14 @@ def azimuthal_average(
         
     Notes
     -----
-    For DiskBridge data in (r, phi, theta) order, use axis=1.
-    For yt/RADMC-3D data in (r, theta, phi) order, use axis=2.
+    For spherical data in (r, theta, phi) order, use axis=2.
     """
     return np.mean(data, axis=axis)
+
+
+def _field_to_r_theta_phi_cgs(field: Field) -> np.ndarray:
+    data = field_data_as_order(field, ('r', 'theta', 'phi'))
+    return data.to_base_units().magnitude
 
 
 def compute_radial_profile(
@@ -99,13 +105,11 @@ def compute_radial_profile(
         raise KeyError(f"Field '{field_name}' not found in model.gas")
     
     field = model.gas[field_name]
-    data = field.data
-    if hasattr(data, 'magnitude'):
-        data = data.magnitude
-    
-    # Data is in (r, phi, theta) order
-    # Average over phi (axis 1)
-    data_phi_avg = np.mean(data, axis=1)  # (nr, ntheta)
+    data = _field_to_r_theta_phi_cgs(field)
+
+    # Data is in (r, theta, phi) order
+    # Average over phi (axis 2)
+    data_phi_avg = np.mean(data, axis=2)  # (nr, ntheta)
     
     if theta_idx is not None:
         # Extract at specific theta
@@ -114,10 +118,8 @@ def compute_radial_profile(
         # Average over theta as well
         if weight_field is not None and weight_field in model.gas:
             # Weighted average
-            weight = model.gas[weight_field].data
-            if hasattr(weight, 'magnitude'):
-                weight = weight.magnitude
-            weight_avg = np.mean(weight, axis=1)
+            weight = _field_to_r_theta_phi_cgs(model.gas[weight_field])
+            weight_avg = np.mean(weight, axis=2)
             profile = np.sum(data_phi_avg * weight_avg, axis=1) / np.sum(weight_avg, axis=1)
         else:
             profile = np.mean(data_phi_avg, axis=1)
@@ -186,13 +188,11 @@ def compute_vertical_profile(
         raise KeyError(f"Field '{field_name}' not found in model.gas")
     
     field = model.gas[field_name]
-    data = field.data
-    if hasattr(data, 'magnitude'):
-        data = data.magnitude
-    
-    # Data is in (r, phi, theta) order
+    data = _field_to_r_theta_phi_cgs(field)
+
+    # Data is in (r, theta, phi) order
     # Average over phi
-    data_phi_avg = np.mean(data, axis=1)  # (nr, ntheta)
+    data_phi_avg = np.mean(data, axis=2)  # (nr, ntheta)
     
     # Extract at this radius
     profile = data_phi_avg[r_idx, :]
@@ -214,7 +214,7 @@ def compute_cell_volumes(model: "Model") -> np.ndarray:
     Returns
     -------
     volumes : ndarray
-        Cell volumes in cm^3, shape (nr, nphi, ntheta) matching DiskBridge order
+        Cell volumes in cm^3, shape (nr, ntheta, nphi) matching mesh.axis_names()
     """
     return _compute_cell_volumes(model)
 
@@ -346,12 +346,11 @@ def compute_column_density(
     if field_name not in model.gas:
         raise KeyError(f"Field '{field_name}' not found in model.gas")
     
-    rho = model.gas[field_name].data
-    if hasattr(rho, 'magnitude'):
-        rho = rho.to('g/cm**3').magnitude
-    
-    # Data is in (r, phi, theta) order
-    nr, nphi, ntheta = rho.shape
+    rho_field = model.gas[field_name]
+    rho = _field_to_r_theta_phi_cgs(rho_field)
+
+    # Data is in (r, theta, phi) order
+    nr, ntheta, nphi = rho.shape
     
     if integrate_axis == 'theta':
         # Face-on: integrate along theta (z direction)
@@ -363,7 +362,7 @@ def compute_column_density(
         for i_r in range(nr):
             for i_phi in range(nphi):
                 # Integrate rho * r * dtheta
-                integrand = rho[i_r, i_phi, :] * r[i_r] * dtheta
+                integrand = rho[i_r, :, i_phi] * r[i_r] * dtheta
                 sigma[i_r, i_phi] = np.sum(integrand)
         
         # Azimuthal average
@@ -471,18 +470,11 @@ def plot_phi_avg_rz_slice(
 
     if isinstance(field, str):
         f = model.gas[field]
-        data = f.data
     else:
-        data = field.data
+        f = field
 
-    if hasattr(data, "to"):
-        data_mag = data.to_base_units().magnitude
-    elif hasattr(data, "magnitude"):
-        data_mag = data.magnitude
-    else:
-        data_mag = np.asarray(data)
-
-    data_phi_avg = np.mean(data_mag, axis=1)
+    data_mag = _field_to_r_theta_phi_cgs(f)
+    data_phi_avg = np.mean(data_mag, axis=2)
     r_grid, theta_grid = np.meshgrid(r, theta, indexing="ij")
 
     x_axis_norm = x_axis.strip().lower()
@@ -570,20 +562,17 @@ def plot_small_dust_rz_slice(
     theta = mesh.centers("theta").magnitude
 
     field = model.gas[field_name]
-    data = field.data
-    if hasattr(data, "to"):
-        data = data.to("g/cm**3").magnitude
-    elif hasattr(data, "magnitude"):
-        data = data.magnitude
+    data = _field_to_r_theta_phi_cgs(field)
 
-    # data is (r, phi, theta); average over phi for an axisymmetric slice
-    rho_phi_avg = np.mean(data, axis=1)  # (nr, ntheta)
+    # data is (r, theta, phi); average over phi for an axisymmetric slice
+    rho_phi_avg = np.mean(data, axis=2)  # (nr, ntheta)
 
     # Prepare spherical axes (1D): r has length nr, theta has length ntheta
     r_au = r  # already in au, shape (nr,)
     theta_rad = theta  # shape (ntheta,)
 
-    z_val = np.log10(rho_phi_avg + 1e-99)  # (nr, ntheta)
+    tiny = np.finfo(np.float64).tiny
+    z_val = np.log10(np.maximum(rho_phi_avg, tiny))  # (nr, ntheta)
 
     fig, ax = plt.subplots(figsize=(6, 4))
     # Use 1D axes: X length N (nr), Y length M (ntheta), C shape (M, N) -> transpose
@@ -619,19 +608,16 @@ def plot_small_dust_midplane_map(
     theta_mid_idx = int(np.argmin(np.abs(theta - np.pi / 2.0)))
 
     field = model.gas[field_name]
-    data = field.data
-    if hasattr(data, 'to'):
-        data = data.to('g/cm**3').magnitude
-    elif hasattr(data, 'magnitude'):
-        data = data.magnitude
+    data = _field_to_r_theta_phi_cgs(field)
 
-    # data is (r, phi, theta); extract midplane slice -> (nr, nphi)
-    slice_mid = data[:, :, theta_mid_idx]
+    # data is (r, theta, phi); extract midplane slice -> (nr, nphi)
+    slice_mid = data[:, theta_mid_idx, :]
 
     r_edges = mesh.edges('r').to('au').magnitude
     phi_edges = mesh.edges('phi').magnitude
 
-    z = np.log10(slice_mid + 1e-99)
+    tiny = np.finfo(np.float64).tiny
+    z = np.log10(np.maximum(slice_mid, tiny))
 
     fig, ax = plt.subplots(figsize=(6, 4))
     pc = ax.pcolormesh(r_edges, phi_edges, z.T, shading='auto')
@@ -668,20 +654,14 @@ def plot_midplane_xy_map(
 
     if isinstance(field, str):
         f = model.gas[field]
-        data = f.data
         title = field
     else:
-        data = field.data
+        f = field
         title = field.quantity
 
-    if hasattr(data, "to"):
-        data_mag = data.to_base_units().magnitude
-    elif hasattr(data, "magnitude"):
-        data_mag = data.magnitude
-    else:
-        data_mag = np.asarray(data)
+    data_mag = _field_to_r_theta_phi_cgs(f)
 
-    slice_mid = data_mag[:, :, theta_mid_idx]
+    slice_mid = data_mag[:, theta_mid_idx, :]
 
     rr, pp = np.meshgrid(r_edges, phi_edges, indexing="ij")
     x = rr * np.cos(pp)
@@ -756,9 +736,7 @@ class ProfilePlotter:
         self.phi = self.mesh.centers('phi').magnitude
         
         # Compute cylindrical coordinates
-        R_grid, phi_grid, theta_grid = np.meshgrid(
-            self.r, self.phi, self.theta, indexing='ij'
-        )
+        R_grid, theta_grid, phi_grid = np.meshgrid(self.r, self.theta, self.phi, indexing='ij')
         self.R_cyl = R_grid * np.sin(theta_grid)
         self.z_cyl = R_grid * np.cos(theta_grid)
     
@@ -918,11 +896,7 @@ class ProfilePlotter:
             fname = field_name if field_name else field_source
             if fname not in self.model.gas:
                 raise KeyError(f"Field '{fname}' not found in model.gas")
-            data = self.model.gas[fname].data
-            if hasattr(data, 'magnitude'):
-                data = data.magnitude
-            # Model data is (r, phi, theta) - average over phi, then transpose
-            data_avg = np.mean(data, axis=1)  # (nr, ntheta)
+            data_avg = np.mean(_field_to_r_theta_phi_cgs(self.model.gas[fname]), axis=2)  # (nr, ntheta)
         
         # Compute R and z grids
         r_grid, theta_grid = np.meshgrid(self.r, self.theta, indexing='ij')
