@@ -475,7 +475,8 @@ def compute_co_shielding_healpix(
     XH2_guess: float = 0.5,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
-) -> Tuple[Quantity, Quantity]:
+    return_quantity: bool = True,
+) -> Tuple[Quantity, Quantity] | Tuple[np.ndarray, np.ndarray]:
     """
     Compute CO self-shielding using HEALPix rays + Visser+09 tables.
 
@@ -564,9 +565,11 @@ def compute_co_shielding_healpix(
                 f"(computed in {metadata.get('compute_time_s', '?')}s)"
                 if metadata else "Loaded healpix results from cache"
             )
-            theta_co_q = Quantity(theta_co_cached, "dimensionless")
-            chi_eff_q = Quantity(chi_eff_cached, "dimensionless")
-            return theta_co_q, chi_eff_q
+            if return_quantity:
+                theta_co_q = Quantity(theta_co_cached, "dimensionless")
+                chi_eff_q = Quantity(chi_eff_cached, "dimensionless")
+                return theta_co_q, chi_eff_q
+            return theta_co_cached, chi_eff_cached
 
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
@@ -601,9 +604,11 @@ def compute_co_shielding_healpix(
     if n_candidates == 0:
         logger.info("No candidate cells to process.")
         chi_eff = chi_arr * theta_co
-        theta_co_q = Quantity(theta_co, "dimensionless")
-        chi_eff_q = Quantity(chi_eff, "dimensionless")
-        return theta_co_q, chi_eff_q
+        if return_quantity:
+            theta_co_q = Quantity(theta_co, "dimensionless")
+            chi_eff_q = Quantity(chi_eff, "dimensionless")
+            return theta_co_q, chi_eff_q
+        return theta_co, chi_eff
 
     # Prepare cell centers array for Numba
     cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
@@ -685,8 +690,8 @@ def compute_co_shielding_healpix(
         }
         save_healpix_cache(cache_dir, cache_key, theta_co, chi_eff, metadata)
     
-    # Wrap outputs as Quantities
-    theta_co_q = Quantity(theta_co, "dimensionless")
-    chi_eff_q = Quantity(chi_eff, "dimensionless")  # Draine units
-    
-    return theta_co_q, chi_eff_q
+    if return_quantity:
+        theta_co_q = Quantity(theta_co, "dimensionless")
+        chi_eff_q = Quantity(chi_eff, "dimensionless")  # Draine units
+        return theta_co_q, chi_eff_q
+    return theta_co, chi_eff

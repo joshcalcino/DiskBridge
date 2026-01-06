@@ -7,6 +7,22 @@ import numpy as np
 from diskbridge._units import Quantity
 
 
+def compute_tau_form_co_cgs(
+    n_eff_cm3: np.ndarray,
+    *,
+    n0_cm3: float,
+    tau0_s: float,
+    tau_min_s: float,
+    alpha: float,
+) -> np.ndarray:
+    n_eff = np.asarray(n_eff_cm3, dtype=np.float64)
+    if np.any(n_eff <= 0.0):
+        raise ValueError("n_eff_cm3 must be > 0 everywhere to compute a formation timescale")
+
+    tau = float(tau0_s) * np.power(float(n0_cm3) / n_eff, float(alpha))
+    return np.maximum(tau, float(tau_min_s))
+
+
 def compute_tau_form_co(
     *,
     nH: Optional[Quantity] = None,

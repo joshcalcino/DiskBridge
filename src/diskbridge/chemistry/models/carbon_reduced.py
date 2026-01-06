@@ -17,12 +17,20 @@ from diskbridge._constants import (
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
 from diskbridge.chemistry.models._carbon_reduced_math import (
-    solve_carbon_reduced_steady_state,
+    solve_carbon_reduced_steady_state_cgs,
     evolve_carbon_reduced_time_dependent,
 )
-from diskbridge.chemistry.tau_form import compute_tau_form_co
+from diskbridge.chemistry.tau_form import compute_tau_form_co_cgs
 from diskbridge.chemistry.validation import validate_chemistry_state
 from diskbridge._logging import logger
+
+
+def _as_cgs_f64(q: Quantity, unit: str) -> np.ndarray:
+    return np.ascontiguousarray(q.to(unit).magnitude, dtype=np.float64)
+
+
+def _flat_view(a: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(a.reshape(-1), dtype=np.float64)
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -131,23 +139,35 @@ def _resolve_tau_form(
     rad: 'RadModel',
     *,
     config: dict,
-    nH: Quantity,
-    nH2: Quantity,
-) -> Quantity:
+    nH2_cm3: np.ndarray,
+) -> np.ndarray:
     if 'tau_form' in config:
-        return config['tau_form']
+        tau_form = config['tau_form']
+        if isinstance(tau_form, Quantity):
+            tau_arr = _as_cgs_f64(tau_form, 's')
+        else:
+            tau_arr = np.asarray(tau_form, dtype=np.float64)
+
+        if np.ndim(tau_arr) == 0:
+            return np.ascontiguousarray(np.full_like(nH2_cm3, float(tau_arr), dtype=np.float64))
+
+        if np.shape(tau_arr) != np.shape(nH2_cm3):
+            raise ValueError(
+                f"tau_form shape {np.shape(tau_arr)} must match nH2 shape {np.shape(nH2_cm3)}"
+            )
+        return np.ascontiguousarray(tau_arr, dtype=np.float64)
 
     model = str(diskbridge.params.co_tau_form_model).lower()
     if model == "density_capped":
-        return compute_tau_form_co(
-            nH2=nH2,
-            n0=Quantity(TAU_FORM_N0, 'cm^-3'),
-            tau0=Quantity(TAU_FORM_TAU0, 's'),
-            tau_min=Quantity(TAU_FORM_TAU_MIN, 's'),
-            alpha=TAU_FORM_ALPHA,
+        return compute_tau_form_co_cgs(
+            nH2_cm3,
+            n0_cm3=float(TAU_FORM_N0),
+            tau0_s=float(TAU_FORM_TAU0),
+            tau_min_s=float(TAU_FORM_TAU_MIN),
+            alpha=float(TAU_FORM_ALPHA),
         )
     if model == "off":
-        return Quantity(TAU_CO_FORM, 's')
+        return np.ascontiguousarray(np.full_like(nH2_cm3, float(TAU_CO_FORM), dtype=np.float64))
     raise ValueError(f"Unknown co_tau_form_model={diskbridge.params.co_tau_form_model!r}")
 
 
@@ -206,10 +226,51 @@ def _run_carbon_closure(
     return nCplus, nC, ne, nco_total
 
 
+def _carbon_closure_cgs(
+    *,
+    nH_cm3: np.ndarray,
+    chi: np.ndarray,
+    Tg_K: np.ndarray,
+    nco_total_cm3: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from diskbridge._constants import (
+        X_C_TOT as _X_C_TOT,
+        GAMMA_C0 as _GAMMA_C0,
+        ALPHA_REC_C0 as _ALPHA_REC_C0,
+        T_REC_EXP as _T_REC_EXP,
+    )
+
+    nH_flat = _flat_view(nH_cm3)
+    chi_flat = _flat_view(chi)
+    Tg_flat = _flat_view(Tg_K)
+    nco_flat = _flat_view(nco_total_cm3)
+
+    ncells = nH_flat.size
+    nCplus_flat = np.empty(ncells, dtype=np.float64)
+    nC_flat = np.empty(ncells, dtype=np.float64)
+    ne_flat = np.empty(ncells, dtype=np.float64)
+
+    _carbon_closure_kernel(
+        nH_flat,
+        chi_flat,
+        Tg_flat,
+        nco_flat,
+        float(_X_C_TOT),
+        float(_GAMMA_C0),
+        float(_ALPHA_REC_C0),
+        float(_T_REC_EXP),
+        nCplus_flat,
+        nC_flat,
+        ne_flat,
+    )
+
+    return nCplus_flat, nC_flat, ne_flat
+
+
 def _prepare_common(
     rad: 'RadModel',
     config: dict,
-) -> tuple[Quantity, Quantity, Quantity, Quantity, float, bool, int, float, int]:
+) -> tuple[Quantity, Quantity, Quantity, np.ndarray, float, bool, int, float, int]:
     Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
     skip_shielding = bool(config.get('skip_shielding', False))
     nside = int(config.get('nside', 4))
@@ -221,9 +282,10 @@ def _prepare_common(
     chi = rad.ensure_chi()
 
     ensure_h2_partition(rad, nH=nH, chi_dust=chi)
-    tau_form = _resolve_tau_form(rad, config=config, nH=nH, nH2=rad.nH2)
+    nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
+    tau_form_s = _resolve_tau_form(rad, config=config, nH2_cm3=nH2_cm3)
 
-    return nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter
+    return nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter
 
 
 def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
@@ -246,58 +308,132 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     ChemistryResult
         Result with abundances, number_densities, and diagnostic fields
     """
-    nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
-    nco_guess = Quantity(float(Xco_tot) * nH.to('cm^-3').magnitude, 'cm^-3')
-    if getattr(rad, 'nco_gas', None) is not None:
-        nco_guess = rad.nco_gas
+    nH_cm3 = _as_cgs_f64(nH, 'cm^-3')
+    T_K = _as_cgs_f64(Tdust, 'K')
+    chi_dim = _as_cgs_f64(chi, 'dimensionless')
+    sigma_cm2 = _as_cgs_f64(sigma_d_per_H, 'cm^2')
+    nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
+    nH_atom_cm3 = _as_cgs_f64(rad.nH_atom, 'cm^-3')
 
-    theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
-    chi_eff = chi
-    diag = {}
-    k_pd = None
-    tau_pd = None
-    Xco_gas = None
-    nco_gas = None
-    nco_ice = None
+    orig_shape = nH_cm3.shape
+    ncells = nH_cm3.size
+
+    nH_flat = _flat_view(nH_cm3)
+    T_flat = _flat_view(T_K)
+    chi_flat = _flat_view(chi_dim)
+    sigma_flat = _flat_view(sigma_cm2)
+    tau_form_flat = _flat_view(tau_form_s)
+
+    if getattr(rad, 'nco_gas', None) is not None:
+        nco_guess_cm3 = _as_cgs_f64(rad.nco_gas, 'cm^-3')
+    else:
+        nco_guess_cm3 = np.ascontiguousarray(float(Xco_tot) * nH_cm3, dtype=np.float64)
+
+    theta_arr = np.ones_like(nH_cm3, dtype=np.float64)
+    chi_eff_arr = np.ascontiguousarray(chi_dim, dtype=np.float64)
+
+    out_Xco_gas = np.empty(ncells, dtype=np.float64)
+    out_nco_gas = np.empty(ncells, dtype=np.float64)
+    out_nco_ice = np.empty(ncells, dtype=np.float64)
+    out_k_pd = np.empty(ncells, dtype=np.float64)
+    out_tau_pd = np.empty(ncells, dtype=np.float64)
+    out_n_ice_act_max = np.empty(ncells, dtype=np.float64)
+    out_n_ice_act = np.empty(ncells, dtype=np.float64)
+    out_k_pd_surf = np.empty(ncells, dtype=np.float64)
+    out_R_pd = np.empty(ncells, dtype=np.float64)
 
     if bool(skip_shielding):
         shielding_iter = 0
 
-    for k in range(int(shielding_iter) + 1):
+    visser = None
+    compute_co_shielding_healpix = None
+    if not bool(skip_shielding):
+        from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+        from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+
+        visser = VisserShielding(b_kms=float(b_kms))
+        compute_co_shielding_healpix = compute_co_shielding_healpix
+
+    min_rate = float(config.get('min_rate', 0.0))
+
+    for _ in range(int(shielding_iter) + 1):
         if not bool(skip_shielding):
-            theta_co, chi_eff = _compute_co_shielding(
-                rad=rad,
-                nH=nH,
-                chi=chi,
-                nCO=nco_guess,
-                nH2=rad.nH2,
-                nside=nside,
-                b_kms=b_kms,
+            theta_arr, chi_eff_arr = compute_co_shielding_healpix(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_dim,
+                visser=visser,
+                nCO=nco_guess_cm3,
+                nH2=nH2_cm3,
+                nside=int(nside),
+                b_kms=float(b_kms),
+                progress_chunks=None,
+                cache_dir=None,
+                return_quantity=False,
             )
 
-        Xco_gas, nco_gas, nco_ice, k_pd, tau_pd, diag = solve_carbon_reduced_steady_state(
-            nH=nH,
-            T=Tdust,
-            chi=chi,
-            theta_co=theta_co,
-            Xco_tot=float(Xco_tot),
-            tau_form=tau_form,
-            sigma_d_per_H=sigma_d_per_H,
+        theta_flat = _flat_view(theta_arr)
+
+        solve_carbon_reduced_steady_state_cgs(
+            nH_flat,
+            T_flat,
+            chi_flat,
+            theta_flat,
+            tau_form_flat,
+            sigma_flat,
+            float(Xco_tot),
+            min_rate,
+            out_Xco_gas,
+            out_nco_gas,
+            out_nco_ice,
+            out_k_pd,
+            out_tau_pd,
+            out_n_ice_act_max,
+            out_n_ice_act,
+            out_k_pd_surf,
+            out_R_pd,
         )
 
-        nco_guess = nco_gas
+        nco_guess_cm3 = np.ascontiguousarray(out_nco_gas.reshape(orig_shape), dtype=np.float64)
 
-    nCplus, nC, ne, nco_total = _run_carbon_closure(
-        rad=rad,
-        nH=nH,
-        chi=chi,
-        Tdust=Tdust,
-        nco_gas=nco_gas,
-        nco_ice=nco_ice,
+    Xco_gas = Quantity(out_Xco_gas.reshape(orig_shape), 'dimensionless')
+    nco_gas = Quantity(out_nco_gas.reshape(orig_shape), 'cm^-3')
+    nco_ice = Quantity(out_nco_ice.reshape(orig_shape), 'cm^-3')
+    k_pd = Quantity(out_k_pd.reshape(orig_shape), '1/s')
+    tau_pd = Quantity(out_tau_pd.reshape(orig_shape), 's')
+
+    theta_co = Quantity(theta_arr, 'dimensionless')
+    chi_eff = Quantity(chi_eff_arr, 'dimensionless')
+
+    diag = {
+        'n_ice_act_max': Quantity(out_n_ice_act_max.reshape(orig_shape), 'cm^-3'),
+        'n_ice_act': Quantity(out_n_ice_act.reshape(orig_shape), 'cm^-3'),
+        'k_pd_surf': Quantity(out_k_pd_surf.reshape(orig_shape), '1/s'),
+        'R_pd': Quantity(out_R_pd.reshape(orig_shape), 'cm^-3/s'),
+    }
+
+    nco_total_cm3 = out_nco_gas + out_nco_ice
+    if rad.gas_temperature is not None:
+        Tg_K = _as_cgs_f64(rad.gas_temperature, 'K')
+        logger.info("Carbon closure using gas temperature")
+    else:
+        Tg_K = T_K
+        logger.info("Carbon closure using dust temperature (gas T not available)")
+
+    nCplus_flat, nC_flat, ne_flat = _carbon_closure_cgs(
+        nH_cm3=nH_cm3,
+        chi=chi_dim,
+        Tg_K=Tg_K,
+        nco_total_cm3=nco_total_cm3.reshape(orig_shape),
     )
+    nCplus = Quantity(nCplus_flat.reshape(orig_shape), 'cm^-3')
+    nC = Quantity(nC_flat.reshape(orig_shape), 'cm^-3')
+    ne = Quantity(ne_flat.reshape(orig_shape), 'cm^-3')
+    nco_total = Quantity(nco_total_cm3.reshape(orig_shape), 'cm^-3')
 
     validate_chemistry_state(
         nH=nH,
@@ -388,7 +524,8 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     if Xco_ice_init is not None and hasattr(Xco_ice_init, 'magnitude'):
         Xco_ice_init = Xco_ice_init.magnitude
 
-    nH, Tdust, chi, tau_form, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+    tau_form = Quantity(tau_form_s, 's')
 
     if int(shielding_iter) != 0:
         raise ValueError("shielding_iter must be 0 for time-dependent carbon_reduced")

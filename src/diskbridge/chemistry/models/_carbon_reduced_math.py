@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit, prange
 
 from diskbridge._units import Quantity
 from diskbridge._constants import (
@@ -13,6 +14,142 @@ from diskbridge._constants import (
 
 # constant below should probably be in _constants.py 
 M_CO_CGS = 28.0 * M_H
+
+
+@njit(parallel=True, cache=True)
+def solve_carbon_reduced_steady_state_cgs(
+    nH_cm3: np.ndarray,
+    T_K: np.ndarray,
+    chi: np.ndarray,
+    theta_co: np.ndarray,
+    tau_form_s: np.ndarray,
+    sigma_d_per_H_cm2: np.ndarray,
+    Xco_tot: float,
+    min_rate: float,
+    out_Xco_gas: np.ndarray,
+    out_nco_gas: np.ndarray,
+    out_nco_ice: np.ndarray,
+    out_k_pd: np.ndarray,
+    out_tau_pd: np.ndarray,
+    out_n_ice_act_max: np.ndarray,
+    out_n_ice_act: np.ndarray,
+    out_k_pd_surf: np.ndarray,
+    out_R_pd: np.ndarray,
+) -> None:
+    ncells = nH_cm3.size
+    for i in prange(ncells):
+        nH_i = nH_cm3[i]
+        T_i = T_K[i]
+        chi_i = chi[i]
+
+        theta_i = theta_co[i]
+        if theta_i < 0.0:
+            theta_i = 0.0
+        elif theta_i > 1.0:
+            theta_i = 1.0
+
+        tau_form_i = tau_form_s[i]
+        sigma_i = sigma_d_per_H_cm2[i]
+
+        nco_max = Xco_tot * nH_i
+
+        k_pd = K0_CO * chi_i * theta_i
+        out_k_pd[i] = k_pd
+        if k_pd <= 0.0:
+            out_tau_pd[i] = np.inf
+        else:
+            k_pd_safe = k_pd
+            if min_rate > 0.0 and k_pd_safe < min_rate:
+                k_pd_safe = min_rate
+            out_tau_pd[i] = 1.0 / k_pd_safe
+
+        v_th = 0.0
+        if T_i > 0.0:
+            v_th = np.sqrt(8.0 * K_B * T_i / (np.pi * M_CO_CGS))
+
+        k_fo = (sigma_i * nH_i) * v_th
+
+        k_td = 0.0
+        if T_i > 0.0:
+            k_td = NU0_CO * np.exp(-E_BIND_CO / T_i)
+
+        k_pd_surf = (chi_i * F_DRAINE) * (Y_CO / (4.0 * N_SURF * float(N_LAY)))
+        out_k_pd_surf[i] = k_pd_surf
+
+        n_ice_act_max = (sigma_i * nH_i) * N_SURF * float(N_LAY)
+        out_n_ice_act_max[i] = n_ice_act_max
+
+        # Thin-ice regime
+        denom_thin = k_td + k_pd_surf
+        a = 0.0
+        if denom_thin > 0.0:
+            a = k_fo / denom_thin
+
+        denom_g_thin = 1.0 + tau_form_i * k_pd + a
+        g_thin = 0.0
+        if denom_g_thin > 0.0:
+            g_thin = nco_max / denom_g_thin
+        if g_thin < 0.0:
+            g_thin = 0.0
+        elif g_thin > nco_max:
+            g_thin = nco_max
+
+        i_thin = a * g_thin
+        if i_thin < 0.0:
+            i_thin = 0.0
+
+        # Thick-ice regime
+        R0 = k_pd_surf * n_ice_act_max
+        denom_g_thick = 1.0 + tau_form_i * k_pd
+        if k_td > 0.0:
+            denom_g_thick = denom_g_thick + (k_fo / k_td)
+        numer_g_thick = nco_max
+        if k_td > 0.0:
+            numer_g_thick = numer_g_thick + (R0 / k_td)
+
+        g_thick = 0.0
+        if denom_g_thick > 0.0:
+            g_thick = numer_g_thick / denom_g_thick
+        if g_thick < 0.0:
+            g_thick = 0.0
+        elif g_thick > nco_max:
+            g_thick = nco_max
+
+        i_thick = 0.0
+        if k_td > 0.0:
+            i_thick = (k_fo * g_thick - R0) / k_td
+        if i_thick < 0.0:
+            i_thick = 0.0
+
+        use_thin = i_thin < n_ice_act_max
+        nco_gas = g_thin if use_thin else g_thick
+        nco_ice = i_thin if use_thin else i_thick
+
+        # Clamp total to nco_max (reduce ice first, then gas)
+        total = nco_gas + nco_ice
+        excess = total - nco_max
+        if excess > 0.0:
+            reduce_ice = nco_ice
+            if reduce_ice > excess:
+                reduce_ice = excess
+            nco_ice = nco_ice - reduce_ice
+            excess2 = excess - reduce_ice
+            if excess2 > 0.0:
+                nco_gas = nco_gas - excess2
+                if nco_gas < 0.0:
+                    nco_gas = 0.0
+
+        out_nco_gas[i] = nco_gas
+        out_nco_ice[i] = nco_ice
+
+        n_ice_act = nco_ice if nco_ice < n_ice_act_max else n_ice_act_max
+        out_n_ice_act[i] = n_ice_act
+        out_R_pd[i] = k_pd_surf * n_ice_act
+
+        if nH_i > 0.0:
+            out_Xco_gas[i] = nco_gas / nH_i
+        else:
+            out_Xco_gas[i] = 0.0
 
 
 @dataclass(frozen=True)
@@ -29,7 +166,7 @@ def compute_co_photodissociation_rate(
     theta_co: Optional[Quantity],
     k0_co: Quantity,
     *,
-    min_rate: float = 1.0e-30,
+    min_rate: float = 0.0,
 ) -> Tuple[Quantity, Optional[Quantity]]:
     chi_arr = chi.to('dimensionless').magnitude
 
@@ -69,7 +206,10 @@ def co_freezeout_rate(T: Quantity, nH: Quantity, sigma_d_per_H: Quantity) -> Qua
 def co_thermal_desorption_rate(T_d: Quantity) -> Quantity:
     """CO thermal desorption rate using E_BIND_CO and NU0_CO from config."""
     T_K = T_d.to('K').magnitude
-    k_td = NU0_CO * np.exp(-E_BIND_CO / np.maximum(T_K, 1e-6))
+    k_td = np.zeros_like(T_K, dtype=float)
+    mask = T_K > 0.0
+    if np.any(mask):
+        k_td[mask] = NU0_CO * np.exp(-E_BIND_CO / T_K[mask])
     return Quantity(k_td, '1/s')
 
 
@@ -112,7 +252,7 @@ def compute_carbon_reduced_rates(
     chi: Quantity,
     theta_co: Optional[Quantity],
     sigma_d_per_H: Quantity,
-    min_rate: float = 1.0e-30,
+    min_rate: float = 0.0,
 ) -> CarbonReducedRates:
     """Compute all CO two-phase chemistry rates using constants from config."""
     k_pd, tau_pd = compute_co_photodissociation_rate(
@@ -136,86 +276,67 @@ def solve_carbon_reduced_steady_state(
     Xco_tot: float,
     tau_form: Quantity,
     sigma_d_per_H: Quantity,
-    min_rate: float = 1.0e-30,
+    min_rate: float = 0.0,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
     """Solve steady-state CO chemistry using an analytic reduced model."""
-    rates = compute_carbon_reduced_rates(
-        nH=nH,
-        T=T,
-        chi=chi,
-        theta_co=theta_co,
-        sigma_d_per_H=sigma_d_per_H,
-        min_rate=min_rate,
+    orig_shape = nH.to('cm^-3').magnitude.shape
+    ncells = nH.to('cm^-3').magnitude.size
+
+    nH_flat = np.ascontiguousarray(nH.to('cm^-3').magnitude.reshape(ncells), dtype=np.float64)
+    T_flat = np.ascontiguousarray(T.to('K').magnitude.reshape(ncells), dtype=np.float64)
+    chi_flat = np.ascontiguousarray(chi.to('dimensionless').magnitude.reshape(ncells), dtype=np.float64)
+    if theta_co is None:
+        theta_flat = np.ones(ncells, dtype=np.float64)
+    else:
+        if isinstance(theta_co, Quantity):
+            theta_arr = theta_co.to('dimensionless').magnitude
+        else:
+            theta_arr = np.asarray(theta_co)
+        theta_flat = np.ascontiguousarray(theta_arr.reshape(ncells), dtype=np.float64)
+    tau_form_flat = np.ascontiguousarray(tau_form.to('s').magnitude.reshape(ncells), dtype=np.float64)
+    sigma_flat = np.ascontiguousarray(sigma_d_per_H.to('cm^2').magnitude.reshape(ncells), dtype=np.float64)
+
+    out_Xco_gas = np.empty(ncells, dtype=np.float64)
+    out_nco_gas = np.empty(ncells, dtype=np.float64)
+    out_nco_ice = np.empty(ncells, dtype=np.float64)
+    out_k_pd = np.empty(ncells, dtype=np.float64)
+    out_tau_pd = np.empty(ncells, dtype=np.float64)
+    out_n_ice_act_max = np.empty(ncells, dtype=np.float64)
+    out_n_ice_act = np.empty(ncells, dtype=np.float64)
+    out_k_pd_surf = np.empty(ncells, dtype=np.float64)
+    out_R_pd = np.empty(ncells, dtype=np.float64)
+
+    solve_carbon_reduced_steady_state_cgs(
+        nH_flat,
+        T_flat,
+        chi_flat,
+        theta_flat,
+        tau_form_flat,
+        sigma_flat,
+        float(Xco_tot),
+        float(min_rate),
+        out_Xco_gas,
+        out_nco_gas,
+        out_nco_ice,
+        out_k_pd,
+        out_tau_pd,
+        out_n_ice_act_max,
+        out_n_ice_act,
+        out_k_pd_surf,
+        out_R_pd,
     )
 
-    k_pd = rates.k_pd
-    tau_pd = rates.tau_pd
-    k_fo = rates.k_fo
-    k_td = rates.k_td
-    k_pd_surf = rates.k_pd_surf
-
-    nH_cm3 = nH.to('cm^-3').magnitude
-    nco_max = float(Xco_tot) * nH_cm3
-    tau_s = tau_form.to('s').magnitude
-
-    k_fo_s = k_fo.to('1/s').magnitude
-    k_td_s = k_td.to('1/s').magnitude
-    k_pd_s = k_pd.to('1/s').magnitude
-
-    k_pd_surf_s = k_pd_surf.to('1/s').magnitude
-
-    # Surface-active ice cap, i_max (cm^-3)
-    n_ice_act_max = (
-        sigma_d_per_H.to('cm^2').magnitude
-        * nH.to('cm^-3').magnitude
-        * N_SURF
-        * float(N_LAY)
-    )
-
-    # Thin-ice regime: R_pd = k_surf * i
-    denom_thin = (k_td_s + k_pd_surf_s)
-    a = np.where(denom_thin > 0.0, k_fo_s / denom_thin, 0.0)
-    denom_g_thin = 1.0 + tau_s * k_pd_s + a
-    g_thin = np.where(denom_g_thin > 0.0, nco_max / denom_g_thin, 0.0)
-    g_thin = np.clip(g_thin, 0.0, nco_max)
-    i_thin = a * g_thin
-    i_thin = np.maximum(i_thin, 0.0)
-
-    # Thick-ice regime: R_pd saturates at k_surf * i_max
-    R0 = k_pd_surf_s * n_ice_act_max
-    denom_g_thick = 1.0 + tau_s * k_pd_s + np.where(k_td_s > 0.0, (k_fo_s / k_td_s), 0.0)
-    numer_g_thick = nco_max + np.where(k_td_s > 0.0, (R0 / k_td_s), 0.0)
-    g_thick = np.where(denom_g_thick > 0.0, numer_g_thick / denom_g_thick, 0.0)
-    g_thick = np.clip(g_thick, 0.0, nco_max)
-    i_thick = np.where(k_td_s > 0.0, (k_fo_s * g_thick - R0) / k_td_s, 0.0)
-    i_thick = np.maximum(i_thick, 0.0)
-
-    use_thin = i_thin < n_ice_act_max
-    nco_gas = np.where(use_thin, g_thin, g_thick)
-    nco_ice = np.where(use_thin, i_thin, i_thick)
-
-    nco_total = nco_gas + nco_ice
-    excess = nco_total - nco_max
-    if np.any(excess > 0.0):
-        # Clamp by reducing ice (preferred) then gas if needed.
-        reduce_ice = np.minimum(nco_ice, excess)
-        nco_ice = nco_ice - reduce_ice
-        excess2 = excess - reduce_ice
-        nco_gas = np.maximum(nco_gas - excess2, 0.0)
-
-    n_ice_act = np.minimum(nco_ice, n_ice_act_max)
-    R_pd = k_pd_surf_s * n_ice_act
-    R_pd_q = Quantity(R_pd, 'cm^-3/s')
-
-    nco_gas_q = Quantity(nco_gas, 'cm^-3')
-    nco_ice_q = Quantity(nco_ice, 'cm^-3')
-    X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), 'dimensionless')
+    X_co = Quantity(out_Xco_gas.reshape(orig_shape), 'dimensionless')
+    nco_gas_q = Quantity(out_nco_gas.reshape(orig_shape), 'cm^-3')
+    nco_ice_q = Quantity(out_nco_ice.reshape(orig_shape), 'cm^-3')
+    k_pd = Quantity(out_k_pd.reshape(orig_shape), '1/s')
+    tau_pd = Quantity(out_tau_pd.reshape(orig_shape), 's')
 
     diag = {
-        'n_ice_act_max': Quantity(n_ice_act_max, 'cm^-3'),
-        'n_ice_act': Quantity(n_ice_act, 'cm^-3'),
-        'k_pd_surf': k_pd_surf,
-        'R_pd': R_pd_q,
+        'n_ice_act_max': Quantity(out_n_ice_act_max.reshape(orig_shape), 'cm^-3'),
+        'n_ice_act': Quantity(out_n_ice_act.reshape(orig_shape), 'cm^-3'),
+        'k_pd_surf': Quantity(out_k_pd_surf.reshape(orig_shape), '1/s'),
+        'R_pd': Quantity(out_R_pd.reshape(orig_shape), 'cm^-3/s'),
     }
 
     return X_co, nco_gas_q, nco_ice_q, k_pd, tau_pd, diag
@@ -234,7 +355,7 @@ def evolve_carbon_reduced_time_dependent(
     Xco_gas_init: Optional[float] = None,
     Xco_ice_init: Optional[float] = None,
     dt: Optional[Quantity] = None,
-    min_rate: float = 1.0e-30,
+    min_rate: float = 0.0,
 ) -> Tuple[Quantity, Quantity, Quantity, Quantity, Optional[Quantity], dict]:
     """Evolve CO two-phase chemistry using constants from config."""
     rates = compute_carbon_reduced_rates(
@@ -306,25 +427,21 @@ def evolve_carbon_reduced_time_dependent(
         nco_ice = X_init_ice * nH_cm3
 
     if dt is None:
-        if np.ndim(t_end_s) != 0:
-            raise ValueError("dt is required when evolving with per-cell t_end")
-        dt_s = 0.05 * float(np.median(tau_s)) if np.ndim(tau_s) != 0 else 0.05 * float(tau_s)
-        dt_s = max(dt_s, 0.0)
-    else:
-        dt_s = float(dt.to('s').magnitude)
+        raise ValueError("dt is required for time-dependent carbon_reduced evolution")
 
-    if float(dt_s) <= 0.0:
-        dt_s = 1.0
+    dt_s = float(dt.to('s').magnitude)
+    if dt_s <= 0.0:
+        raise ValueError("dt must be > 0")
 
     t = 0.0
     n_steps = 0
-    max_steps = int(1e8)
+    n_steps_total = int(np.ceil(float(t_end_s) / float(dt_s)))
 
     n_ice_act_max_last = None
     n_ice_act_last = None
     R_pd_last = None
 
-    while t < float(t_end_s) and n_steps < max_steps:
+    while t < float(t_end_s) and n_steps < n_steps_total:
         dt_step = min(float(dt_s), float(t_end_s) - t)
 
         def _rhs(nco_g, nco_i):
@@ -365,7 +482,7 @@ def evolve_carbon_reduced_time_dependent(
 
     nco_gas_q = Quantity(nco_gas, 'cm^-3')
     nco_ice_q = Quantity(nco_ice, 'cm^-3')
-    X_co = Quantity(nco_gas / (nH_cm3 + 1e-99), 'dimensionless')
+    X_co = Quantity(np.where(nH_cm3 > 0.0, nco_gas / nH_cm3, 0.0), 'dimensionless')
 
     diag = {
         'n_ice_act_max': n_ice_act_max_last,
