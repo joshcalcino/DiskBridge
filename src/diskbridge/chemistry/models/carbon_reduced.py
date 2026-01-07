@@ -14,11 +14,14 @@ from diskbridge._constants import (
     TAU_CO_FORM,
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
+from diskbridge._constants import K0_NL97, K1_NL97, GAMMA_CHX0, X_O_NL97
+from diskbridge._config import resolve_model_config
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
 from diskbridge.chemistry.models._carbon_reduced_math import (
     solve_carbon_reduced_steady_state_cgs,
     evolve_carbon_reduced_time_dependent,
+    carbon_closure_cell_param_cgs,
 )
 from diskbridge.chemistry.tau_form import compute_tau_form_co_cgs
 from diskbridge.chemistry.validation import validate_chemistry_state
@@ -49,30 +52,20 @@ def _carbon_closure_kernel(
 ) -> None:
     ncells = nH.size
     for i in prange(ncells):
-        n_C_tot = X_C_tot * nH[i]
-        n_C_available = max(n_C_tot - nco_total[i], 0.0)
-
-        Gamma_photo = Gamma_C0 * chi[i]
-        alpha = alpha_rec_c0 * (Tg[i] / 300.0) ** T_rec_exp
-
-        if Gamma_photo <= 0.0 or n_C_available <= 0.0:
-            nCplus = 0.0
-        elif alpha <= 0.0:
-            nCplus = n_C_available
-        else:
-            disc = Gamma_photo * Gamma_photo + 4.0 * alpha * Gamma_photo * n_C_available
-            sqrt_disc = np.sqrt(disc)
-            nCplus = (2.0 * Gamma_photo * n_C_available) / (Gamma_photo + sqrt_disc)
-            if nCplus < 0.0:
-                nCplus = 0.0
-            elif nCplus > n_C_available:
-                nCplus = n_C_available
-
-        nC = n_C_available - nCplus
+        nCplus, nC, ne = carbon_closure_cell_param_cgs(
+            nH_cm3=nH[i],
+            chi=chi[i],
+            Tg_K=Tg[i],
+            nco_total_cm3=nco_total[i],
+            X_C_tot=X_C_tot,
+            Gamma_C0=Gamma_C0,
+            alpha_rec_c0=alpha_rec_c0,
+            T_rec_exp=T_rec_exp,
+        )
 
         nCplus_out[i] = nCplus
         nC_out[i] = nC
-        ne_out[i] = nCplus
+        ne_out[i] = ne
 
 
 def _carbon_closure(
@@ -308,7 +301,8 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     ChemistryResult
         Result with abundances, number_densities, and diagnostic fields
     """
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+    cfg = resolve_model_config(("chemistry", "carbon_reduced"), overrides=config)
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
@@ -319,6 +313,13 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
     nH_atom_cm3 = _as_cgs_f64(rad.nH_atom, 'cm^-3')
 
+    if rad.gas_temperature is not None:
+        Tg_K = _as_cgs_f64(rad.gas_temperature, 'K')
+        logger.info("CO formation using gas temperature")
+    else:
+        Tg_K = T_K
+        logger.info("CO formation using dust temperature (gas T not available)")
+
     orig_shape = nH_cm3.shape
     ncells = nH_cm3.size
 
@@ -327,6 +328,21 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     chi_flat = _flat_view(chi_dim)
     sigma_flat = _flat_view(sigma_cm2)
     tau_form_flat = _flat_view(tau_form_s)
+    nH2_flat = _flat_view(nH2_cm3)
+    Tg_flat = _flat_view(Tg_K)
+
+    formation_model = str(cfg.get('formation_model', 'tau')).lower()
+    if formation_model == 'tau':
+        formation_model_flag = 0
+    elif formation_model == 'nl97':
+        formation_model_flag = 1
+    else:
+        raise ValueError(f"Unknown formation_model={formation_model!r} (expected 'tau' or 'nl97')")
+
+    k0_nl97 = float(Quantity(cfg.get('k0_nl97', K0_NL97), 'cm^3/s').to('cm^3/s').magnitude) if isinstance(cfg.get('k0_nl97', K0_NL97), str) else float(K0_NL97)
+    k1_nl97 = float(Quantity(cfg.get('k1_nl97', K1_NL97), 'cm^3/s').to('cm^3/s').magnitude) if isinstance(cfg.get('k1_nl97', K1_NL97), str) else float(K1_NL97)
+    gamma_chx0 = float(Quantity(cfg.get('gamma_chx0', GAMMA_CHX0), '1/s').to('1/s').magnitude) if isinstance(cfg.get('gamma_chx0', GAMMA_CHX0), str) else float(GAMMA_CHX0)
+    xO = float(cfg.get('xO', X_O_NL97))
 
     if getattr(rad, 'nco_gas', None) is not None:
         nco_guess_cm3 = _as_cgs_f64(rad.nco_gas, 'cm^-3')
@@ -385,8 +401,15 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
             theta_flat,
             tau_form_flat,
             sigma_flat,
+            nH2_flat,
+            Tg_flat,
+            int(formation_model_flag),
+            float(k0_nl97),
+            float(k1_nl97),
+            float(xO),
+            float(gamma_chx0),
             float(Xco_tot),
-            min_rate,
+            float(min_rate),
             out_Xco_gas,
             out_nco_gas,
             out_nco_ice,

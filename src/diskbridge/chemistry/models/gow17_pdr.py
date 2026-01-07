@@ -350,19 +350,19 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
 
     nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
 
-    validate_chemistry_state(
-        nH=nH,
-        nH2=nH2_cm3,
-        nHI=nH_atom,
-        nC=nC,
-        nCplus=nCplus,
-        nco_total=Quantity(nco_gas.magnitude + nco_ice.magnitude, "cm^-3"),
-        check_pd=False,
-    )
-
     if np.any(status != 0):
         bad = int(np.sum(status != 0))
         logger.warning(f"gow17_pdr: {bad} cells did not converge")
+    else:
+        validate_chemistry_state(
+            nH=nH,
+            nH2=nH2_cm3,
+            nHI=nH_atom,
+            nC=nC,
+            nCplus=nCplus,
+            nco_total=Quantity(nco_gas.magnitude + nco_ice.magnitude, "cm^-3"),
+            check_pd=False,
+        )
 
     abundances = {
         "co": Quantity(xCO, "dimensionless"),
@@ -398,6 +398,16 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
 
     rad.gow17_y = y_out
 
+    n_fail = int(np.sum(status != 0))
+    max_status = int(np.max(status)) if status.size else 0
+
+    fail_idx = np.flatnonzero(status != 0)
+    fail_idx_head = fail_idx[:16].astype(np.int64)
+    status_hist = {}
+    if status.size:
+        for code in (0, 1, 2):
+            status_hist[int(code)] = int(np.sum(status == code))
+
     meta = {
         "model": "gow17_pdr",
         "mode": str(mode),
@@ -410,6 +420,10 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         "reltol": float(reltol),
         "abstol0": float(abstol0),
         "max_iter": int(max_iter),
+        "n_fail": int(n_fail),
+        "max_status": int(max_status),
+        "fail_idx_head": fail_idx_head.tolist(),
+        "status_hist": status_hist,
     }
 
     return ChemistryResult(

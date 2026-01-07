@@ -91,6 +91,11 @@ N_LAY = int(_co2p['N_LAY'])                                             # dimens
 N_SURF = Quantity(_co2p['n_surf']).to_base_units().magnitude            # 1/cm^2
 Y_CO = float(_co2p['Y_CO'])                                             # molecules/photon
 
+K0_NL97 = Quantity(_co2p['k0_nl97']).to_base_units().magnitude           # cm^3/s
+K1_NL97 = Quantity(_co2p['k1_nl97']).to_base_units().magnitude           # cm^3/s
+GAMMA_CHX0 = Quantity(_co2p['gamma_chx0']).to_base_units().magnitude     # s^-1
+X_O_NL97 = float(_co2p.get('xO', X_O_TOT))                               # dimensionless
+
 # Density-capped tau_form model
 TAU_FORM_N0 = Quantity(_co2p['tau_form_n0']).to_base_units().magnitude      # cm^-3
 TAU_FORM_TAU0 = Quantity(_co2p['tau_form_tau0']).to_base_units().magnitude  # s

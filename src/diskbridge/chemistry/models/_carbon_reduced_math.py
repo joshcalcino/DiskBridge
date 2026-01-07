@@ -11,6 +11,9 @@ from diskbridge._units import Quantity
 from diskbridge._constants import (
     K_B, M_H, K0_CO, E_BIND_CO, NU0_CO, F_DRAINE, N_LAY, N_SURF, Y_CO
 )
+from diskbridge._constants import (
+    X_C_TOT, GAMMA_C0, ALPHA_REC_C0, T_REC_EXP,
+)
 from diskbridge.chemistry.processes.co_phase import (
     M_CO_CGS as _M_CO_CGS,
     co_freezeout_rate_cgs,
@@ -29,6 +32,134 @@ from diskbridge.chemistry.processes.co_phase import (
 M_CO_CGS = _M_CO_CGS
 
 
+@njit(inline='always')
+def carbon_closure_cell_param_cgs(
+    nH_cm3: float,
+    chi: float,
+    Tg_K: float,
+    nco_total_cm3: float,
+    X_C_tot: float,
+    Gamma_C0: float,
+    alpha_rec_c0: float,
+    T_rec_exp: float,
+) -> tuple[float, float, float]:
+    n_C_tot = X_C_tot * nH_cm3
+    n_C_available = max(n_C_tot - nco_total_cm3, 0.0)
+
+    Gamma_photo = Gamma_C0 * chi
+    alpha = 0.0
+    if Tg_K > 0.0:
+        alpha = alpha_rec_c0 * (Tg_K / 300.0) ** T_rec_exp
+
+    if Gamma_photo <= 0.0 or n_C_available <= 0.0:
+        nCplus = 0.0
+    elif alpha <= 0.0:
+        nCplus = n_C_available
+    else:
+        disc = Gamma_photo * Gamma_photo + 4.0 * alpha * Gamma_photo * n_C_available
+        sqrt_disc = np.sqrt(disc)
+        nCplus = (2.0 * Gamma_photo * n_C_available) / (Gamma_photo + sqrt_disc)
+        if nCplus < 0.0:
+            nCplus = 0.0
+        elif nCplus > n_C_available:
+            nCplus = n_C_available
+
+    nC = n_C_available - nCplus
+    ne = nCplus
+    return nCplus, nC, ne
+
+
+@njit(inline='always')
+def carbon_closure_cell_cgs(
+    nH_cm3: float,
+    chi: float,
+    Tg_K: float,
+    nco_total_cm3: float,
+) -> tuple[float, float, float]:
+    return carbon_closure_cell_param_cgs(
+        nH_cm3=nH_cm3,
+        chi=chi,
+        Tg_K=Tg_K,
+        nco_total_cm3=nco_total_cm3,
+        X_C_tot=float(X_C_TOT),
+        Gamma_C0=float(GAMMA_C0),
+        alpha_rec_c0=float(ALPHA_REC_C0),
+        T_rec_exp=float(T_REC_EXP),
+    )
+
+
+@njit(inline='always')
+def _apply_co_budget_clamp(g: float, i_ice: float, nco_max: float) -> tuple[float, float]:
+    total = g + i_ice
+    excess = total - nco_max
+    if excess > 0.0:
+        reduce_ice = i_ice
+        if reduce_ice > excess:
+            reduce_ice = excess
+        i_ice = i_ice - reduce_ice
+
+        excess2 = excess - reduce_ice
+        if excess2 > 0.0:
+            g = g - excess2
+            if g < 0.0:
+                g = 0.0
+    return g, i_ice
+
+
+@njit(inline='always')
+def _nl97_eval_F_thin(
+    g_in: float,
+    nco_max: float,
+    a: float,
+    k_pd_eff: float,
+    k0_nl97: float,
+    beta: float,
+    nH_i: float,
+    chi_i: float,
+    Tg_i: float,
+    nH2_i: float,
+) -> tuple[float, float]:
+    g = g_in
+    i_ice = a * g
+    if i_ice < 0.0:
+        i_ice = 0.0
+
+    g, i_ice = _apply_co_budget_clamp(g, i_ice, nco_max)
+    nco_total = g + i_ice
+    nCplus, _, _ = carbon_closure_cell_cgs(nH_i, chi_i, Tg_i, nco_total)
+    R_form = k0_nl97 * beta * nCplus * nH2_i
+    return (k_pd_eff * g - R_form), i_ice
+
+
+@njit(inline='always')
+def _nl97_eval_F_thick(
+    g_in: float,
+    nco_max: float,
+    k_fo: float,
+    k_td: float,
+    R0: float,
+    k_pd_eff: float,
+    k0_nl97: float,
+    beta: float,
+    nH_i: float,
+    chi_i: float,
+    Tg_i: float,
+    nH2_i: float,
+) -> tuple[float, float]:
+    g = g_in
+    i_ice = 0.0
+    if k_td > 0.0:
+        i_ice = (k_fo * g - R0) / k_td
+    if i_ice < 0.0:
+        i_ice = 0.0
+
+    g, i_ice = _apply_co_budget_clamp(g, i_ice, nco_max)
+    nco_total = g + i_ice
+    nCplus, _, _ = carbon_closure_cell_cgs(nH_i, chi_i, Tg_i, nco_total)
+    R_form = k0_nl97 * beta * nCplus * nH2_i
+    return (k_pd_eff * g - R_form), i_ice
+
+
 @njit(parallel=True, cache=True)
 def solve_carbon_reduced_steady_state_cgs(
     nH_cm3: np.ndarray,
@@ -37,6 +168,13 @@ def solve_carbon_reduced_steady_state_cgs(
     theta_co: np.ndarray,
     tau_form_s: np.ndarray,
     sigma_d_per_H_cm2: np.ndarray,
+    nH2_cm3: np.ndarray,
+    Tg_K: np.ndarray,
+    formation_model: int,
+    k0_nl97: float,
+    k1_nl97: float,
+    xO: float,
+    gamma_chx0: float,
     Xco_tot: float,
     min_rate: float,
     out_Xco_gas: np.ndarray,
@@ -64,6 +202,9 @@ def solve_carbon_reduced_steady_state_cgs(
         tau_form_i = tau_form_s[i]
         sigma_i = sigma_d_per_H_cm2[i]
 
+        nH2_i = nH2_cm3[i]
+        Tg_i = Tg_K[i]
+
         nco_max = Xco_tot * nH_i
 
         k_pd = K0_CO * chi_i * theta_i
@@ -90,41 +231,255 @@ def solve_carbon_reduced_steady_state_cgs(
         if denom_thin > 0.0:
             a = k_fo / denom_thin
 
-        denom_g_thin = 1.0 + tau_form_i * k_pd + a
-        g_thin = 0.0
-        if denom_g_thin > 0.0:
-            g_thin = nco_max / denom_g_thin
-        if g_thin < 0.0:
+        if int(formation_model) == 0:
+            # Timescale (tau) formation law
+            denom_g_thin = 1.0 + tau_form_i * k_pd + a
             g_thin = 0.0
-        elif g_thin > nco_max:
-            g_thin = nco_max
+            if denom_g_thin > 0.0:
+                g_thin = nco_max / denom_g_thin
+            if g_thin < 0.0:
+                g_thin = 0.0
+            elif g_thin > nco_max:
+                g_thin = nco_max
 
-        i_thin = a * g_thin
-        if i_thin < 0.0:
-            i_thin = 0.0
+            i_thin = a * g_thin
+            if i_thin < 0.0:
+                i_thin = 0.0
 
-        # Thick-ice regime
-        R0 = k_pd_surf * n_ice_act_max
-        denom_g_thick = 1.0 + tau_form_i * k_pd
-        if k_td > 0.0:
-            denom_g_thick = denom_g_thick + (k_fo / k_td)
-        numer_g_thick = nco_max
-        if k_td > 0.0:
-            numer_g_thick = numer_g_thick + (R0 / k_td)
+            # Thick-ice regime
+            R0 = k_pd_surf * n_ice_act_max
+            denom_g_thick = 1.0 + tau_form_i * k_pd
+            if k_td > 0.0:
+                denom_g_thick = denom_g_thick + (k_fo / k_td)
+            numer_g_thick = nco_max
+            if k_td > 0.0:
+                numer_g_thick = numer_g_thick + (R0 / k_td)
 
-        g_thick = 0.0
-        if denom_g_thick > 0.0:
-            g_thick = numer_g_thick / denom_g_thick
-        if g_thick < 0.0:
             g_thick = 0.0
-        elif g_thick > nco_max:
-            g_thick = nco_max
+            if denom_g_thick > 0.0:
+                g_thick = numer_g_thick / denom_g_thick
+            if g_thick < 0.0:
+                g_thick = 0.0
+            elif g_thick > nco_max:
+                g_thick = nco_max
 
-        i_thick = 0.0
-        if k_td > 0.0:
-            i_thick = (k_fo * g_thick - R0) / k_td
-        if i_thick < 0.0:
             i_thick = 0.0
+            if k_td > 0.0:
+                i_thick = (k_fo * g_thick - R0) / k_td
+            if i_thick < 0.0:
+                i_thick = 0.0
+        else:
+            # NL97 formation law
+            k_pd_eff = k_pd
+            if min_rate > 0.0 and k_pd_eff < min_rate:
+                k_pd_eff = min_rate
+
+            # Precompute constants for formation
+            Gamma_CHx = gamma_chx0 * chi_i
+            beta = 0.0
+            denom_beta = (k1_nl97 * xO * nH_i) + Gamma_CHx
+            if denom_beta > 0.0:
+                beta = (k1_nl97 * xO * nH_i) / denom_beta
+
+            # Fixed-iteration bisection per regime
+            n_bisect = 35
+
+            # Solve thin
+            lo = 0.0
+            hi = nco_max
+            f_lo, _ = _nl97_eval_F_thin(
+                g_in=lo,
+                nco_max=nco_max,
+                a=a,
+                k_pd_eff=k_pd_eff,
+                k0_nl97=k0_nl97,
+                beta=beta,
+                nH_i=nH_i,
+                chi_i=chi_i,
+                Tg_i=Tg_i,
+                nH2_i=nH2_i,
+            )
+            f_hi, _ = _nl97_eval_F_thin(
+                g_in=hi,
+                nco_max=nco_max,
+                a=a,
+                k_pd_eff=k_pd_eff,
+                k0_nl97=k0_nl97,
+                beta=beta,
+                nH_i=nH_i,
+                chi_i=chi_i,
+                Tg_i=Tg_i,
+                nH2_i=nH2_i,
+            )
+            if f_hi < 0.0:
+                g_thin = nco_max
+                _, i_thin = _nl97_eval_F_thin(
+                    g_in=g_thin,
+                    nco_max=nco_max,
+                    a=a,
+                    k_pd_eff=k_pd_eff,
+                    k0_nl97=k0_nl97,
+                    beta=beta,
+                    nH_i=nH_i,
+                    chi_i=chi_i,
+                    Tg_i=Tg_i,
+                    nH2_i=nH2_i,
+                )
+            elif f_lo > 0.0:
+                g_thin = 0.0
+                _, i_thin = _nl97_eval_F_thin(
+                    g_in=g_thin,
+                    nco_max=nco_max,
+                    a=a,
+                    k_pd_eff=k_pd_eff,
+                    k0_nl97=k0_nl97,
+                    beta=beta,
+                    nH_i=nH_i,
+                    chi_i=chi_i,
+                    Tg_i=Tg_i,
+                    nH2_i=nH2_i,
+                )
+            else:
+                for _ in range(n_bisect):
+                    mid = 0.5 * (lo + hi)
+                    f_mid, _ = _nl97_eval_F_thin(
+                        g_in=mid,
+                        nco_max=nco_max,
+                        a=a,
+                        k_pd_eff=k_pd_eff,
+                        k0_nl97=k0_nl97,
+                        beta=beta,
+                        nH_i=nH_i,
+                        chi_i=chi_i,
+                        Tg_i=Tg_i,
+                        nH2_i=nH2_i,
+                    )
+                    if f_mid <= 0.0:
+                        lo = mid
+                        f_lo = f_mid
+                    else:
+                        hi = mid
+                        f_hi = f_mid
+                g_thin = 0.5 * (lo + hi)
+                _, i_thin = _nl97_eval_F_thin(
+                    g_in=g_thin,
+                    nco_max=nco_max,
+                    a=a,
+                    k_pd_eff=k_pd_eff,
+                    k0_nl97=k0_nl97,
+                    beta=beta,
+                    nH_i=nH_i,
+                    chi_i=chi_i,
+                    Tg_i=Tg_i,
+                    nH2_i=nH2_i,
+                )
+
+            # Solve thick
+            if k_td <= 0.0:
+                g_thick = g_thin
+                i_thick = i_thin
+            else:
+                R0 = k_pd_surf * n_ice_act_max
+                lo = 0.0
+                hi = nco_max
+                f_lo, _ = _nl97_eval_F_thick(
+                    g_in=lo,
+                    nco_max=nco_max,
+                    k_fo=k_fo,
+                    k_td=k_td,
+                    R0=R0,
+                    k_pd_eff=k_pd_eff,
+                    k0_nl97=k0_nl97,
+                    beta=beta,
+                    nH_i=nH_i,
+                    chi_i=chi_i,
+                    Tg_i=Tg_i,
+                    nH2_i=nH2_i,
+                )
+                f_hi, _ = _nl97_eval_F_thick(
+                    g_in=hi,
+                    nco_max=nco_max,
+                    k_fo=k_fo,
+                    k_td=k_td,
+                    R0=R0,
+                    k_pd_eff=k_pd_eff,
+                    k0_nl97=k0_nl97,
+                    beta=beta,
+                    nH_i=nH_i,
+                    chi_i=chi_i,
+                    Tg_i=Tg_i,
+                    nH2_i=nH2_i,
+                )
+                if f_hi < 0.0:
+                    g_thick = nco_max
+                    _, i_thick = _nl97_eval_F_thick(
+                        g_in=g_thick,
+                        nco_max=nco_max,
+                        k_fo=k_fo,
+                        k_td=k_td,
+                        R0=R0,
+                        k_pd_eff=k_pd_eff,
+                        k0_nl97=k0_nl97,
+                        beta=beta,
+                        nH_i=nH_i,
+                        chi_i=chi_i,
+                        Tg_i=Tg_i,
+                        nH2_i=nH2_i,
+                    )
+                elif f_lo > 0.0:
+                    g_thick = 0.0
+                    _, i_thick = _nl97_eval_F_thick(
+                        g_in=g_thick,
+                        nco_max=nco_max,
+                        k_fo=k_fo,
+                        k_td=k_td,
+                        R0=R0,
+                        k_pd_eff=k_pd_eff,
+                        k0_nl97=k0_nl97,
+                        beta=beta,
+                        nH_i=nH_i,
+                        chi_i=chi_i,
+                        Tg_i=Tg_i,
+                        nH2_i=nH2_i,
+                    )
+                else:
+                    for _ in range(n_bisect):
+                        mid = 0.5 * (lo + hi)
+                        f_mid, _ = _nl97_eval_F_thick(
+                            g_in=mid,
+                            nco_max=nco_max,
+                            k_fo=k_fo,
+                            k_td=k_td,
+                            R0=R0,
+                            k_pd_eff=k_pd_eff,
+                            k0_nl97=k0_nl97,
+                            beta=beta,
+                            nH_i=nH_i,
+                            chi_i=chi_i,
+                            Tg_i=Tg_i,
+                            nH2_i=nH2_i,
+                        )
+                        if f_mid <= 0.0:
+                            lo = mid
+                            f_lo = f_mid
+                        else:
+                            hi = mid
+                            f_hi = f_mid
+                    g_thick = 0.5 * (lo + hi)
+                    _, i_thick = _nl97_eval_F_thick(
+                        g_in=g_thick,
+                        nco_max=nco_max,
+                        k_fo=k_fo,
+                        k_td=k_td,
+                        R0=R0,
+                        k_pd_eff=k_pd_eff,
+                        k0_nl97=k0_nl97,
+                        beta=beta,
+                        nH_i=nH_i,
+                        chi_i=chi_i,
+                        Tg_i=Tg_i,
+                        nH2_i=nH2_i,
+                    )
 
         use_thin = i_thin < n_ice_act_max
         nco_gas = g_thin if use_thin else g_thick
@@ -308,6 +663,9 @@ def solve_carbon_reduced_steady_state(
     out_k_pd_surf = np.empty(ncells, dtype=np.float64)
     out_R_pd = np.empty(ncells, dtype=np.float64)
 
+    nH2_flat = np.zeros_like(nH_flat, dtype=np.float64)
+    Tg_flat = np.ascontiguousarray(T_flat, dtype=np.float64)
+
     solve_carbon_reduced_steady_state_cgs(
         nH_flat,
         T_flat,
@@ -315,6 +673,13 @@ def solve_carbon_reduced_steady_state(
         theta_flat,
         tau_form_flat,
         sigma_flat,
+        nH2_flat,
+        Tg_flat,
+        int(0),
+        float(0.0),
+        float(0.0),
+        float(0.0),
+        float(0.0),
         float(Xco_tot),
         float(min_rate),
         out_Xco_gas,

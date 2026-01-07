@@ -529,15 +529,15 @@ def _fd_jacobian(
     f_work = np.empty(N_Y, dtype=np.float64)
 
     eps = np.finfo(np.float64).eps
-    sqrt_eps = np.sqrt(eps)
+    sqrt_eps = np.sqrt(np.finfo(np.float64).eps)
 
     for j in range(N_Y):
         yj = y[j]
 
-        scale = float(abstol[j]) + float(reltol) * abs(yj)
-        h = sqrt_eps * max(scale, 0.0)
-        if h == 0.0:
-            h = sqrt_eps
+        scale = abs(yj)
+        if scale < 1.0:
+            scale = 1.0
+        h = sqrt_eps * scale
 
         y_work[j] = yj + h
 
@@ -612,6 +612,7 @@ def newton_solve_fd(
     f = np.empty(N_Y, dtype=np.float64)
     J = np.empty((N_Y, N_Y), dtype=np.float64)
     dx = np.empty(N_Y, dtype=np.float64)
+    sat = np.empty(N_Y, dtype=np.int8)
 
     for _ in range(max_iter):
         gow17_rhs_cgs(
@@ -650,6 +651,7 @@ def newton_solve_fd(
             if denom <= 0.0:
                 denom = 1.0
             si = abs(f[i]) / denom
+            sat[i] = 1 if si <= 1.0 else 0
             if si > max_scaled:
                 max_scaled = si
 
@@ -689,6 +691,13 @@ def newton_solve_fd(
         )
 
         rhs = -f
+        if mode == 0:
+            for i in range(N_Y):
+                if sat[i] != 0:
+                    rhs[i] = 0.0
+                    for j in range(N_Y):
+                        J[i, j] = 0.0
+                    J[i, i] = 1.0
         st = _solve_linear_system_gauss(J, rhs, dx)
         if st != 0:
             return 2

@@ -33,7 +33,6 @@ import json
 import time as _time
 from pathlib import Path
 from typing import Optional, Tuple
-import healpy as hp
 import numpy as np
 
 from diskbridge._logging import logger
@@ -42,6 +41,16 @@ from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
 
 from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
+
+
+def _get_healpy():
+    try:
+        import healpy as hp  # type: ignore
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "healpy is required for HEALPix shielding. Install with: pip install healpy"
+        ) from e
+    return hp
 
 
 # =============================================================================
@@ -319,14 +328,13 @@ class SphericalHealpixRayTracer:
       that you can optimize / numba-ise later.
     """
 
-    def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
-
-        if mesh.coord_system != "spherical":
-            raise ValueError(
-                f"SphericalHealpixRayTracer requires spherical mesh, "
-                f"got {mesh.coord_system!r}"
-            )
-
+    def __init__(
+        self,
+        mesh,
+        nside: int,
+        ds_fraction: float = 0.5,
+    ):
+        hp = _get_healpy()
         self.mesh = mesh
         self.nside = int(nside)
 
