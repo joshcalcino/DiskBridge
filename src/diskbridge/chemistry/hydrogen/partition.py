@@ -12,28 +12,16 @@ from diskbridge._constants import (
     H2P_NSIDE,
     H2P_R_FORM,
 )
-
-from diskbridge.chemistry.shielding.healpix_columns import (
-CartesianHealpixRayTracer,
-SphericalHealpixRayTracer,
+from diskbridge.chemistry.shielding.columns_1d import (
+    column_to_outer_boundary_1d,
+    effective_1d_axis,
+    is_effectively_1d,
 )
-from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
+from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 
 
 if TYPE_CHECKING:
     from diskbridge.model.mesh import Mesh
-
-
-def _h2_self_shielding_db96(N_H2: np.ndarray, b5: float, alpha: float) -> np.ndarray:
-    x = N_H2 / 5.0e14
-    x = np.maximum(x, 0.0)
-
-    term1 = (1.0 + x / b5) ** alpha
-    term2 = np.exp(-5.0e-4 * np.sqrt(1.0 + x))
-    f_shield = term1 * term2
-
-    f_shield = np.clip(f_shield, 0.0, 1.0)
-    return f_shield
 
 
 def compute_h2_partition(
@@ -52,19 +40,6 @@ def compute_h2_partition(
     b5 = 2.0
     alpha = -0.75
 
-    if mesh.coord_system == "spherical":
-        tracer = SphericalHealpixRayTracer(mesh, nside=nside)
-    elif mesh.coord_system == "cartesian":
-        tracer = CartesianHealpixRayTracer(mesh, nside=nside)
-    else:
-        raise ValueError(
-            f"Unsupported mesh coord_system {mesh.coord_system!r} for H2 partition "
-            "(expected 'spherical' or 'cartesian')."
-        )
-
-    dirs = tracer.dirs.astype(np.float64)
-    npix = dirs.shape[0]
-
     nH_cgs = nH.to("cm^-3").magnitude
     chi_arr = chi_dust.to("dimensionless").magnitude
 
@@ -72,19 +47,61 @@ def compute_h2_partition(
         raise ValueError(f"nH and chi_dust must have same shape, got {nH_cgs.shape} vs {chi_arr.shape}")
 
     shape = nH_cgs.shape
-    idx_all = np.argwhere(np.ones(shape, dtype=bool))
-    n_cells = idx_all.shape[0]
-
-    cell_centers = np.zeros((n_cells, 3), dtype=np.float64)
-    for k, idx in enumerate(idx_all):
-        cell_centers[k] = tracer.cell_center_xyz(*idx)
-
     nH_flat = nH_cgs.reshape(-1)
     chi_flat = chi_arr.reshape(-1)
 
     denom0 = 2.0 * R_form * nH_flat + k0_diss * chi_flat
     fH2 = np.where(denom0 > 0.0, (2.0 * R_form * nH_flat) / denom0, 0.0)
     fH2 = np.clip(fH2, 0.0, 1.0)
+
+    if is_effectively_1d(mesh, shape):
+        axis_name, axis_index = effective_1d_axis(mesh, shape)
+        for _ in range(n_iter):
+            nH2_cgs = 0.5 * fH2.reshape(shape) * nH_cgs
+            N_H2 = column_to_outer_boundary_1d(
+                mesh,
+                nH2_cgs,
+                axis_name=axis_name,
+                axis_index=axis_index,
+                outer="max",
+            )
+            f_sh_eff = h2_self_shielding_db96(N_H2, b5=b5, alpha=alpha).reshape(-1)
+
+            k_diss_eff = k0_diss * chi_flat * f_sh_eff
+            denom = 2.0 * R_form * nH_flat + k_diss_eff
+            fH2_new = np.where(denom > 0.0, (2.0 * R_form * nH_flat) / denom, 0.0)
+            fH2_new = np.clip(fH2_new, 0.0, 1.0)
+            fH2 = fH2_new
+
+        nH2_out = Quantity((0.5 * fH2.reshape(shape) * nH_cgs), "cm^-3")
+        nH_atom_out = Quantity(((1.0 - fH2.reshape(shape)) * nH_cgs), "cm^-3")
+        return nH2_out, nH_atom_out
+
+    if mesh.coord_system == "spherical":
+        from diskbridge.chemistry.shielding.healpix_columns import SphericalHealpixRayTracer
+
+        tracer = SphericalHealpixRayTracer(mesh, nside=nside)
+    elif mesh.coord_system == "cartesian":
+        from diskbridge.chemistry.shielding.healpix_columns import CartesianHealpixRayTracer
+
+        tracer = CartesianHealpixRayTracer(mesh, nside=nside)
+    else:
+        raise ValueError(
+            f"Unsupported mesh coord_system {mesh.coord_system!r} for H2 partition "
+            "(expected 'spherical' or 'cartesian')."
+        )
+
+    from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
+
+    dirs = tracer.dirs.astype(np.float64)
+    npix = dirs.shape[0]
+
+    idx_all = np.argwhere(np.ones(shape, dtype=bool))
+    n_cells = idx_all.shape[0]
+
+    cell_centers = np.zeros((n_cells, 3), dtype=np.float64)
+    for k, idx in enumerate(idx_all):
+        cell_centers[k] = tracer.cell_center_xyz(*idx)
 
     reduce_fn = np.mean
 
@@ -110,7 +127,7 @@ def compute_h2_partition(
                 dirs,
                 nH2_cgs,
             )
-            f_sh_rays = _h2_self_shielding_db96(N_H2_rays, b5=b5, alpha=alpha)
+            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=b5, alpha=alpha)
             f_sh_eff[mask] = reduce_fn(f_sh_rays, axis=1)
 
         k_diss_eff = k0_diss * chi_flat * f_sh_eff

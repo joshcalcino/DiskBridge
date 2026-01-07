@@ -14,7 +14,7 @@ from diskbridge._logging import logger
 from diskbridge._constants import X_C_TOT
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
-from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d, is_effectively_1d
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.validation import validate_chemistry_state
 
@@ -151,18 +151,34 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if nCO_in is None:
             nCO_in = np.ascontiguousarray(y0[I_CO] * nH_cm3, dtype=np.float64)
 
-        theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
-            mesh=rad.model.mesh,
-            nH=nH_cm3,
-            chi=chi_arr,
-            visser=visser,
-            nCO=nCO_in,
-            nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
-            nH2=getattr(rad, "nH2", None),
-            nside=nside,
-            b_kms=b_kms,
-            return_quantity=False,
-        )
+        if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_arr,
+                visser=visser,
+                nCO=nCO_in,
+                nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
+                nH2=getattr(rad, "nH2", None),
+                b_kms=b_kms,
+                outer="max",
+                return_quantity=False,
+            )
+        else:
+            from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+
+            theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_arr,
+                visser=visser,
+                nCO=nCO_in,
+                nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
+                nH2=getattr(rad, "nH2", None),
+                nside=nside,
+                b_kms=b_kms,
+                return_quantity=False,
+            )
 
         y_out = np.zeros((ncells, N_Y), dtype=np.float64)
         status = np.zeros(ncells, dtype=np.int64)
@@ -254,18 +270,34 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2_cm3 = np.ascontiguousarray((xH2 * nH_flat).reshape(shape), dtype=np.float64)
                 nC_cm3 = np.ascontiguousarray((xC_neutral * nH_flat).reshape(shape), dtype=np.float64)
 
-                theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
-                    mesh=rad.model.mesh,
-                    nH=nH_cm3,
-                    chi=chi_arr,
-                    visser=visser,
-                    nCO=nCO_cm3,
-                    nC=nC_cm3,
-                    nH2=nH2_cm3,
-                    nside=nside,
-                    b_kms=b_kms,
-                    return_quantity=False,
-                )
+                if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+                    theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                        mesh=rad.model.mesh,
+                        nH=nH_cm3,
+                        chi=chi_arr,
+                        visser=visser,
+                        nCO=nCO_cm3,
+                        nC=nC_cm3,
+                        nH2=nH2_cm3,
+                        b_kms=b_kms,
+                        outer="max",
+                        return_quantity=False,
+                    )
+                else:
+                    from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+
+                    theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                        mesh=rad.model.mesh,
+                        nH=nH_cm3,
+                        chi=chi_arr,
+                        visser=visser,
+                        nCO=nCO_cm3,
+                        nC=nC_cm3,
+                        nH2=nH2_cm3,
+                        nside=nside,
+                        b_kms=b_kms,
+                        return_quantity=False,
+                    )
 
             dt_step = min(dt_s, t_end_s - t)
 

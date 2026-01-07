@@ -435,6 +435,8 @@ class CartesianHealpixRayTracer:
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
 
+        hp = _get_healpy()
+
         if mesh.coord_system != "cartesian":
             raise ValueError(
                 f"CartesianHealpixRayTracer requires cartesian mesh, "
@@ -939,7 +941,7 @@ def compute_pdr_shielding_healpix(
 
     n_candidates = int(candidate_idx.shape[0])
     if n_candidates > 0:
-        from diskbridge.chemistry.hydrogen.partition import _h2_self_shielding_db96
+        from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 
         if b_kms is None:
             raise ValueError("b_kms is required for H2 self-shielding")
@@ -958,7 +960,7 @@ def compute_pdr_shielding_healpix(
             centers_chunk = cell_centers[start:end]
 
             N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs)
-            f_sh_rays = _h2_self_shielding_db96(N_H2_rays, b5=float(b_kms), alpha=-0.75)
+            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms), alpha=-0.75)
             theta_h2_mean = f_sh_rays.mean(axis=1)
             _scatter_candidates_3d(theta_h2, idx_chunk, theta_h2_mean)
 
