@@ -36,6 +36,16 @@ def _flat_view(a: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(a.reshape(-1), dtype=np.float64)
 
 
+def _parse_value_to_cgs_float(val, unit: str, default_cgs: float) -> float:
+    if val is None:
+        return float(default_cgs)
+    if isinstance(val, str):
+        return float(Quantity(val).to(unit).magnitude)
+    if hasattr(val, 'to'):
+        return float(val.to(unit).magnitude)
+    return float(val)
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _carbon_closure_kernel(
     nH: np.ndarray,
@@ -339,9 +349,9 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     else:
         raise ValueError(f"Unknown formation_model={formation_model!r} (expected 'tau' or 'nl97')")
 
-    k0_nl97 = float(Quantity(cfg.get('k0_nl97', K0_NL97), 'cm^3/s').to('cm^3/s').magnitude) if isinstance(cfg.get('k0_nl97', K0_NL97), str) else float(K0_NL97)
-    k1_nl97 = float(Quantity(cfg.get('k1_nl97', K1_NL97), 'cm^3/s').to('cm^3/s').magnitude) if isinstance(cfg.get('k1_nl97', K1_NL97), str) else float(K1_NL97)
-    gamma_chx0 = float(Quantity(cfg.get('gamma_chx0', GAMMA_CHX0), '1/s').to('1/s').magnitude) if isinstance(cfg.get('gamma_chx0', GAMMA_CHX0), str) else float(GAMMA_CHX0)
+    k0_nl97 = _parse_value_to_cgs_float(cfg.get('k0_nl97', None), 'cm^3/s', float(K0_NL97))
+    k1_nl97 = _parse_value_to_cgs_float(cfg.get('k1_nl97', None), 'cm^3/s', float(K1_NL97))
+    gamma_chx0 = _parse_value_to_cgs_float(cfg.get('gamma_chx0', None), '1/s', float(GAMMA_CHX0))
     xO = float(cfg.get('xO', X_O_NL97))
 
     if getattr(rad, 'nco_gas', None) is not None:
@@ -374,7 +384,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         visser = VisserShielding(b_kms=float(b_kms))
         compute_co_shielding_healpix = compute_co_shielding_healpix
 
-    min_rate = float(config.get('min_rate', 0.0))
+    min_rate = float(cfg.get('min_rate', 0.0))
 
     for _ in range(int(shielding_iter) + 1):
         if not bool(skip_shielding):
@@ -547,7 +557,12 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     if Xco_ice_init is not None and hasattr(Xco_ice_init, 'magnitude'):
         Xco_ice_init = Xco_ice_init.magnitude
 
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, config)
+    cfg = resolve_model_config(("chemistry", "carbon_reduced"), overrides=config)
+    formation_model = str(cfg.get('formation_model', 'tau')).lower()
+    if formation_model == 'nl97':
+        raise ValueError("formation_model='nl97' is not supported in time-dependent carbon_reduced")
+
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
     tau_form = Quantity(tau_form_s, 's')
 
     if int(shielding_iter) != 0:
