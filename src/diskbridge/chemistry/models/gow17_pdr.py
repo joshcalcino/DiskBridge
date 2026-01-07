@@ -13,8 +13,12 @@ from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
 from diskbridge._constants import X_C_TOT
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
-from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d, is_effectively_1d
+from diskbridge.chemistry.shielding.columns_1d import (
+    compute_pdr_shielding_1d,
+    is_effectively_1d,
+    column_to_outer_boundary_1d,
+    effective_1d_axis,
+)
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.validation import validate_chemistry_state
 
@@ -66,6 +70,8 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     nside = int(cfg.get("nside"))
     b_kms = float(cfg.get("b_kms"))
 
+    chi0_cfg = cfg.get("chi0", None)
+
     ion_rate_s = Quantity(cfg.get("ion_rate")).to("1/s").magnitude
 
     Zg = float(cfg.get("Zg"))
@@ -99,15 +105,40 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
 
     chi = rad.ensure_chi()
 
-    ensure_h2_partition(rad, nH=nH, chi_dust=chi)
-
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     T_K = _as_cgs_f64(Tgas, "K")
     Tdust_K = _as_cgs_f64(Tdust, "K")
-    chi_arr = _as_cgs_f64(chi, "dimensionless")
+    chi_pe_arr = _as_cgs_f64(chi, "dimensionless")
     sigma_cm2 = _as_cgs_f64(sigma_d_per_H, "cm^2")
+
+    if chi0_cfg is None:
+        chi0_arr = 2.0 * chi_pe_arr
+        Av_arr = np.zeros_like(chi_pe_arr, dtype=np.float64)
+    else:
+        chi0_val = float(chi0_cfg)
+        chi0_arr = np.full_like(chi_pe_arr, chi0_val, dtype=np.float64)
+
+        Av_in = getattr(rad, "Av", None)
+        if Av_in is not None:
+            Av_arr = _as_cgs_f64(Av_in, "dimensionless")
+            if Av_arr.shape != chi_pe_arr.shape:
+                raise ValueError(
+                    f"gow17_pdr: rad.Av must match chi shape, got {Av_arr.shape} vs {chi_pe_arr.shape}"
+                )
+        elif is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            axis_name, axis_index = effective_1d_axis(rad.model.mesh, nH_cm3.shape)
+            NH = column_to_outer_boundary_1d(
+                rad.model.mesh,
+                nH_cm3,
+                axis_name=axis_name,
+                axis_index=axis_index,
+                outer="max",
+            )
+            Av_arr = (NH * float(Zd)) / 1.87e21
+        else:
+            Av_arr = np.zeros_like(chi_pe_arr, dtype=np.float64)
 
     visser = VisserShielding(b_kms=float(b_kms))
 
@@ -137,9 +168,15 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_h2_arr = np.ones_like(nH_cm3, dtype=np.float64)
     theta_co_arr = np.ones_like(nH_cm3, dtype=np.float64)
     theta_c_arr = np.ones_like(nH_cm3, dtype=np.float64)
-    chi_eff_pdr_arr = np.ascontiguousarray(chi_arr, dtype=np.float64)
+    chi_eff_pdr_arr = np.ascontiguousarray(chi_pe_arr, dtype=np.float64)
 
     if mode == "equilibrium":
+        if "t_end" not in cfg:
+            raise ValueError("gow17_pdr equilibrium mode requires config['t_end']")
+        dt_eq_s = float(Quantity(cfg.get("t_end")).to("s").magnitude)
+        if dt_eq_s <= 0.0:
+            raise ValueError("gow17_pdr: t_end must be > 0")
+
         xCtot = float(Zg) * float(X_C_TOT)
         xC_guess = xCtot - (y0[I_HCOP] + y0[I_CHX] + y0[I_CO] + y0[I_CP] + y0[I_CO_ICE])
         if xC_guess < 0.0:
@@ -151,15 +188,22 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if nCO_in is None:
             nCO_in = np.ascontiguousarray(y0[I_CO] * nH_cm3, dtype=np.float64)
 
+        y_prev = getattr(rad, "gow17_y", None)
+        if y_prev is not None and np.shape(y_prev) == tuple(shape) + (N_Y,):
+            xH2_prev = np.ascontiguousarray(np.asarray(y_prev, dtype=np.float64)[..., I_H2])
+            nH2_in = np.ascontiguousarray(xH2_prev * nH_cm3, dtype=np.float64)
+        else:
+            nH2_in = np.ascontiguousarray(y0[I_H2] * nH_cm3, dtype=np.float64)
+
         if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
             theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
-                chi=chi_arr,
+                chi=chi_pe_arr,
                 visser=visser,
                 nCO=nCO_in,
                 nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
-                nH2=getattr(rad, "nH2", None),
+                nH2=nH2_in,
                 b_kms=b_kms,
                 outer="max",
                 return_quantity=False,
@@ -170,11 +214,11 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
-                chi=chi_arr,
+                chi=chi_pe_arr,
                 visser=visser,
                 nCO=nCO_in,
                 nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
-                nH2=getattr(rad, "nH2", None),
+                nH2=nH2_in,
                 nside=nside,
                 b_kms=b_kms,
                 return_quantity=False,
@@ -183,17 +227,28 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         y_out = np.zeros((ncells, N_Y), dtype=np.float64)
         status = np.zeros(ncells, dtype=np.int64)
 
+        y0_cells = np.zeros((ncells, N_Y), dtype=np.float64)
+        y_prev = getattr(rad, "gow17_y", None)
+        if y_prev is not None and np.shape(y_prev) == tuple(shape) + (N_Y,):
+            y0_cells[:, :] = np.ascontiguousarray(np.asarray(y_prev, dtype=np.float64).reshape(ncells, N_Y))
+        else:
+            for j in range(N_Y):
+                y0_cells[:, j] = y0[j]
+
         solve_gow17_equilibrium_cells_cgs(
             nH_cm3.reshape(ncells),
             T_K.reshape(ncells),
             Tdust_K.reshape(ncells),
-            chi_arr.reshape(ncells),
+            chi_pe_arr.reshape(ncells),
+            chi0_arr.reshape(ncells),
+            Av_arr.reshape(ncells),
             theta_h2_arr.reshape(ncells),
             theta_co_arr.reshape(ncells),
             theta_c_arr.reshape(ncells),
             chi_eff_pdr_arr.reshape(ncells),
             sigma_cm2.reshape(ncells),
-            y0=y0,
+            float(dt_eq_s),
+            y0=y0_cells,
             Zg=Zg,
             Zd=Zd,
             ion_rate_s=float(ion_rate_s),
@@ -242,7 +297,9 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         status_step = np.zeros(ncells, dtype=np.int64)
 
         nH_flat = nH_cm3.reshape(ncells)
-        chi_flat = chi_arr.reshape(ncells)
+        chi_pe_flat = chi_pe_arr.reshape(ncells)
+        chi0_flat = chi0_arr.reshape(ncells)
+        Av_flat = Av_arr.reshape(ncells)
         T_flat = T_K.reshape(ncells)
         Td_flat = Tdust_K.reshape(ncells)
         sigma_flat = sigma_cm2.reshape(ncells)
@@ -274,7 +331,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
                         mesh=rad.model.mesh,
                         nH=nH_cm3,
-                        chi=chi_arr,
+                        chi=chi_pe_arr,
                         visser=visser,
                         nCO=nCO_cm3,
                         nC=nC_cm3,
@@ -289,7 +346,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
                         mesh=rad.model.mesh,
                         nH=nH_cm3,
-                        chi=chi_arr,
+                        chi=chi_pe_arr,
                         visser=visser,
                         nCO=nCO_cm3,
                         nC=nC_cm3,
@@ -305,7 +362,9 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH_flat,
                 T_flat,
                 Td_flat,
-                chi_flat,
+                chi_pe_flat,
+                chi0_flat,
+                Av_flat,
                 theta_h2_arr.reshape(ncells),
                 theta_co_arr.reshape(ncells),
                 theta_c_arr.reshape(ncells),
@@ -394,6 +453,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             nCplus=nCplus,
             nco_total=Quantity(nco_gas.magnitude + nco_ice.magnitude, "cm^-3"),
             check_pd=False,
+            rtol=float(reltol),
         )
 
     abundances = {

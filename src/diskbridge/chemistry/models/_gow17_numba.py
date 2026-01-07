@@ -63,6 +63,7 @@ from diskbridge.chemistry.models._gow17_network import (
     IN_PH,
     OUT_PH1,
     KPH_BASE,
+    KPH_AVFAC,
     N_GR,
     IN_GR,
     OUT_GR,
@@ -108,15 +109,7 @@ def _solve_linear_system_gauss(A: np.ndarray, b: np.ndarray, x_out: np.ndarray) 
     A_work = A.copy()
     b_work = b.copy()
 
-    max_abs = 0.0
-    for i in range(n):
-        for j in range(n):
-            aij = abs(A_work[i, j])
-            if aij > max_abs:
-                max_abs = aij
-
     eps = np.finfo(np.float64).eps
-    piv_tol = eps * max(1.0, max_abs)
 
     for k in range(n):
         piv_row = k
@@ -126,6 +119,8 @@ def _solve_linear_system_gauss(A: np.ndarray, b: np.ndarray, x_out: np.ndarray) 
             if v > piv:
                 piv = v
                 piv_row = r
+
+        piv_tol = eps * max(1.0, piv)
 
         if piv <= piv_tol:
             return 1
@@ -152,6 +147,7 @@ def _solve_linear_system_gauss(A: np.ndarray, b: np.ndarray, x_out: np.ndarray) 
         for j in range(i + 1, n):
             s = s - A_work[i, j] * x_out[j]
         diag = A_work[i, i]
+        piv_tol = eps * max(1.0, abs(diag))
         if abs(diag) <= piv_tol:
             return 1
         x_out[i] = s / diag
@@ -227,18 +223,15 @@ def gow17_set_ghost_species(
         + 2.0 * out_yghost[I_H2]
     )
 
-    for j in range(N_GHOST):
-        idx = GHOST_OFFSET + j
-        if out_yghost[idx] < 0.0:
-            out_yghost[idx] = 0.0
-
 
 @njit(cache=True)
 def gow17_compute_rates(
     yghost: np.ndarray,
     nH_cm3: float,
     T_K: float,
-    chi: float,
+    chi_pe: float,
+    chi0: float,
+    Av: float,
     theta_h2: float,
     theta_co: float,
     theta_c: float,
@@ -363,9 +356,13 @@ def gow17_compute_rates(
             out_k2[16] = 0.0
             out_k2[17] = 0.0
 
-    Gph = chi
-    for i in range(N_PH):
-        out_kph[i] = KPH_BASE[i] * Gph
+    Gph0 = 0.5 * chi0
+    if Av > 0.0:
+        for i in range(N_PH):
+            out_kph[i] = KPH_BASE[i] * (Gph0 * np.exp(-KPH_AVFAC[i] * Av))
+    else:
+        for i in range(N_PH):
+            out_kph[i] = KPH_BASE[i] * Gph0
 
     out_kph[IPH_CO] *= theta_co
     out_kph[IPH_H2] *= theta_h2
@@ -378,7 +375,7 @@ def gow17_compute_rates(
             out_kgr[i] = 0.0
         return
 
-    psi_gr_fac = 1.7 * chi * np.sqrt(T_K) / nH_cm3
+    psi_gr_fac = 1.7 * chi_pe * np.sqrt(T_K) / nH_cm3
     psi = psi_gr_fac / xe
 
     logT = np.log(T_K)
@@ -395,7 +392,9 @@ def gow17_rhs_cgs(
     y: np.ndarray,
     nH_cm3: float,
     T_K: float,
-    chi: float,
+    chi_pe: float,
+    chi0: float,
+    Av: float,
     theta_h2: float,
     theta_co: float,
     theta_c: float,
@@ -426,7 +425,9 @@ def gow17_rhs_cgs(
         yghost,
         nH_cm3=nH_cm3,
         T_K=T_K,
-        chi=chi,
+        chi_pe=chi_pe,
+        chi0=chi0,
+        Av=Av,
         theta_h2=theta_h2,
         theta_co=theta_co,
         theta_c=theta_c,
@@ -504,7 +505,9 @@ def _fd_jacobian(
     dt_s: float,
     nH_cm3: float,
     T_K: float,
-    chi: float,
+    chi_pe: float,
+    chi0: float,
+    Av: float,
     theta_h2: float,
     theta_co: float,
     theta_c: float,
@@ -545,7 +548,9 @@ def _fd_jacobian(
             y_work,
             nH_cm3=nH_cm3,
             T_K=T_K,
-            chi=chi,
+            chi_pe=chi_pe,
+            chi0=chi0,
+            Av=Av,
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
@@ -586,7 +591,9 @@ def newton_solve_fd(
     dt_s: float,
     nH_cm3: float,
     T_K: float,
-    chi: float,
+    chi_pe: float,
+    chi0: float,
+    Av: float,
     theta_h2: float,
     theta_co: float,
     theta_c: float,
@@ -614,12 +621,17 @@ def newton_solve_fd(
     dx = np.empty(N_Y, dtype=np.float64)
     sat = np.empty(N_Y, dtype=np.int8)
 
+    for i in range(N_Y):
+        sat[i] = 0
+
     for _ in range(max_iter):
         gow17_rhs_cgs(
             y,
             nH_cm3=nH_cm3,
             T_K=T_K,
-            chi=chi,
+            chi_pe=chi_pe,
+            chi0=chi0,
+            Av=Av,
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
@@ -639,26 +651,19 @@ def newton_solve_fd(
             out_rhs=f,
         )
 
-        if mode == 0:
-            pass
-        else:
+        if mode != 0:
             for i in range(N_Y):
                 f[i] = y[i] - y_prev[i] - dt_s * f[i]
 
-        max_scaled = 0.0
-        for i in range(N_Y):
-            denom = float(abstol[i]) + float(reltol) * abs(y[i])
-            if denom <= 0.0:
-                denom = 1.0
-            si = abs(f[i]) / denom
-            sat[i] = 1 if si <= 1.0 else 0
-            if si > max_scaled:
-                max_scaled = si
-
-        if max_scaled <= 1.0:
+        max_scaled_resid = 0.0
+        if mode != 0:
             for i in range(N_Y):
-                out_y[i] = y[i]
-            return 0
+                denom = float(abstol[i]) + float(reltol) * abs(y[i])
+                if denom <= 0.0:
+                    denom = 1.0
+                si = abs(f[i]) / denom
+                if si > max_scaled_resid:
+                    max_scaled_resid = si
 
         _fd_jacobian(
             y,
@@ -668,7 +673,9 @@ def newton_solve_fd(
             dt_s=dt_s,
             nH_cm3=nH_cm3,
             T_K=T_K,
-            chi=chi,
+            chi_pe=chi_pe,
+            chi0=chi0,
+            Av=Av,
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
@@ -698,14 +705,67 @@ def newton_solve_fd(
                     for j in range(N_Y):
                         J[i, j] = 0.0
                     J[i, i] = 1.0
+
+        if mode == 0:
+            max_abs_diag = 0.0
+            for i in range(N_Y):
+                v = abs(J[i, i])
+                if v > max_abs_diag:
+                    max_abs_diag = v
+            if max_abs_diag > 0.0:
+                dt_char = 1.0 / max_abs_diag
+            else:
+                dt_char = 0.0
+
+            max_scaled_resid = 0.0
+            if dt_char > 0.0:
+                for i in range(N_Y):
+                    denom = float(abstol[i]) + float(reltol) * abs(y[i])
+                    if denom <= 0.0:
+                        denom = 1.0
+                    si = abs(f[i]) * dt_char / denom
+                    if si > max_scaled_resid:
+                        max_scaled_resid = si
         st = _solve_linear_system_gauss(J, rhs, dx)
         if st != 0:
             return 2
 
+        alpha = 1.0
+
         for i in range(N_Y):
-            y[i] = y[i] + dx[i]
+            if dx[i] < 0.0 and y[i] > 0.0:
+                a = y[i] / (-dx[i])
+                if a < alpha:
+                    alpha = a
+
+        if dx[I_H2] > 0.0:
+            a = (0.5 - y[I_H2]) / dx[I_H2]
+            if a < alpha:
+                alpha = a
+
+        if alpha < 0.0:
+            return 2
+
+        max_scaled = 0.0
+        for i in range(N_Y):
+            step = alpha * dx[i]
+            y[i] = y[i] + step
             if y[i] < 0.0:
                 y[i] = 0.0
+
+            denom = float(abstol[i]) + float(reltol) * abs(y[i])
+            if denom <= 0.0:
+                denom = 1.0
+            si = abs(step) / denom
+            if mode == 0:
+                sat[i] = 1 if si <= 1.0 else 0
+            if si > max_scaled:
+                max_scaled = si
+
+        if max_scaled <= 1.0 and max_scaled_resid <= 1.0:
+            for i in range(N_Y):
+                out_y[i] = y[i]
+            return 0
 
     for i in range(N_Y):
         out_y[i] = y[i]
@@ -717,12 +777,15 @@ def solve_gow17_equilibrium_cells_cgs(
     nH_cm3: np.ndarray,
     T_K: np.ndarray,
     Tdust_K: np.ndarray,
-    chi: np.ndarray,
+    chi_pe: np.ndarray,
+    chi0: np.ndarray,
+    Av: np.ndarray,
     theta_h2: np.ndarray,
     theta_co: np.ndarray,
     theta_c: np.ndarray,
     chi_eff_pdr: np.ndarray,
     sigma_d_per_H_cm2: np.ndarray,
+    dt_s: float,
     y0: np.ndarray,
     Zg: float,
     Zd: float,
@@ -745,19 +808,21 @@ def solve_gow17_equilibrium_cells_cgs(
     for i in prange(ncells):
         y_init = np.empty(N_Y, dtype=np.float64)
         for j in range(N_Y):
-            y_init[j] = y0[j]
+            y_init[j] = y0[i, j]
 
         y_prev = y_init
         y_sol = np.empty(N_Y, dtype=np.float64)
 
         st = newton_solve_fd(
             y_init,
-            mode=0,
+            mode=1,
             y_prev=y_prev,
-            dt_s=0.0,
+            dt_s=float(dt_s),
             nH_cm3=float(nH_cm3[i]),
             T_K=float(T_K[i]),
-            chi=float(chi[i]),
+            chi_pe=float(chi_pe[i]),
+            chi0=float(chi0[i]),
+            Av=float(Av[i]),
             theta_h2=float(theta_h2[i]),
             theta_co=float(theta_co[i]),
             theta_c=float(theta_c[i]),
@@ -790,7 +855,9 @@ def evolve_gow17_be_cells_cgs(
     nH_cm3: np.ndarray,
     T_K: np.ndarray,
     Tdust_K: np.ndarray,
-    chi: np.ndarray,
+    chi_pe: np.ndarray,
+    chi0: np.ndarray,
+    Av: np.ndarray,
     theta_h2: np.ndarray,
     theta_co: np.ndarray,
     theta_c: np.ndarray,
@@ -831,7 +898,9 @@ def evolve_gow17_be_cells_cgs(
             dt_s=float(dt_s),
             nH_cm3=float(nH_cm3[i]),
             T_K=float(T_K[i]),
-            chi=float(chi[i]),
+            chi_pe=float(chi_pe[i]),
+            chi0=float(chi0[i]),
+            Av=float(Av[i]),
             theta_h2=float(theta_h2[i]),
             theta_co=float(theta_co[i]),
             theta_c=float(theta_c[i]),
