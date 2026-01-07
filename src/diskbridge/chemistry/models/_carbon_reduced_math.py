@@ -11,9 +11,22 @@ from diskbridge._units import Quantity
 from diskbridge._constants import (
     K_B, M_H, K0_CO, E_BIND_CO, NU0_CO, F_DRAINE, N_LAY, N_SURF, Y_CO
 )
+from diskbridge.chemistry.processes.co_phase import (
+    M_CO_CGS as _M_CO_CGS,
+    co_freezeout_rate_cgs,
+    co_thermal_desorption_rate_cgs,
+    co_photodesorption_surface_rate_cgs,
+    co_active_ice_cgs,
+    co_photodesorption_R_cgs,
+    co_freezeout_rate_field_cgs,
+    co_thermal_desorption_rate_field_cgs,
+    co_photodesorption_surface_rate_field_cgs,
+    co_active_ice_field_cgs,
+    co_photodesorption_R_field_cgs,
+)
 
 # constant below should probably be in _constants.py 
-M_CO_CGS = 28.0 * M_H
+M_CO_CGS = _M_CO_CGS
 
 
 @njit(parallel=True, cache=True)
@@ -63,20 +76,12 @@ def solve_carbon_reduced_steady_state_cgs(
                 k_pd_safe = min_rate
             out_tau_pd[i] = 1.0 / k_pd_safe
 
-        v_th = 0.0
-        if T_i > 0.0:
-            v_th = np.sqrt(8.0 * K_B * T_i / (np.pi * M_CO_CGS))
-
-        k_fo = (sigma_i * nH_i) * v_th
-
-        k_td = 0.0
-        if T_i > 0.0:
-            k_td = NU0_CO * np.exp(-E_BIND_CO / T_i)
-
-        k_pd_surf = (chi_i * F_DRAINE) * (Y_CO / (4.0 * N_SURF * float(N_LAY)))
+        k_fo = co_freezeout_rate_cgs(nH_i, T_i, sigma_i)
+        k_td = co_thermal_desorption_rate_cgs(T_i)
+        k_pd_surf = co_photodesorption_surface_rate_cgs(chi_i)
         out_k_pd_surf[i] = k_pd_surf
 
-        n_ice_act_max = (sigma_i * nH_i) * N_SURF * float(N_LAY)
+        n_ice_act_max, _ = co_active_ice_cgs(nH_i, sigma_i, 0.0)
         out_n_ice_act_max[i] = n_ice_act_max
 
         # Thin-ice regime
@@ -142,9 +147,9 @@ def solve_carbon_reduced_steady_state_cgs(
         out_nco_gas[i] = nco_gas
         out_nco_ice[i] = nco_ice
 
-        n_ice_act = nco_ice if nco_ice < n_ice_act_max else n_ice_act_max
+        _, n_ice_act = co_active_ice_cgs(nH_i, sigma_i, nco_ice)
         out_n_ice_act[i] = n_ice_act
-        out_R_pd[i] = k_pd_surf * n_ice_act
+        out_R_pd[i] = co_photodesorption_R_cgs(k_pd_surf, n_ice_act)
 
         if nH_i > 0.0:
             out_Xco_gas[i] = nco_gas / nH_i
@@ -195,27 +200,23 @@ def compute_co_photodissociation_rate(
 
 def co_freezeout_rate(T: Quantity, nH: Quantity, sigma_d_per_H: Quantity) -> Quantity:
     """CO freeze-out rate using mesh sigma_d_per_H."""
-    T_K = T.to('K').magnitude
-    nH_cm3 = nH.to('cm^-3').magnitude
-    v_th = np.sqrt(8.0 * K_B * T_K / (np.pi * M_CO_CGS))
-    sigma_nd = sigma_d_per_H.to('cm^2').magnitude * nH_cm3
-    k_fo = sigma_nd * v_th
+    T_K = np.asarray(T.to('K').magnitude, dtype=float)
+    nH_cm3 = np.asarray(nH.to('cm^-3').magnitude, dtype=float)
+    sigma = np.asarray(sigma_d_per_H.to('cm^2').magnitude, dtype=float)
+    k_fo = co_freezeout_rate_field_cgs(nH_cm3, T_K, sigma)
     return Quantity(k_fo, '1/s')
 
 
 def co_thermal_desorption_rate(T_d: Quantity) -> Quantity:
     """CO thermal desorption rate using E_BIND_CO and NU0_CO from config."""
-    T_K = T_d.to('K').magnitude
-    k_td = np.zeros_like(T_K, dtype=float)
-    mask = T_K > 0.0
-    if np.any(mask):
-        k_td[mask] = NU0_CO * np.exp(-E_BIND_CO / T_K[mask])
+    T_K = np.asarray(T_d.to('K').magnitude, dtype=float)
+    k_td = co_thermal_desorption_rate_field_cgs(T_K)
     return Quantity(k_td, '1/s')
 
 
 def co_photodesorption_rate_surface(chi: Quantity) -> Quantity:
-    chi_val = chi.to('dimensionless').magnitude
-    k_pd_surf = (chi_val * F_DRAINE) * (Y_CO / (4.0 * N_SURF * float(N_LAY)))
+    chi_val = np.asarray(chi.to('dimensionless').magnitude, dtype=float)
+    k_pd_surf = co_photodesorption_surface_rate_field_cgs(chi_val)
     return Quantity(k_pd_surf, '1/s')
 
 
@@ -226,16 +227,17 @@ def co_photodesorption_sink(
     sigma_d_per_H: Quantity,
     k_pd_surf: Quantity,
 ) -> tuple[Quantity, Quantity, Quantity, Quantity]:
-    nH_cm3 = nH.to('cm^-3').magnitude
-    nco_ice_cm3 = nco_ice.to('cm^-3').magnitude
-    sigma = sigma_d_per_H.to('cm^2').magnitude
-    A_d = sigma * nH_cm3
+    nH_cm3 = np.asarray(nH.to('cm^-3').magnitude, dtype=float)
+    nco_ice_cm3 = np.asarray(nco_ice.to('cm^-3').magnitude, dtype=float)
+    sigma = np.asarray(sigma_d_per_H.to('cm^2').magnitude, dtype=float)
 
-    n_ice_act_max = A_d * N_SURF * float(N_LAY)
-    n_ice_act = np.minimum(nco_ice_cm3, n_ice_act_max)
+    n_ice_act_max, n_ice_act = co_active_ice_field_cgs(nH_cm3, sigma, nco_ice_cm3)
 
-    k_pd_s = k_pd_surf.to('1/s').magnitude
-    R_pd = k_pd_s * n_ice_act
+    k_pd_s = np.asarray(k_pd_surf.to('1/s').magnitude, dtype=float)
+    if np.ndim(k_pd_s) == 0:
+        k_pd_s = np.broadcast_to(k_pd_s, n_ice_act.shape)
+
+    R_pd = co_photodesorption_R_field_cgs(k_pd_s, n_ice_act)
 
     return (
         Quantity(n_ice_act_max, 'cm^-3'),

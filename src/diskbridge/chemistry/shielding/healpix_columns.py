@@ -35,13 +35,11 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
-import healpy as hp
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
-
 
 from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
 
@@ -49,6 +47,31 @@ from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
 # =============================================================================
 # HEALPIX CACHE UTILITIES
 # =============================================================================
+
+def _mesh_cache_info(mesh, shape: tuple[int, ...] | list[int]):
+    if mesh.coord_system == "cartesian":
+        return {
+            "coord": "cartesian",
+            "shape": list(shape),
+            "xmin": float(mesh.edges("x").to("cm").magnitude[0]),
+            "xmax": float(mesh.edges("x").to("cm").magnitude[-1]),
+            "ymin": float(mesh.edges("y").to("cm").magnitude[0]),
+            "ymax": float(mesh.edges("y").to("cm").magnitude[-1]),
+            "zmin": float(mesh.edges("z").to("cm").magnitude[0]),
+            "zmax": float(mesh.edges("z").to("cm").magnitude[-1]),
+        }
+    if mesh.coord_system == "spherical":
+        return {
+            "coord": "spherical",
+            "shape": list(shape),
+            "rmin": float(mesh.edges("r").to("cm").magnitude[0]),
+            "rmax": float(mesh.edges("r").to("cm").magnitude[-1]),
+            "thmin": float(mesh.edges("theta").to("rad").magnitude[0]),
+            "thmax": float(mesh.edges("theta").to("rad").magnitude[-1]),
+            "phmin": float(mesh.edges("phi").to("rad").magnitude[0]),
+            "phmax": float(mesh.edges("phi").to("rad").magnitude[-1]),
+        }
+    return {"coord": mesh.coord_system, "shape": list(shape)}
 
 def _compute_field_hash(arr: np.ndarray, precision: int = 6) -> str:
     """Compute a hash of a numpy array for cache keying.
@@ -92,31 +115,7 @@ def _compute_cache_key(
     str
         Cache key string.
     """
-    # Mesh parameters
-    if mesh.coord_system == "cartesian":
-        mesh_info = {
-            "coord": "cartesian",
-            "shape": list(nH_cgs.shape),
-            "xmin": float(mesh.edges("x").to("cm").magnitude[0]),
-            "xmax": float(mesh.edges("x").to("cm").magnitude[-1]),
-            "ymin": float(mesh.edges("y").to("cm").magnitude[0]),
-            "ymax": float(mesh.edges("y").to("cm").magnitude[-1]),
-            "zmin": float(mesh.edges("z").to("cm").magnitude[0]),
-            "zmax": float(mesh.edges("z").to("cm").magnitude[-1]),
-        }
-    elif mesh.coord_system == "spherical":
-        mesh_info = {
-            "coord": "spherical",
-            "shape": list(nH_cgs.shape),
-            "rmin": float(mesh.edges("r").to("cm").magnitude[0]),
-            "rmax": float(mesh.edges("r").to("cm").magnitude[-1]),
-            "thmin": float(mesh.edges("theta").to("rad").magnitude[0]),
-            "thmax": float(mesh.edges("theta").to("rad").magnitude[-1]),
-            "phmin": float(mesh.edges("phi").to("rad").magnitude[0]),
-            "phmax": float(mesh.edges("phi").to("rad").magnitude[-1]),
-        }
-    else:
-        mesh_info = {"coord": mesh.coord_system, "shape": list(nH_cgs.shape)}
+    mesh_info = _mesh_cache_info(mesh, nH_cgs.shape)
     
     params = {
         "mesh": mesh_info,
@@ -265,6 +264,80 @@ def _to_ndarray_cgs(x, target_unit: str) -> np.ndarray:
     return np.asarray(x, dtype=float)
 
 
+def _compute_mask_hash(mask: np.ndarray) -> str:
+    packed = np.packbits(np.asarray(mask, dtype=np.uint8).ravel())
+    return hashlib.md5(packed.tobytes()).hexdigest()[:16]
+
+
+def _compute_nh_cache_key(
+    mesh,
+    nside: int,
+    nH_cgs: np.ndarray,
+    candidate_mask: np.ndarray,
+) -> str:
+    mesh_info = _mesh_cache_info(mesh, nH_cgs.shape)
+
+    params = {
+        "mesh": mesh_info,
+        "nside": int(nside),
+        "nH_hash": _compute_field_hash(nH_cgs),
+        "mask_hash": _compute_mask_hash(candidate_mask),
+    }
+    params_str = json.dumps(params, sort_keys=True)
+    return hashlib.md5(params_str.encode()).hexdigest()
+
+
+def _load_nh_rays_cache(
+    cache_dir: Path | str,
+    cache_key: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict | None] | None:
+    cache_dir = Path(cache_dir)
+    cache_file = cache_dir / f"healpix_nh_cache_{cache_key}.npz"
+    if not cache_file.exists():
+        return None
+
+    try:
+        data = np.load(cache_file)
+        candidate_idx = data["candidate_idx"]
+        dirs = data["dirs"]
+        N_H_rays = data["N_H_rays"]
+
+        metadata = None
+        if "metadata_json" in data:
+            metadata = json.loads(str(data["metadata_json"][0]))
+
+        logger.info(f"Loaded healpix NH cache from: {cache_file}")
+        return candidate_idx, dirs, N_H_rays, metadata
+    except Exception as e:
+        logger.warning(f"Failed to load healpix NH cache: {e}")
+        return None
+
+
+def _save_nh_rays_cache(
+    cache_dir: Path | str,
+    cache_key: str,
+    candidate_idx: np.ndarray,
+    dirs: np.ndarray,
+    N_H_rays: np.ndarray,
+    metadata: dict | None = None,
+) -> Path:
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"healpix_nh_cache_{cache_key}.npz"
+
+    save_dict = {
+        "candidate_idx": candidate_idx,
+        "dirs": dirs,
+        "N_H_rays": N_H_rays,
+    }
+    if metadata is not None:
+        save_dict["metadata_json"] = np.array([json.dumps(metadata)])
+
+    np.savez_compressed(cache_file, **save_dict)
+    logger.info(f"Saved healpix NH cache to: {cache_file}")
+    return cache_file
+
+
 class SphericalHealpixRayTracer:
     """
     Simple ray tracer on a spherical (r, theta, phi) mesh.
@@ -289,6 +362,13 @@ class SphericalHealpixRayTracer:
     """
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
+        try:
+            import healpy as hp
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "healpy is required for HEALPix shielding (pip install healpy)"
+            ) from e
+
         if mesh.coord_system != "spherical":
             raise ValueError(
                 f"SphericalHealpixRayTracer requires spherical mesh, "
@@ -394,6 +474,13 @@ class CartesianHealpixRayTracer:
     """
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
+        try:
+            import healpy as hp
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "healpy is required for HEALPix shielding (pip install healpy)"
+            ) from e
+
         if mesh.coord_system != "cartesian":
             raise ValueError(
                 f"CartesianHealpixRayTracer requires cartesian mesh, "
@@ -455,6 +542,112 @@ class CartesianHealpixRayTracer:
         y = self.y_centers[iy]
         z = self.z_centers[iz]
         return float(x), float(y), float(z)
+
+
+def compute_NH_rays_healpix(
+    mesh,
+    nH_cgs: np.ndarray,
+    *,
+    nside: int,
+    candidate_mask: np.ndarray,
+    progress_chunks: Optional[int] = None,
+    cache_dir: Optional[Path | str] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    nH_cgs = np.asarray(nH_cgs, dtype=np.float64)
+    candidate_mask = np.asarray(candidate_mask, dtype=bool)
+    if nH_cgs.shape != candidate_mask.shape:
+        raise ValueError(
+            f"nH_cgs and candidate_mask must have the same shape, got {nH_cgs.shape} vs {candidate_mask.shape}"
+        )
+
+    cache_key = None
+    if cache_dir is not None:
+        cache_key = _compute_nh_cache_key(mesh, int(nside), nH_cgs, candidate_mask)
+        cached = _load_nh_rays_cache(cache_dir, cache_key)
+        if cached is not None:
+            candidate_idx, dirs, N_H_rays, metadata = cached
+            if metadata:
+                logger.info(
+                    f"Loaded healpix NH rays from cache (computed in {metadata.get('compute_time_s', '?')}s)"
+                )
+            return candidate_idx, dirs, N_H_rays
+
+    candidate_idx = np.argwhere(candidate_mask)
+    n_candidates = candidate_idx.shape[0]
+
+    if mesh.coord_system == "spherical":
+        tracer = SphericalHealpixRayTracer(mesh, nside=int(nside))
+    elif mesh.coord_system == "cartesian":
+        tracer = CartesianHealpixRayTracer(mesh, nside=int(nside))
+    else:
+        raise ValueError(
+            f"Unsupported mesh coord_system {mesh.coord_system!r} for compute_NH_rays_healpix "
+            "(expected 'spherical' or 'cartesian')."
+        )
+
+    dirs = tracer.dirs.astype(np.float64)
+    npix = dirs.shape[0]
+
+    if n_candidates == 0:
+        N_H_rays = np.empty((0, npix), dtype=np.float64)
+        return candidate_idx, dirs, N_H_rays
+
+    cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
+    for k, idx in enumerate(candidate_idx):
+        cell_centers[k] = tracer.cell_center_xyz(*idx)
+
+    _t_start = _time.time()
+
+    if progress_chunks is None or progress_chunks <= 1:
+        N_H_rays = integrate_rays(tracer, cell_centers, dirs, nH_cgs)
+    else:
+        n_chunks = int(progress_chunks)
+        if n_chunks <= 0:
+            n_chunks = 1
+        chunk_size = max(1, n_candidates // n_chunks)
+
+        logger.info(
+            f"HEALPix ray tracing progress enabled: {n_candidates} cells "
+            f"in {n_chunks} chunks (chunk_size={chunk_size})."
+        )
+
+        N_H_rays = np.empty((n_candidates, npix), dtype=np.float64)
+        _t_chunk_start = _time.time()
+        for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
+            end = min(start + chunk_size, n_candidates)
+            N_chunk = integrate_rays(
+                tracer,
+                cell_centers[start:end],
+                dirs,
+                nH_cgs,
+            )
+            N_H_rays[start:end] = N_chunk
+
+            frac = end / n_candidates
+            t_now = _time.time()
+            dt = t_now - _t_chunk_start
+            _t_chunk_start = t_now
+            n_cells_chunk = end - start
+            cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
+            rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
+            logger.info(
+                f"HEALPix rays: {end}/{n_candidates} cells "
+                f"({100.0 * frac:.1f}%) done. "
+                f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
+                f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
+            )
+
+    _t_elapsed = _time.time() - _t_start
+    if cache_dir is not None and cache_key is not None:
+        metadata = {
+            "compute_time_s": round(_t_elapsed, 2),
+            "n_candidates": int(n_candidates),
+            "nside": int(nside),
+            "npix": int(npix),
+        }
+        _save_nh_rays_cache(cache_dir, cache_key, candidate_idx, dirs, N_H_rays, metadata)
+
+    return candidate_idx, dirs, N_H_rays
 
 
 
@@ -584,18 +777,16 @@ def compute_co_shielding_healpix(
         f"(log10(chi/nH) > {LOG_CHI_OVER_NH_PDISS:.2f})."
     )
 
-    # Prepare ray tracer (spherical or cartesian)
-    if mesh.coord_system == "spherical":
-        tracer = SphericalHealpixRayTracer(mesh, nside=nside)
-    elif mesh.coord_system == "cartesian":
-        tracer = CartesianHealpixRayTracer(mesh, nside=nside)
-    else:
-        raise ValueError(
-            f"Unsupported mesh coord_system {mesh.coord_system!r} for "
-            "compute_co_shielding_healpix (expected 'spherical' or 'cartesian')."
-        )
+    _t_start = _time.time()
 
-    dirs = tracer.dirs.astype(np.float64)
+    _, dirs, Nref_all = compute_NH_rays_healpix(
+        mesh,
+        nH_cgs,
+        nside=int(nside),
+        candidate_mask=candidate_mask,
+        progress_chunks=progress_chunks,
+        cache_dir=cache_dir,
+    )
     npix = dirs.shape[0]
 
     # Output arrays
@@ -609,56 +800,6 @@ def compute_co_shielding_healpix(
             chi_eff_q = Quantity(chi_eff, "dimensionless")
             return theta_co_q, chi_eff_q
         return theta_co, chi_eff
-
-    # Prepare cell centers array for Numba
-    cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
-    for k, idx in enumerate(candidate_idx):
-        cell_centers[k] = tracer.cell_center_xyz(*idx)
-
-    # Track computation time for cache metadata
-    _t_start = _time.time()
-
-    # Use Numba-optimized ray integration
-    logger.info(f"Running Numba-optimized ray integration ({n_candidates} cells x {npix} directions)...")
-
-    if progress_chunks is None or progress_chunks <= 1:
-        Nref_all = integrate_rays(tracer, cell_centers, dirs, nH_cgs)
-    else:
-        n_chunks = int(progress_chunks)
-        if n_chunks <= 0:
-            n_chunks = 1
-        chunk_size = max(1, n_candidates // n_chunks)
-
-        logger.info(
-            f"HEALPix ray tracing progress enabled: {n_candidates} cells "
-            f"in {n_chunks} chunks (chunk_size={chunk_size})."
-        )
-
-        Nref_all = np.empty((n_candidates, npix), dtype=np.float64)
-        _t_chunk_start = _time.time()
-        for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
-            end = min(start + chunk_size, n_candidates)
-            Nref_chunk = integrate_rays(
-                tracer,
-                cell_centers[start:end],
-                dirs,
-                nH_cgs,
-            )
-            Nref_all[start:end] = Nref_chunk
-
-            frac = end / n_candidates
-            t_now = _time.time()
-            dt = t_now - _t_chunk_start
-            _t_chunk_start = t_now
-            n_cells_chunk = end - start
-            cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
-            rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
-            logger.info(
-                f"HEALPix rays: {end}/{n_candidates} cells "
-                f"({100.0 * frac:.1f}%) done. "
-                f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
-                f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
-            )
 
     ci = candidate_idx[:, 0]
     cj = candidate_idx[:, 1]
@@ -695,3 +836,96 @@ def compute_co_shielding_healpix(
         chi_eff_q = Quantity(chi_eff, "dimensionless")  # Draine units
         return theta_co_q, chi_eff_q
     return theta_co, chi_eff
+
+
+def compute_pdr_shielding_healpix(
+    mesh,
+    nH,
+    chi,
+    *,
+    visser: Optional[VisserShielding] = None,
+    nCO=None,
+    nH2=None,
+    nside: int = 4,
+    b_kms: Optional[float] = None,
+    candidate_mask: Optional[np.ndarray] = None,
+    Xco_guess: float = 5e-5,
+    XH2_guess: float = 0.5,
+    progress_chunks: Optional[int] = None,
+    cache_dir: Optional[Path | str] = None,
+    return_quantity: bool = True,
+) -> tuple[Quantity, Quantity, Quantity, Quantity] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
+    chi_arr = _to_ndarray_cgs(chi, "dimensionless")
+
+    if nCO is None:
+        nCO_cgs = Xco_guess * nH_cgs
+    else:
+        nCO_cgs = _to_ndarray_cgs(nCO, "cm^-3")
+
+    if nH2 is None:
+        nH2_cgs = 0.5 * XH2_guess * nH_cgs
+    else:
+        nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
+
+    if nH_cgs.shape != chi_arr.shape:
+        raise ValueError(f"nH and chi must have same shape, got {nH_cgs.shape} vs {chi_arr.shape}")
+    if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
+        raise ValueError("nCO and nH2 must match nH shape.")
+
+    Xco_field = nCO_cgs / (nH_cgs + 1.0e-99)
+    XH2_field = 2.0 * nH2_cgs / (nH_cgs + 1.0e-99)
+
+    if candidate_mask is None:
+        ratio = chi_arr / (nH_cgs + 1e-99)
+        log_ratio = np.log10(np.maximum(ratio, 1e-99))
+        candidate_mask = log_ratio > LOG_CHI_OVER_NH_PDISS
+
+    candidate_idx, dirs, N_H_rays = compute_NH_rays_healpix(
+        mesh,
+        nH_cgs,
+        nside=int(nside),
+        candidate_mask=candidate_mask,
+        progress_chunks=progress_chunks,
+        cache_dir=cache_dir,
+    )
+
+    theta_h2 = np.ones_like(nH_cgs, dtype=np.float64)
+    theta_co = np.ones_like(nH_cgs, dtype=np.float64)
+    theta_c = np.ones_like(nH_cgs, dtype=np.float64)
+
+    n_candidates = candidate_idx.shape[0]
+    if n_candidates > 0:
+        from diskbridge.chemistry.hydrogen.partition import _h2_self_shielding_db96
+
+        ci = candidate_idx[:, 0]
+        cj = candidate_idx[:, 1]
+        ck = candidate_idx[:, 2]
+
+        XH2_cand = XH2_field[ci, cj, ck]
+        N_H2_rays = (0.5 * XH2_cand[:, None] * N_H_rays).astype(np.float64)
+        f_sh_rays = _h2_self_shielding_db96(N_H2_rays, b5=2.0, alpha=-0.75)
+        theta_h2_mean = f_sh_rays.mean(axis=1)
+        for k, idx in enumerate(candidate_idx):
+            theta_h2[tuple(idx)] = float(theta_h2_mean[k])
+
+        if visser is not None:
+            Xco_cand = Xco_field[ci, cj, ck]
+            Nco_rays = (Xco_cand[:, None] * N_H_rays).astype(np.float64)
+            theta_co_rays = visser.theta("co", Nco_rays, N_H2_rays, b_kms=b_kms)
+            theta_co_mean = theta_co_rays.mean(axis=1)
+            for k, idx in enumerate(candidate_idx):
+                theta_co[tuple(idx)] = float(theta_co_mean[k])
+
+    chi_eff_h2 = chi_arr * theta_h2
+    chi_eff_co = chi_arr * theta_co
+    chi_eff_pdr = chi_arr * theta_h2 * theta_co
+
+    if return_quantity:
+        return (
+            Quantity(theta_h2, "dimensionless"),
+            Quantity(theta_co, "dimensionless"),
+            Quantity(theta_c, "dimensionless"),
+            Quantity(chi_eff_pdr, "dimensionless"),
+        )
+    return theta_h2, theta_co, theta_c, chi_eff_pdr
