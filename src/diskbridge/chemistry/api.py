@@ -159,7 +159,8 @@ def run_thermochemistry(
     chi_dust = rad.chi if rad.chi is not None else rad.ensure_chi()
     nH = rad.ensure_nH()
 
-    ensure_h2_partition(rad, nH=nH, chi_dust=chi_dust)
+    if str(chemistry_model).lower() != "gow17_pdr":
+        ensure_h2_partition(rad, nH=nH, chi_dust=chi_dust)
 
     enable_convergence = convergence is not None
     if enable_convergence:

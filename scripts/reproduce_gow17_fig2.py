@@ -50,6 +50,16 @@ SPEC_LIST_REF = [
 
 _SPEC_INDEX_REF = {name: i for i, name in enumerate(SPEC_LIST_REF)}
 
+COLORS = {
+    "CO": "#1f77b4",
+    "C": "#d62728",
+    "C+": "#ff7f0e",
+    "H3+": "#2ca02c",
+    "OHx": "#9467bd",
+    "CHx": "#8c564b",
+    "He+": "#e377c2",
+}
+
 
 @dataclass(frozen=True)
 class RefSlab:
@@ -178,6 +188,7 @@ def run_diskbridge_slab(
             model="gow17_pdr",
             config={
                 "mode": "equilibrium",
+                "t_end": "2.0e9 yr",
                 "nside": 1,
                 "b_kms": 0.3,
                 "chi0": float(chi0),
@@ -217,14 +228,15 @@ def _plot_compare(
 ) -> None:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=160)
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
 
     for spec in species:
         y_ref = ref.abd[spec][:, nH_index][::-1]
         y_db = abd_db[spec].reshape(-1)
+        color = COLORS.get(spec, "#444444")
 
-        ax.plot(Av, _safe_log10(y_ref), lw=1.2, label=f"{spec} ref")
-        ax.plot(Av, _safe_log10(y_db), lw=1.2, ls="--", label=f"{spec} diskbridge")
+        ax.plot(Av, _safe_log10(y_ref), lw=1.2, label=f"{spec} ref", color=color)
+        ax.plot(Av, _safe_log10(y_db), lw=1.2, ls="--", label=f"{spec} diskbridge", color=color)
 
     ax.set_xlabel("A_V")
     ax.set_ylabel("log10 abundance per H")

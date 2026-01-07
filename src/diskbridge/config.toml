@@ -112,8 +112,8 @@ T_cmb = "2.725 K"
 
 [chemistry.common]
 # Elemental abundances (relative to H nuclei)
-X_C_tot = 1.4e-4               # Total carbon abundance (C + C+ + CO + ...)
-X_O_tot = 3.0e-4               # Total oxygen abundance
+X_C_tot = 1.6e-4               # Total carbon abundance (C + C+ + CO + ...)
+X_O_tot = 3.2e-4               # Total oxygen abundance
 
 # CO molecular properties
 E_bind_co = "855.0 K"          # CO binding energy to grain surface
@@ -272,6 +272,10 @@ const_temp = true
 max_iter = 60
 reltol = 1.0e-2
 abstol0 = 1.0e-9
+
+shielding_max_iter = 6
+shielding_reltol = 1.0e-2
+shielding_abstol = 1.0e-9
 
 # Time-dependent mode parameters
 t_end = "1.0e3 yr"

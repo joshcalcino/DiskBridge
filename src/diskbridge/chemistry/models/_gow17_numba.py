@@ -738,11 +738,6 @@ def newton_solve_fd(
                 if a < alpha:
                     alpha = a
 
-        if dx[I_H2] > 0.0:
-            a = (0.5 - y[I_H2]) / dx[I_H2]
-            if a < alpha:
-                alpha = a
-
         if alpha < 0.0:
             return 2
 
@@ -752,6 +747,9 @@ def newton_solve_fd(
             y[i] = y[i] + step
             if y[i] < 0.0:
                 y[i] = 0.0
+
+            if i == I_H2 and y[i] > 0.5:
+                y[i] = 0.5
 
             denom = float(abstol[i]) + float(reltol) * abs(y[i])
             if denom <= 0.0:
