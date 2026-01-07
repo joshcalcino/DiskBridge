@@ -33,7 +33,7 @@ import json
 import time as _time
 from pathlib import Path
 from typing import Optional, Tuple
-
+import healpy as hp
 import numpy as np
 
 from diskbridge._logging import logger
@@ -362,12 +362,6 @@ class SphericalHealpixRayTracer:
     """
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
-        try:
-            import healpy as hp
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "healpy is required for HEALPix shielding (pip install healpy)"
-            ) from e
 
         if mesh.coord_system != "spherical":
             raise ValueError(
@@ -474,12 +468,6 @@ class CartesianHealpixRayTracer:
     """
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:
-        try:
-            import healpy as hp
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "healpy is required for HEALPix shielding (pip install healpy)"
-            ) from e
 
         if mesh.coord_system != "cartesian":
             raise ValueError(
@@ -845,6 +833,7 @@ def compute_pdr_shielding_healpix(
     *,
     visser: Optional[VisserShielding] = None,
     nCO=None,
+    nC=None,
     nH2=None,
     nside: int = 4,
     b_kms: Optional[float] = None,
@@ -863,6 +852,11 @@ def compute_pdr_shielding_healpix(
     else:
         nCO_cgs = _to_ndarray_cgs(nCO, "cm^-3")
 
+    if nC is None:
+        nC_cgs = np.zeros_like(nH_cgs, dtype=np.float64)
+    else:
+        nC_cgs = _to_ndarray_cgs(nC, "cm^-3")
+
     if nH2 is None:
         nH2_cgs = 0.5 * XH2_guess * nH_cgs
     else:
@@ -870,11 +864,12 @@ def compute_pdr_shielding_healpix(
 
     if nH_cgs.shape != chi_arr.shape:
         raise ValueError(f"nH and chi must have same shape, got {nH_cgs.shape} vs {chi_arr.shape}")
-    if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
-        raise ValueError("nCO and nH2 must match nH shape.")
+    if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape or nC_cgs.shape != nH_cgs.shape:
+        raise ValueError("nCO, nC, and nH2 must match nH shape.")
 
     Xco_field = nCO_cgs / (nH_cgs + 1.0e-99)
     XH2_field = 2.0 * nH2_cgs / (nH_cgs + 1.0e-99)
+    Xc_field = nC_cgs / (nH_cgs + 1.0e-99)
 
     if candidate_mask is None:
         ratio = chi_arr / (nH_cgs + 1e-99)
@@ -898,16 +893,32 @@ def compute_pdr_shielding_healpix(
     if n_candidates > 0:
         from diskbridge.chemistry.hydrogen.partition import _h2_self_shielding_db96
 
+        if b_kms is None:
+            raise ValueError("b_kms is required for H2 self-shielding")
+
         ci = candidate_idx[:, 0]
         cj = candidate_idx[:, 1]
         ck = candidate_idx[:, 2]
 
         XH2_cand = XH2_field[ci, cj, ck]
         N_H2_rays = (0.5 * XH2_cand[:, None] * N_H_rays).astype(np.float64)
-        f_sh_rays = _h2_self_shielding_db96(N_H2_rays, b5=2.0, alpha=-0.75)
+        f_sh_rays = _h2_self_shielding_db96(N_H2_rays, b5=float(b_kms), alpha=-0.75)
         theta_h2_mean = f_sh_rays.mean(axis=1)
         for k, idx in enumerate(candidate_idx):
             theta_h2[tuple(idx)] = float(theta_h2_mean[k])
+
+        Xc_cand = Xc_field[ci, cj, ck]
+        N_C_rays = (Xc_cand[:, None] * N_H_rays).astype(np.float64)
+
+        AH2 = 1.17e-8
+        tau_H2 = 1.2e-14 * 2.0 * N_H2_rays
+        y = AH2 * tau_H2
+        ry = np.exp(-y) / (1.0 + y)
+        rc = np.exp(-1.6e-17 * N_C_rays)
+        theta_c_rays = rc * ry
+        theta_c_mean = theta_c_rays.mean(axis=1)
+        for k, idx in enumerate(candidate_idx):
+            theta_c[tuple(idx)] = float(theta_c_mean[k])
 
         if visser is not None:
             Xco_cand = Xco_field[ci, cj, ck]

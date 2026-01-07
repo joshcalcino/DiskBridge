@@ -774,3 +774,77 @@ def solve_gow17_equilibrium_cells_cgs(
         status_out[i] = st
         for j in range(N_Y):
             y_out[i, j] = y_sol[j]
+
+
+@njit(parallel=True, cache=True)
+def evolve_gow17_be_cells_cgs(
+    nH_cm3: np.ndarray,
+    T_K: np.ndarray,
+    Tdust_K: np.ndarray,
+    chi: np.ndarray,
+    theta_h2: np.ndarray,
+    theta_co: np.ndarray,
+    theta_c: np.ndarray,
+    chi_eff_pdr: np.ndarray,
+    sigma_d_per_H_cm2: np.ndarray,
+    dt_s: float,
+    y_inout: np.ndarray,
+    Zg: float,
+    Zd: float,
+    ion_rate_s: float,
+    fH2gr: float,
+    fHplusgr: float,
+    fCplusgr: float,
+    fHeplusgr: float,
+    fSplusgr: float,
+    fSiplusgr: float,
+    fCplusCR: float,
+    max_iter: int,
+    reltol: float,
+    abstol: np.ndarray,
+    status_out: np.ndarray,
+) -> None:
+    ncells = nH_cm3.size
+
+    for i in prange(ncells):
+        y_prev = np.empty(N_Y, dtype=np.float64)
+        y_init = np.empty(N_Y, dtype=np.float64)
+        for j in range(N_Y):
+            y_prev[j] = y_inout[i, j]
+            y_init[j] = y_inout[i, j]
+
+        y_sol = np.empty(N_Y, dtype=np.float64)
+
+        st = newton_solve_fd(
+            y_init,
+            mode=1,
+            y_prev=y_prev,
+            dt_s=float(dt_s),
+            nH_cm3=float(nH_cm3[i]),
+            T_K=float(T_K[i]),
+            chi=float(chi[i]),
+            theta_h2=float(theta_h2[i]),
+            theta_co=float(theta_co[i]),
+            theta_c=float(theta_c[i]),
+            ion_rate_s=float(ion_rate_s),
+            sigma_d_per_H_cm2=float(sigma_d_per_H_cm2[i]),
+            Tdust_K=float(Tdust_K[i]),
+            chi_eff_pdr=float(chi_eff_pdr[i]),
+            Zg=float(Zg),
+            Zd=float(Zd),
+            fH2gr=float(fH2gr),
+            fHplusgr=float(fHplusgr),
+            fCplusgr=float(fCplusgr),
+            fHeplusgr=float(fHeplusgr),
+            fSplusgr=float(fSplusgr),
+            fSiplusgr=float(fSiplusgr),
+            fCplusCR=float(fCplusCR),
+            max_iter=int(max_iter),
+            reltol=float(reltol),
+            abstol=abstol,
+            out_y=y_sol,
+        )
+
+        status_out[i] = st
+        for j in range(N_Y):
+            y_inout[i, j] = y_sol[j]
