@@ -147,12 +147,16 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
 
         nC_guess = np.ascontiguousarray(xC_guess * nH_cm3, dtype=np.float64)
 
+        nCO_in = getattr(rad, "nco_gas", None)
+        if nCO_in is None:
+            nCO_in = np.ascontiguousarray(y0[I_CO] * nH_cm3, dtype=np.float64)
+
         theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
             mesh=rad.model.mesh,
             nH=nH_cm3,
             chi=chi_arr,
             visser=visser,
-            nCO=getattr(rad, "nco_gas", None),
+            nCO=nCO_in,
             nC=getattr(rad, "nC", None) if getattr(rad, "nC", None) is not None else nC_guess,
             nH2=getattr(rad, "nH2", None),
             nside=nside,
