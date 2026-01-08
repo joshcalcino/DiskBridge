@@ -58,6 +58,9 @@ class gow17 : public Ode {
 		/* Print chemistry network and current rates.*/
 		void PrintChemNet(FILE *pf) const;
     void Etol(const double abstol_T);
+
+    static double xC_std() { return xC_std_; }
+    static double xO_std() { return xO_std_; }
 		void SetnH(const double nH);
 		void SetbCO(const double bCO);
 		void SetNCO(const double NCO);

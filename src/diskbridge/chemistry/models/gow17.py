@@ -10,7 +10,6 @@ import numpy as np
 from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
-from diskbridge._constants import X_C_TOT
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
     compute_pdr_shielding_1d,
@@ -30,6 +29,8 @@ IPH_OH = _gow17.IPH_OH
 IPH_H2 = _gow17.IPH_H2
 IPH_S = _gow17.IPH_S
 IPH_SI = _gow17.IPH_SI
+
+XC_STD = _gow17.XC_STD
 
 I_HEP = 0
 I_OHX = 1
@@ -150,7 +151,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_co_arr = np.ones(ncells, dtype=np.float64)
     theta_c_arr = np.ones(ncells, dtype=np.float64)
 
-    xCtot = float(Zg) * float(X_C_TOT)
+    xCtot_flat = Zg_arr * float(XC_STD)
 
     status_acc = np.zeros(ncells, dtype=np.int32)
 
@@ -161,7 +162,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         xCO = y_guess[:, I_CO]
         xH2 = y_guess[:, I_H2]
 
-        xC_neutral = xCtot - (
+        xC_neutral = xCtot_flat - (
             y_guess[:, I_HCOP]
             + y_guess[:, I_CHX]
             + xCO
@@ -300,6 +301,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         + 2.0 * y_out[..., I_H2]
     )
 
+    xCtot = xCtot_flat.reshape(shape)
     xC_neutral = xCtot - (
         y_out[..., I_HCOP]
         + y_out[..., I_CHX]

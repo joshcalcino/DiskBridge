@@ -274,6 +274,9 @@ PYBIND11_MODULE(_gow17, m) {
     m.attr("IPH_S") = IPH_S;
     m.attr("IPH_SI") = IPH_SI;
 
+    m.attr("XC_STD") = gow17::xC_std();
+    m.attr("XO_STD") = gow17::xO_std();
+
     m.def(
         "solve_slab_1d_equilibrium",
         &solve_slab_1d_equilibrium,
