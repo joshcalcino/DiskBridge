@@ -104,8 +104,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     fSiplusgr = float(cfg.get("fSiplusgr", 1.0))
     fCplusCR = float(cfg.get("fCplusCR", 1.0))
 
-    gradv = float(cfg.get("gradv", 1.0e-14))
-    Leff_CO_max = float(cfg.get("Leff_CO_max", 3.0e20))
+    gradv_scalar = float(cfg.get("gradv", 1.0e-14))
+    gradv_mode = str(cfg.get("gradv_mode", "scalar"))
+    gradv_q = float(cfg.get("gradv_q", 1.5))
+    gradv_N0 = float(cfg.get("gradv_N0", 1e21))
+    gradv_p = float(cfg.get("gradv_p", 1.0))
+    gradv_f_corr = float(cfg.get("gradv_f_corr", 4.0))
+    gradv_gmin = float(cfg.get("gradv_gmin", 1e-20))
+    gradv_gmax = float(cfg.get("gradv_gmax", 1e-8))
+    Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
     isDust_cooling = bool(cfg.get("isDust_cooling", False))
     isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
     const_temp = bool(cfg.get("const_temp", True))
@@ -160,6 +167,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
     else:
         Zd_arr = _broadcast_scalar_or_array(Zd_scalar, ncells)
+
+    Leff_CO_max_arr = _broadcast_scalar_or_array(Leff_CO_max_scalar, ncells)
+    gradv_arr = _broadcast_scalar_or_array(gradv_scalar, ncells)
 
     visser = VisserShielding(b_kms=float(b_kms))
 
@@ -294,8 +304,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             tmin=tmin,
             tmax=tmax,
             const_temp=const_temp,
-            gradv=gradv,
-            Leff_CO_max=Leff_CO_max,
+            gradv=gradv_arr,
+            Leff_CO_max=Leff_CO_max_arr,
             isDust_cooling=isDust_cooling,
             isCoolingCOThin=isCoolingCOThin,
             fH2gr=fH2gr,

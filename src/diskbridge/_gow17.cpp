@@ -151,8 +151,8 @@ static py::dict solve_batch_equilibrium(
     const double tmin,
     const double tmax,
     const bool const_temp,
-    const double gradv,
-    const double Leff_CO_max,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
     const bool isDust_cooling,
     const bool isCoolingCOThin,
     const double fH2gr,
@@ -200,6 +200,12 @@ static py::dict solve_batch_equilibrium(
     if (abstol.ndim() != 1 || abstol.size() != N_Y) {
         throw std::invalid_argument("abstol must be 1D with length 14");
     }
+    if (Leff_CO_max.ndim() != 1 || Leff_CO_max.size() != Ncells) {
+        throw std::invalid_argument("Leff_CO_max must be 1D with length Ncells");
+    }
+    if (gradv.ndim() != 1 || gradv.size() != Ncells) {
+        throw std::invalid_argument("gradv must be 1D with length Ncells");
+    }
 
     const double *y0_ptr = y0.data();
     const double *nH_ptr = nH.data();
@@ -212,6 +218,8 @@ static py::dict solve_batch_equilibrium(
     const double *GISRF_ptr = GISRF.data();
     const double *Gph_ptr = Gph.data();
     const double *abstol_ptr = abstol.data();
+    const double *Leff_CO_max_ptr = Leff_CO_max.data();
+    const double *gradv_ptr = gradv.data();
 
     py::array_t<double> y_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(N_Y)});
     py::array_t<int> status_out(py::array::ShapeContainer{Ncells});
@@ -235,9 +243,9 @@ static py::dict solve_batch_equilibrium(
         ode.SetfSplusgr(fSplusgr);
         ode.SetfSiplusgr(fSiplusgr);
         ode.SetfCplusCR(fCplusCR);
-        ode.SetGradv(gradv);
+        ode.SetGradv(gradv_ptr[i]);
         ode.SetTdust(Tdust_ptr[i]);
-        ode.Leff_CO_max(Leff_CO_max);
+        ode.Leff_CO_max(Leff_CO_max_ptr[i]);
         ode.IsDustCooling(isDust_cooling);
         ode.SetCoolingCOThin(isCoolingCOThin);
 
@@ -367,7 +375,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("tmax"),
         py::arg("const_temp"),
         py::arg("gradv"),
-        py::arg("Leff_CO_max") = 3.0e20,
+        py::arg("Leff_CO_max"),
         py::arg("isDust_cooling") = false,
         py::arg("isCoolingCOThin") = false,
         py::arg("fH2gr"),

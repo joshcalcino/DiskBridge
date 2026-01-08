@@ -54,6 +54,8 @@ class TestBatchSolverBasic:
         GPE = np.ones(ncells, dtype=np.float64)
         GISRF = np.ones(ncells, dtype=np.float64)
         Gph = np.ones((ncells, N_PH), dtype=np.float64)
+        Leff_CO_max = np.full(ncells, 3.0e20, dtype=np.float64)
+        gradv = np.full(ncells, 1e-14, dtype=np.float64)
         abstol = default_abstol()
 
         result = _gow17.solve_batch_equilibrium(
@@ -75,7 +77,8 @@ class TestBatchSolverBasic:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -105,6 +108,8 @@ class TestBatchSolverBasic:
         GPE = np.ones(ncells, dtype=np.float64)
         GISRF = np.ones(ncells, dtype=np.float64)
         Gph = np.ones((ncells, N_PH), dtype=np.float64)
+        Leff_CO_max = np.full(ncells, 3.0e20, dtype=np.float64)
+        gradv = np.full(ncells, 1e-14, dtype=np.float64)
         abstol = default_abstol()
 
         result = _gow17.solve_batch_equilibrium(
@@ -126,7 +131,8 @@ class TestBatchSolverBasic:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -167,6 +173,8 @@ class TestNoDoubleAttenuation:
         GPE = np.ones(ncells, dtype=np.float64)
         GISRF = np.ones(ncells, dtype=np.float64)
         Gph = np.ones((ncells, N_PH), dtype=np.float64)
+        Leff_CO_max = np.full(ncells, 3.0e20, dtype=np.float64)
+        gradv = np.full(ncells, 1e-14, dtype=np.float64)
         abstol = default_abstol()
 
         result1 = _gow17.solve_batch_equilibrium(
@@ -188,7 +196,8 @@ class TestNoDoubleAttenuation:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -223,7 +232,8 @@ class TestNoDoubleAttenuation:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -262,6 +272,8 @@ class TestRadiationFieldScaling:
         Zd = np.ones(ncells, dtype=np.float64)
         Zg = np.ones(ncells, dtype=np.float64)
         ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
+        Leff_CO_max = np.full(ncells, 3.0e20, dtype=np.float64)
+        gradv = np.full(ncells, 1e-14, dtype=np.float64)
         abstol = default_abstol()
 
         GPE_low = np.full(ncells, 0.1, dtype=np.float64)
@@ -287,7 +299,8 @@ class TestRadiationFieldScaling:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -322,7 +335,8 @@ class TestRadiationFieldScaling:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=True,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             fH2gr=1.0,
             fHplusgr=1.0,
             fCplusgr=1.0,
@@ -359,6 +373,8 @@ class TestThermoEvolution:
         GPE = np.ones(ncells, dtype=np.float64)
         GISRF = np.ones(ncells, dtype=np.float64)
         Gph = np.ones((ncells, N_PH), dtype=np.float64)
+        Leff_CO_max = np.full(ncells, 3.0e20, dtype=np.float64)
+        gradv = np.full(ncells, 1e-14, dtype=np.float64)
         abstol = default_abstol()
 
         KB_CGS = 1.380649e-16
@@ -387,7 +403,8 @@ class TestThermoEvolution:
             tmin=3.16e10,
             tmax=3.16e14,
             const_temp=False,
-            gradv=1e-14,
+            gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
             isDust_cooling=True,
             fH2gr=1.0,
             fHplusgr=1.0,

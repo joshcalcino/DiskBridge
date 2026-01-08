@@ -38,7 +38,10 @@ import numpy as np
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
+from diskbridge.chemistry.shielding.healpix_utils import (
+    integrate_rays,
+    integrate_rays_with_pathlength,
+)
 
 from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
 
@@ -304,6 +307,140 @@ def _compute_healpix_column_cache_key(
     }
     params_str = json.dumps(params, sort_keys=True)
     return hashlib.md5(params_str.encode()).hexdigest()
+
+def compute_L_geo_from_pathlengths(
+    S_all: np.ndarray,
+    reduction: str = "percentile_20",
+    L_min: float = 1e10,
+    L_max: float = 1e20,
+) -> np.ndarray:
+    """
+    Compute geometric escape length per cell from ray path lengths.
+    
+    Parameters
+    ----------
+    S_all : ndarray, shape (n_cells, n_dirs)
+        Path lengths to boundary for each ray direction.
+    reduction : str
+        Reduction method:
+        - "min": minimum path length (most conservative, more cooling)
+        - "percentile_10": 10th percentile
+        - "percentile_20": 20th percentile (default, mimics vertical escape)
+        - "percentile_30": 30th percentile
+        - "harmonic": harmonic mean (penalizes long rays)
+    L_min : float
+        Minimum allowed L_geo (cm). Prevents tiny values.
+    L_max : float
+        Maximum allowed L_geo (cm). Caps at domain scale.
+    
+    Returns
+    -------
+    L_geo : ndarray, shape (n_cells,)
+        Geometric escape length per cell (cm).
+    """
+    eps = 1e-30
+    
+    if reduction == "min":
+        L_geo = np.min(S_all, axis=1)
+    elif reduction.startswith("percentile_"):
+        pct = int(reduction.split("_")[1])
+        L_geo = np.percentile(S_all, pct, axis=1)
+    elif reduction == "harmonic":
+        L_geo = 1.0 / np.mean(1.0 / np.maximum(S_all, eps), axis=1)
+    else:
+        raise ValueError(f"Unknown reduction method: {reduction}")
+    
+    return np.clip(L_geo, L_min, L_max)
+
+
+def compute_gradv_nh_weighted(
+    NH_rays: np.ndarray,
+    dirs: np.ndarray,
+    Omega: np.ndarray,
+    eR: np.ndarray,
+    L_cell: np.ndarray,
+    b_kms: float = 0.3,
+    q: float = 1.5,
+    N0: float = 1e21,
+    p: float = 1.0,
+    f_corr: float = 4.0,
+    gmin: float = 1e-20,
+    gmax: float = 1e-8,
+) -> np.ndarray:
+    """
+    Compute per-cell velocity gradient using NH-weighted harmonic mean.
+    
+    Combines Keplerian shear with turbulent floor, weighted by escape probability.
+    
+    Parameters
+    ----------
+    NH_rays : ndarray, shape (n_cells, n_dirs)
+        H column density along each HEALPix direction (cm^-2).
+    dirs : ndarray, shape (n_dirs, 3)
+        Unit direction vectors (Cartesian).
+    Omega : ndarray, shape (n_cells,)
+        Angular velocity |v_phi|/R (s^-1) per cell.
+    eR : ndarray, shape (n_cells, 3)
+        Cylindrical radial unit vector per cell.
+    L_cell : ndarray, shape (n_cells,)
+        Cell size (cm) per cell.
+    b_kms : float
+        Doppler parameter / microturbulence (km/s). Default 0.3.
+    q : float
+        Shear parameter. Default 1.5 (Keplerian).
+    N0 : float
+        Column density scale for weighting (cm^-2). Default 1e21.
+    p : float
+        Power for NH weighting. Default 1.0.
+    f_corr : float
+        Correlation length factor for turbulence. Default 4.0.
+    gmin : float
+        Minimum gradv (s^-1). Default 1e-20.
+    gmax : float
+        Maximum gradv (s^-1). Default 1e-8.
+    
+    Returns
+    -------
+    gradv : ndarray, shape (n_cells,)
+        Effective velocity gradient per cell (s^-1).
+    
+    Notes
+    -----
+    The effective gradient per direction is:
+        g_eff = sqrt(g_shear^2 + g_turb^2)
+    where:
+        g_shear = q * Omega * |n . eR|  (disk shear)
+        g_turb = sigma_turb / (f_corr * L_cell)  (turbulent floor)
+    
+    Directions are weighted by escape probability:
+        w = 1 / (NH + N0)^p
+    
+    Final gradv is the weighted harmonic mean:
+        gradv = sum(w) / sum(w / g_eff)
+    """
+    n_cells = NH_rays.shape[0]
+    n_dirs = dirs.shape[0]
+    eps = 1e-30
+    
+    sigma_turb = b_kms * 1e5
+    
+    w = 1.0 / np.power(NH_rays + N0, p)
+    w_sum = w.sum(axis=1, keepdims=True)
+    w = w / np.maximum(w_sum, eps)
+    
+    nR = np.abs(eR @ dirs.T)
+    
+    g_shear = q * Omega[:, None] * nR
+    
+    g_turb = sigma_turb / (f_corr * np.maximum(L_cell, eps))
+    
+    g_eff = np.sqrt(g_shear**2 + g_turb[:, None]**2)
+    
+    w_over_g = w / np.maximum(g_eff, gmin)
+    gradv = w.sum(axis=1) / np.maximum(w_over_g.sum(axis=1), eps)
+    
+    return np.clip(gradv, gmin, gmax)
+
 
 class SphericalHealpixRayTracer:
     """
