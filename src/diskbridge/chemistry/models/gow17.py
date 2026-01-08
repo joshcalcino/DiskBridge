@@ -10,6 +10,7 @@ import numpy as np
 from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
+from diskbridge._constants import SIGMA_D_PER_H
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
     compute_pdr_shielding_1d,
@@ -31,21 +32,44 @@ IPH_S = _gow17.IPH_S
 IPH_SI = _gow17.IPH_SI
 
 XC_STD = _gow17.XC_STD
+XHE = _gow17.XHE
 
-I_HEP = 0
-I_OHX = 1
-I_CHX = 2
-I_CO = 3
-I_CP = 4
-I_HCOP = 5
-I_H2 = 6
-I_HP = 7
-I_H3P = 8
-I_H2P = 9
-I_SP = 10
-I_SIP = 11
-I_OP = 12
-I_E = 13
+I_HEP = _gow17.I_HEP
+I_OHX = _gow17.I_OHX
+I_CHX = _gow17.I_CHX
+I_CO = _gow17.I_CO
+I_CP = _gow17.I_CP
+I_HCOP = _gow17.I_HCOP
+I_H2 = _gow17.I_H2
+I_HP = _gow17.I_HP
+I_H3P = _gow17.I_H3P
+I_H2P = _gow17.I_H2P
+I_SP = _gow17.I_SP
+I_SIP = _gow17.I_SIP
+I_OP = _gow17.I_OP
+I_E = _gow17.I_E
+
+KB_CGS = 1.380649e-16
+
+
+def _cv_cold(xH2: np.ndarray, xe: np.ndarray) -> np.ndarray:
+    """Heat capacity per H nucleus for cold gas (cgs: erg/K per H)."""
+    return 1.5 * KB_CGS * ((1.0 - 2.0 * xH2) + xH2 + XHE + xe)
+
+
+def _electron_abundance(y: np.ndarray) -> np.ndarray:
+    """Sum of all ion abundances to get electron abundance."""
+    return (
+        y[..., I_HEP]
+        + y[..., I_CP]
+        + y[..., I_HCOP]
+        + y[..., I_H3P]
+        + y[..., I_H2P]
+        + y[..., I_HP]
+        + y[..., I_SP]
+        + y[..., I_SIP]
+        + y[..., I_OP]
+    )
 
 
 def _as_cgs_f64(q: Quantity, unit: str) -> np.ndarray:
@@ -68,7 +92,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
 
     Zg = float(cfg.get("Zg", 1.0))
-    Zd = float(cfg.get("Zd", 1.0))
+    Zd_mode = str(cfg.get("Zd_mode", "scalar"))
+    Zd_scalar = float(cfg.get("Zd", 1.0))
+    sigma_d_per_H_ref = float(cfg.get("sigma_d_per_H_ref", SIGMA_D_PER_H))
 
     fH2gr = float(cfg.get("fH2gr", 1.0))
     fHplusgr = float(cfg.get("fHplusgr", 1.0))
@@ -79,6 +105,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     fCplusCR = float(cfg.get("fCplusCR", 1.0))
 
     gradv = float(cfg.get("gradv", 1.0e-14))
+    Leff_CO_max = float(cfg.get("Leff_CO_max", 3.0e20))
+    isDust_cooling = bool(cfg.get("isDust_cooling", False))
+    isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
+    const_temp = bool(cfg.get("const_temp", True))
 
     reltol = float(cfg.get("reltol", 1e-4))
     abstol0 = float(cfg.get("abstol0", 1e-15))
@@ -98,6 +128,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Tgas = rad.ensure_gas_temperature()
     if Tgas is None:
         Tgas = rad.ensure_dust_temperature()
+    Tdust = rad.ensure_dust_temperature()
 
     chi = rad.ensure_chi()
 
@@ -108,13 +139,27 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shape = nH_cm3.shape
     ncells = nH_cm3.size
 
+    Tdust_K = _as_cgs_f64(Tdust, "K")
+
     nH_flat = nH_cm3.reshape(ncells)
     T_flat = T_K.reshape(ncells)
+    Tdust_flat = Tdust_K.reshape(ncells)
     chi_dust_flat = chi_dust_arr.reshape(ncells)
 
-    Zd_arr = _broadcast_scalar_or_array(Zd, ncells)
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
+
+    if Zd_mode == "sigma_d_per_H":
+        sigma_d = rad.ensure_sigma_d_per_H()
+        sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
+        Zd_arr = np.divide(
+            sigma_d_cm2,
+            sigma_d_per_H_ref,
+            out=np.ones(ncells, dtype=np.float64),
+            where=(sigma_d_per_H_ref > 0.0),
+        )
+    else:
+        Zd_arr = _broadcast_scalar_or_array(Zd_scalar, ncells)
 
     visser = VisserShielding(b_kms=float(b_kms))
 
@@ -139,13 +184,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     y_guess = np.zeros((ncells, N_Y), dtype=np.float64)
     y_prev = getattr(rad, "gow17_y", None)
-    if y_prev is not None and np.shape(y_prev) == tuple(shape) + (N_Y,):
+    warm_start = y_prev is not None and np.shape(y_prev) == tuple(shape) + (N_Y,)
+    if warm_start:
         y_guess[:, :] = np.ascontiguousarray(
             np.asarray(y_prev, dtype=np.float64).reshape(ncells, N_Y)
         )
     else:
         for j in range(N_Y):
             y_guess[:, j] = y0_single[j]
+
+    if not const_temp and not warm_start:
+        xe0 = _electron_abundance(y_guess)
+        Cv0 = _cv_cold(y_guess[:, I_H2], xe0)
+        y_guess[:, I_E] = Cv0 * T_flat
 
     theta_h2_arr = np.ones(ncells, dtype=np.float64)
     theta_co_arr = np.ones(ncells, dtype=np.float64)
@@ -228,6 +279,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             y0=np.ascontiguousarray(y_guess, dtype=np.float64),
             nH=nH_flat,
             Tgas=T_flat,
+            Tdust=Tdust_flat,
             Zd=Zd_arr,
             Zg=Zg_arr,
             ion_rate=ion_rate_arr,
@@ -241,8 +293,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             tolfac=tolfac,
             tmin=tmin,
             tmax=tmax,
-            const_temp=True,
+            const_temp=const_temp,
             gradv=gradv,
+            Leff_CO_max=Leff_CO_max,
+            isDust_cooling=isDust_cooling,
+            isCoolingCOThin=isCoolingCOThin,
             fH2gr=fH2gr,
             fHplusgr=fHplusgr,
             fCplusgr=fCplusgr,
@@ -356,6 +411,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     rad.nCplus = nCplus
     rad.nC = nC
     rad.ne = ne
+
+    if not const_temp:
+        xe_out = _electron_abundance(y_out)
+        Cv_out = _cv_cold(y_out[..., I_H2], xe_out)
+        T_out = y_out[..., I_E] / Cv_out
+        T_out = np.clip(T_out, 2.7, 1e6)
+        rad.Tgas_gow17 = Quantity(T_out, "K")
 
     n_fail = int(np.sum(status != 0))
     max_status = int(np.max(status)) if status.size else 0

@@ -47,6 +47,7 @@ class TestBatchSolverBasic:
         y0 = default_y0(ncells)
         nH = np.full(ncells, 1000.0, dtype=np.float64)
         Tgas = np.full(ncells, 50.0, dtype=np.float64)
+        Tdust = np.full(ncells, 20.0, dtype=np.float64)
         Zd = np.ones(ncells, dtype=np.float64)
         Zg = np.ones(ncells, dtype=np.float64)
         ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
@@ -59,6 +60,7 @@ class TestBatchSolverBasic:
             y0=y0,
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -96,6 +98,7 @@ class TestBatchSolverBasic:
         y0 = default_y0(ncells)
         nH = np.full(ncells, 1000.0, dtype=np.float64)
         Tgas = np.full(ncells, 50.0, dtype=np.float64)
+        Tdust = np.full(ncells, 20.0, dtype=np.float64)
         Zd = np.ones(ncells, dtype=np.float64)
         Zg = np.ones(ncells, dtype=np.float64)
         ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
@@ -108,6 +111,7 @@ class TestBatchSolverBasic:
             y0=y0,
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -156,6 +160,7 @@ class TestNoDoubleAttenuation:
 
         nH = np.full(ncells, 100.0, dtype=np.float64)
         Tgas = np.full(ncells, 50.0, dtype=np.float64)
+        Tdust = np.full(ncells, 20.0, dtype=np.float64)
         Zd = np.ones(ncells, dtype=np.float64)
         Zg = np.ones(ncells, dtype=np.float64)
         ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
@@ -168,6 +173,7 @@ class TestNoDoubleAttenuation:
             y0=y0.copy(),
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -202,6 +208,7 @@ class TestNoDoubleAttenuation:
             y0=y0.copy(),
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -251,6 +258,7 @@ class TestRadiationFieldScaling:
 
         nH = np.full(ncells, 1000.0, dtype=np.float64)
         Tgas = np.full(ncells, 50.0, dtype=np.float64)
+        Tdust = np.full(ncells, 20.0, dtype=np.float64)
         Zd = np.ones(ncells, dtype=np.float64)
         Zg = np.ones(ncells, dtype=np.float64)
         ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
@@ -264,6 +272,7 @@ class TestRadiationFieldScaling:
             y0=y0.copy(),
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -298,6 +307,7 @@ class TestRadiationFieldScaling:
             y0=y0.copy(),
             nH=nH,
             Tgas=Tgas,
+            Tdust=Tdust,
             Zd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -333,6 +343,80 @@ class TestRadiationFieldScaling:
         )
 
 
+class TestThermoEvolution:
+    """Tests for thermal evolution mode (const_temp=False)."""
+
+    def test_thermo_mode_converges(self):
+        """Thermo mode should converge with reasonable parameters."""
+        ncells = 4
+        y0 = default_y0(ncells)
+        nH = np.full(ncells, 1000.0, dtype=np.float64)
+        Tgas = np.full(ncells, 50.0, dtype=np.float64)
+        Tdust = np.full(ncells, 20.0, dtype=np.float64)
+        Zd = np.ones(ncells, dtype=np.float64)
+        Zg = np.ones(ncells, dtype=np.float64)
+        ion_rate = np.full(ncells, 2e-16, dtype=np.float64)
+        GPE = np.ones(ncells, dtype=np.float64)
+        GISRF = np.ones(ncells, dtype=np.float64)
+        Gph = np.ones((ncells, N_PH), dtype=np.float64)
+        abstol = default_abstol()
+
+        KB_CGS = 1.380649e-16
+        XHE = 0.1
+        xH2_init = y0[0, 6]
+        xe_init = y0[0, 0] + y0[0, 4]
+        Cv_init = 1.5 * KB_CGS * ((1.0 - 2.0 * xH2_init) + xH2_init + XHE + xe_init)
+        y0[:, 13] = Cv_init * Tgas
+
+        result = _gow17.solve_batch_equilibrium(
+            y0=y0,
+            nH=nH,
+            Tgas=Tgas,
+            Tdust=Tdust,
+            Zd=Zd,
+            Zg=Zg,
+            ion_rate=ion_rate,
+            GPE=GPE,
+            GISRF=GISRF,
+            Gph=Gph,
+            reltol=1e-4,
+            abstol=abstol,
+            mxsteps=10000,
+            maxord=5,
+            tolfac=10.0,
+            tmin=3.16e10,
+            tmax=3.16e14,
+            const_temp=False,
+            gradv=1e-14,
+            isDust_cooling=True,
+            fH2gr=1.0,
+            fHplusgr=1.0,
+            fCplusgr=1.0,
+            fHeplusgr=1.0,
+            fSplusgr=1.0,
+            fSiplusgr=1.0,
+            fCplusCR=1.0,
+            userJac=False,
+            verbose=False,
+        )
+
+        assert np.all(result["status"] == 0), f"Some cells failed: {result['status']}"
+
+        y_out = result["y"]
+        assert np.all(np.isfinite(y_out)), "Output contains non-finite values"
+        assert np.all(y_out[:, :13] >= 0), "Abundances contain negative values"
+
+        E_out = y_out[:, 13]
+        assert np.all(E_out > 0), f"Energy should be positive, got {E_out}"
+
+        xH2_out = y_out[:, 6]
+        xe_out = y_out[:, 0] + y_out[:, 4] + y_out[:, 5] + y_out[:, 7] + y_out[:, 8] + y_out[:, 9] + y_out[:, 10] + y_out[:, 11] + y_out[:, 12]
+        Cv_out = 1.5 * KB_CGS * ((1.0 - 2.0 * xH2_out) + xH2_out + XHE + xe_out)
+        T_out = E_out / Cv_out
+        assert np.all(T_out > 0), f"Temperature should be positive, got {T_out}"
+        assert np.all(T_out < 1e6), f"Temperature unreasonably high: {T_out}"
+
+
 class TestModuleConstants:
     """Tests that module constants are correctly exposed."""
 
@@ -343,6 +427,24 @@ class TestModuleConstants:
         assert hasattr(_gow17, "IPH_C")
         assert hasattr(_gow17, "IPH_CO")
         assert hasattr(_gow17, "IPH_H2")
+
+    def test_species_indices_exist(self):
+        """Species indices should be exposed from C++."""
+        assert hasattr(_gow17, "I_HEP")
+        assert hasattr(_gow17, "I_H2")
+        assert hasattr(_gow17, "I_CO")
+        assert hasattr(_gow17, "I_CP")
+        assert hasattr(_gow17, "I_E")
+        assert hasattr(_gow17, "XHE")
+
+    def test_species_indices_values(self):
+        """Species indices should have expected values."""
+        assert _gow17.I_HEP == 0
+        assert _gow17.I_H2 == 6
+        assert _gow17.I_CO == 3
+        assert _gow17.I_CP == 4
+        assert _gow17.I_E == 13
+        assert _gow17.XHE == 0.1
 
     def test_constants_values(self):
         """Constants should have expected values."""

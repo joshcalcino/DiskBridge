@@ -136,6 +136,7 @@ static py::dict solve_batch_equilibrium(
     const py::array_t<double, py::array::c_style | py::array::forcecast> y0,
     const py::array_t<double, py::array::c_style | py::array::forcecast> nH,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
@@ -151,6 +152,9 @@ static py::dict solve_batch_equilibrium(
     const double tmax,
     const bool const_temp,
     const double gradv,
+    const double Leff_CO_max,
+    const bool isDust_cooling,
+    const bool isCoolingCOThin,
     const double fH2gr,
     const double fHplusgr,
     const double fCplusgr,
@@ -171,6 +175,9 @@ static py::dict solve_batch_equilibrium(
     }
     if (Tgas.ndim() != 1 || Tgas.size() != Ncells) {
         throw std::invalid_argument("Tgas must be 1D with length Ncells");
+    }
+    if (Tdust.ndim() != 1 || Tdust.size() != Ncells) {
+        throw std::invalid_argument("Tdust must be 1D with length Ncells");
     }
     if (Zd.ndim() != 1 || Zd.size() != Ncells) {
         throw std::invalid_argument("Zd must be 1D with length Ncells");
@@ -197,6 +204,7 @@ static py::dict solve_batch_equilibrium(
     const double *y0_ptr = y0.data();
     const double *nH_ptr = nH.data();
     const double *Tgas_ptr = Tgas.data();
+    const double *Tdust_ptr = Tdust.data();
     const double *Zd_ptr = Zd.data();
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
@@ -228,6 +236,10 @@ static py::dict solve_batch_equilibrium(
         ode.SetfSiplusgr(fSiplusgr);
         ode.SetfCplusCR(fCplusCR);
         ode.SetGradv(gradv);
+        ode.SetTdust(Tdust_ptr[i]);
+        ode.Leff_CO_max(Leff_CO_max);
+        ode.IsDustCooling(isDust_cooling);
+        ode.SetCoolingCOThin(isCoolingCOThin);
 
         if (const_temp) {
             ode.SetConstTemp(Tgas_ptr[i]);
@@ -276,6 +288,22 @@ PYBIND11_MODULE(_gow17, m) {
 
     m.attr("XC_STD") = gow17::xC_std();
     m.attr("XO_STD") = gow17::xO_std();
+    m.attr("XHE") = 0.1;
+
+    m.attr("I_HEP") = gow17::id("He+");
+    m.attr("I_OHX") = gow17::id("OHx");
+    m.attr("I_CHX") = gow17::id("CHx");
+    m.attr("I_CO") = gow17::id("CO");
+    m.attr("I_CP") = gow17::id("C+");
+    m.attr("I_HCOP") = gow17::id("HCO+");
+    m.attr("I_H2") = gow17::id("H2");
+    m.attr("I_HP") = gow17::id("H+");
+    m.attr("I_H3P") = gow17::id("H3+");
+    m.attr("I_H2P") = gow17::id("H2+");
+    m.attr("I_SP") = gow17::id("S+");
+    m.attr("I_SIP") = gow17::id("Si+");
+    m.attr("I_OP") = gow17::id("O+");
+    m.attr("I_E") = gow17::id("E");
 
     m.def(
         "solve_slab_1d_equilibrium",
@@ -323,6 +351,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("y0"),
         py::arg("nH"),
         py::arg("Tgas"),
+        py::arg("Tdust"),
         py::arg("Zd"),
         py::arg("Zg"),
         py::arg("ion_rate"),
@@ -338,6 +367,9 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("tmax"),
         py::arg("const_temp"),
         py::arg("gradv"),
+        py::arg("Leff_CO_max") = 3.0e20,
+        py::arg("isDust_cooling") = false,
+        py::arg("isCoolingCOThin") = false,
         py::arg("fH2gr"),
         py::arg("fHplusgr"),
         py::arg("fCplusgr"),

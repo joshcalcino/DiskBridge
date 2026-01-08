@@ -67,6 +67,7 @@ class gow17 : public Ode {
 		void SetNH(const double NH);
     void SetZd(const double Zd);
     void SetZg(const double Zg);
+    void SetTdust(const double Tdust);
     void SetIonRate(const double ion_rate);
     void SetRadField(double *GPE, double *Gph, double *GISRF);
     /* Set total C and O abundance */
@@ -142,6 +143,7 @@ class gow17 : public Ode {
 		 * NL99, see DESPOTIC NL99 implementation.*/
     double Zg_; /*gas metallicity*/
     double Zd_; /*dust abundance relative to solar neighbourhood*/
+    double Tdust_; /*dust temperature in K for gas-dust thermal coupling*/
     double xC_; /* total C aboundance per H*/
     double xO_; /* total O aboundance per H*/
     double xS_; /* total S aboundance per H*/
