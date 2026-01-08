@@ -38,7 +38,6 @@ def compute_h2_partition(
 
     # Draine & Bertoldi 1996 fit parameters
     b5 = 2.0
-    alpha = -0.75
 
     nH_cgs = nH.to("cm^-3").magnitude
     chi_arr = chi_dust.to("dimensionless").magnitude
@@ -65,7 +64,7 @@ def compute_h2_partition(
                 axis_index=axis_index,
                 outer="max",
             )
-            f_sh_eff = h2_self_shielding_db96(N_H2, b5=b5, alpha=alpha).reshape(-1)
+            f_sh_eff = h2_self_shielding_db96(N_H2, b5=b5).reshape(-1)
 
             k_diss_eff = k0_diss * chi_flat * f_sh_eff
             denom = 2.0 * R_form * nH_flat + k_diss_eff
@@ -127,7 +126,7 @@ def compute_h2_partition(
                 dirs,
                 nH2_cgs,
             )
-            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=b5, alpha=alpha)
+            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=b5)
             f_sh_eff[mask] = reduce_fn(f_sh_rays, axis=1)
 
         k_diss_eff = k0_diss * chi_flat * f_sh_eff

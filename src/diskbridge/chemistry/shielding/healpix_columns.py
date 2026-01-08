@@ -960,7 +960,7 @@ def compute_pdr_shielding_healpix(
             centers_chunk = cell_centers[start:end]
 
             N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs)
-            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms), alpha=-0.75)
+            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
             theta_h2_mean = f_sh_rays.mean(axis=1)
             _scatter_candidates_3d(theta_h2, idx_chunk, theta_h2_mean)
 

@@ -142,7 +142,7 @@ def compute_pdr_shielding_1d(
     if b_kms is None:
         raise ValueError("b_kms is required for H2 self-shielding")
 
-    theta_h2 = h2_self_shielding_db96(N_H2, b5=float(b_kms), alpha=-0.75)
+    theta_h2 = h2_self_shielding_db96(N_H2, b5=float(b_kms))
 
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     if visser is not None:

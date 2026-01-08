@@ -8,7 +8,7 @@ import numpy as np
 
 import diskbridge
 from diskbridge._units import Quantity
-from diskbridge.chemistry.api import run_chemistry
+import diskbridge._gow17 as gow17_native
 from diskbridge.chemistry.models._gow17_network import (
     I_CHX,
     I_CO,
@@ -24,6 +24,7 @@ from diskbridge.chemistry.models._gow17_network import (
     I_SIP,
     I_SP,
     N_Y,
+    I_CO_ICE,
 )
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.field import Field
@@ -162,53 +163,76 @@ def run_diskbridge_slab(
     outer_iter: int = 6,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], RadModel]:
     radm = _build_1d_cartesian_model(nH_cm3=nH_cm3, NH=NH)
-    shape = radm.model.mesh.shape
 
-    # Reference code uses: GPE = (G0/2) * exp(-NH*sigmaPE) with sigmaPE=1e-21,
-    # and passes G0*2 to represent one-sided illumination.
-    # chi is the dust-attenuated PE field (GPE in reference). For beamed geometry:
-    # GPE = (G0/2) * exp(-NH * sigmaPE). The reference sets G0*2 for one-sided slab,
-    # so chi0 here should be 2.0 to make (chi0/2)=1 at the boundary.
-    NH_rev = np.asarray(NH, dtype=float)[::-1]
-    chi_pe = 0.5 * chi0 * np.exp(-NH_rev * 1.0e-21)
-    radm.chi = Quantity(chi_pe.reshape(shape), "dimensionless")
+    NH = np.asarray(NH, dtype=float)
+    if NH.ndim != 1:
+        raise ValueError("NH must be 1D")
+    if NH.size < 2:
+        raise ValueError("NH must have at least 2 entries")
 
-    Av = NH_rev / 1.87e21
-    radm.Av = Quantity(Av.reshape(shape), "dimensionless")
+    # Native slab solver internally computes dust attenuation + shielding.
+    # Use the reference NH grid directly.
+    y0 = np.zeros(N_Y, dtype=float)
+    y0[I_HEP] = 1.450654e-08
+    y0[I_H3P] = 2.681411e-07
+    y0[I_CP] = 1.0e-4
+    y0[I_CO] = 1.0e-7
+    y0[I_H2] = 0.1
+    y0[I_CO_ICE] = 0.0
 
-    radm.dust_temperature = Quantity(np.full(shape, 100.0, dtype=float), "K")
+    abstol = np.full(N_Y, 1.0e-9, dtype=float)
+    abstol[I_HEP] = 1.0e-15
+    abstol[I_OHX] = 1.0e-15
+    abstol[I_CHX] = 1.0e-15
+    abstol[I_CO] = 1.0e-15
+    abstol[I_CP] = 1.0e-15
+    abstol[I_HCOP] = 1.0e-30
+    abstol[I_H2] = 1.0e-8
+    abstol[I_HP] = 1.0e-15
+    abstol[I_H3P] = 1.0e-15
+    abstol[I_H2P] = 1.0e-15
 
-    # seed for shielding iteration
-    radm.nco_gas = Quantity(np.full(shape, 1.0e-12 * float(nH_cm3), dtype=float), "cm^-3")
+    out = gow17_native.solve_slab_1d_equilibrium(
+        nH=float(nH_cm3),
+        G0=float(chi0),
+        ngrid=int(NH.size),
+        NH_total=float(NH[-1]),
+        logNH=True,
+        NH_min=float(NH[0]),
+        field_geo=0,
+        isdust=True,
+        isfsH2=True,
+        isfsCO=True,
+        isfsC=True,
+        Zg=1.0,
+        Zd=1.0,
+        ion_rate=float(xi_cr),
+        reltol=1.0e-2,
+        abstol=abstol,
+        mxsteps=200000,
+        maxord=3,
+        tolfac=10.0,
+        tmin=3.16e10,
+        tmax=3.16e13,
+        verbose=False,
+        y0=y0,
+        const_temp=True,
+        Tgas=100.0,
+        gradv=3e-14,
+        NCOeff_global=True,
+        bCO_L=True,
+        fH2gr=1.0,
+        fHplusgr=0.6,
+        fCplusgr=0.6,
+        fHeplusgr=0.6,
+        fSplusgr=0.6,
+        fSiplusgr=0.6,
+        fCplusCR=1.0,
+        userJac=False,
+    )
 
-    res = None
-    for _ in range(int(outer_iter)):
-        res = run_chemistry(
-            radm,
-            model="gow17_pdr",
-            config={
-                "mode": "equilibrium",
-                "t_end": "2.0e9 yr",
-                "nside": 1,
-                "b_kms": 0.3,
-                "chi0": float(chi0),
-                "ion_rate": f"{xi_cr} 1/s",
-                "Zg": 1.0,
-                "Zd": 1.0,
-                "fHplusgr": 0.6,
-                "fHeplusgr": 0.6,
-                "fCplusgr": 0.6,
-                "fSplusgr": 0.6,
-                "fSiplusgr": 0.6,
-                "max_iter": 80,
-            },
-        )
-        radm.nco_gas = res.number_densities["co"]
-
-    assert res is not None
-    y = np.asarray(radm.gow17_y, dtype=float)
+    y = np.asarray(out["y"], dtype=float)
     abd = _diskbridge_abundances_from_y(y)
-
     return y, abd, radm
 
 
@@ -231,7 +255,7 @@ def _plot_compare(
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
 
     for spec in species:
-        y_ref = ref.abd[spec][:, nH_index][::-1]
+        y_ref = ref.abd[spec][:, nH_index]
         y_db = abd_db[spec].reshape(-1)
         color = COLORS.get(spec, "#444444")
 
@@ -258,7 +282,7 @@ def main() -> None:
 
     # Use the same NH grid as the reference output
     NH = ref.NH
-    Av = ref.Av[::-1]
+    Av = ref.Av
 
     species = ["CO", "C", "C+", "H3+", "OHx", "CHx", "He+"]
 

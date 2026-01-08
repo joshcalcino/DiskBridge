@@ -41,6 +41,8 @@ LEIDEN_CO_ZIP = (
 
 ArrayLike = Union[float, np.ndarray]
 
+N_SHIELD_MIN = 1.0e10
+
 
 def ensure_visser_tables(
     data_dir: str | Path,
@@ -94,7 +96,7 @@ class ShieldingGrid2D:
     logNco_grid: np.ndarray        # (nNco,)
     logNh2_grid: np.ndarray        # (nNh2,)
     theta_grid: np.ndarray         # (nNco, nNh2)
-    fill_value: float = 1.0
+    fill_value: Optional[float] = None
     bounds_error: bool = False
 
     def __post_init__(self):
@@ -105,9 +107,12 @@ class ShieldingGrid2D:
         if th.shape != (lgNco.size, lgNh2.size):
             raise ValueError("theta_grid shape mismatch with axis grids.")
 
+        th = np.clip(th, 1.0e-300, 1.0)
+        log_th = np.log(th)
+
         interp = RegularGridInterpolator(
             (lgNco, lgNh2),
-            th,
+            log_th,
             bounds_error=self.bounds_error,
             fill_value=self.fill_value,
         )
@@ -118,7 +123,8 @@ class ShieldingGrid2D:
         logNh2 = np.asarray(logNh2, float)
         a, b = np.broadcast_arrays(logNco, logNh2)
         pts = np.stack([a.ravel(), b.ravel()], axis=-1)
-        out = self._interp(pts).reshape(a.shape)
+        out_log = self._interp(pts).reshape(a.shape)
+        out = np.exp(out_log)
         return np.clip(out, 0.0, 1.0)
 
 
@@ -168,7 +174,6 @@ class VisserShielding:
         Nco: ArrayLike,
         Nh2: ArrayLike,
         b_kms: Optional[float] = None,
-        log_floor: Tuple[float, float] = (8.0, 10.0),
     ) -> np.ndarray:
         """
         Evaluate shielding theta for one isotopologue.
@@ -202,10 +207,18 @@ class VisserShielding:
 
         Nco = np.asarray(Nco, float)
         Nh2 = np.asarray(Nh2, float)
-        logNco = np.log10(np.maximum(Nco, 10.0**log_floor[0]))
-        logNh2 = np.log10(np.maximum(Nh2, 10.0**log_floor[1]))
 
-        return self._grids[iso].theta(logNco, logNh2)
+        Nco_b, Nh2_b = np.broadcast_arrays(Nco, Nh2)
+        out = np.ones_like(Nco_b, dtype=float)
+
+        unshielded = (Nco_b < N_SHIELD_MIN) & (Nh2_b < N_SHIELD_MIN)
+        need_interp = ~unshielded
+        if np.any(need_interp):
+            logNco = np.log10(np.maximum(Nco_b[need_interp], N_SHIELD_MIN))
+            logNh2 = np.log10(np.maximum(Nh2_b[need_interp], N_SHIELD_MIN))
+            out[need_interp] = self._grids[iso].theta(logNco, logNh2)
+
+        return np.clip(out, 0.0, 1.0)
 
     # --------- filename helpers ----------
 
