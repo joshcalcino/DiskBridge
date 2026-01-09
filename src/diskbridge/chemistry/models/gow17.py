@@ -11,10 +11,22 @@ from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
 from diskbridge._constants import SIGMA_D_PER_H
+from diskbridge._constants import EPS_CHI, LOG_CHI_OVER_NH_PDISS
+from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
     compute_pdr_shielding_1d,
     is_effectively_1d,
+)
+from diskbridge.chemistry.shielding.healpix_columns import (
+    CartesianHealpixRayTracer,
+    SphericalHealpixRayTracer,
+    compute_gradv_nh_weighted,
+    compute_L_geo_from_pathlengths,
+)
+from diskbridge.chemistry.shielding.healpix_utils import (
+    integrate_rays,
+    integrate_rays_with_pathlength,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.validation import validate_chemistry_state
@@ -112,6 +124,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     gradv_f_corr = float(cfg.get("gradv_f_corr", 4.0))
     gradv_gmin = float(cfg.get("gradv_gmin", 1e-20))
     gradv_gmax = float(cfg.get("gradv_gmax", 1e-8))
+
+    Leff_CO_max_mode = str(cfg.get("Leff_CO_max_mode", "scalar"))
+    L_geo_reduction = str(cfg.get("L_geo_reduction", "percentile_20"))
+    L_geo_min = float(cfg.get("L_geo_min", 1e10))
+    L_geo_max = float(cfg.get("L_geo_max", 1e20))
     Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
     isDust_cooling = bool(cfg.get("isDust_cooling", False))
     isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
@@ -170,6 +187,135 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     Leff_CO_max_arr = _broadcast_scalar_or_array(Leff_CO_max_scalar, ncells)
     gradv_arr = _broadcast_scalar_or_array(gradv_scalar, ncells)
+
+    candidate_mask_arr = None
+    tracer = None
+    dirs = None
+    candidate_idx = None
+    candidate_flat_idx = None
+    cell_centers = None
+
+    use_healpix_geometry = (
+        (gradv_mode == "nh_weighted_shear+turb")
+        or (Leff_CO_max_mode == "geo")
+    )
+    if use_healpix_geometry and (not is_effectively_1d(rad.model.mesh, nH_cm3.shape)):
+        ratio = np.where(nH_cm3 > 0.0, chi_dust_arr / nH_cm3, 0.0)
+        log_ratio = np.log10(np.maximum(ratio, EPS_CHI))
+        candidate_mask_arr = log_ratio > LOG_CHI_OVER_NH_PDISS
+        candidate_idx = np.argwhere(candidate_mask_arr)
+        if candidate_idx.size > 0:
+            candidate_flat_idx = np.ravel_multi_index(candidate_idx.T, dims=shape)
+            if rad.model.mesh.coord_system == "spherical":
+                tracer = SphericalHealpixRayTracer(rad.model.mesh, nside=int(nside))
+            elif rad.model.mesh.coord_system == "cartesian":
+                tracer = CartesianHealpixRayTracer(rad.model.mesh, nside=int(nside))
+            else:
+                raise ValueError(
+                    f"Unsupported mesh coord_system {rad.model.mesh.coord_system!r} for HEALPix rays "
+                    "(expected 'spherical' or 'cartesian')."
+                )
+            dirs = np.asarray(tracer.dirs, dtype=np.float64)
+            n_candidates = int(candidate_idx.shape[0])
+            cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
+            for k, idx in enumerate(candidate_idx):
+                cell_centers[k] = tracer.cell_center_xyz(*idx)
+
+    if gradv_mode == "nh_weighted_shear+turb":
+        if candidate_idx is None or candidate_idx.size == 0:
+            logger.info("gradv_mode=nh_weighted_shear+turb: no candidate cells; using scalar gradv")
+        else:
+            if "vphi" not in rad.model.gas:
+                raise ValueError("gradv_mode=nh_weighted_shear+turb requires gas field 'vphi'")
+            vphi_cgs = _as_cgs_f64(rad.model.gas["vphi"].data, "cm/s")
+
+            if rad.model.mesh.coord_system == "spherical":
+                r_cent = rad.model.mesh.centers("r").to("cm").magnitude
+                theta_cent = rad.model.mesh.centers("theta").to("radian").magnitude
+                phi_cent = rad.model.mesh.centers("phi").to("radian").magnitude
+
+                ir = candidate_idx[:, 0]
+                itheta = candidate_idx[:, 1]
+                iphi = candidate_idx[:, 2]
+
+                r_cand = r_cent[ir]
+                theta_cand = theta_cent[itheta]
+                phi_cand = phi_cent[iphi]
+
+                R_cyl = r_cand * np.sin(theta_cand)
+                vphi_cand = np.abs(vphi_cgs[ir, itheta, iphi])
+                Omega = np.where(R_cyl > 0.0, vphi_cand / R_cyl, 0.0)
+
+                eR = np.zeros((candidate_idx.shape[0], 3), dtype=np.float64)
+                eR[:, 0] = np.cos(phi_cand)
+                eR[:, 1] = np.sin(phi_cand)
+
+                volumes = compute_cell_volumes(rad.model)
+                L_cell = np.cbrt(volumes)
+                L_cell_cand = L_cell[ir, itheta, iphi]
+            else:
+                x_edges = rad.model.mesh.edges("x").to("cm").magnitude
+                y_edges = rad.model.mesh.edges("y").to("cm").magnitude
+                z_edges = rad.model.mesh.edges("z").to("cm").magnitude
+                x_cent = 0.5 * (x_edges[:-1] + x_edges[1:])
+                y_cent = 0.5 * (y_edges[:-1] + y_edges[1:])
+                z_cent = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+                dx = np.diff(x_edges)
+                dy = np.diff(y_edges)
+                dz = np.diff(z_edges)
+                volumes = dx[:, None, None] * dy[None, :, None] * dz[None, None, :]
+                L_cell = np.cbrt(volumes)
+
+                ix = candidate_idx[:, 0]
+                iy = candidate_idx[:, 1]
+                iz = candidate_idx[:, 2]
+
+                x_cand = x_cent[ix]
+                y_cand = y_cent[iy]
+                R_cyl = np.sqrt(x_cand**2 + y_cand**2)
+                vphi_cand = np.abs(vphi_cgs[ix, iy, iz])
+                Omega = np.where(R_cyl > 0.0, vphi_cand / R_cyl, 0.0)
+
+                eR = np.zeros((candidate_idx.shape[0], 3), dtype=np.float64)
+                mask_R = R_cyl > 0.0
+                eR[mask_R, 0] = x_cand[mask_R] / R_cyl[mask_R]
+                eR[mask_R, 1] = y_cand[mask_R] / R_cyl[mask_R]
+                eR[~mask_R, 0] = 1.0
+
+                L_cell_cand = L_cell[ix, iy, iz]
+
+            NH_rays = integrate_rays(tracer, cell_centers, dirs, nH_cm3)
+            gradv_cand = compute_gradv_nh_weighted(
+                NH_rays,
+                dirs,
+                Omega,
+                eR,
+                L_cell_cand,
+                b_kms=float(b_kms),
+                q=float(gradv_q),
+                N0=float(gradv_N0),
+                p=float(gradv_p),
+                f_corr=float(gradv_f_corr),
+                gmin=float(gradv_gmin),
+                gmax=float(gradv_gmax),
+            )
+            gradv_arr[candidate_flat_idx] = gradv_cand
+            rad.gradv_gow17 = gradv_arr.reshape(shape)
+
+    if Leff_CO_max_mode == "geo":
+        if candidate_idx is None or candidate_idx.size == 0:
+            logger.info("Leff_CO_max_mode=geo: no candidate cells; using scalar Leff_CO_max")
+        else:
+            _, S_all = integrate_rays_with_pathlength(tracer, cell_centers, dirs, nH_cm3)
+            L_geo_cand = compute_L_geo_from_pathlengths(
+                S_all,
+                reduction=L_geo_reduction,
+                L_min=L_geo_min,
+                L_max=L_geo_max,
+            )
+            Leff_CO_max_arr[candidate_flat_idx] = L_geo_cand
+            rad.Lgeo_gow17 = Leff_CO_max_arr.reshape(shape)
 
     visser = VisserShielding(b_kms=float(b_kms))
 
@@ -269,6 +415,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 nside=nside,
                 b_kms=b_kms,
+                candidate_mask=candidate_mask_arr,
                 return_quantity=False,
             )
 
