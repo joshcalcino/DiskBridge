@@ -40,6 +40,7 @@ from diskbridge._units import Quantity, units
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays,
+    integrate_rays_multi,
     integrate_rays_with_pathlength,
 )
 
@@ -1043,7 +1044,9 @@ def compute_pdr_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     return_quantity: bool = True,
-) -> tuple[Quantity, Quantity, Quantity, Quantity] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity] | tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
     chi_arr = _to_ndarray_cgs(chi, "dimensionless")
 
@@ -1075,6 +1078,7 @@ def compute_pdr_shielding_healpix(
     theta_h2 = np.ones_like(nH_cgs, dtype=np.float64)
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     theta_c = np.ones_like(nH_cgs, dtype=np.float64)
+    theta_pdr = np.ones_like(nH_cgs, dtype=np.float64)
 
     n_candidates = int(candidate_idx.shape[0])
     if n_candidates > 0:
@@ -1091,17 +1095,28 @@ def compute_pdr_shielding_healpix(
                 n_chunks = 1
             chunk_size = max(1, n_candidates // n_chunks)
 
+        if visser is not None:
+            fields_stack = np.ascontiguousarray(np.stack([nH2_cgs, nC_cgs, nCO_cgs], axis=0), dtype=np.float64)
+            has_co = True
+        else:
+            fields_stack = np.ascontiguousarray(np.stack([nH2_cgs, nC_cgs], axis=0), dtype=np.float64)
+            has_co = False
+
         for start in range(0, n_candidates, chunk_size):
             end = min(start + chunk_size, n_candidates)
             idx_chunk = candidate_idx[start:end]
             centers_chunk = cell_centers[start:end]
 
-            N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs)
+            N_rays = integrate_rays_multi(tracer, centers_chunk, dirs, fields_stack)
+            N_H2_rays = N_rays[:, :, 0]
+            N_C_rays = N_rays[:, :, 1]
+            if has_co:
+                N_CO_rays = N_rays[:, :, 2]
+
             f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
             theta_h2_mean = f_sh_rays.mean(axis=1)
             _scatter_candidates_3d(theta_h2, idx_chunk, theta_h2_mean)
-
-            N_C_rays = integrate_rays(tracer, centers_chunk, dirs, nC_cgs)
+            _scatter_candidates_3d(theta_pdr, idx_chunk, theta_h2_mean)
 
             AH2 = 1.17e-8
             tau_H2 = 1.2e-14 * 2.0 * N_H2_rays
@@ -1113,20 +1128,24 @@ def compute_pdr_shielding_healpix(
             _scatter_candidates_3d(theta_c, idx_chunk, theta_c_mean)
 
             if visser is not None:
-                N_CO_rays = integrate_rays(tracer, centers_chunk, dirs, nCO_cgs)
                 theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
                 theta_co_mean = theta_co_rays.mean(axis=1)
                 _scatter_candidates_3d(theta_co, idx_chunk, theta_co_mean)
 
+                theta_pdr_rays = f_sh_rays * theta_co_rays
+                theta_pdr_mean = theta_pdr_rays.mean(axis=1)
+                _scatter_candidates_3d(theta_pdr, idx_chunk, theta_pdr_mean)
+
     chi_eff_h2 = chi_arr * theta_h2
     chi_eff_co = chi_arr * theta_co
-    chi_eff_pdr = chi_arr * theta_h2 * theta_co
+    chi_eff_pdr = chi_arr * theta_pdr
 
     if return_quantity:
         return (
             Quantity(theta_h2, "dimensionless"),
             Quantity(theta_co, "dimensionless"),
             Quantity(theta_c, "dimensionless"),
+            Quantity(theta_pdr, "dimensionless"),
             Quantity(chi_eff_pdr, "dimensionless"),
         )
-    return theta_h2, theta_co, theta_c, chi_eff_pdr
+    return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr

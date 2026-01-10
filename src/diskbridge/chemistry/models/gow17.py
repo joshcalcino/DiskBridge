@@ -388,7 +388,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
 
         if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-            theta_h2_arr, theta_co_arr, theta_c_arr, _ = compute_pdr_shielding_1d(
+            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
                 chi=chi_dust_arr,
@@ -405,7 +405,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 compute_pdr_shielding_healpix,
             )
 
-            theta_h2_arr, theta_co_arr, theta_c_arr, _ = compute_pdr_shielding_healpix(
+            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
                 chi=chi_dust_arr,

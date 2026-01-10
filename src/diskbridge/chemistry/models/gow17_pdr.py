@@ -168,6 +168,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_h2_arr = np.ones_like(nH_cm3, dtype=np.float64)
     theta_co_arr = np.ones_like(nH_cm3, dtype=np.float64)
     theta_c_arr = np.ones_like(nH_cm3, dtype=np.float64)
+    theta_pdr_arr = np.ones_like(nH_cm3, dtype=np.float64)
     chi_eff_pdr_arr = np.ascontiguousarray(chi_pe_arr, dtype=np.float64)
 
     if mode == "equilibrium":
@@ -194,33 +195,49 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if shielding_abstol <= 0.0:
             raise ValueError("gow17_pdr: shielding_abstol must be > 0")
 
-        y_guess = np.zeros((ncells, N_Y), dtype=np.float64)
+        shielding_mix_cfg = cfg.get("shielding_mix", None)
+        if shielding_mix_cfg is None:
+            shielding_mix = 1.0
+        else:
+            shielding_mix = float(shielding_mix_cfg)
+        if not (0.0 < shielding_mix <= 1.0):
+            raise ValueError(
+                f"gow17_pdr: shielding_mix must be in (0, 1], got {shielding_mix}"
+            )
+
+        y_inout = np.zeros((ncells, N_Y), dtype=np.float64)
         y_prev = getattr(rad, "gow17_y", None)
         if y_prev is not None and np.shape(y_prev) == tuple(shape) + (N_Y,):
-            y_guess[:, :] = np.ascontiguousarray(np.asarray(y_prev, dtype=np.float64).reshape(ncells, N_Y))
+            y_inout[:, :] = np.ascontiguousarray(np.asarray(y_prev, dtype=np.float64).reshape(ncells, N_Y))
         else:
             for j in range(N_Y):
-                y_guess[:, j] = y0[j]
+                y_inout[:, j] = y0[j]
 
-        y_tmp = np.zeros((ncells, N_Y), dtype=np.float64)
-        status = np.zeros(ncells, dtype=np.int64)
+        y_prev_snapshot = np.zeros((ncells, N_Y), dtype=np.float64)
+        status_step = np.zeros(ncells, dtype=np.int64)
         status_acc = np.zeros(ncells, dtype=np.int64)
 
         xCtot = float(Zg) * float(X_C_TOT)
+        theta_h2_prev_flat = np.ones(ncells, dtype=np.float64)
+        theta_co_prev_flat = np.ones(ncells, dtype=np.float64)
+        theta_c_prev_flat = np.ones(ncells, dtype=np.float64)
+        theta_pdr_prev_flat = np.ones(ncells, dtype=np.float64)
+        tiny = float(np.finfo(np.float64).tiny)
 
         for it in range(shielding_max_iter):
-            xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
-            xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
+            y_prev_snapshot[:, :] = y_inout
+            xCO_old = np.ascontiguousarray(y_inout[:, I_CO].copy(), dtype=np.float64)
+            xH2_old = np.ascontiguousarray(y_inout[:, I_H2].copy(), dtype=np.float64)
 
-            xCO = y_guess[:, I_CO]
-            xCO_ice = y_guess[:, I_CO_ICE]
-            xH2 = y_guess[:, I_H2]
+            xCO = y_inout[:, I_CO]
+            xCO_ice = y_inout[:, I_CO_ICE]
+            xH2 = y_inout[:, I_H2]
 
             xC_neutral = xCtot - (
-                y_guess[:, I_HCOP]
-                + y_guess[:, I_CHX]
+                y_inout[:, I_HCOP]
+                + y_inout[:, I_CHX]
                 + xCO
-                + y_guess[:, I_CP]
+                + y_inout[:, I_CP]
                 + xCO_ice
             )
             xC_neutral = np.maximum(xC_neutral, 0.0)
@@ -230,7 +247,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             nC_cm3 = np.ascontiguousarray((xC_neutral * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
 
             if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-                theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
                     mesh=rad.model.mesh,
                     nH=nH_cm3,
                     chi=chi_pe_arr,
@@ -245,7 +262,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             else:
                 from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
 
-                theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
                     mesh=rad.model.mesh,
                     nH=nH_cm3,
                     chi=chi_pe_arr,
@@ -258,6 +275,49 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     return_quantity=False,
                 )
 
+            alpha = float(shielding_mix)
+
+            theta_h2_new_flat = theta_h2_arr.reshape(ncells)
+            theta_co_new_flat = theta_co_arr.reshape(ncells)
+            theta_c_new_flat = theta_c_arr.reshape(ncells)
+            theta_pdr_new_flat = theta_pdr_arr.reshape(ncells)
+
+            theta_h2_prev_pos = np.maximum(theta_h2_prev_flat, tiny)
+            theta_co_prev_pos = np.maximum(theta_co_prev_flat, tiny)
+            theta_c_prev_pos = np.maximum(theta_c_prev_flat, tiny)
+            theta_pdr_prev_pos = np.maximum(theta_pdr_prev_flat, tiny)
+
+            theta_h2_new_pos = np.maximum(theta_h2_new_flat, tiny)
+            theta_co_new_pos = np.maximum(theta_co_new_flat, tiny)
+            theta_c_new_pos = np.maximum(theta_c_new_flat, tiny)
+            theta_pdr_new_pos = np.maximum(theta_pdr_new_flat, tiny)
+
+            theta_h2_mix_flat = np.exp(
+                (1.0 - alpha) * np.log(theta_h2_prev_pos) + alpha * np.log(theta_h2_new_pos)
+            )
+            theta_co_mix_flat = np.exp(
+                (1.0 - alpha) * np.log(theta_co_prev_pos) + alpha * np.log(theta_co_new_pos)
+            )
+            theta_c_mix_flat = np.exp(
+                (1.0 - alpha) * np.log(theta_c_prev_pos) + alpha * np.log(theta_c_new_pos)
+            )
+            theta_pdr_mix_flat = np.exp(
+                (1.0 - alpha) * np.log(theta_pdr_prev_pos) + alpha * np.log(theta_pdr_new_pos)
+            )
+
+            theta_h2_prev_flat = np.ascontiguousarray(theta_h2_mix_flat, dtype=np.float64)
+            theta_co_prev_flat = np.ascontiguousarray(theta_co_mix_flat, dtype=np.float64)
+            theta_c_prev_flat = np.ascontiguousarray(theta_c_mix_flat, dtype=np.float64)
+            theta_pdr_prev_flat = np.ascontiguousarray(theta_pdr_mix_flat, dtype=np.float64)
+
+            theta_h2_arr = theta_h2_mix_flat.reshape(shape)
+            theta_co_arr = theta_co_mix_flat.reshape(shape)
+            theta_c_arr = theta_c_mix_flat.reshape(shape)
+            theta_pdr_arr = theta_pdr_mix_flat.reshape(shape)
+            chi_eff_pdr_arr = (chi_pe_arr.reshape(ncells) * theta_pdr_mix_flat).reshape(shape)
+
+            y_tmp = np.zeros_like(y_inout)
+            status_step[:] = 0
             solve_gow17_equilibrium_cells_cgs(
                 nH_cm3.reshape(ncells),
                 T_K.reshape(ncells),
@@ -271,7 +331,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 chi_eff_pdr_arr.reshape(ncells),
                 sigma_cm2.reshape(ncells),
                 float(dt_eq_s),
-                y0=y_guess,
+                y0=y_inout,
                 Zg=Zg,
                 Zd=Zd,
                 ion_rate_s=float(ion_rate_s),
@@ -286,14 +346,18 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 reltol=reltol,
                 abstol=abstol,
                 y_out=y_tmp,
-                status_out=status,
+                status_out=status_step,
             )
 
-            status_acc = np.maximum(status_acc, status)
-            y_guess[:, :] = y_tmp
+            status_acc = np.maximum(status_acc, status_step)
+            bad_idx = np.flatnonzero(status_step == 2)
+            if bad_idx.size:
+                y_tmp[bad_idx, :] = y_prev_snapshot[bad_idx, :]
 
-            xCO_new = y_guess[:, I_CO]
-            xH2_new = y_guess[:, I_H2]
+            y_inout[:, :] = y_tmp
+
+            xCO_new = y_inout[:, I_CO]
+            xH2_new = y_inout[:, I_H2]
 
             denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
             denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
@@ -302,7 +366,53 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             if max(d_h2, d_co) <= shielding_reltol:
                 break
 
-        y_out = y_guess.reshape(shape + (N_Y,))
+        xCO = y_inout[:, I_CO]
+        xCO_ice = y_inout[:, I_CO_ICE]
+        xH2 = y_inout[:, I_H2]
+
+        xC_neutral = xCtot - (
+            y_inout[:, I_HCOP]
+            + y_inout[:, I_CHX]
+            + xCO
+            + y_inout[:, I_CP]
+            + xCO_ice
+        )
+        xC_neutral = np.maximum(xC_neutral, 0.0)
+
+        nCO_cm3 = np.ascontiguousarray((xCO * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+        nH2_cm3 = np.ascontiguousarray((xH2 * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+        nC_cm3 = np.ascontiguousarray((xC_neutral * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+
+        if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_pe_arr,
+                visser=visser,
+                nCO=nCO_cm3,
+                nC=nC_cm3,
+                nH2=nH2_cm3,
+                b_kms=b_kms,
+                outer="max",
+                return_quantity=False,
+            )
+        else:
+            from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+
+            theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_pe_arr,
+                visser=visser,
+                nCO=nCO_cm3,
+                nC=nC_cm3,
+                nH2=nH2_cm3,
+                nside=nside,
+                b_kms=b_kms,
+                return_quantity=False,
+            )
+
+        y_out = y_inout.reshape(shape + (N_Y,))
         status = status_acc
     else:
         if "t_end" not in cfg:
@@ -365,7 +475,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nC_cm3 = np.ascontiguousarray((xC_neutral * nH_flat).reshape(shape), dtype=np.float64)
 
                 if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-                    theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                    theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
                         mesh=rad.model.mesh,
                         nH=nH_cm3,
                         chi=chi_pe_arr,
@@ -380,7 +490,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 else:
                     from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
 
-                    theta_h2_arr, theta_co_arr, theta_c_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                    theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
                         mesh=rad.model.mesh,
                         nH=nH_cm3,
                         chi=chi_pe_arr,
@@ -510,6 +620,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     fields = {
         "co_ice": nco_ice,
         "theta_co": Quantity(theta_co_arr, "dimensionless"),
+        "theta_pdr": Quantity(theta_pdr_arr, "dimensionless"),
         "chi_eff_pdr": Quantity(chi_eff_pdr_arr, "dimensionless"),
         "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
         "theta_c": Quantity(theta_c_arr, "dimensionless"),
@@ -519,6 +630,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     rad.nco_gas = nco_gas
     rad.nco_ice = nco_ice
     rad.theta_co = Quantity(theta_co_arr, "dimensionless")
+    rad.theta_pdr = Quantity(theta_pdr_arr, "dimensionless")
     rad.chi_eff = Quantity(chi_eff_pdr_arr, "dimensionless")
     rad.nH2 = nH2_cm3
     rad.nH_atom = nH_atom

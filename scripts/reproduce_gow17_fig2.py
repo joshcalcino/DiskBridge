@@ -10,11 +10,18 @@ import numpy as np
 import diskbridge
 import diskbridge._gow17 as gow17_native
 from diskbridge._units import Quantity
-from diskbridge._constants import K_B
+from diskbridge._constants import K_B, X_C_TOT
 from diskbridge.chemistry.api import run_chemistry
+from diskbridge.chemistry.models._gow17_numba import (
+    solve_gow17_equilibrium_cells_cgs,
+    evolve_gow17_be_cells_cgs,
+)
+from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d
+from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.models._gow17_network import (
     I_CHX,
     I_CO,
+    I_CO_ICE,
     I_CP,
     I_H2,
     I_H2P,
@@ -133,10 +140,22 @@ def _build_1d_cartesian_model(*, nH_cm3: float, NH: np.ndarray) -> RadModel:
     # smallest at the last index. So we reverse NH such that index 0 is the
     # deepest point and the surface is at the +x boundary.
     NH_rev = np.asarray(NH, dtype=float)[::-1]
-    L_cm = float(NH_rev[0] / float(nH_cm3))
-    x_centers_cm = L_cm - (NH_rev / float(nH_cm3))
 
-    x_axis = Axis(centers=Quantity(x_centers_cm, "cm"))
+    dx_cm = np.empty_like(NH_rev)
+    accum = 0.0
+    for i in range(int(NH_rev.size) - 1, -1, -1):
+        if i == int(NH_rev.size) - 1:
+            dx_cm[i] = 2.0 * float(NH_rev[i]) / float(nH_cm3)
+        else:
+            dx_cm[i] = 2.0 * (float(NH_rev[i]) / float(nH_cm3) - accum)
+        if not (dx_cm[i] > 0.0):
+            raise ValueError(
+                f"Invalid slab grid: non-positive cell width dx={dx_cm[i]:.3e} cm at i={i}"
+            )
+        accum += float(dx_cm[i])
+
+    x_edges_cm = np.concatenate((np.array([0.0]), np.cumsum(dx_cm)))
+    x_axis = Axis(edges=Quantity(x_edges_cm, "cm"))
     y_axis = Axis(edges=Quantity(np.array([0.0, 1.0]), "cm"))
     z_axis = Axis(edges=Quantity(np.array([0.0, 1.0]), "cm"))
 
@@ -351,7 +370,7 @@ def run_external_iteration(
     NH_rev = NH[::-1]
     Av_arr = NH_rev / 1.87e21
 
-    radm.dust_temperature = Quantity(np.full(shape, 10.0, dtype=float), "K")
+    radm.dust_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
     Tgas_K = np.asarray(Tgas_K, dtype=float)
     if Tgas_K.shape != (ncells,):
         raise ValueError(f"Tgas_K must have shape ({ncells},), got {Tgas_K.shape}")
@@ -361,127 +380,290 @@ def run_external_iteration(
     chi_pe = 0.5 * chi0_incident * np.exp(-NH_rev * 1.0e-21)
     radm.chi = Quantity(chi_pe.reshape(shape), "dimensionless")
 
-    config = {
-        "mode": "equilibrium",
-        "const_temp": False,
-        "t_end": "2.0e9 yr",
-        "nside": 1,
-        "chi0": float(chi0_incident),
-        "ion_rate": f"{float(xi_cr)} 1/s",
-        "max_iter": 80,
-        "reltol": 1.0e-2,
-        "abstol0": 1.0e-9,
-        "b_kms": 0.3,
-        "Zg": 1.0,
-        "Zd": 1.0,
-        "fH2gr": 1.0,
-        "fHplusgr": 0.6,
-        "fCplusgr": 0.6,
-        "fHeplusgr": 0.6,
-        "fSplusgr": 0.6,
-        "fSiplusgr": 0.6,
-        "fCplusCR": 1.0,
-        "shielding_max_iter": 1,
-        "shielding_reltol": 1.0e-6,
-        "shielding_abstol": 1.0e-20,
-    }
+    nH_cm3_arr = np.ascontiguousarray(np.full(shape, float(nH_cm3), dtype=np.float64))
+    T_K_arr = np.ascontiguousarray(radm.gas_temperature.to("K").magnitude, dtype=np.float64)
+    Tdust_K_arr = np.ascontiguousarray(radm.dust_temperature.to("K").magnitude, dtype=np.float64)
+    chi_pe_arr = np.ascontiguousarray(radm.chi.to("dimensionless").magnitude, dtype=np.float64)
+    chi0_arr = np.ascontiguousarray(np.full(shape, float(chi0_incident), dtype=np.float64))
+    Av_in = np.ascontiguousarray(radm.Av.to("dimensionless").magnitude, dtype=np.float64)
+    sigma_cm2_arr = np.ascontiguousarray(np.full(shape, 1.0e-21, dtype=np.float64))
+
+    dt_eq_s = float(Quantity("2.0e9 yr").to("s").magnitude)
+    b_kms = 0.3
+
+    Zg = 1.0
+    Zd = 1.0
+
+    y0 = np.zeros(N_Y, dtype=np.float64)
+    y0[I_HEP] = 1.450654e-08
+    y0[I_H3P] = 2.681411e-07
+    y0[I_CP] = 1.0e-4
+    y0[I_CO] = 1.0e-7
+    y0[I_H2] = 0.1
+
+    abstol = np.full(N_Y, 1.0e-9, dtype=np.float64)
+    abstol[I_HEP] = 1.0e-15
+    abstol[I_OHX] = 1.0e-15
+    abstol[I_CHX] = 1.0e-15
+    abstol[I_CO] = 1.0e-15
+    abstol[I_CP] = 1.0e-15
+    abstol[I_HCOP] = 1.0e-30
+    abstol[I_H2] = 1.0e-8
+    abstol[I_HP] = 1.0e-15
+    abstol[I_H3P] = 1.0e-15
+    abstol[I_H2P] = 1.0e-15
+
+    reltol = 1.0e-2
+    max_iter = 80
+    ion_rate_s = float(xi_cr)
+
+    fH2gr = 1.0
+    fHplusgr = 0.6
+    fCplusgr = 0.6
+    fHeplusgr = 0.6
+    fSplusgr = 0.6
+    fSiplusgr = 0.6
+    fCplusCR = 1.0
+
+    visser = VisserShielding(b_kms=float(b_kms))
 
     mix = float(mix)
     if not (0.0 < mix <= 1.0):
         raise ValueError(f"mix must be in (0, 1], got {mix}")
 
+    tiny = float(np.finfo(np.float64).tiny)
+    y_inout = np.zeros((ncells, N_Y), dtype=np.float64)
+    for j in range(N_Y):
+        y_inout[:, j] = y0[j]
+
+    y_prev_snapshot = np.zeros((ncells, N_Y), dtype=np.float64)
+    status_step = np.zeros(ncells, dtype=np.int64)
+    status_acc = np.zeros(ncells, dtype=np.int64)
+
+    theta_h2_prev_flat = np.ones(ncells, dtype=np.float64)
+    theta_co_prev_flat = np.ones(ncells, dtype=np.float64)
+    theta_c_prev_flat = np.ones(ncells, dtype=np.float64)
+    theta_pdr_prev_flat = np.ones(ncells, dtype=np.float64)
+
+    dt_coeff = (2.0 * float(dt_eq_s)) / (float(int(outer_iter)) * float(int(outer_iter) + 1))
+
     convergence_history = []
-    y_prev = None
     converged = False
 
-    eps = float(np.finfo(np.float64).tiny)
-
     for it in range(int(outer_iter)):
-        res = run_chemistry(radm, model="gow17_pdr", config=config)
+        y_prev_snapshot[:, :] = y_inout
+        xCO_old = np.ascontiguousarray(y_inout[:, I_CO].copy(), dtype=np.float64)
+        xH2_old = np.ascontiguousarray(y_inout[:, I_H2].copy(), dtype=np.float64)
 
-        y_raw = np.asarray(radm.gow17_y, dtype=float).reshape(-1, N_Y)
+        xCO = y_inout[:, I_CO]
+        xCO_ice = y_inout[:, I_CO_ICE]
+        xH2 = y_inout[:, I_H2]
 
-        y_out = y_raw
+        xCtot = float(Zg) * float(X_C_TOT)
+        xC_neutral = xCtot - (y_inout[:, I_HCOP] + y_inout[:, I_CHX] + xCO + y_inout[:, I_CP] + xCO_ice)
+        xC_neutral = np.maximum(xC_neutral, 0.0)
 
-        if y_prev is not None and mix < 1.0:
-            y_prev_pos = np.maximum(y_prev, eps)
-            y_raw_pos = np.maximum(y_raw, eps)
-            y_mixed = np.exp((1.0 - mix) * np.log(y_prev_pos) + mix * np.log(y_raw_pos))
-            radm.gow17_y = y_mixed.reshape(shape + (N_Y,))
-            y_out = y_mixed
+        nCO_cm3 = np.ascontiguousarray((xCO * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
+        nH2_cm3 = np.ascontiguousarray((xH2 * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
+        nC_cm3 = np.ascontiguousarray((xC_neutral * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
 
-        if y_prev is not None:
-            xco_new = y_raw[:, I_CO]
-            xco_old = y_prev[:, I_CO]
-            xh2_new = y_raw[:, I_H2]
-            xh2_old = y_prev[:, I_H2]
+        theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr = compute_pdr_shielding_1d(
+            mesh=radm.model.mesh,
+            nH=nH_cm3_arr,
+            chi=chi_pe_arr,
+            visser=visser,
+            nCO=nCO_cm3,
+            nC=nC_cm3,
+            nH2=nH2_cm3,
+            b_kms=float(b_kms),
+            outer="max",
+            return_quantity=False,
+        )
 
-            Av_line = Av_arr.reshape(-1)
-            co_floor = 1.0e-15
-            h2_floor = 1.0e-8
-            mask_co = (Av_line > 0.5) & ((xco_new > co_floor) | (xco_old > co_floor))
-            mask_h2 = (Av_line > 0.5) & ((xh2_new > h2_floor) | (xh2_old > h2_floor))
+        alpha = float(mix)
 
-            if np.any(mask_co):
-                denom_co = np.maximum(np.maximum(xco_new[mask_co], xco_old[mask_co]), co_floor)
-                rel_co = np.abs(xco_new[mask_co] - xco_old[mask_co]) / denom_co
-                max_rel_co = float(np.max(rel_co))
-                p90_rel_co = float(np.percentile(rel_co, 90))
-            else:
-                max_rel_co = 0.0
-                p90_rel_co = 0.0
+        theta_h2_new_flat = theta_h2.reshape(ncells)
+        theta_co_new_flat = theta_co.reshape(ncells)
+        theta_c_new_flat = theta_c.reshape(ncells)
 
-            if np.any(mask_h2):
-                denom_h2 = np.maximum(np.maximum(xh2_new[mask_h2], xh2_old[mask_h2]), h2_floor)
-                rel_h2 = np.abs(xh2_new[mask_h2] - xh2_old[mask_h2]) / denom_h2
-                max_rel_h2 = float(np.max(rel_h2))
-                p90_rel_h2 = float(np.percentile(rel_h2, 90))
-            else:
-                max_rel_h2 = 0.0
-                p90_rel_h2 = 0.0
+        theta_h2_prev_pos = np.maximum(theta_h2_prev_flat, tiny)
+        theta_co_prev_pos = np.maximum(theta_co_prev_flat, tiny)
+        theta_c_prev_pos = np.maximum(theta_c_prev_flat, tiny)
+        theta_pdr_prev_pos = np.maximum(theta_pdr_prev_flat, tiny)
 
-            xco_mixed = y_out[:, I_CO]
-            xh2_mixed = y_out[:, I_H2]
-            if np.any(mask_co):
-                denom_co_m = np.maximum(xco_mixed[mask_co], xco_old[mask_co])
-                rel_co_m = np.abs(xco_mixed[mask_co] - xco_old[mask_co]) / denom_co_m
-                max_rel_co_mixed = float(np.max(rel_co_m))
-            else:
-                max_rel_co_mixed = 0.0
-            if np.any(mask_h2):
-                denom_h2_m = np.maximum(xh2_mixed[mask_h2], xh2_old[mask_h2])
-                rel_h2_m = np.abs(xh2_mixed[mask_h2] - xh2_old[mask_h2]) / denom_h2_m
-                max_rel_h2_mixed = float(np.max(rel_h2_m))
-            else:
-                max_rel_h2_mixed = 0.0
+        theta_h2_new_pos = np.maximum(theta_h2_new_flat, tiny)
+        theta_co_new_pos = np.maximum(theta_co_new_flat, tiny)
+        theta_c_new_pos = np.maximum(theta_c_new_flat, tiny)
+        theta_pdr_new_pos = np.maximum(theta_h2_new_pos * theta_co_new_pos, tiny)
 
-            convergence_history.append({
+        theta_h2_mix_flat = np.exp((1.0 - alpha) * np.log(theta_h2_prev_pos) + alpha * np.log(theta_h2_new_pos))
+        theta_co_mix_flat = np.exp((1.0 - alpha) * np.log(theta_co_prev_pos) + alpha * np.log(theta_co_new_pos))
+        theta_c_mix_flat = np.exp((1.0 - alpha) * np.log(theta_c_prev_pos) + alpha * np.log(theta_c_new_pos))
+        theta_pdr_mix_flat = theta_h2_mix_flat * theta_co_mix_flat
+
+        theta_h2_prev_flat = np.ascontiguousarray(theta_h2_mix_flat, dtype=np.float64)
+        theta_co_prev_flat = np.ascontiguousarray(theta_co_mix_flat, dtype=np.float64)
+        theta_c_prev_flat = np.ascontiguousarray(theta_c_mix_flat, dtype=np.float64)
+        theta_pdr_prev_flat = np.ascontiguousarray(theta_pdr_mix_flat, dtype=np.float64)
+
+        chi_eff_pdr_mix = (chi_pe_arr.reshape(ncells) * theta_pdr_mix_flat).reshape(shape)
+
+        dt_outer_s = float(dt_coeff) * float(it + 1)
+        evolve_gow17_be_cells_cgs(
+            nH_cm3_arr.reshape(ncells),
+            T_K_arr.reshape(ncells),
+            Tdust_K_arr.reshape(ncells),
+            chi_pe_arr.reshape(ncells),
+            chi0_arr.reshape(ncells),
+            Av_in.reshape(ncells),
+            theta_h2_prev_flat,
+            theta_co_prev_flat,
+            theta_c_prev_flat,
+            chi_eff_pdr_mix.reshape(ncells),
+            sigma_cm2_arr.reshape(ncells),
+            float(dt_outer_s),
+            y_inout,
+            Zg=float(Zg),
+            Zd=float(Zd),
+            ion_rate_s=float(ion_rate_s),
+            fH2gr=float(fH2gr),
+            fHplusgr=float(fHplusgr),
+            fCplusgr=float(fCplusgr),
+            fHeplusgr=float(fHeplusgr),
+            fSplusgr=float(fSplusgr),
+            fSiplusgr=float(fSiplusgr),
+            fCplusCR=float(fCplusCR),
+            max_iter=int(max_iter),
+            reltol=float(reltol),
+            abstol=abstol,
+            status_out=status_step,
+        )
+
+        status_acc = np.maximum(status_acc, status_step)
+        bad_idx = np.flatnonzero(status_step == 2)
+        if bad_idx.size:
+            y_inout[bad_idx, :] = y_prev_snapshot[bad_idx, :]
+
+        xco_new = y_inout[:, I_CO]
+        xh2_new = y_inout[:, I_H2]
+        xco_old = xCO_old
+        xh2_old = xH2_old
+
+        Av_line = Av_arr.reshape(-1)
+        co_floor = 1.0e-15
+        h2_floor = 1.0e-8
+        mask_co = (Av_line > 0.5) & ((xco_new > co_floor) | (xco_old > co_floor))
+        mask_h2 = (Av_line > 0.5) & ((xh2_new > h2_floor) | (xh2_old > h2_floor))
+
+        if np.any(mask_co):
+            denom_co = np.maximum(np.maximum(xco_new[mask_co], xco_old[mask_co]), co_floor)
+            rel_co = np.abs(xco_new[mask_co] - xco_old[mask_co]) / denom_co
+            max_rel_co = float(np.max(rel_co))
+            p90_rel_co = float(np.percentile(rel_co, 90))
+        else:
+            max_rel_co = 0.0
+            p90_rel_co = 0.0
+
+        if np.any(mask_h2):
+            denom_h2 = np.maximum(np.maximum(xh2_new[mask_h2], xh2_old[mask_h2]), h2_floor)
+            rel_h2 = np.abs(xh2_new[mask_h2] - xh2_old[mask_h2]) / denom_h2
+            max_rel_h2 = float(np.max(rel_h2))
+            p90_rel_h2 = float(np.percentile(rel_h2, 90))
+        else:
+            max_rel_h2 = 0.0
+            p90_rel_h2 = 0.0
+
+        convergence_history.append(
+            {
                 "iter": it + 1,
                 "max_rel_co": max_rel_co,
-                "max_rel_h2": max_rel_h2,
                 "p90_rel_co": p90_rel_co,
+                "max_rel_h2": max_rel_h2,
                 "p90_rel_h2": p90_rel_h2,
-                "max_rel_co_mixed": max_rel_co_mixed,
-                "max_rel_h2_mixed": max_rel_h2_mixed,
-            })
+            }
+        )
 
-            if verbose:
-                print(
-                    f"  iter={it+1}/{int(outer_iter)}: "
-                    f"max_rel_CO={max_rel_co:.3e}, p90_rel_CO={p90_rel_co:.3e}, "
-                    f"max_rel_H2={max_rel_h2:.3e}, p90_rel_H2={p90_rel_h2:.3e}"
-                )
+        if verbose:
+            print(
+                f"  iter={it+1}/{int(outer_iter)}: "
+                f"max_rel_CO={max_rel_co:.3e}, p90_rel_CO={p90_rel_co:.3e}, "
+                f"max_rel_H2={max_rel_h2:.3e}, p90_rel_H2={p90_rel_h2:.3e}"
+            )
 
-            if max(p90_rel_co, p90_rel_h2) <= float(outer_reltol):
-                converged = True
-                break
-
-        y_prev = y_out.copy()
+        if max(p90_rel_co, p90_rel_h2) <= float(outer_reltol):
+            converged = True
+            break
 
     if not converged and verbose:
         print(f"  Warning: did not converge after {outer_iter} iterations")
 
-    y_line = np.asarray(radm.gow17_y, dtype=float).reshape(-1, N_Y)[::-1]
+    xCO = y_inout[:, I_CO]
+    xCO_ice = y_inout[:, I_CO_ICE]
+    xH2 = y_inout[:, I_H2]
+
+    xCtot = float(Zg) * float(X_C_TOT)
+    xC_neutral = xCtot - (
+        y_inout[:, I_HCOP] + y_inout[:, I_CHX] + xCO + y_inout[:, I_CP] + xCO_ice
+    )
+    xC_neutral = np.maximum(xC_neutral, 0.0)
+
+    nCO_cm3 = np.ascontiguousarray((xCO * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
+    nH2_cm3 = np.ascontiguousarray((xH2 * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
+    nC_cm3 = np.ascontiguousarray((xC_neutral * nH_cm3_arr.reshape(ncells)).reshape(shape), dtype=np.float64)
+
+    theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr = compute_pdr_shielding_1d(
+        mesh=radm.model.mesh,
+        nH=nH_cm3_arr,
+        chi=chi_pe_arr,
+        visser=visser,
+        nCO=nCO_cm3,
+        nC=nC_cm3,
+        nH2=nH2_cm3,
+        b_kms=float(b_kms),
+        outer="max",
+        return_quantity=False,
+    )
+
+    y_tmp = np.zeros_like(y_inout)
+    status_final = np.zeros(ncells, dtype=np.int64)
+    solve_gow17_equilibrium_cells_cgs(
+        nH_cm3_arr.reshape(ncells),
+        T_K_arr.reshape(ncells),
+        Tdust_K_arr.reshape(ncells),
+        chi_pe_arr.reshape(ncells),
+        chi0_arr.reshape(ncells),
+        Av_in.reshape(ncells),
+        theta_h2.reshape(ncells),
+        theta_co.reshape(ncells),
+        theta_c.reshape(ncells),
+        chi_eff_pdr.reshape(ncells),
+        sigma_cm2_arr.reshape(ncells),
+        float(dt_eq_s),
+        y0=y_inout,
+        Zg=float(Zg),
+        Zd=float(Zd),
+        ion_rate_s=float(ion_rate_s),
+        fH2gr=float(fH2gr),
+        fHplusgr=float(fHplusgr),
+        fCplusgr=float(fCplusgr),
+        fHeplusgr=float(fHeplusgr),
+        fSplusgr=float(fSplusgr),
+        fSiplusgr=float(fSiplusgr),
+        fCplusCR=float(fCplusCR),
+        max_iter=int(max_iter),
+        reltol=float(reltol),
+        abstol=abstol,
+        y_out=y_tmp,
+        status_out=status_final,
+    )
+
+    status_acc = np.maximum(status_acc, status_final)
+    bad_idx = np.flatnonzero(status_final == 2)
+    if bad_idx.size:
+        y_tmp[bad_idx, :] = y_inout[bad_idx, :]
+    y_inout[:, :] = y_tmp
+
+    y_line = np.asarray(y_inout, dtype=float).reshape(-1, N_Y)[::-1]
     abd = _diskbridge_abundances_from_y(y_line)
 
     info = {
@@ -489,6 +671,11 @@ def run_external_iteration(
         "converged": converged,
         "convergence_history": convergence_history,
         "mix": mix,
+        "status_hist": {
+            0: int(np.sum(status_acc == 0)),
+            1: int(np.sum(status_acc == 1)),
+            2: int(np.sum(status_acc == 2)),
+        },
     }
 
     return y_line, abd, NH, info
@@ -513,7 +700,7 @@ def run_gow17_pdr_internal(
     NH_rev = NH[::-1]
     Av_arr = NH_rev / 1.87e21
 
-    radm.dust_temperature = Quantity(np.full(shape, 10.0, dtype=float), "K")
+    radm.dust_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
     Tgas_K = np.asarray(Tgas_K, dtype=float)
     if Tgas_K.shape != (ncells,):
         raise ValueError(f"Tgas_K must have shape ({ncells},), got {Tgas_K.shape}")

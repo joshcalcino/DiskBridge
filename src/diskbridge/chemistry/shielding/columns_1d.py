@@ -158,14 +158,16 @@ def compute_pdr_shielding_1d(
     rc = np.exp(-1.6e-17 * N_C)
     theta_c = rc * ry
 
-    chi_eff_pdr = chi_arr * theta_h2 * theta_co
+    theta_pdr = theta_h2 * theta_co
+    chi_eff_pdr = chi_arr * theta_pdr
 
     if return_quantity:
         return (
             Quantity(theta_h2, "dimensionless"),
             Quantity(theta_co, "dimensionless"),
             Quantity(theta_c, "dimensionless"),
+            Quantity(theta_pdr, "dimensionless"),
             Quantity(chi_eff_pdr, "dimensionless"),
         )
 
-    return theta_h2, theta_co, theta_c, chi_eff_pdr
+    return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr

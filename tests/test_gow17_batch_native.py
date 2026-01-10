@@ -7,6 +7,7 @@ Key invariants tested:
 """
 from __future__ import annotations
 
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -18,6 +19,25 @@ N_PH = _gow17.N_PH
 IPH_C = _gow17.IPH_C
 IPH_CO = _gow17.IPH_CO
 IPH_H2 = _gow17.IPH_H2
+
+
+FIG_DIR = Path(__file__).parent.parent / "visualization_tests"
+
+
+def _maybe_get_pyplot():
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    return plt
+
+
+def _save_fig(fig, filename: str) -> None:
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(FIG_DIR / filename, dpi=150)
 
 
 def default_y0(ncells: int) -> np.ndarray:
@@ -247,6 +267,22 @@ class TestNoDoubleAttenuation:
 
         y1_co = result1["y"][:, 3]
         y2_co = result2["y"][:, 3]
+
+        plt = _maybe_get_pyplot()
+        if plt is not None:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            x = np.arange(y1_co.size)
+            ax.plot(x, y1_co, marker="o", label="Gph=1")
+            ax.plot(x, y2_co, marker="o", label="Gph=0.5")
+            ax.set_xlabel("cell")
+            ax.set_ylabel("CO abundance")
+            ax.set_title("No double attenuation: CO differs when Gph differs")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            _save_fig(fig, "gow17_batch_native_no_double_attn.png")
+            plt.close(fig)
+
         assert not np.allclose(y1_co, y2_co, rtol=0.1, atol=0), (
             "CO abundance should differ when Gph differs; "
             f"if same, the code may not be using Gph correctly. "
@@ -351,6 +387,21 @@ class TestRadiationFieldScaling:
         co_low = result_low["y"][:, 3]
         co_high = result_high["y"][:, 3]
 
+        plt = _maybe_get_pyplot()
+        if plt is not None:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            x = np.arange(co_low.size)
+            ax.plot(x, co_low, marker="o", label="Gph=0.1")
+            ax.plot(x, co_high, marker="o", label="Gph=1.0")
+            ax.set_xlabel("cell")
+            ax.set_ylabel("CO abundance")
+            ax.set_title("Radiation scaling: CO decreases with higher Gph")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            _save_fig(fig, "gow17_batch_native_chi_scaling.png")
+            plt.close(fig)
+
         assert co_low.mean() > co_high.mean(), (
             f"Lower radiation should lead to more CO. "
             f"Got CO_low={co_low.mean():.2e}, CO_high={co_high.mean():.2e}"
@@ -430,6 +481,20 @@ class TestThermoEvolution:
         xe_out = y_out[:, 0] + y_out[:, 4] + y_out[:, 5] + y_out[:, 7] + y_out[:, 8] + y_out[:, 9] + y_out[:, 10] + y_out[:, 11] + y_out[:, 12]
         Cv_out = 1.5 * KB_CGS * ((1.0 - 2.0 * xH2_out) + xH2_out + XHE + xe_out)
         T_out = E_out / Cv_out
+
+        plt = _maybe_get_pyplot()
+        if plt is not None:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            x = np.arange(T_out.size)
+            ax.plot(x, T_out, marker="o")
+            ax.set_xlabel("cell")
+            ax.set_ylabel("Tgas (derived)")
+            ax.set_title("Thermo evolution: derived temperature per cell")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            _save_fig(fig, "gow17_batch_native_thermo_T_out.png")
+            plt.close(fig)
+
         assert np.all(T_out > 0), f"Temperature should be positive, got {T_out}"
         assert np.all(T_out < 1e6), f"Temperature unreasonably high: {T_out}"
 

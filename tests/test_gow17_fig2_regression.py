@@ -26,6 +26,9 @@ REF_DIR = Path(__file__).parent.parent / "other_codes" / "pdr" / "out_example_si
 SPEC_LIST_REF = ["He+", "OHx", "CHx", "CO", "C+", "HCO+", "H2", "H+", "H3+", "H2+", "S+", "Si+", "O+", "E"]
 IDX_REF = {n: i for i, n in enumerate(SPEC_LIST_REF)}
 
+
+FIG_DIR = Path(__file__).parent.parent / "visualization_tests"
+
 TOLERANCES_DEX = {
     "CO": 0.6,
     "C+": 0.15,
@@ -144,6 +147,43 @@ class TestGOW17Fig2Regression:
         """All cells should converge."""
         Av_db, Y = diskbridge_nH100
         assert Y.shape[0] > 0, "No cells computed"
+
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception:
+            return
+
+        Av_ref, slab_ref = reference_nH100
+        FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
+        axes = axes.ravel()
+
+        series = [
+            ("CO", I_CO),
+            ("C+", I_CP),
+            ("H2", I_H2),
+            ("He+", I_HEP),
+        ]
+        for ax, (name, idx_db) in zip(axes, series):
+            db_vals = np.asarray(Y[:, idx_db], float)
+            ref_vals = np.interp(Av_db, Av_ref, slab_ref[:, IDX_REF[name]])
+            ax.plot(Av_db, safe_log10(db_vals), label="diskbridge")
+            ax.plot(Av_db, safe_log10(ref_vals), label="reference", linestyle="--")
+            ax.set_title(name)
+            ax.set_ylabel("log10(abundance)")
+            ax.grid(True, alpha=0.3)
+
+        for ax in axes[-2:]:
+            ax.set_xlabel("Av")
+
+        axes[0].legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(FIG_DIR / "gow17_fig2_pytest_nH100.png", dpi=150)
+        plt.close(fig)
 
     @pytest.mark.parametrize("species,idx_db,tol", [
         ("CO", I_CO, TOLERANCES_DEX["CO"]),
