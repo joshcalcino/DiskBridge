@@ -276,6 +276,8 @@ abstol0 = 1.0e-9
 shielding_max_iter = 6
 shielding_reltol = 1.0e-2
 shielding_abstol = 1.0e-9
+shielding_outer_coupling = "pseudotime"
+shielding_dt_schedule = "triangular"
 
 # Time-dependent mode parameters
 t_end = "1.0e3 yr"
