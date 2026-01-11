@@ -278,6 +278,7 @@ shielding_reltol = 1.0e-2
 shielding_abstol = 1.0e-9
 shielding_outer_coupling = "pseudotime"
 shielding_dt_schedule = "triangular"
+shielding_self_weight = 1.0
 
 # Time-dependent mode parameters
 t_end = "1.0e3 yr"

@@ -19,6 +19,7 @@ def integrate_ray_cartesian_dda_3d(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    self_weight: float = 1.0,
 ) -> float:
     """DDA-style ray integration on a 3D uniform Cartesian grid."""
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
@@ -111,6 +112,7 @@ def integrate_ray_cartesian_dda_3d(
 
     col = 0.0
     t_curr = 0.0
+    is_first = True
 
     for _ in range(max_steps):
         if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
@@ -135,7 +137,11 @@ def integrate_ray_cartesian_dda_3d(
         if ds_loc <= 0.0 or not np.isfinite(ds_loc):
             break
 
-        col += density[ix, iy, iz] * ds_loc
+        if is_first:
+            col += self_weight * density[ix, iy, iz] * ds_loc
+            is_first = False
+        else:
+            col += density[ix, iy, iz] * ds_loc
         t_curr = t_next
 
         if hit_axis == 0:
@@ -167,6 +173,7 @@ def integrate_ray_cartesian_dda_3d_with_pathlength(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    self_weight: float = 1.0,
 ) -> Tuple[float, float]:
     """DDA-style ray integration returning both column and path length."""
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
@@ -260,6 +267,7 @@ def integrate_ray_cartesian_dda_3d_with_pathlength(
     col = 0.0
     s_total = 0.0
     t_curr = 0.0
+    is_first = True
 
     for _ in range(max_steps):
         if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
@@ -284,7 +292,11 @@ def integrate_ray_cartesian_dda_3d_with_pathlength(
         if ds_loc <= 0.0 or not np.isfinite(ds_loc):
             break
 
-        col += density[ix, iy, iz] * ds_loc
+        if is_first:
+            col += self_weight * density[ix, iy, iz] * ds_loc
+            is_first = False
+        else:
+            col += density[ix, iy, iz] * ds_loc
         s_total += ds_loc
         t_curr = t_next
 
@@ -406,6 +418,7 @@ def integrate_ray_spherical_dda_3d(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    self_weight: float = 1.0,
 ) -> float:
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
     if norm == 0.0:
@@ -449,6 +462,7 @@ def integrate_ray_spherical_dda_3d(
         return 0.0
 
     col = 0.0
+    is_first = True
 
     for _ in range(max_steps):
         if ir < 0 or ir >= nr or it < 0 or it >= nt:
@@ -511,7 +525,11 @@ def integrate_ray_spherical_dda_3d(
             break
 
         ds = t_min
-        col += density[ir, it, ip] * ds
+        if is_first:
+            col += self_weight * density[ir, it, ip] * ds
+            is_first = False
+        else:
+            col += density[ir, it, ip] * ds
 
         x += dx * t_min
         y += dy * t_min
@@ -553,6 +571,7 @@ def integrate_ray_spherical_dda_3d_with_pathlength(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    self_weight: float = 1.0,
 ) -> Tuple[float, float]:
     """Spherical DDA ray integration returning both column and path length."""
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
@@ -598,6 +617,7 @@ def integrate_ray_spherical_dda_3d_with_pathlength(
 
     col = 0.0
     s_total = 0.0
+    is_first = True
 
     for _ in range(max_steps):
         if ir < 0 or ir >= nr or it < 0 or it >= nt:
@@ -657,7 +677,11 @@ def integrate_ray_spherical_dda_3d_with_pathlength(
             break
 
         ds = t_min
-        col += density[ir, it, ip] * ds
+        if is_first:
+            col += self_weight * density[ir, it, ip] * ds
+            is_first = False
+        else:
+            col += density[ir, it, ip] * ds
         s_total += ds
 
         x += dx * t_min
@@ -696,6 +720,7 @@ def _integrate_all_rays_spherical_dda(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -724,6 +749,7 @@ def _integrate_all_rays_spherical_dda(
                 theta_edges,
                 phi_edges,
                 max_steps,
+                self_weight,
             )
 
     return N_all
@@ -738,6 +764,7 @@ def _integrate_all_rays_spherical_dda_multi(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -795,6 +822,8 @@ def _integrate_all_rays_spherical_dda_multi(
 
             if ir < 0 or ir >= nr or it < 0 or it >= nt or ip < 0 or ip >= nphi:
                 continue
+
+            is_first = True
 
             for _ in range(max_steps):
                 if ir < 0 or ir >= nr or it < 0 or it >= nt:
@@ -854,8 +883,13 @@ def _integrate_all_rays_spherical_dda_multi(
                     break
 
                 ds = t_min
-                for k in range(n_fields):
-                    N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
+                if is_first:
+                    for k in range(n_fields):
+                        N_all[i, j, k] += self_weight * fields_stack[k, ir, it, ip] * ds
+                    is_first = False
+                else:
+                    for k in range(n_fields):
+                        N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
 
                 x += dx * t_min
                 y += dy * t_min
@@ -893,6 +927,7 @@ def _integrate_all_rays_cartesian_dda_multi(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -1004,6 +1039,7 @@ def _integrate_all_rays_cartesian_dda_multi(
                 tDeltaZ = np.inf
 
             t_curr = 0.0
+            is_first = True
 
             for _ in range(max_steps):
                 if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
@@ -1028,8 +1064,13 @@ def _integrate_all_rays_cartesian_dda_multi(
                 if ds_loc <= 0.0 or not np.isfinite(ds_loc):
                     break
 
-                for k in range(n_fields):
-                    N_all[i, j, k] += fields_stack[k, ix, iy, iz] * ds_loc
+                if is_first:
+                    for k in range(n_fields):
+                        N_all[i, j, k] += self_weight * fields_stack[k, ix, iy, iz] * ds_loc
+                    is_first = False
+                else:
+                    for k in range(n_fields):
+                        N_all[i, j, k] += fields_stack[k, ix, iy, iz] * ds_loc
 
                 t_curr = t_next
 
@@ -1058,6 +1099,7 @@ def _integrate_all_rays_cartesian_dda(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -1086,6 +1128,7 @@ def _integrate_all_rays_cartesian_dda(
                 y_edges,
                 z_edges,
                 max_steps,
+                self_weight,
             )
 
     return N_all
@@ -1100,6 +1143,7 @@ def _integrate_all_rays_cartesian_dda_with_pathlength(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    self_weight: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -1129,6 +1173,7 @@ def _integrate_all_rays_cartesian_dda_with_pathlength(
                 y_edges,
                 z_edges,
                 max_steps,
+                self_weight,
             )
             N_all[i, j] = col
             S_all[i, j] = s
@@ -1145,6 +1190,7 @@ def _integrate_all_rays_spherical_dda_with_pathlength(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    self_weight: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -1174,6 +1220,7 @@ def _integrate_all_rays_spherical_dda_with_pathlength(
                 theta_edges,
                 phi_edges,
                 max_steps,
+                self_weight,
             )
             N_all[i, j] = col
             S_all[i, j] = s
@@ -1212,6 +1259,7 @@ def integrate_rays(
 	directions: np.ndarray,
 	n_field: np.ndarray,
 	max_steps: int = 10000,
+	self_weight: float = 1.0,
 ) -> np.ndarray:
     """
     Unified ray integration dispatcher.
@@ -1245,8 +1293,12 @@ def integrate_rays(
     edges = _tracer_edges_float64(tracer, kind)
 
     if kind == "cartesian":
-        return _integrate_all_rays_cartesian_dda(cell_centers, directions, n_field, *edges, max_steps)
-    return _integrate_all_rays_spherical_dda(cell_centers, directions, n_field, *edges, max_steps)
+        return _integrate_all_rays_cartesian_dda(
+            cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
+        )
+    return _integrate_all_rays_spherical_dda(
+        cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
+    )
 
 
 def integrate_rays_multi(
@@ -1255,6 +1307,7 @@ def integrate_rays_multi(
 	directions: np.ndarray,
 	fields_stack: np.ndarray,
 	max_steps: int = 10000,
+	self_weight: float = 1.0,
 ) -> np.ndarray:
     kind = _tracer_kind(tracer)
     cell_centers = np.asarray(cell_centers, dtype=np.float64)
@@ -1263,8 +1316,12 @@ def integrate_rays_multi(
     edges = _tracer_edges_float64(tracer, kind)
 
     if kind == "cartesian":
-        return _integrate_all_rays_cartesian_dda_multi(cell_centers, directions, fields_stack, *edges, max_steps)
-    return _integrate_all_rays_spherical_dda_multi(cell_centers, directions, fields_stack, *edges, max_steps)
+        return _integrate_all_rays_cartesian_dda_multi(
+            cell_centers, directions, fields_stack, *edges, max_steps, float(self_weight)
+        )
+    return _integrate_all_rays_spherical_dda_multi(
+        cell_centers, directions, fields_stack, *edges, max_steps, float(self_weight)
+    )
 
 
 def integrate_rays_with_pathlength(
@@ -1273,6 +1330,7 @@ def integrate_rays_with_pathlength(
     directions: np.ndarray,
     n_field: np.ndarray,
     max_steps: int = 10000,
+    self_weight: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Ray integration returning both column densities and path lengths.
@@ -1300,13 +1358,14 @@ def integrate_rays_with_pathlength(
     kind = _tracer_kind(tracer)
     cell_centers = np.asarray(cell_centers, dtype=np.float64)
     directions = np.asarray(directions, dtype=np.float64)
+
     n_field = np.asarray(n_field, dtype=np.float64)
     edges = _tracer_edges_float64(tracer, kind)
 
     if kind == "cartesian":
         return _integrate_all_rays_cartesian_dda_with_pathlength(
-            cell_centers, directions, n_field, *edges, max_steps
+            cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
         )
     return _integrate_all_rays_spherical_dda_with_pathlength(
-        cell_centers, directions, n_field, *edges, max_steps
+        cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
     )

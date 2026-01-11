@@ -70,6 +70,16 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
     nside = int(cfg.get("nside"))
     b_kms = float(cfg.get("b_kms"))
 
+    shielding_self_weight_cfg = cfg.get("shielding_self_weight", None)
+    if shielding_self_weight_cfg is None:
+        shielding_self_weight = 1.0
+    else:
+        shielding_self_weight = float(shielding_self_weight_cfg)
+    if shielding_self_weight <= 0.0:
+        raise ValueError(
+            f"gow17_pdr: shielding_self_weight must be > 0, got {shielding_self_weight}"
+        )
+
     chi0_cfg = cfg.get("chi0", None)
 
     ion_rate_s = Quantity(cfg.get("ion_rate")).to("1/s").magnitude
@@ -245,8 +255,8 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if not np.any(mask_av):
             mask_av = np.ones(ncells, dtype=bool)
 
-        co_floor = max(float(abstol[I_CO]), float(shielding_abstol))
-        h2_floor = max(float(abstol[I_H2]), float(shielding_abstol))
+        co_floor = float(abstol[I_CO])
+        h2_floor = float(abstol[I_H2])
 
         for it in range(shielding_max_iter):
             y_prev_snapshot[:, :] = y_inout
@@ -296,6 +306,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nH2=nH2_cm3,
                     nside=nside,
                     b_kms=b_kms,
+                    self_weight=shielding_self_weight,
                     return_quantity=False,
                 )
 
@@ -485,6 +496,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nH2=nH2_cm3,
                     nside=nside,
                     b_kms=b_kms,
+                    self_weight=shielding_self_weight,
                     return_quantity=False,
                 )
 
@@ -570,6 +582,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 nside=nside,
                 b_kms=b_kms,
+                self_weight=shielding_self_weight,
                 return_quantity=False,
             )
 
@@ -661,6 +674,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                         nH2=nH2_cm3,
                         nside=nside,
                         b_kms=b_kms,
+                        self_weight=shielding_self_weight,
                         return_quantity=False,
                     )
 

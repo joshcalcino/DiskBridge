@@ -864,6 +864,7 @@ def compute_co_shielding_healpix(
     candidate_mask: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
+    self_weight: float = 1.0,
     return_quantity: bool = True,
 ) -> Tuple[Quantity, Quantity] | Tuple[np.ndarray, np.ndarray]:
     """
@@ -1002,8 +1003,8 @@ def compute_co_shielding_healpix(
         idx_chunk = candidate_idx[start:end]
         centers_chunk = cell_centers[start:end]
 
-        N_CO_rays = integrate_rays(tracer, centers_chunk, dirs, nCO_cgs)
-        N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs)
+        N_CO_rays = integrate_rays(tracer, centers_chunk, dirs, nCO_cgs, self_weight=float(self_weight))
+        N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs, self_weight=float(self_weight))
 
         theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
         theta_mean = theta_rays.mean(axis=1)
@@ -1043,6 +1044,7 @@ def compute_pdr_shielding_healpix(
     candidate_mask: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
+    self_weight: float = 1.0,
     return_quantity: bool = True,
 ) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity] | tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
@@ -1107,7 +1109,13 @@ def compute_pdr_shielding_healpix(
             idx_chunk = candidate_idx[start:end]
             centers_chunk = cell_centers[start:end]
 
-            N_rays = integrate_rays_multi(tracer, centers_chunk, dirs, fields_stack)
+            N_rays = integrate_rays_multi(
+                tracer,
+                centers_chunk,
+                dirs,
+                fields_stack,
+                self_weight=float(self_weight),
+            )
             N_H2_rays = N_rays[:, :, 0]
             N_C_rays = N_rays[:, :, 1]
             if has_co:
