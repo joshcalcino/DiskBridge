@@ -195,6 +195,20 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if shielding_abstol <= 0.0:
             raise ValueError("gow17_pdr: shielding_abstol must be > 0")
 
+        shielding_outer_coupling = str(cfg.get("shielding_outer_coupling", "equilibrium")).lower()
+        if shielding_outer_coupling not in {"equilibrium", "pseudotime"}:
+            raise ValueError(
+                "gow17_pdr: shielding_outer_coupling must be 'equilibrium' or 'pseudotime', "
+                f"got {shielding_outer_coupling!r}"
+            )
+
+        shielding_dt_schedule = str(cfg.get("shielding_dt_schedule", "triangular")).lower()
+        if shielding_dt_schedule != "triangular":
+            raise ValueError(
+                "gow17_pdr: shielding_dt_schedule must be 'triangular', "
+                f"got {shielding_dt_schedule!r}"
+            )
+
         shielding_mix_cfg = cfg.get("shielding_mix", None)
         if shielding_mix_cfg is None:
             shielding_mix = 1.0
@@ -223,6 +237,16 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         theta_c_prev_flat = np.ones(ncells, dtype=np.float64)
         theta_pdr_prev_flat = np.ones(ncells, dtype=np.float64)
         tiny = float(np.finfo(np.float64).tiny)
+
+        dt_coeff = (2.0 * float(dt_eq_s)) / (float(shielding_max_iter) * float(shielding_max_iter + 1))
+
+        Av_line = Av_arr.reshape(ncells)
+        mask_av = Av_line > 0.5
+        if not np.any(mask_av):
+            mask_av = np.ones(ncells, dtype=bool)
+
+        co_floor = float(abstol[I_CO])
+        h2_floor = float(abstol[I_H2])
 
         for it in range(shielding_max_iter):
             y_prev_snapshot[:, :] = y_inout
@@ -316,6 +340,154 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_pdr_arr = theta_pdr_mix_flat.reshape(shape)
             chi_eff_pdr_arr = (chi_pe_arr.reshape(ncells) * theta_pdr_mix_flat).reshape(shape)
 
+            status_step[:] = 0
+            if shielding_outer_coupling == "equilibrium":
+                y_tmp = np.zeros_like(y_inout)
+                solve_gow17_equilibrium_cells_cgs(
+                    nH_cm3.reshape(ncells),
+                    T_K.reshape(ncells),
+                    Tdust_K.reshape(ncells),
+                    chi_pe_arr.reshape(ncells),
+                    chi0_arr.reshape(ncells),
+                    Av_arr.reshape(ncells),
+                    theta_h2_arr.reshape(ncells),
+                    theta_co_arr.reshape(ncells),
+                    theta_c_arr.reshape(ncells),
+                    chi_eff_pdr_arr.reshape(ncells),
+                    sigma_cm2.reshape(ncells),
+                    float(dt_eq_s),
+                    y0=y_inout,
+                    Zg=Zg,
+                    Zd=Zd,
+                    ion_rate_s=float(ion_rate_s),
+                    fH2gr=fH2gr,
+                    fHplusgr=fHplusgr,
+                    fCplusgr=fCplusgr,
+                    fHeplusgr=fHeplusgr,
+                    fSplusgr=fSplusgr,
+                    fSiplusgr=fSiplusgr,
+                    fCplusCR=fCplusCR,
+                    max_iter=max_iter,
+                    reltol=reltol,
+                    abstol=abstol,
+                    y_out=y_tmp,
+                    status_out=status_step,
+                )
+
+                status_acc = np.maximum(status_acc, status_step)
+                bad_idx = np.flatnonzero(status_step != 0)
+                if bad_idx.size:
+                    y_tmp[bad_idx, :] = y_prev_snapshot[bad_idx, :]
+
+                y_inout[:, :] = y_tmp
+            else:
+                dt_outer_s = float(dt_coeff) * float(it + 1)
+                evolve_gow17_be_cells_cgs(
+                    nH_cm3.reshape(ncells),
+                    T_K.reshape(ncells),
+                    Tdust_K.reshape(ncells),
+                    chi_pe_arr.reshape(ncells),
+                    chi0_arr.reshape(ncells),
+                    Av_arr.reshape(ncells),
+                    theta_h2_arr.reshape(ncells),
+                    theta_co_arr.reshape(ncells),
+                    theta_c_arr.reshape(ncells),
+                    chi_eff_pdr_arr.reshape(ncells),
+                    sigma_cm2.reshape(ncells),
+                    float(dt_outer_s),
+                    y_inout,
+                    Zg=Zg,
+                    Zd=Zd,
+                    ion_rate_s=float(ion_rate_s),
+                    fH2gr=fH2gr,
+                    fHplusgr=fHplusgr,
+                    fCplusgr=fCplusgr,
+                    fHeplusgr=fHeplusgr,
+                    fSplusgr=fSplusgr,
+                    fSiplusgr=fSiplusgr,
+                    fCplusCR=fCplusCR,
+                    max_iter=max_iter,
+                    reltol=reltol,
+                    abstol=abstol,
+                    status_out=status_step,
+                )
+
+                status_acc = np.maximum(status_acc, status_step)
+                bad_idx = np.flatnonzero(status_step != 0)
+                if bad_idx.size:
+                    y_inout[bad_idx, :] = y_prev_snapshot[bad_idx, :]
+
+            xCO_new = y_inout[:, I_CO]
+            xH2_new = y_inout[:, I_H2]
+
+            mask_co = mask_av & ((xCO_new > co_floor) | (xCO_old > co_floor))
+            mask_h2 = mask_av & ((xH2_new > h2_floor) | (xH2_old > h2_floor))
+
+            if np.any(mask_co):
+                denom_co = np.maximum(np.maximum(xCO_new[mask_co], xCO_old[mask_co]), co_floor)
+                rel_co = np.abs(xCO_new[mask_co] - xCO_old[mask_co]) / denom_co
+                d_co = float(np.percentile(rel_co, 90))
+            else:
+                d_co = 0.0
+
+            if np.any(mask_h2):
+                denom_h2 = np.maximum(np.maximum(xH2_new[mask_h2], xH2_old[mask_h2]), h2_floor)
+                rel_h2 = np.abs(xH2_new[mask_h2] - xH2_old[mask_h2]) / denom_h2
+                d_h2 = float(np.percentile(rel_h2, 90))
+            else:
+                d_h2 = 0.0
+
+            if max(d_h2, d_co) <= shielding_reltol:
+                break
+
+        if shielding_outer_coupling == "pseudotime":
+            y_prev_snapshot[:, :] = y_inout
+            xCO = y_inout[:, I_CO]
+            xCO_ice = y_inout[:, I_CO_ICE]
+            xH2 = y_inout[:, I_H2]
+
+            xC_neutral = xCtot - (
+                y_inout[:, I_HCOP]
+                + y_inout[:, I_CHX]
+                + xCO
+                + y_inout[:, I_CP]
+                + xCO_ice
+            )
+            xC_neutral = np.maximum(xC_neutral, 0.0)
+
+            nCO_cm3 = np.ascontiguousarray((xCO * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+            nH2_cm3 = np.ascontiguousarray((xH2 * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+            nC_cm3 = np.ascontiguousarray((xC_neutral * nH_cm3.reshape(ncells)).reshape(shape), dtype=np.float64)
+
+            if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+                theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                    mesh=rad.model.mesh,
+                    nH=nH_cm3,
+                    chi=chi_pe_arr,
+                    visser=visser,
+                    nCO=nCO_cm3,
+                    nC=nC_cm3,
+                    nH2=nH2_cm3,
+                    b_kms=b_kms,
+                    outer="max",
+                    return_quantity=False,
+                )
+            else:
+                from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+
+                theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                    mesh=rad.model.mesh,
+                    nH=nH_cm3,
+                    chi=chi_pe_arr,
+                    visser=visser,
+                    nCO=nCO_cm3,
+                    nC=nC_cm3,
+                    nH2=nH2_cm3,
+                    nside=nside,
+                    b_kms=b_kms,
+                    return_quantity=False,
+                )
+
             y_tmp = np.zeros_like(y_inout)
             status_step[:] = 0
             solve_gow17_equilibrium_cells_cgs(
@@ -350,21 +522,10 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             )
 
             status_acc = np.maximum(status_acc, status_step)
-            bad_idx = np.flatnonzero(status_step == 2)
+            bad_idx = np.flatnonzero(status_step != 0)
             if bad_idx.size:
                 y_tmp[bad_idx, :] = y_prev_snapshot[bad_idx, :]
-
             y_inout[:, :] = y_tmp
-
-            xCO_new = y_inout[:, I_CO]
-            xH2_new = y_inout[:, I_H2]
-
-            denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
-            denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
-            d_h2 = np.max(np.abs(xH2_new - xH2_old) / denom_h2)
-            d_co = np.max(np.abs(xCO_new - xCO_old) / denom_co)
-            if max(d_h2, d_co) <= shielding_reltol:
-                break
 
         xCO = y_inout[:, I_CO]
         xCO_ice = y_inout[:, I_CO_ICE]

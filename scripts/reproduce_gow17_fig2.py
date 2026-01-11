@@ -540,7 +540,7 @@ def run_external_iteration(
         )
 
         status_acc = np.maximum(status_acc, status_step)
-        bad_idx = np.flatnonzero(status_step == 2)
+        bad_idx = np.flatnonzero(status_step != 0)
         if bad_idx.size:
             y_inout[bad_idx, :] = y_prev_snapshot[bad_idx, :]
 
@@ -658,7 +658,7 @@ def run_external_iteration(
     )
 
     status_acc = np.maximum(status_acc, status_final)
-    bad_idx = np.flatnonzero(status_final == 2)
+    bad_idx = np.flatnonzero(status_final != 0)
     if bad_idx.size:
         y_tmp[bad_idx, :] = y_inout[bad_idx, :]
     y_inout[:, :] = y_tmp
@@ -730,6 +730,7 @@ def run_gow17_pdr_internal(
         "fSplusgr": 0.6,
         "fSiplusgr": 0.6,
         "fCplusCR": 1.0,
+        "shielding_outer_coupling": "pseudotime",
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-6,
         "shielding_abstol": 1.0e-20,
