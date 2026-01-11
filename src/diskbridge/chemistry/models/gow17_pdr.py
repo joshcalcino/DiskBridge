@@ -255,8 +255,8 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
         if not np.any(mask_av):
             mask_av = np.ones(ncells, dtype=bool)
 
-        co_floor = float(abstol[I_CO])
-        h2_floor = float(abstol[I_H2])
+        co_floor = max(float(abstol[I_CO]), float(shielding_abstol))
+        h2_floor = max(float(abstol[I_H2]), float(shielding_abstol))
 
         for it in range(shielding_max_iter):
             y_prev_snapshot[:, :] = y_inout
