@@ -645,124 +645,36 @@ def _integrate_field_rays(
     n_field_cgs: np.ndarray,
     *,
     progress_chunks: Optional[int],
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_candidates = cell_centers.shape[0]
-    npix = dirs.shape[0]
-
     if n_candidates == 0:
-        return np.empty((0, npix), dtype=np.float64)
+        return np.zeros((0, dirs.shape[0]), dtype=np.float64)
 
     if progress_chunks is None or progress_chunks <= 1:
-        return integrate_rays(tracer, cell_centers, dirs, n_field_cgs)
+        return integrate_rays(
+            tracer, cell_centers, dirs, n_field_cgs, self_weight=float(self_weight)
+        )
 
-    n_chunks = int(progress_chunks)
-    if n_chunks <= 0:
-        n_chunks = 1
-    chunk_size = max(1, n_candidates // n_chunks)
+    chunk_size = (n_candidates + progress_chunks - 1) // progress_chunks
+    out = np.zeros((n_candidates, dirs.shape[0]), dtype=np.float64)
 
-    logger.info(
-        f"HEALPix ray tracing progress enabled: {n_candidates} cells "
-        f"in {n_chunks} chunks (chunk_size={chunk_size})."
-    )
+    for i in range(progress_chunks):
+        start = i * chunk_size
+        end = min((i + 1) * chunk_size, n_candidates)
+        if start >= end:
+            break
 
-    N_all = np.empty((n_candidates, npix), dtype=np.float64)
-    _t_chunk_start = _time.time()
-    for ichunk, start in enumerate(range(0, n_candidates, chunk_size), 1):
-        end = min(start + chunk_size, n_candidates)
-        N_chunk = integrate_rays(
+        logger.info(f"Ray marching chunk {i+1}/{progress_chunks} ({end-start} cells)...")
+        out[start:end] = integrate_rays(
             tracer,
             cell_centers[start:end],
             dirs,
             n_field_cgs,
-        )
-        N_all[start:end] = N_chunk
-
-        frac = end / n_candidates
-        t_now = _time.time()
-        dt = t_now - _t_chunk_start
-        _t_chunk_start = t_now
-        n_cells_chunk = end - start
-        cells_per_sec = n_cells_chunk / dt if dt > 0.0 else float("inf")
-        rays_per_sec = (n_cells_chunk * npix) / dt if dt > 0.0 else float("inf")
-        logger.info(
-            f"HEALPix rays: {end}/{n_candidates} cells "
-            f"({100.0 * frac:.1f}%) done. "
-            f"Chunk {ichunk}/{n_chunks}: {n_cells_chunk} cells in {dt:.2f}s "
-            f"({cells_per_sec:.1f} cells/s, {rays_per_sec:.1f} rays/s)."
+            self_weight=float(self_weight),
         )
 
-    return N_all
-
-
-def _prepare_healpix_geometry(
-    mesh,
-    *,
-    nside: int,
-    candidate_mask: np.ndarray,
-    cache_dir: Optional[Path | str],
-) -> tuple[object, np.ndarray, np.ndarray, np.ndarray]:
-    candidate_mask = np.asarray(candidate_mask, dtype=bool)
-
-    geom_cache_key = None
-    cached_geom = None
-    if cache_dir is not None:
-        geom_cache_key = _compute_healpix_geometry_cache_key(mesh, int(nside), candidate_mask)
-        cached_geom = _load_healpix_geometry_cache(cache_dir, geom_cache_key)
-
-    if mesh.coord_system == "spherical":
-        tracer = SphericalHealpixRayTracer(mesh, nside=int(nside))
-    elif mesh.coord_system == "cartesian":
-        tracer = CartesianHealpixRayTracer(mesh, nside=int(nside))
-    else:
-        raise ValueError(
-            f"Unsupported mesh coord_system {mesh.coord_system!r} for HEALPix rays "
-            "(expected 'spherical' or 'cartesian')."
-        )
-
-    if cached_geom is not None:
-        candidate_idx, dirs, cell_centers, metadata = cached_geom
-        if metadata:
-            logger.info(
-                f"Loaded healpix geometry from cache (computed in {metadata.get('compute_time_s', '?')}s)"
-            )
-        return tracer, np.asarray(dirs, dtype=np.float64), np.asarray(candidate_idx), np.asarray(cell_centers, dtype=np.float64)
-
-    candidate_idx = np.argwhere(candidate_mask)
-    n_candidates = candidate_idx.shape[0]
-
-    dirs = tracer.dirs.astype(np.float64)
-    cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
-    for k, idx in enumerate(candidate_idx):
-        cell_centers[k] = tracer.cell_center_xyz(*idx)
-
-    if cache_dir is not None and geom_cache_key is not None:
-        metadata = {
-            "compute_time_s": 0.0,
-            "n_candidates": int(n_candidates),
-            "nside": int(nside),
-            "npix": int(dirs.shape[0]),
-        }
-        _save_healpix_geometry_cache(
-            cache_dir,
-            geom_cache_key,
-            candidate_idx,
-            dirs,
-            cell_centers,
-            metadata,
-        )
-
-    return tracer, dirs, candidate_idx, cell_centers
-
-
-def _scatter_candidates_3d(
-    grid: np.ndarray,
-    candidate_idx: np.ndarray,
-    values: np.ndarray,
-) -> None:
-    ci = candidate_idx[:, 0]
-    cj = candidate_idx[:, 1]
-    ck = candidate_idx[:, 2]
-    grid[ci, cj, ck] = values
+    return out
 
 
 def compute_column_rays_healpix(
@@ -770,35 +682,52 @@ def compute_column_rays_healpix(
     fields: dict[str, np.ndarray],
     *,
     nside: int,
-    candidate_mask: np.ndarray,
+    candidate_mask: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
+    self_weight: float = 1.0,
+    tracer: Optional[object] = None,
+    dirs: Optional[np.ndarray] = None,
+    candidate_idx: Optional[np.ndarray] = None,
+    cell_centers: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    candidate_mask = np.asarray(candidate_mask, dtype=bool)
+    if candidate_mask is not None:
+        candidate_mask = np.asarray(candidate_mask, dtype=bool)
 
-    any_field = next(iter(fields.values()))
-    if np.shape(any_field) != np.shape(candidate_mask):
-        raise ValueError(
-            f"field and candidate_mask must have the same shape, got {np.shape(any_field)} vs {candidate_mask.shape}"
-        )
-
-    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
-        mesh,
-        nside=int(nside),
-        candidate_mask=candidate_mask,
-        cache_dir=cache_dir,
+    have_geom = (
+        tracer is not None
+        and dirs is not None
+        and candidate_idx is not None
+        and cell_centers is not None
     )
 
+    if not have_geom:
+        if candidate_mask is None:
+            raise ValueError("candidate_mask is required if geometry is not provided.")
+        tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+            mesh,
+            nside=int(nside),
+            candidate_mask=candidate_mask,
+            cache_dir=cache_dir,
+        )
+    else:
+        dirs = np.asarray(dirs, dtype=np.float64)
+        candidate_idx = np.asarray(candidate_idx)
+        cell_centers = np.asarray(cell_centers, dtype=np.float64)
+
+    # Disable caching if no candidate_mask (chunked path)
+    if candidate_mask is None:
+        cache_dir = None
+
     out: dict[str, np.ndarray] = {}
+    missing_names = []
+    missing_arrays = []
+    missing_cache_keys = []
+
     for name, field in fields.items():
         n_field_cgs = np.asarray(field, dtype=np.float64)
-        if n_field_cgs.shape != candidate_mask.shape:
-            raise ValueError(
-                f"field {name!r} must match candidate_mask shape, got {n_field_cgs.shape} vs {candidate_mask.shape}"
-            )
-
         cache_key = None
-        if cache_dir is not None:
+        if cache_dir is not None and candidate_mask is not None:
             cache_key = _compute_healpix_column_cache_key(
                 mesh,
                 int(nside),
@@ -817,19 +746,52 @@ def compute_column_rays_healpix(
                 out[str(name)] = arrays["N_rays"]
                 continue
 
-        _t_start = _time.time()
+        missing_names.append(name)
+        missing_arrays.append(n_field_cgs)
+        missing_cache_keys.append(cache_key)
+
+    if len(missing_names) >= 2:
+        fields_stack = np.ascontiguousarray(
+            np.stack(missing_arrays, axis=0), dtype=np.float64
+        )
+        N_all = integrate_rays_multi(
+            tracer,
+            cell_centers,
+            dirs,
+            fields_stack,
+            self_weight=float(self_weight),
+        )  # (n_cells, npix, n_fields)
+        for j, name in enumerate(missing_names):
+            N_rays = N_all[:, :, j]
+            out[str(name)] = N_rays
+            if cache_dir is not None and missing_cache_keys[j] is not None:
+                metadata = {
+                    "field": str(name),
+                    "n_candidates": int(cell_centers.shape[0]),
+                    "nside": int(nside),
+                    "npix": int(dirs.shape[0]),
+                }
+                _save_npz_cache(
+                    cache_dir,
+                    prefix="healpix_col_cache",
+                    cache_key=missing_cache_keys[j],
+                    arrays={"N_rays": N_rays},
+                    metadata=metadata,
+                )
+    elif len(missing_names) == 1:
+        name = missing_names[0]
+        n_field_cgs = missing_arrays[0]
         N_rays = _integrate_field_rays(
             tracer,
             cell_centers,
             dirs,
             n_field_cgs,
             progress_chunks=progress_chunks,
+            self_weight=float(self_weight),
         )
-        _t_elapsed = _time.time() - _t_start
-
-        if cache_dir is not None and cache_key is not None:
+        out[str(name)] = N_rays
+        if cache_dir is not None and missing_cache_keys[0] is not None:
             metadata = {
-                "compute_time_s": round(_t_elapsed, 2),
                 "field": str(name),
                 "n_candidates": int(cell_centers.shape[0]),
                 "nside": int(nside),
@@ -838,17 +800,12 @@ def compute_column_rays_healpix(
             _save_npz_cache(
                 cache_dir,
                 prefix="healpix_col_cache",
-                cache_key=cache_key,
+                cache_key=missing_cache_keys[0],
                 arrays={"N_rays": N_rays},
                 metadata=metadata,
             )
 
-        out[str(name)] = N_rays
-
     return candidate_idx, dirs, out
-
-
-
 
 
 def compute_co_shielding_healpix(
@@ -867,66 +824,15 @@ def compute_co_shielding_healpix(
     self_weight: float = 1.0,
     return_quantity: bool = True,
 ) -> Tuple[Quantity, Quantity] | Tuple[np.ndarray, np.ndarray]:
-    """
-    Compute CO self-shielding using HEALPix rays + Visser+09 tables.
-
-    Parameters
-    ----------
-    mesh : Mesh
-        DiskBridge mesh (spherical or cartesian).
-    nH : Quantity or ndarray
-        H nuclei number density [cm^-3], shape matching mesh.
-    chi : Quantity or ndarray
-        UV field in Draine units (dust-attenuated, unshielded by molecules).
-    visser : VisserShielding
-        Loaded Visser+09 shielding interpolator.
-    nCO : Quantity or ndarray, optional
-        CO number density [cm^-3]. If None, approximated as Xco_guess * nH.
-    nH2 : Quantity or ndarray, optional
-        H2 number density [cm^-3]. If None, approximated as XH2_guess * nH / 2.
-    nside : int, optional
-        HEALPix resolution. npix = 12 * nside^2 directions.
-    b_kms : float, optional
-        Microturbulent Doppler b (km/s). Must match the Visser file if given.
-    candidate_mask : ndarray of bool, optional
-        Mask of cells to process. If None, constructed from chi/nH threshold.
-    Xco_guess : float, optional
-        Default CO abundance relative to nH when nCO is not supplied.
-    XH2_guess : float, optional
-        Fraction of H nuclei in H2 when nH2 is not supplied.
-    progress_chunks : int, optional
-        If set to a positive integer, split candidate cells into this many
-        chunks, calling integrate_rays on each chunk and logging progress
-        after each chunk. None (default) keeps a single fast integrate_rays
-        call for maximum performance.
-    cache_dir : Path or str, optional
-        Directory to cache/load healpix computation results. If provided and
-        a matching cache exists, the cached results will be loaded instead of
-        recomputing. New results will be saved to cache after computation.
-
-    Returns
-    -------
-    theta_co : Quantity, dimensionless
-        Angle-averaged CO shielding factor (0-1).
-    chi_eff : Quantity, dimensionless
-        Effective UV field including CO self-shielding: chi * theta_co.
-
-    Notes
-    -----
-    - Math-heavy sections use plain numpy arrays for numba compatibility.
-    - Geometry / ray marching is delegated to SphericalHealpixRayTracer or
-    -      CartesianHealpixRayTracer depending on mesh.coord_system.
-    """
-
     nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
     chi_arr = _to_ndarray_cgs(chi, "dimensionless")  # chi is in Draine units
 
     if nCO is None:
-        raise ValueError("compute_co_shielding_healpix requires nCO (no abundance scaling assumptions)")
+        raise ValueError("compute_co_shielding_healpix requires nCO")
     nCO_cgs = _to_ndarray_cgs(nCO, "cm^-3")
 
     if nH2 is None:
-        raise ValueError("compute_co_shielding_healpix requires nH2 (no abundance scaling assumptions)")
+        raise ValueError("compute_co_shielding_healpix requires nH2")
     nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
 
     if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
@@ -934,99 +840,28 @@ def compute_co_shielding_healpix(
 
     candidate_mask_arr = _prepare_candidate_mask(nH_cgs, chi_arr, candidate_mask)
 
-    # Check for cached results
-    cache_key = None
-    if cache_dir is not None:
-        params = {
-            "mesh": _mesh_cache_info(mesh, nH_cgs.shape),
-            "nside": int(nside),
-            "nH_hash": _compute_field_hash(nH_cgs),
-            "chi_hash": _compute_field_hash(chi_arr),
-            "nCO_hash": _compute_field_hash(nCO_cgs),
-            "nH2_hash": _compute_field_hash(nH2_cgs),
-            "b_kms": None if b_kms is None else float(b_kms),
-            "mask_hash": _compute_mask_hash(candidate_mask_arr),
-            "log_threshold": LOG_CHI_OVER_NH_PDISS,
-        }
-        cache_key = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()
-        cached = load_healpix_cache(cache_dir, cache_key)
-        if cached is not None:
-            theta_co_cached, chi_eff_cached, metadata = cached
-            logger.info(
-                f"Loaded healpix results from cache "
-                f"(computed in {metadata.get('compute_time_s', '?')}s)"
-                if metadata else "Loaded healpix results from cache"
-            )
-            if return_quantity:
-                theta_co_q = Quantity(theta_co_cached, "dimensionless")
-                chi_eff_q = Quantity(chi_eff_cached, "dimensionless")
-                return theta_co_q, chi_eff_q
-            return theta_co_cached, chi_eff_cached
-
-    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+    candidate_idx, dirs, cols = compute_column_rays_healpix(
         mesh,
+        fields={"co": nCO_cgs, "h2": nH2_cgs},
         nside=int(nside),
         candidate_mask=candidate_mask_arr,
+        progress_chunks=progress_chunks,
         cache_dir=cache_dir,
-    )
-    n_candidates = int(candidate_idx.shape[0])
-
-    logger.info(
-        f"compute_co_shielding_healpix: {n_candidates} candidate cells "
-        f"(log10(chi/nH) > {LOG_CHI_OVER_NH_PDISS:.2f})."
+        self_weight=float(self_weight),
     )
 
-    npix = dirs.shape[0]
-
-    # Output arrays
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
-
-    if n_candidates == 0:
-        logger.info("No candidate cells to process.")
-        chi_eff = chi_arr * theta_co
-        if return_quantity:
-            theta_co_q = Quantity(theta_co, "dimensionless")
-            chi_eff_q = Quantity(chi_eff, "dimensionless")
-            return theta_co_q, chi_eff_q
-        return theta_co, chi_eff
-
-    if progress_chunks is None or progress_chunks <= 1:
-        chunk_size = n_candidates
-    else:
-        n_chunks = int(progress_chunks)
-        if n_chunks <= 0:
-            n_chunks = 1
-        chunk_size = max(1, n_candidates // n_chunks)
-
-    for start in range(0, n_candidates, chunk_size):
-        end = min(start + chunk_size, n_candidates)
-        idx_chunk = candidate_idx[start:end]
-        centers_chunk = cell_centers[start:end]
-
-        N_CO_rays = integrate_rays(tracer, centers_chunk, dirs, nCO_cgs, self_weight=float(self_weight))
-        N_H2_rays = integrate_rays(tracer, centers_chunk, dirs, nH2_cgs, self_weight=float(self_weight))
-
+    if candidate_idx.shape[0] > 0:
+        N_CO_rays = cols["co"]
+        N_H2_rays = cols["h2"]
         theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
         theta_mean = theta_rays.mean(axis=1)
-        _scatter_candidates_3d(theta_co, idx_chunk, theta_mean)
+        _scatter_candidates_3d(theta_co, candidate_idx, theta_mean)
 
     chi_eff = chi_arr * theta_co
-    _t_elapsed = _time.time() - _t_start
-    
-    # Save to cache if cache_dir is specified
-    if cache_dir is not None and cache_key is not None:
-        metadata = {
-            "compute_time_s": round(_t_elapsed, 2),
-            "n_candidates": n_candidates,
-            "nside": nside,
-            "npix": npix,
-        }
-        save_healpix_cache(cache_dir, cache_key, theta_co, chi_eff, metadata)
-    
+
     if return_quantity:
-        theta_co_q = Quantity(theta_co, "dimensionless")
-        chi_eff_q = Quantity(chi_eff, "dimensionless")  # Draine units
-        return theta_co_q, chi_eff_q
+        return Quantity(theta_co, "dimensionless"), Quantity(chi_eff, "dimensionless")
     return theta_co, chi_eff
 
 
@@ -1034,117 +869,78 @@ def compute_pdr_shielding_healpix(
     mesh,
     nH,
     chi,
-    *,
     visser: Optional[VisserShielding] = None,
+    *,
     nCO=None,
     nC=None,
     nH2=None,
     nside: int = 4,
-    b_kms: Optional[float] = None,
+    b_kms: float = 0.3,
     candidate_mask: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     self_weight: float = 1.0,
     return_quantity: bool = True,
-) -> tuple[Quantity, Quantity, Quantity, Quantity, Quantity] | tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
-]:
+) -> (
+    Tuple[Quantity, Quantity, Quantity, Quantity, Quantity]
+    | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+):
     nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
     chi_arr = _to_ndarray_cgs(chi, "dimensionless")
 
     if nH2 is None:
-        raise ValueError("compute_pdr_shielding_healpix requires nH2 (no abundance scaling assumptions)")
+        raise ValueError("compute_pdr_shielding_healpix requires nH2")
     nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
 
     if nC is None:
-        raise ValueError("compute_pdr_shielding_healpix requires nC (no abundance scaling assumptions)")
+        raise ValueError("compute_pdr_shielding_healpix requires nC")
     nC_cgs = _to_ndarray_cgs(nC, "cm^-3")
 
-    if visser is not None and nCO is None:
-        raise ValueError("compute_pdr_shielding_healpix requires nCO when visser is provided")
-    nCO_cgs = None if nCO is None else _to_ndarray_cgs(nCO, "cm^-3")
-    if nH2_cgs.shape != nH_cgs.shape or nC_cgs.shape != nH_cgs.shape:
-        raise ValueError("nC and nH2 must match nH shape.")
-    if nCO_cgs is not None and nCO_cgs.shape != nH_cgs.shape:
-        raise ValueError("nCO must match nH shape.")
+    fields = {"h2": nH2_cgs, "c": nC_cgs}
+    if visser is not None:
+        if nCO is None:
+            raise ValueError("nCO is required if visser is provided")
+        fields["co"] = _to_ndarray_cgs(nCO, "cm^-3")
 
     candidate_mask_arr = _prepare_candidate_mask(nH_cgs, chi_arr, candidate_mask)
 
-    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+    candidate_idx, dirs, cols = compute_column_rays_healpix(
         mesh,
+        fields=fields,
         nside=int(nside),
         candidate_mask=candidate_mask_arr,
+        progress_chunks=progress_chunks,
         cache_dir=cache_dir,
+        self_weight=float(self_weight),
     )
 
     theta_h2 = np.ones_like(nH_cgs, dtype=np.float64)
-    theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     theta_c = np.ones_like(nH_cgs, dtype=np.float64)
+    theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     theta_pdr = np.ones_like(nH_cgs, dtype=np.float64)
 
-    n_candidates = int(candidate_idx.shape[0])
-    if n_candidates > 0:
-        from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
+    if candidate_idx.shape[0] > 0:
+        N_H2_rays = cols["h2"]
+        N_C_rays = cols["c"]
 
-        if b_kms is None:
-            raise ValueError("b_kms is required for H2 self-shielding")
+        f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
+        theta_h2_mean = f_sh_rays.mean(axis=1)
+        _scatter_candidates_3d(theta_h2, candidate_idx, theta_h2_mean)
 
-        if progress_chunks is None or progress_chunks <= 1:
-            chunk_size = n_candidates
-        else:
-            n_chunks = int(progress_chunks)
-            if n_chunks <= 0:
-                n_chunks = 1
-            chunk_size = max(1, n_candidates // n_chunks)
+        theta_pdr_mean = theta_h2_mean  # baseline
+        _scatter_candidates_3d(theta_pdr, candidate_idx, theta_h2_mean)
 
         if visser is not None:
-            fields_stack = np.ascontiguousarray(np.stack([nH2_cgs, nC_cgs, nCO_cgs], axis=0), dtype=np.float64)
-            has_co = True
-        else:
-            fields_stack = np.ascontiguousarray(np.stack([nH2_cgs, nC_cgs], axis=0), dtype=np.float64)
-            has_co = False
+            N_CO_rays = cols["co"]
+            theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
+            theta_co_mean = theta_co_rays.mean(axis=1)
+            _scatter_candidates_3d(theta_co, candidate_idx, theta_co_mean)
 
-        for start in range(0, n_candidates, chunk_size):
-            end = min(start + chunk_size, n_candidates)
-            idx_chunk = candidate_idx[start:end]
-            centers_chunk = cell_centers[start:end]
+            theta_pdr_rays = f_sh_rays * theta_co_rays
+            theta_pdr_mean = theta_pdr_rays.mean(axis=1)
+            _scatter_candidates_3d(theta_pdr, candidate_idx, theta_pdr_mean)
 
-            N_rays = integrate_rays_multi(
-                tracer,
-                centers_chunk,
-                dirs,
-                fields_stack,
-                self_weight=float(self_weight),
-            )
-            N_H2_rays = N_rays[:, :, 0]
-            N_C_rays = N_rays[:, :, 1]
-            if has_co:
-                N_CO_rays = N_rays[:, :, 2]
-
-            f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
-            theta_h2_mean = f_sh_rays.mean(axis=1)
-            _scatter_candidates_3d(theta_h2, idx_chunk, theta_h2_mean)
-            _scatter_candidates_3d(theta_pdr, idx_chunk, theta_h2_mean)
-
-            AH2 = 1.17e-8
-            tau_H2 = 1.2e-14 * 2.0 * N_H2_rays
-            y = AH2 * tau_H2
-            ry = np.exp(-y) / (1.0 + y)
-            rc = np.exp(-1.6e-17 * N_C_rays)
-            theta_c_rays = rc * ry
-            theta_c_mean = theta_c_rays.mean(axis=1)
-            _scatter_candidates_3d(theta_c, idx_chunk, theta_c_mean)
-
-            if visser is not None:
-                theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
-                theta_co_mean = theta_co_rays.mean(axis=1)
-                _scatter_candidates_3d(theta_co, idx_chunk, theta_co_mean)
-
-                theta_pdr_rays = f_sh_rays * theta_co_rays
-                theta_pdr_mean = theta_pdr_rays.mean(axis=1)
-                _scatter_candidates_3d(theta_pdr, idx_chunk, theta_pdr_mean)
-
-    chi_eff_h2 = chi_arr * theta_h2
+    chi_eff = chi_arr * theta_pdr
     chi_eff_co = chi_arr * theta_co
     chi_eff_pdr = chi_arr * theta_pdr
 

@@ -18,6 +18,10 @@ from diskbridge.chemistry.shielding.columns_1d import (
     is_effectively_1d,
 )
 from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
+from diskbridge.chemistry.shielding.healpix_columns import (
+    _prepare_healpix_geometry,
+    compute_column_rays_healpix,
+)
 
 
 if TYPE_CHECKING:
@@ -76,36 +80,20 @@ def compute_h2_partition(
         nH_atom_out = Quantity(((1.0 - fH2.reshape(shape)) * nH_cgs), "cm^-3")
         return nH2_out, nH_atom_out
 
-    if mesh.coord_system == "spherical":
-        from diskbridge.chemistry.shielding.healpix_columns import SphericalHealpixRayTracer
+    # HEALPix path
+    candidate_mask_all = np.ones(shape, dtype=bool)
+    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+        mesh,
+        nside=int(nside),
+        candidate_mask=candidate_mask_all,
+        cache_dir=None,
+    )
 
-        tracer = SphericalHealpixRayTracer(mesh, nside=nside)
-    elif mesh.coord_system == "cartesian":
-        from diskbridge.chemistry.shielding.healpix_columns import CartesianHealpixRayTracer
-
-        tracer = CartesianHealpixRayTracer(mesh, nside=nside)
-    else:
-        raise ValueError(
-            f"Unsupported mesh coord_system {mesh.coord_system!r} for H2 partition "
-            "(expected 'spherical' or 'cartesian')."
-        )
-
-    from diskbridge.chemistry.shielding.healpix_utils import integrate_rays
-
-    dirs = tracer.dirs.astype(np.float64)
-    npix = dirs.shape[0]
-
-    idx_all = np.argwhere(np.ones(shape, dtype=bool))
-    n_cells = idx_all.shape[0]
-
-    cell_centers = np.zeros((n_cells, 3), dtype=np.float64)
-    for k, idx in enumerate(idx_all):
-        cell_centers[k] = tracer.cell_center_xyz(*idx)
-
+    n_cells = candidate_idx.shape[0]
     reduce_fn = np.mean
 
     logger.info(
-        f"Computing H2 partition with HEALPix columns: nside={nside}, npix={npix}, n_iter={n_iter}"
+        f"Computing H2 partition with HEALPix columns: nside={nside}, npix={dirs.shape[0]}, n_iter={n_iter}"
     )
 
     for it in range(n_iter):
@@ -113,19 +101,27 @@ def compute_h2_partition(
         f_sh_eff = np.zeros(n_cells, dtype=np.float64)
 
         # Integrate rays in slabs along the first axis to limit peak allocations.
-        axis0 = idx_all[:, 0]
+        axis0 = candidate_idx[:, 0]
         n0 = int(shape[0])
         for i0 in range(n0):
             mask = axis0 == i0
             if not np.any(mask):
                 continue
-            centers_chunk = cell_centers[mask]
-            N_H2_rays = integrate_rays(
-                tracer,
-                centers_chunk,
-                dirs,
-                nH2_cgs,
+            
+            _, _, cols = compute_column_rays_healpix(
+                mesh,
+                fields={"h2": nH2_cgs},
+                nside=int(nside),
+                candidate_mask=None,
+                progress_chunks=None,
+                cache_dir=None,
+                self_weight=1.0,
+                tracer=tracer,
+                dirs=dirs,
+                candidate_idx=candidate_idx[mask],
+                cell_centers=cell_centers[mask],
             )
+            N_H2_rays = cols["h2"]
             f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=b5)
             f_sh_eff[mask] = reduce_fn(f_sh_rays, axis=1)
 
@@ -133,7 +129,6 @@ def compute_h2_partition(
         denom = 2.0 * R_form * nH_flat + k_diss_eff
         fH2_new = np.where(denom > 0.0, (2.0 * R_form * nH_flat) / denom, 0.0)
         fH2_new = np.clip(fH2_new, 0.0, 1.0)
-
         fH2 = fH2_new
 
     nH2_out = Quantity((0.5 * fH2.reshape(shape) * nH_cgs), "cm^-3")

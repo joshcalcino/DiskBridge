@@ -19,13 +19,12 @@ from diskbridge.chemistry.shielding.columns_1d import (
     is_effectively_1d,
 )
 from diskbridge.chemistry.shielding.healpix_columns import (
-    CartesianHealpixRayTracer,
-    SphericalHealpixRayTracer,
+    _prepare_healpix_geometry,
+    compute_column_rays_healpix,
     compute_gradv_nh_weighted,
     compute_L_geo_from_pathlengths,
 )
 from diskbridge.chemistry.shielding.healpix_utils import (
-    integrate_rays,
     integrate_rays_with_pathlength,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
@@ -105,7 +104,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     Zg = float(cfg.get("Zg", 1.0))
     Zd_mode = str(cfg.get("Zd_mode", "scalar"))
-    Zd_scalar = float(cfg.get("Zd", 1.0))
     sigma_d_per_H_ref = float(cfg.get("sigma_d_per_H_ref", SIGMA_D_PER_H))
 
     fH2gr = float(cfg.get("fH2gr", 1.0))
@@ -173,17 +171,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
 
-    if Zd_mode == "sigma_d_per_H":
-        sigma_d = rad.ensure_sigma_d_per_H()
-        sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
-        Zd_arr = np.divide(
-            sigma_d_cm2,
-            sigma_d_per_H_ref,
-            out=np.ones(ncells, dtype=np.float64),
-            where=(sigma_d_per_H_ref > 0.0),
-        )
-    else:
-        Zd_arr = _broadcast_scalar_or_array(Zd_scalar, ncells)
+
+    sigma_d = rad.ensure_sigma_d_per_H()
+    sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
+    Zd_arr = np.divide(
+        sigma_d_cm2,
+        sigma_d_per_H_ref,
+        out=np.ones(ncells, dtype=np.float64),
+        where=(sigma_d_per_H_ref > 0.0),
+    )
+
 
     Leff_CO_max_arr = _broadcast_scalar_or_array(Leff_CO_max_scalar, ncells)
     gradv_arr = _broadcast_scalar_or_array(gradv_scalar, ncells)
@@ -203,23 +200,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ratio = np.where(nH_cm3 > 0.0, chi_dust_arr / nH_cm3, 0.0)
         log_ratio = np.log10(np.maximum(ratio, EPS_CHI))
         candidate_mask_arr = log_ratio > LOG_CHI_OVER_NH_PDISS
-        candidate_idx = np.argwhere(candidate_mask_arr)
+        tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+            rad.model.mesh,
+            nside=int(nside),
+            candidate_mask=candidate_mask_arr,
+            cache_dir=None,
+        )
         if candidate_idx.size > 0:
             candidate_flat_idx = np.ravel_multi_index(candidate_idx.T, dims=shape)
-            if rad.model.mesh.coord_system == "spherical":
-                tracer = SphericalHealpixRayTracer(rad.model.mesh, nside=int(nside))
-            elif rad.model.mesh.coord_system == "cartesian":
-                tracer = CartesianHealpixRayTracer(rad.model.mesh, nside=int(nside))
-            else:
-                raise ValueError(
-                    f"Unsupported mesh coord_system {rad.model.mesh.coord_system!r} for HEALPix rays "
-                    "(expected 'spherical' or 'cartesian')."
-                )
-            dirs = np.asarray(tracer.dirs, dtype=np.float64)
-            n_candidates = int(candidate_idx.shape[0])
-            cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
-            for k, idx in enumerate(candidate_idx):
-                cell_centers[k] = tracer.cell_center_xyz(*idx)
 
     if gradv_mode == "nh_weighted_shear+turb":
         if candidate_idx is None or candidate_idx.size == 0:
@@ -285,7 +273,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
                 L_cell_cand = L_cell[ix, iy, iz]
 
-            NH_rays = integrate_rays(tracer, cell_centers, dirs, nH_cm3)
+            _, _, cols = compute_column_rays_healpix(
+                rad.model.mesh,
+                fields={"nh": nH_cm3},
+                nside=int(nside),
+                candidate_mask=None,
+                tracer=tracer,
+                dirs=dirs,
+                candidate_idx=candidate_idx,
+                cell_centers=cell_centers,
+                self_weight=1.0,
+            )
+            NH_rays = cols["nh"]
             gradv_cand = compute_gradv_nh_weighted(
                 NH_rays,
                 dirs,
