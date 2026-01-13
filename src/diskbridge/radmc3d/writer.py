@@ -379,18 +379,27 @@ class RadWriter:
 
                 if self.model.mesh is None:
                     raise ValueError("Model has no mesh defined")
-                if self.model.mesh.coord_system != 'spherical':
+
+                if self.model.mesh.coord_system == 'spherical':
+                    rho_out = transpose_to_axis_order(
+                        np.asarray(rho_cgs),
+                        from_order=rho_field.axis_order,
+                        to_order=('phi', 'theta', 'r'),
+                    )
+                    rho_flat = np.ravel(rho_out)
+                elif self.model.mesh.coord_system == 'cartesian':
+                    rho_out = transpose_to_axis_order(
+                        np.asarray(rho_cgs),
+                        from_order=rho_field.axis_order,
+                        to_order=('x', 'y', 'z'),
+                    )
+                    rho_flat = np.ravel(rho_out, order='F')
+                else:
                     raise ValueError(
-                        f"dust density writer supports spherical only, got {self.model.mesh.coord_system}"
+                        f"dust density writer supports spherical or cartesian only, got {self.model.mesh.coord_system}"
                     )
 
-                rho_out = transpose_to_axis_order(
-                    np.asarray(rho_cgs),
-                    from_order=rho_field.axis_order,
-                    to_order=('phi', 'theta', 'r'),
-                )
-
-                rho_out.flatten().astype(np.float64).tofile(f)
+                rho_flat.astype(np.float64).tofile(f)
     
     def _write_dust_density_ascii(
         self,
@@ -418,18 +427,26 @@ class RadWriter:
 
                 if self.model.mesh is None:
                     raise ValueError("Model has no mesh defined")
-                if self.model.mesh.coord_system != 'spherical':
+
+                if self.model.mesh.coord_system == 'spherical':
+                    rho_out = transpose_to_axis_order(
+                        np.asarray(rho_cgs),
+                        from_order=rho_field.axis_order,
+                        to_order=('phi', 'theta', 'r'),
+                    )
+                    rho_flat = np.ravel(rho_out)
+                elif self.model.mesh.coord_system == 'cartesian':
+                    rho_out = transpose_to_axis_order(
+                        np.asarray(rho_cgs),
+                        from_order=rho_field.axis_order,
+                        to_order=('x', 'y', 'z'),
+                    )
+                    rho_flat = np.ravel(rho_out, order='F')
+                else:
                     raise ValueError(
-                        f"dust density writer supports spherical only, got {self.model.mesh.coord_system}"
+                        f"dust density writer supports spherical or cartesian only, got {self.model.mesh.coord_system}"
                     )
 
-                rho_out = transpose_to_axis_order(
-                    np.asarray(rho_cgs),
-                    from_order=rho_field.axis_order,
-                    to_order=('phi', 'theta', 'r'),
-                )
-
-                rho_flat = rho_out.flatten()
                 for val in rho_flat:
                     f.write(f'{val:13.6e}\n')
     
@@ -909,6 +926,76 @@ class RadWriter:
             for T in temp_flat:
                 f.write(f'{T:.6e}\n')
                 
+        logger.info(f"Wrote {fpath}")
+
+    def write_dust_temperature(
+        self,
+        temperature: Quantity,
+        output_dir: str | Path = '.',
+        nspec: int = 1,
+    ) -> None:
+        """Write dust temperature to dust_temperature.dat.
+
+        Parameters
+        ----------
+        temperature : Quantity
+            Dust temperature field in K, shape (nx, ny, nz)
+        output_dir : str or Path, optional
+            Directory to write file (default: '.')
+        nspec : int, optional
+            Number of dust species in the file header (default: 1)
+
+        Notes
+        -----
+        Writes ASCII format dust_temperature.dat. The file format matches what
+        RadData.readDustTemp() expects: format=1, ncells, nspec, then values.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fpath = output_dir / 'dust_temperature.dat'
+
+        temp = temperature.to('K').magnitude
+
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
+
+        if mesh.coord_system == 'spherical':
+            temp = transpose_to_axis_order(
+                np.asarray(temp),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+            temp_flat = np.asarray(temp).flatten(order='C')
+        elif mesh.coord_system == 'cartesian':
+            temp = transpose_to_axis_order(
+                np.asarray(temp),
+                from_order=mesh.axis_names(),
+                to_order=('x', 'y', 'z'),
+            )
+            temp_flat = np.asarray(temp).flatten(order='F')
+        else:
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
+
+        nspec_i = int(nspec)
+        if nspec_i <= 0:
+            raise ValueError(f'nspec must be > 0, got {nspec_i}')
+
+        ncells = int(temp_flat.size)
+
+        logger.info(
+            f"Writing dust temperature to {fpath}: {ncells} cells, nspec={nspec_i}, "
+            f"T_range=[{float(np.min(temp_flat)):.1f}, {float(np.max(temp_flat)):.1f}] K"
+        )
+
+        with open(fpath, 'w') as f:
+            f.write('1\n')
+            f.write(f'{ncells}\n')
+            f.write(f'{nspec_i}\n')
+            for T in temp_flat:
+                f.write(f'{float(T):.6e}\n')
+
+        self.written_files[fpath.name] = fpath
         logger.info(f"Wrote {fpath}")
 
     def write_number_density(

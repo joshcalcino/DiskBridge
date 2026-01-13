@@ -26,7 +26,7 @@ class SegmentDefinition:
     work_dir: Path
 
 
-class SegmentedRadmcRunner:
+class SegmentedRadRunner:
     def __init__(self, base_model: Model, base_model_dir: Path):
         self.base_model = base_model
         self.base_model_dir = Path(base_model_dir)
@@ -169,6 +169,7 @@ class SegmentedRadmcRunner:
         outer_rad: Optional[RadModel] = None
         merged_T: Optional[Quantity] = None
         merged_chi: Optional[Quantity] = None
+        mcmono_wav_um_use: Optional[np.ndarray] = None
 
         base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
@@ -223,14 +224,14 @@ class SegmentedRadmcRunner:
             self._run_segment_rt(rad, nphot_therm_intermediate, nphot_mono_intermediate, mcmono_wav_um_use, force)
 
             if merged_T is None or merged_chi is None:
-                merged_T = rad.temperature
+                merged_T = rad.dust_temperature
                 merged_chi = rad.chi
             else:
                 if seg_indexer is None:
                     raise ValueError("Internal error: missing indexer for inner segment")
                 merged_T = self._merge_field(
                     merged=merged_T,
-                    child=rad.temperature,
+                    child=rad.dust_temperature,
                     indexer=seg_indexer,
                     axis_order=axis_order,
                 )
@@ -310,7 +311,7 @@ class SegmentedRadmcRunner:
 
                 merged_T = self._merge_field(
                     merged=merged_T,
-                    child=final_rad.temperature,
+                    child=final_rad.dust_temperature,
                     indexer=final_indexer,
                     axis_order=axis_order,
                 )
@@ -339,9 +340,11 @@ class SegmentedRadmcRunner:
         if merged_T is None or merged_chi is None:
             raise ValueError("Segmented RT produced no results")
 
+        # Finalize: attach merged fields to the *base* model in canonical names.
+        # Downstream chemistry and imaging should not need any manual plumbing.
         self.base_model.gas_register(
-            'temperature',
-            Field(quantity='temperature', data=merged_T, axis_order=axis_order),
+            'dust_temperature',
+            Field(quantity='dust_temperature', data=merged_T, axis_order=axis_order),
         )
         self.base_model.gas_register(
             'chi',
@@ -349,6 +352,19 @@ class SegmentedRadmcRunner:
         )
 
         self.base_model.validate_canonical_axis_orders(include_dust=False)
+
+        # Write merged dust temperature into the base model_dir outputs so RadImage
+        # (and any external RADMC-3D calls) can find dust_temperature.* without
+        # workflow-level custom file writing.
+        base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
+        base_rad.dust_temperature = merged_T
+        base_rad.chi = merged_chi
+        base_rad.outputs_dir.mkdir(parents=True, exist_ok=True)
+        base_rad.writer.write_dust_temperature(
+            merged_T,
+            output_dir=base_rad.outputs_dir,
+            nspec=1,
+        )
 
         logger.info(
             f"Segmented RT complete. splits={len(split_radii_au)} max_splits={max_splits}"

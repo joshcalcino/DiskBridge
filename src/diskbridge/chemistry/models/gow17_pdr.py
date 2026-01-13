@@ -582,7 +582,7 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 nside=nside,
                 b_kms=b_kms,
-                self_weight=shielding_self_weight,
+                self_weight=1.0,
                 return_quantity=False,
             )
 
@@ -713,6 +713,53 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
             status_acc = np.maximum(status_acc, status_step)
             t += dt_step
             istep += 1
+
+        xCO = y_inout[:, I_CO]
+        xCO_ice = y_inout[:, I_CO_ICE]
+        xH2 = y_inout[:, I_H2]
+
+        xC_neutral = xCtot - (
+            y_inout[:, I_HCOP]
+            + y_inout[:, I_CHX]
+            + xCO
+            + y_inout[:, I_CP]
+            + xCO_ice
+        )
+        xC_neutral = np.maximum(xC_neutral, 0.0)
+
+        nCO_cm3 = np.ascontiguousarray((xCO * nH_flat).reshape(shape), dtype=np.float64)
+        nH2_cm3 = np.ascontiguousarray((xH2 * nH_flat).reshape(shape), dtype=np.float64)
+        nC_cm3 = np.ascontiguousarray((xC_neutral * nH_flat).reshape(shape), dtype=np.float64)
+
+        if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_1d(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_pe_arr,
+                visser=visser,
+                nCO=nCO_cm3,
+                nC=nC_cm3,
+                nH2=nH2_cm3,
+                b_kms=b_kms,
+                outer="max",
+                return_quantity=False,
+            )
+        else:
+            from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+
+            theta_h2_arr, theta_co_arr, theta_c_arr, theta_pdr_arr, chi_eff_pdr_arr = compute_pdr_shielding_healpix(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_pe_arr,
+                visser=visser,
+                nCO=nCO_cm3,
+                nC=nC_cm3,
+                nH2=nH2_cm3,
+                nside=nside,
+                b_kms=b_kms,
+                self_weight=1.0,
+                return_quantity=False,
+            )
 
         y_out = y_inout.reshape(shape + (N_Y,))
         status = status_acc
