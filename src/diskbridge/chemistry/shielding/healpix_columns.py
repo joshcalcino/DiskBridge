@@ -106,30 +106,10 @@ def _compute_field_hash(arr: np.ndarray, precision: int = 6) -> str:
     return hashlib.md5(rounded.tobytes()).hexdigest()[:16]
 
 
-def save_healpix_cache(
-    cache_dir: Path | str,
-    cache_key: str,
-    theta_co: np.ndarray,
-    chi_eff: np.ndarray,
-    metadata: dict | None = None,
-) -> Path:
-    cache_file = _save_npz_cache(
-        cache_dir,
-        prefix="healpix_cache",
-        cache_key=cache_key,
-        arrays={
-            "theta_co": theta_co,
-            "chi_eff": chi_eff,
-        },
-        metadata=metadata,
-    )
-    return cache_file
-
-
 def _load_healpix_geometry_cache(
     cache_dir: Path | str,
     cache_key: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict | None] | None:
+):
     loaded = _load_npz_cache(
         cache_dir,
         prefix="healpix_geom_cache",
@@ -161,22 +141,6 @@ def _save_healpix_geometry_cache(
         },
         metadata=metadata,
     )
-
-
-def load_healpix_cache(
-    cache_dir: Path | str,
-    cache_key: str,
-) -> tuple[np.ndarray, np.ndarray, dict | None] | None:
-    loaded = _load_npz_cache(
-        cache_dir,
-        prefix="healpix_cache",
-        cache_key=cache_key,
-        required_keys=("theta_co", "chi_eff"),
-    )
-    if loaded is None:
-        return None
-    arrays, metadata = loaded
-    return arrays["theta_co"], arrays["chi_eff"], metadata
 
 
 def _cache_file_path(cache_dir: Path | str, prefix: str, cache_key: str) -> Path:
@@ -754,13 +718,41 @@ def compute_column_rays_healpix(
         fields_stack = np.ascontiguousarray(
             np.stack(missing_arrays, axis=0), dtype=np.float64
         )
-        N_all = integrate_rays_multi(
-            tracer,
-            cell_centers,
-            dirs,
-            fields_stack,
-            self_weight=float(self_weight),
-        )  # (n_cells, npix, n_fields)
+        n_candidates = int(cell_centers.shape[0])
+        npix = int(dirs.shape[0])
+        n_fields = int(fields_stack.shape[0])
+
+        if n_candidates == 0:
+            N_all = np.zeros((0, npix, n_fields), dtype=np.float64)
+        elif progress_chunks is None or progress_chunks <= 1:
+            N_all = integrate_rays_multi(
+                tracer,
+                cell_centers,
+                dirs,
+                fields_stack,
+                self_weight=float(self_weight),
+            )
+        else:
+            n_chunks = int(progress_chunks)
+            if n_chunks <= 0:
+                n_chunks = 1
+            chunk_size = (n_candidates + n_chunks - 1) // n_chunks
+            N_all = np.zeros((n_candidates, npix, n_fields), dtype=np.float64)
+            for i in range(n_chunks):
+                start = i * chunk_size
+                end = min((i + 1) * chunk_size, n_candidates)
+                if start >= end:
+                    break
+                logger.info(
+                    f"Ray marching chunk {i+1}/{n_chunks} ({end-start} cells, multi-field)..."
+                )
+                N_all[start:end] = integrate_rays_multi(
+                    tracer,
+                    cell_centers[start:end],
+                    dirs,
+                    fields_stack,
+                    self_weight=float(self_weight),
+                )
         for j, name in enumerate(missing_names):
             N_rays = N_all[:, :, j]
             out[str(name)] = N_rays

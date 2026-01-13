@@ -10,8 +10,7 @@ import numpy as np
 from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
-from diskbridge._constants import SIGMA_D_PER_H
-from diskbridge._constants import EPS_CHI, LOG_CHI_OVER_NH_PDISS
+from diskbridge._constants import SIGMA_D_PER_H, EPS_CHI, LOG_CHI_OVER_NH_PDISS
 from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
