@@ -396,7 +396,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 b_kms=b_kms,
                 outer="max",
-                return_quantity=False,
             )
         else:
             from diskbridge.chemistry.shielding.healpix_columns import (
@@ -414,7 +413,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nside=nside,
                 b_kms=b_kms,
                 candidate_mask=candidate_mask_arr,
-                return_quantity=False,
             )
 
         theta_h2_flat = theta_h2_arr.reshape(ncells)

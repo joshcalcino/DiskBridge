@@ -291,7 +291,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nH2=nH2_cm3,
                     b_kms=b_kms,
                     outer="max",
-                    return_quantity=False,
                 )
             else:
                 from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
@@ -307,7 +306,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nside=nside,
                     b_kms=b_kms,
                     self_weight=shielding_self_weight,
-                    return_quantity=False,
                 )
 
             alpha = float(shielding_mix)
@@ -481,7 +479,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nH2=nH2_cm3,
                     b_kms=b_kms,
                     outer="max",
-                    return_quantity=False,
                 )
             else:
                 from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
@@ -497,7 +494,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                     nside=nside,
                     b_kms=b_kms,
                     self_weight=shielding_self_weight,
-                    return_quantity=False,
                 )
 
             y_tmp = np.zeros_like(y_inout)
@@ -567,7 +563,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 b_kms=b_kms,
                 outer="max",
-                return_quantity=False,
             )
         else:
             from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
@@ -583,7 +578,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nside=nside,
                 b_kms=b_kms,
                 self_weight=1.0,
-                return_quantity=False,
             )
 
         y_out = y_inout.reshape(shape + (N_Y,))
@@ -659,7 +653,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                         nH2=nH2_cm3,
                         b_kms=b_kms,
                         outer="max",
-                        return_quantity=False,
                     )
                 else:
                     from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
@@ -675,7 +668,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                         nside=nside,
                         b_kms=b_kms,
                         self_weight=shielding_self_weight,
-                        return_quantity=False,
                     )
 
             dt_step = min(dt_s, t_end_s - t)
@@ -742,7 +734,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 b_kms=b_kms,
                 outer="max",
-                return_quantity=False,
             )
         else:
             from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
@@ -758,7 +749,6 @@ def run_gow17_pdr(rad: "RadModel", config: dict) -> ChemistryResult:
                 nside=nside,
                 b_kms=b_kms,
                 self_weight=1.0,
-                return_quantity=False,
             )
 
         y_out = y_inout.reshape(shape + (N_Y,))

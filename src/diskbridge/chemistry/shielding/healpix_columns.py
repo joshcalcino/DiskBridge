@@ -22,7 +22,6 @@ Assumptions
 Dependencies
 ------------
 - healpy for HEALPix directions (pip install healpy)
-- diskbridge._units for unit handling
 - diskbridge.chemistry.shielding.visser_shielding for theta_CO tables.
 """
 
@@ -36,12 +35,9 @@ from typing import Optional, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
-from diskbridge._units import Quantity, units
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
-    integrate_rays,
     integrate_rays_multi,
-    integrate_rays_with_pathlength,
 )
 
 from diskbridge._constants import LOG_CHI_OVER_NH_PDISS, EPS_CHI
@@ -199,25 +195,9 @@ def _load_npz_cache(
         return None
 
 
-def _to_ndarray_cgs(x, target_unit: str) -> np.ndarray:
-    """
-    Convert Quantity or array-like to plain ndarray in specified CGS unit.
-    
-    Parameters
-    ----------
-    x : Quantity or array-like
-        Input data.
-    target_unit : str
-        Target unit string (e.g., 'cm', 'cm^-3').
-        
-    Returns
-    -------
-    ndarray
-        Plain numpy array in the specified unit.
-    """
-    if isinstance(x, Quantity):
-        return x.to(target_unit).magnitude
-    return np.asarray(x, dtype=float)
+def _as_f64(name: str, x) -> np.ndarray:
+    a = np.asarray(x, dtype=np.float64)
+    return a
 
 
 def _prepare_candidate_mask(
@@ -272,6 +252,7 @@ def _compute_healpix_column_cache_key(
     }
     params_str = json.dumps(params, sort_keys=True)
     return hashlib.md5(params_str.encode()).hexdigest()
+
 
 def compute_L_geo_from_pathlengths(
     S_all: np.ndarray,
@@ -441,7 +422,7 @@ class SphericalHealpixRayTracer:
         self.nside = int(nside)
 
         # Axis edges in CGS / radians
-        r_edges_q = mesh.edges("r")  # Quantity
+        r_edges_q = mesh.edges("r")
         th_edges_q = mesh.edges("theta")
         ph_edges_q = mesh.edges("phi")
 
@@ -549,7 +530,7 @@ class CartesianHealpixRayTracer:
         self.nside = int(nside)
 
         # Axis edges in CGS
-        x_edges_q = mesh.edges("x")  # Quantity
+        x_edges_q = mesh.edges("x")
         y_edges_q = mesh.edges("y")
         z_edges_q = mesh.edges("z")
 
@@ -602,45 +583,6 @@ class CartesianHealpixRayTracer:
         return float(x), float(y), float(z)
 
 
-def _integrate_field_rays(
-    tracer,
-    cell_centers: np.ndarray,
-    dirs: np.ndarray,
-    n_field_cgs: np.ndarray,
-    *,
-    progress_chunks: Optional[int],
-    self_weight: float = 1.0,
-) -> np.ndarray:
-    n_candidates = cell_centers.shape[0]
-    if n_candidates == 0:
-        return np.zeros((0, dirs.shape[0]), dtype=np.float64)
-
-    if progress_chunks is None or progress_chunks <= 1:
-        return integrate_rays(
-            tracer, cell_centers, dirs, n_field_cgs, self_weight=float(self_weight)
-        )
-
-    chunk_size = (n_candidates + progress_chunks - 1) // progress_chunks
-    out = np.zeros((n_candidates, dirs.shape[0]), dtype=np.float64)
-
-    for i in range(progress_chunks):
-        start = i * chunk_size
-        end = min((i + 1) * chunk_size, n_candidates)
-        if start >= end:
-            break
-
-        logger.info(f"Ray marching chunk {i+1}/{progress_chunks} ({end-start} cells)...")
-        out[start:end] = integrate_rays(
-            tracer,
-            cell_centers[start:end],
-            dirs,
-            n_field_cgs,
-            self_weight=float(self_weight),
-        )
-
-    return out
-
-
 def compute_column_rays_healpix(
     mesh,
     fields: dict[str, np.ndarray],
@@ -675,9 +617,9 @@ def compute_column_rays_healpix(
             cache_dir=cache_dir,
         )
     else:
-        dirs = np.asarray(dirs, dtype=np.float64)
+        dirs = _as_f64("dirs", dirs)
         candidate_idx = np.asarray(candidate_idx)
-        cell_centers = np.asarray(cell_centers, dtype=np.float64)
+        cell_centers = _as_f64("cell_centers", cell_centers)
 
     # Disable caching if no candidate_mask (chunked path)
     if candidate_mask is None:
@@ -689,7 +631,7 @@ def compute_column_rays_healpix(
     missing_cache_keys = []
 
     for name, field in fields.items():
-        n_field_cgs = np.asarray(field, dtype=np.float64)
+        n_field_cgs = _as_f64(str(name), field)
         cache_key = None
         if cache_dir is not None and candidate_mask is not None:
             cache_key = _compute_healpix_column_cache_key(
@@ -714,10 +656,8 @@ def compute_column_rays_healpix(
         missing_arrays.append(n_field_cgs)
         missing_cache_keys.append(cache_key)
 
-    if len(missing_names) >= 2:
-        fields_stack = np.ascontiguousarray(
-            np.stack(missing_arrays, axis=0), dtype=np.float64
-        )
+    if len(missing_names) >= 1:
+        fields_stack = np.ascontiguousarray(np.stack(missing_arrays, axis=0), dtype=np.float64)
         n_candidates = int(cell_centers.shape[0])
         npix = int(dirs.shape[0])
         n_fields = int(fields_stack.shape[0])
@@ -753,6 +693,7 @@ def compute_column_rays_healpix(
                     fields_stack,
                     self_weight=float(self_weight),
                 )
+
         for j, name in enumerate(missing_names):
             N_rays = N_all[:, :, j]
             out[str(name)] = N_rays
@@ -770,32 +711,6 @@ def compute_column_rays_healpix(
                     arrays={"N_rays": N_rays},
                     metadata=metadata,
                 )
-    elif len(missing_names) == 1:
-        name = missing_names[0]
-        n_field_cgs = missing_arrays[0]
-        N_rays = _integrate_field_rays(
-            tracer,
-            cell_centers,
-            dirs,
-            n_field_cgs,
-            progress_chunks=progress_chunks,
-            self_weight=float(self_weight),
-        )
-        out[str(name)] = N_rays
-        if cache_dir is not None and missing_cache_keys[0] is not None:
-            metadata = {
-                "field": str(name),
-                "n_candidates": int(cell_centers.shape[0]),
-                "nside": int(nside),
-                "npix": int(dirs.shape[0]),
-            }
-            _save_npz_cache(
-                cache_dir,
-                prefix="healpix_col_cache",
-                cache_key=missing_cache_keys[0],
-                arrays={"N_rays": N_rays},
-                metadata=metadata,
-            )
 
     return candidate_idx, dirs, out
 
@@ -814,18 +729,17 @@ def compute_co_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     self_weight: float = 1.0,
-    return_quantity: bool = True,
-) -> Tuple[Quantity, Quantity] | Tuple[np.ndarray, np.ndarray]:
-    nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
-    chi_arr = _to_ndarray_cgs(chi, "dimensionless")  # chi is in Draine units
+) -> tuple[np.ndarray, np.ndarray]:
+    nH_cgs = _as_f64("nH", nH)
+    chi_arr = _as_f64("chi", chi)  # chi is in Draine units
 
     if nCO is None:
         raise ValueError("compute_co_shielding_healpix requires nCO")
-    nCO_cgs = _to_ndarray_cgs(nCO, "cm^-3")
+    nCO_cgs = _as_f64("nCO", nCO)
 
     if nH2 is None:
         raise ValueError("compute_co_shielding_healpix requires nH2")
-    nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
+    nH2_cgs = _as_f64("nH2", nH2)
 
     if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
         raise ValueError("nCO and nH2 must match nH shape.")
@@ -851,9 +765,6 @@ def compute_co_shielding_healpix(
         _scatter_candidates_3d(theta_co, candidate_idx, theta_mean)
 
     chi_eff = chi_arr * theta_co
-
-    if return_quantity:
-        return Quantity(theta_co, "dimensionless"), Quantity(chi_eff, "dimensionless")
     return theta_co, chi_eff
 
 
@@ -872,27 +783,23 @@ def compute_pdr_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     self_weight: float = 1.0,
-    return_quantity: bool = True,
-) -> (
-    Tuple[Quantity, Quantity, Quantity, Quantity, Quantity]
-    | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-):
-    nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
-    chi_arr = _to_ndarray_cgs(chi, "dimensionless")
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    nH_cgs = _as_f64("nH", nH)
+    chi_arr = _as_f64("chi", chi)
 
     if nH2 is None:
         raise ValueError("compute_pdr_shielding_healpix requires nH2")
-    nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
+    nH2_cgs = _as_f64("nH2", nH2)
 
     if nC is None:
         raise ValueError("compute_pdr_shielding_healpix requires nC")
-    nC_cgs = _to_ndarray_cgs(nC, "cm^-3")
+    nC_cgs = _as_f64("nC", nC)
 
     fields = {"h2": nH2_cgs, "c": nC_cgs}
     if visser is not None:
         if nCO is None:
             raise ValueError("nCO is required if visser is provided")
-        fields["co"] = _to_ndarray_cgs(nCO, "cm^-3")
+        fields["co"] = _as_f64("nCO", nCO)
 
     candidate_mask_arr = _prepare_candidate_mask(nH_cgs, chi_arr, candidate_mask)
 
@@ -932,16 +839,5 @@ def compute_pdr_shielding_healpix(
             theta_pdr_mean = theta_pdr_rays.mean(axis=1)
             _scatter_candidates_3d(theta_pdr, candidate_idx, theta_pdr_mean)
 
-    chi_eff = chi_arr * theta_pdr
-    chi_eff_co = chi_arr * theta_co
     chi_eff_pdr = chi_arr * theta_pdr
-
-    if return_quantity:
-        return (
-            Quantity(theta_h2, "dimensionless"),
-            Quantity(theta_co, "dimensionless"),
-            Quantity(theta_c, "dimensionless"),
-            Quantity(theta_pdr, "dimensionless"),
-            Quantity(chi_eff_pdr, "dimensionless"),
-        )
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr

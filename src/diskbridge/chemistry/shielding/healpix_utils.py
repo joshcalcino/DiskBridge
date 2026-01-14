@@ -6,6 +6,11 @@ import numpy as np
 from numba import njit, prange
 
 
+def _as_f64(name: str, x) -> np.ndarray:
+    a = np.asarray(x, dtype=np.float64)
+    return a
+
+
 @njit(cache=True)
 def integrate_ray_cartesian_dda_3d(
     x0: float,
@@ -405,50 +410,6 @@ def integrate_ray_spherical_dda_3d(
 
 
 @njit(cache=True, parallel=True)
-def _integrate_all_rays_spherical_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    n_field: np.ndarray,
-    r_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    phi_edges: np.ndarray,
-    max_steps: int = 200000,
-    self_weight: float = 1.0,
-) -> np.ndarray:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-
-    N_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            N_all[i, j] = integrate_ray_spherical_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                n_field,
-                r_edges,
-                theta_edges,
-                phi_edges,
-                max_steps,
-                self_weight,
-            )
-
-    return N_all
-
-
-@njit(cache=True, parallel=True)
 def _integrate_all_rays_spherical_dda_multi(
     cell_centers: np.ndarray,
     directions: np.ndarray,
@@ -783,144 +744,6 @@ def _integrate_all_rays_cartesian_dda_multi(
     return N_all
 
 
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_cartesian_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    n_field: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
-    z_edges: np.ndarray,
-    max_steps: int = 100000,
-    self_weight: float = 1.0,
-) -> np.ndarray:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-
-    N_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            N_all[i, j] = integrate_ray_cartesian_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                n_field,
-                x_edges,
-                y_edges,
-                z_edges,
-                max_steps,
-                self_weight,
-            )
-
-    return N_all
-
-
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_cartesian_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    n_field: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
-    z_edges: np.ndarray,
-    max_steps: int = 100000,
-    self_weight: float = 1.0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-
-    N_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    S_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            col, s = integrate_ray_cartesian_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                n_field,
-                x_edges,
-                y_edges,
-                z_edges,
-                max_steps,
-                self_weight,
-            )
-            N_all[i, j] = col
-            S_all[i, j] = s
-
-    return N_all, S_all
-
-
-@njit(cache=True, parallel=True)
-def _integrate_all_rays_spherical_dda(
-    cell_centers: np.ndarray,
-    directions: np.ndarray,
-    n_field: np.ndarray,
-    r_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    phi_edges: np.ndarray,
-    max_steps: int = 200000,
-    self_weight: float = 1.0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    n_cells = cell_centers.shape[0]
-    n_dirs = directions.shape[0]
-
-    N_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-    S_all = np.zeros((n_cells, n_dirs), dtype=np.float64)
-
-    for i in prange(n_cells):
-        x0 = cell_centers[i, 0]
-        y0 = cell_centers[i, 1]
-        z0 = cell_centers[i, 2]
-
-        for j in range(n_dirs):
-            vx = directions[j, 0]
-            vy = directions[j, 1]
-            vz = directions[j, 2]
-
-            col, s = integrate_ray_spherical_dda_3d(
-                x0,
-                y0,
-                z0,
-                vx,
-                vy,
-                vz,
-                n_field,
-                r_edges,
-                theta_edges,
-                phi_edges,
-                max_steps,
-                self_weight,
-            )
-            N_all[i, j] = col
-            S_all[i, j] = s
-
-    return N_all, S_all
-
-
 def _tracer_kind(tracer) -> str:
     if hasattr(tracer, "x_edges"):
         return "cartesian"
@@ -947,12 +770,12 @@ def _tracer_edges_float64(tracer, kind: str) -> Tuple[np.ndarray, np.ndarray, np
 
 
 def integrate_rays(
-	tracer,
-	cell_centers: np.ndarray,
-	directions: np.ndarray,
-	n_field: np.ndarray,
-	max_steps: int = 10000,
-	self_weight: float = 1.0,
+    tracer,
+    cell_centers: np.ndarray,
+    directions: np.ndarray,
+    n_field: np.ndarray,
+    max_steps: int = 10000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     """
     Unified ray integration dispatcher.
@@ -969,43 +792,44 @@ def integrate_rays(
         Starting positions in Cartesian (x, y, z) coordinates.
     directions : ndarray, shape (n_dirs, 3)
         Unit direction vectors.
-	    n_field : ndarray
-	        Density field to integrate.
-	    max_steps : int, optional
-	        Maximum integration steps per ray.
+    n_field : ndarray
+        Density field to integrate.
+    max_steps : int, optional
+        Maximum integration steps per ray.
     
     Returns
     -------
     N_all : ndarray
         Integrated column densities, shape (n_cells, n_dirs).
     """
-    kind = _tracer_kind(tracer)
-    cell_centers = np.asarray(cell_centers, dtype=np.float64)
-    directions = np.asarray(directions, dtype=np.float64)
-    n_field = np.asarray(n_field, dtype=np.float64)
-    edges = _tracer_edges_float64(tracer, kind)
+    cell_centers = _as_f64("cell_centers", cell_centers)
+    directions = _as_f64("directions", directions)
+    n_field = _as_f64("n_field", n_field)
 
-    if kind == "cartesian":
-        return _integrate_all_rays_cartesian_dda(
-            cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
-        )
-    return _integrate_all_rays_spherical_dda(
-        cell_centers, directions, n_field, *edges, max_steps, float(self_weight)
-    )
+    fields_stack = n_field[None, ...]  # (1, nx, ny, nz)
+    N_all = integrate_rays_multi(
+        tracer,
+        cell_centers,
+        directions,
+        fields_stack,
+        max_steps=max_steps,
+        self_weight=self_weight,
+    )  # (n_cells, n_dirs, 1)
+    return N_all[:, :, 0]
 
 
 def integrate_rays_multi(
-	tracer,
-	cell_centers: np.ndarray,
-	directions: np.ndarray,
-	fields_stack: np.ndarray,
-	max_steps: int = 10000,
-	self_weight: float = 1.0,
+    tracer,
+    cell_centers: np.ndarray,
+    directions: np.ndarray,
+    fields_stack: np.ndarray,
+    max_steps: int = 10000,
+    self_weight: float = 1.0,
 ) -> np.ndarray:
     kind = _tracer_kind(tracer)
-    cell_centers = np.asarray(cell_centers, dtype=np.float64)
-    directions = np.asarray(directions, dtype=np.float64)
-    fields_stack = np.asarray(fields_stack, dtype=np.float64)
+    cell_centers = _as_f64("cell_centers", cell_centers)
+    directions = _as_f64("directions", directions)
+    fields_stack = _as_f64("fields_stack", fields_stack)
     edges = _tracer_edges_float64(tracer, kind)
 
     if kind == "cartesian":
@@ -1016,3 +840,28 @@ def integrate_rays_multi(
         cell_centers, directions, fields_stack, *edges, max_steps, float(self_weight)
     )
 
+
+def integrate_rays_with_pathlength(
+    tracer,
+    cell_centers: np.ndarray,
+    directions: np.ndarray,
+    n_field: np.ndarray,
+    max_steps: int = 10000,
+    self_weight: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    cell_centers = _as_f64("cell_centers", cell_centers)
+    directions = _as_f64("directions", directions)
+    n_field = _as_f64("n_field", n_field)
+
+    ones_field = np.ones_like(n_field, dtype=np.float64)
+    fields_stack = np.ascontiguousarray(np.stack((n_field, ones_field), axis=0), dtype=np.float64)
+
+    N_all = integrate_rays_multi(
+        tracer,
+        cell_centers,
+        directions,
+        fields_stack,
+        max_steps=max_steps,
+        self_weight=self_weight,
+    )
+    return N_all[:, :, 0], N_all[:, :, 1]

@@ -177,24 +177,24 @@ def _resolve_tau_form(
 def _compute_co_shielding(
     *,
     rad: 'RadModel',
-    nH: Quantity,
-    chi: Quantity,
-    nCO: Quantity,
-    nH2: Quantity,
+    nH_cm3: np.ndarray,
+    chi: np.ndarray,
+    nCO_cm3: np.ndarray,
+    nH2_cm3: np.ndarray,
     nside: int,
     b_kms: float,
-) -> tuple[Quantity, Quantity]:
+) -> tuple[np.ndarray, np.ndarray]:
     from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
     from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
     visser = VisserShielding(b_kms=float(b_kms))
     theta_co, chi_eff = compute_co_shielding_healpix(
         mesh=rad.model.mesh,
-        nH=nH,
+        nH=nH_cm3,
         chi=chi,
         visser=visser,
-        nCO=nCO,
-        nH2=nH2,
+        nCO=nCO_cm3,
+        nH2=nH2_cm3,
         nside=int(nside),
         b_kms=float(b_kms),
         progress_chunks=None,
@@ -399,7 +399,6 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
                 b_kms=float(b_kms),
                 progress_chunks=None,
                 cache_dir=None,
-                return_quantity=False,
             )
 
         theta_flat = _flat_view(theta_arr)
@@ -578,13 +577,16 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
 
         theta_co, chi_eff = _compute_co_shielding(
             rad=rad,
-            nH=nH,
-            chi=chi,
-            nCO=nco_guess,
-            nH2=rad.nH2,
+            nH_cm3=_as_cgs_f64(nH, 'cm^-3'),
+            chi=_as_cgs_f64(chi, 'dimensionless'),
+            nCO_cm3=_as_cgs_f64(nco_guess, 'cm^-3'),
+            nH2_cm3=_as_cgs_f64(rad.nH2, 'cm^-3'),
             nside=nside,
             b_kms=b_kms,
         )
+
+        theta_co = Quantity(theta_co, 'dimensionless')
+        chi_eff = Quantity(chi_eff, 'dimensionless')
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 

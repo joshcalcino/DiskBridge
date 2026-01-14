@@ -12,10 +12,7 @@ from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
 
-from diskbridge.model.profiles import (
-    compute_volume_weighted_mean_radial_profile,
-    find_r_split,
-)
+from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile
 from .wavelengths import build_mcmono_wavelengths
 
 
@@ -131,13 +128,11 @@ class SegmentedRadRunner:
         force: bool = False,
     ) -> Dict[str, Any]:
         from diskbridge.radmc3d.model import RadModel
-        from diskbridge.radmc3d.utils import link_dustkappa_opacities
-
+        
         import diskbridge
         params = diskbridge.params
 
-        tol_T = params.segmented_tol_T
-        tol_chi = params.segmented_tol_chi
+        tol = params.segmented_tol
         window_fraction = params.segmented_window_fraction
         shell_ncells = params.segmented_shell_ncells
         r_clip_min_au = params.segmented_r_clip_min.to('au').magnitude
@@ -174,14 +169,6 @@ class SegmentedRadRunner:
         base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
 
-        def _ensure_opacities_available() -> None:
-            from diskbridge.radmc3d.writer import RadWriter
-
-            if list(base_opacity_dir.glob('dustkappa_*.inp')):
-                return
-            writer = RadWriter(self.base_model)
-            writer.compute_and_write_dust_opacities(self.base_model_dir)
-
         for level in range(max_splits + 1):
             if level == 0:
                 seg_bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
@@ -202,7 +189,6 @@ class SegmentedRadRunner:
             else:
                 seg_model, seg_indexer = self._build_segment_model_and_indexer(segment)
 
-            _ensure_opacities_available()
             rad = self._setup_segment(seg_model, segment.work_dir, base_opacity_dir)
 
             if mcmono_wav_um_use is None:
@@ -278,8 +264,7 @@ class SegmentedRadRunner:
                     r_edges_au=r_edges_au,
                     chi_profile=chi_profile,
                     T_profile=T_profile,
-                    tol_chi=tol_chi,
-                    tol_T=tol_T,
+                    tol=tol,
                     window_fraction=window_fraction,
                     r_clip_min_au=float(r_clip_min_au),
                 )
@@ -301,7 +286,6 @@ class SegmentedRadRunner:
                 )
                 final_model, final_indexer = self._build_segment_model_and_indexer(final_segment)
                 
-                _ensure_opacities_available()
                 final_rad = self._setup_segment(final_model, final_work_dir, base_opacity_dir)
                 
                 if outer_rad is not None:
@@ -376,3 +360,73 @@ class SegmentedRadRunner:
             'temperature': merged_T,
             'chi': merged_chi,
         }
+
+
+
+def find_r_split(
+    r_au: np.ndarray,
+    r_edges_au: np.ndarray,
+    chi_profile: np.ndarray,
+    T_profile: np.ndarray,
+    tol: float = 0.01,  
+    window_fraction: float = 0.1,
+    r_clip_min_au: float = 1.0,
+) -> Tuple[float, dict]:
+    nr = len(r_au)
+    r_max = r_au[-1]
+    r_min = r_au[0]
+
+    window_r_min = r_max - window_fraction * (r_max - r_min)
+    window_mask = r_au >= window_r_min
+
+    if not np.any(window_mask):
+        raise ValueError(
+            f"Asymptote window is empty (window_r_min={window_r_min:.2f} AU)"
+        )
+
+    chi_asymptote = float(np.mean(chi_profile[window_mask]))
+    T_asymptote = float(np.mean(T_profile[window_mask]))
+
+    if chi_asymptote <= 0:
+        raise ValueError(f"Invalid chi_asymptote={chi_asymptote}")
+    if T_asymptote <= 0:
+        raise ValueError(f"Invalid T_asymptote={T_asymptote}")
+
+    chi_dev = np.abs(chi_profile - chi_asymptote) / chi_asymptote
+    T_dev = np.abs(T_profile - T_asymptote) / T_asymptote
+
+    within_tol = (chi_dev <= tol) & (T_dev <= tol)
+
+    r_split_idx = None
+    for i in range(nr - 2, -1, -1):
+        if within_tol[i]:
+            r_split_idx = i
+        else:
+            break
+
+    if r_split_idx is None:
+        for i in range(nr - 1, -1, -1):
+            if not within_tol[i]:
+                r_split_idx = i + 1
+                break
+        if r_split_idx is None or r_split_idx >= nr:
+            raise ValueError("Could not find valid R_split: profiles never reach asymptote")
+
+    r_split_au = float(r_edges_au[r_split_idx])
+
+    if r_split_au < r_clip_min_au:
+        raise ValueError(
+            f"R_split={r_split_au:.2f} AU < r_clip_min={r_clip_min_au:.2f} AU. "
+            "The stellar radiation dominates too far out for segmented RT."
+        )
+
+    info = {
+        'chi_asymptote': float(chi_asymptote),
+        'T_asymptote': float(T_asymptote),
+        'r_split_cell_idx': int(r_split_idx),
+        'window_r_min': float(window_r_min),
+        'chi_dev_at_split': float(chi_dev[r_split_idx]) if r_split_idx < nr else np.nan,
+        'T_dev_at_split': float(T_dev[r_split_idx]) if r_split_idx < nr else np.nan,
+    }
+
+    return r_split_au, info
