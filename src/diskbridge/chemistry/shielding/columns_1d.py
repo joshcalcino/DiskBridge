@@ -4,16 +4,16 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from diskbridge._units import Quantity
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
 
-def _to_ndarray_cgs(x, unit: str) -> np.ndarray:
-    if isinstance(x, Quantity):
-        return np.asarray(x.to(unit).magnitude, dtype=np.float64)
-    if hasattr(x, "to"):
-        return np.asarray(x.to(unit).magnitude, dtype=np.float64)
-    return np.asarray(x, dtype=np.float64)
+def _as_f64(name: str, x) -> np.ndarray:
+    if hasattr(x, "magnitude") and hasattr(x, "units"):
+        raise TypeError(f"{name} must be a float64 numpy array (no unit-carrying objects).")
+    a = np.asarray(x, dtype=np.float64)
+    if a.dtype == object:
+        raise TypeError(f"{name} must be float64; got dtype=object")
+    return np.ascontiguousarray(a, dtype=np.float64)
 
 
 def effective_1d_axis(mesh, shape: tuple[int, ...]) -> Tuple[str, int]:
@@ -50,16 +50,13 @@ def column_to_outer_boundary_1d(
     axis_index: int,
     outer: str = "max",
 ) -> np.ndarray:
-    n_field = np.asarray(n_field, dtype=np.float64)
+    n_field = _as_f64("n_field", n_field)
     if np.shape(n_field) != tuple(mesh.shape):
         raise ValueError(
             f"n_field must match mesh.shape, got {np.shape(n_field)} vs {tuple(mesh.shape)}"
         )
 
-    edges_q = mesh.edges(axis_name)
-    if edges_q is None:
-        raise ValueError(f"mesh axis {axis_name!r} has no edges")
-    e_cm = np.asarray(edges_q.to("cm").magnitude, dtype=np.float64)
+    e_cm = mesh.edges_f64(axis_name, "cm")
     dx = np.diff(e_cm)
 
     if n_field.ndim == 1:
@@ -96,31 +93,25 @@ def column_to_outer_boundary_1d(
 
 def compute_pdr_shielding_1d(
     mesh,
-    nH,
-    chi,
+    nH: np.ndarray,
+    chi: np.ndarray,
     *,
     visser: Optional[VisserShielding] = None,
-    nCO=None,
-    nC=None,
-    nH2=None,
+    nCO: Optional[np.ndarray] = None,
+    nC: np.ndarray,
+    nH2: np.ndarray,
     b_kms: Optional[float] = None,
     outer: str = "max",
-    return_quantity: bool = True,
 ):
-    nH_cgs = _to_ndarray_cgs(nH, "cm^-3")
-    chi_arr = _to_ndarray_cgs(chi, "dimensionless")
+    nH_cgs = _as_f64("nH", nH)
+    chi_arr = _as_f64("chi", chi)
 
-    if nH2 is None:
-        raise ValueError("compute_pdr_shielding_1d requires nH2")
-    nH2_cgs = _to_ndarray_cgs(nH2, "cm^-3")
-
-    if nC is None:
-        raise ValueError("compute_pdr_shielding_1d requires nC")
-    nC_cgs = _to_ndarray_cgs(nC, "cm^-3")
+    nH2_cgs = _as_f64("nH2", nH2)
+    nC_cgs = _as_f64("nC", nC)
 
     if visser is not None and nCO is None:
         raise ValueError("compute_pdr_shielding_1d requires nCO when visser is provided")
-    nCO_cgs = None if nCO is None else _to_ndarray_cgs(nCO, "cm^-3")
+    nCO_cgs = None if nCO is None else _as_f64("nCO", nCO)
 
     if nH2_cgs.shape != nH_cgs.shape or nC_cgs.shape != nH_cgs.shape:
         raise ValueError("nC and nH2 must match nH shape")
@@ -160,14 +151,4 @@ def compute_pdr_shielding_1d(
 
     theta_pdr = theta_h2 * theta_co
     chi_eff_pdr = chi_arr * theta_pdr
-
-    if return_quantity:
-        return (
-            Quantity(theta_h2, "dimensionless"),
-            Quantity(theta_co, "dimensionless"),
-            Quantity(theta_c, "dimensionless"),
-            Quantity(theta_pdr, "dimensionless"),
-            Quantity(chi_eff_pdr, "dimensionless"),
-        )
-
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr

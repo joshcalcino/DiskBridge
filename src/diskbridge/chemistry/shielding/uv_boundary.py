@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from diskbridge.model.core import Model
 
-from diskbridge._units import Quantity
 from diskbridge.model.profiles import (
     compute_volume_weighted_mean_radial_profile,
     find_r_split,
@@ -17,9 +16,9 @@ def find_uv_boundary_radius(
     *,
     tol_chi: float = 0.01,
     window_fraction: float = 0.10,
-    r_min: Optional[Quantity] = None,
-    r_max: Optional[Quantity] = None,
-) -> Quantity:
+    r_min_au: Optional[float] = None,
+    r_max_au: Optional[float] = None,
+) -> float:
     """Find boundary radius where stellar UV increases chi above background.
     
     Returns the innermost radius where volume-weighted mean chi(r) first
@@ -34,15 +33,15 @@ def find_uv_boundary_radius(
         Fractional tolerance above background (default: 0.01 = 1%)
     window_fraction : float, optional
         Fraction of domain for background window (default: 0.10)
-    r_min : Quantity, optional
-        Minimum allowed boundary radius
-    r_max : Quantity, optional
-        Maximum allowed boundary radius
+    r_min_au : float, optional
+        Minimum allowed boundary radius (au)
+    r_max_au : float, optional
+        Maximum allowed boundary radius (au)
         
     Returns
     -------
-    r_boundary : Quantity
-        Boundary radius in AU
+    r_boundary : float
+        Boundary radius in au
         
     Raises
     ------
@@ -59,13 +58,13 @@ def find_uv_boundary_radius(
         raise KeyError("Field 'chi' not found in model.gas")
     
     r_au, chi_profile = compute_volume_weighted_mean_radial_profile(model, 'chi')
-    r_edges_au = model.mesh.edges('r').to('au').magnitude
+    r_edges_au = model.mesh.edges_f64('r', 'au')
     
     T_profile = chi_profile.copy()
     
     r_clip_min_au = 0.1
-    if r_min is not None:
-        r_clip_min_au = float(r_min.to('au').magnitude)
+    if r_min_au is not None:
+        r_clip_min_au = float(r_min_au)
     
     try:
         r_boundary_au, info = find_r_split(
@@ -84,12 +83,11 @@ def find_uv_boundary_radius(
             "Stellar UV may dominate entire domain."
         ) from e
     
-    r_boundary = Quantity(r_boundary_au, 'au')
-    
-    if r_max is not None and r_boundary > r_max:
+    r_boundary = float(r_boundary_au)
+
+    if r_max_au is not None and r_boundary > float(r_max_au):
         raise ValueError(
-            f"UV boundary {r_boundary.to('au'):.2f} exceeds "
-            f"max {r_max.to('au'):.2f}"
+            f"UV boundary {r_boundary:.2f} exceeds max {float(r_max_au):.2f}"
         )
-    
+
     return r_boundary

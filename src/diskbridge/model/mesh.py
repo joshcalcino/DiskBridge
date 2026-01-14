@@ -129,6 +129,18 @@ class Mesh:
     def centers(self, name: str) -> Optional[Quantity]:
         return self.axis(name).centers
 
+    def edges_f64(self, name: str, unit: str) -> np.ndarray:
+        e = self.edges(name)
+        if e is None:
+            raise ValueError(f"mesh axis {name!r} has no edges")
+        return np.ascontiguousarray(np.asarray(e.to(unit).magnitude, dtype=np.float64))
+
+    def centers_f64(self, name: str, unit: str) -> np.ndarray:
+        c = self.centers(name)
+        if c is None:
+            raise ValueError(f"mesh axis {name!r} has no centers")
+        return np.ascontiguousarray(np.asarray(c.to(unit).magnitude, dtype=np.float64))
+
     def ncell(self, name: str) -> Optional[int]:
         e = self.edges(name)
         return None if e is None else int(e.size - 1)

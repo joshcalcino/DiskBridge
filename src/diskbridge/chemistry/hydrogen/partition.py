@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
-from diskbridge._units import Quantity
 from diskbridge._constants import (
     H2P_K0_DISS,
     H2P_N_ITER,
@@ -28,12 +27,17 @@ if TYPE_CHECKING:
     from diskbridge.model.mesh import Mesh
 
 
+def _as_f64(name: str, x) -> np.ndarray:
+    a = np.asarray(x, dtype=np.float64)
+    return np.ascontiguousarray(a, dtype=np.float64)
+
+
 def compute_h2_partition(
     rad,
     mesh: "Mesh",
-    nH: Quantity,
-    chi_dust: Quantity,
-) -> Tuple[Quantity, Quantity]:
+    nH_cm3: np.ndarray,
+    chi_dust: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
 
     nside = H2P_NSIDE
     n_iter = H2P_N_ITER
@@ -43,8 +47,8 @@ def compute_h2_partition(
     # Draine & Bertoldi 1996 fit parameters
     b5 = 2.0
 
-    nH_cgs = nH.to("cm^-3").magnitude
-    chi_arr = chi_dust.to("dimensionless").magnitude
+    nH_cgs = _as_f64("nH_cm3", nH_cm3)
+    chi_arr = _as_f64("chi_dust", chi_dust)
 
     if nH_cgs.shape != chi_arr.shape:
         raise ValueError(f"nH and chi_dust must have same shape, got {nH_cgs.shape} vs {chi_arr.shape}")
@@ -76,8 +80,8 @@ def compute_h2_partition(
             fH2_new = np.clip(fH2_new, 0.0, 1.0)
             fH2 = fH2_new
 
-        nH2_out = Quantity((0.5 * fH2.reshape(shape) * nH_cgs), "cm^-3")
-        nH_atom_out = Quantity(((1.0 - fH2.reshape(shape)) * nH_cgs), "cm^-3")
+        nH2_out = np.ascontiguousarray((0.5 * fH2.reshape(shape) * nH_cgs), dtype=np.float64)
+        nH_atom_out = np.ascontiguousarray(((1.0 - fH2.reshape(shape)) * nH_cgs), dtype=np.float64)
         return nH2_out, nH_atom_out
 
     # HEALPix path
@@ -131,7 +135,7 @@ def compute_h2_partition(
         fH2_new = np.clip(fH2_new, 0.0, 1.0)
         fH2 = fH2_new
 
-    nH2_out = Quantity((0.5 * fH2.reshape(shape) * nH_cgs), "cm^-3")
-    nH_atom_out = Quantity(((1.0 - fH2.reshape(shape)) * nH_cgs), "cm^-3")
+    nH2_out = np.ascontiguousarray((0.5 * fH2.reshape(shape) * nH_cgs), dtype=np.float64)
+    nH_atom_out = np.ascontiguousarray(((1.0 - fH2.reshape(shape)) * nH_cgs), dtype=np.float64)
 
     return nH2_out, nH_atom_out

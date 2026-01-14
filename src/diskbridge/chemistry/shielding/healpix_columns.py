@@ -15,9 +15,6 @@ You can call them from RadModel or from separate post-processing scripts.
 Assumptions
 -----------
 - Mesh coordinate system is spherical, with axes 'r', 'theta', 'phi'.
-- nH, chi, etc. are in RADMC / DiskBridge order (nr, ntheta, nphi),
-  as produced by RadModel.compute_nH_from_model and compute_mcmono. 
-- Column densities are integrated in cm^-2.
 
 Dependencies
 ------------
@@ -59,26 +56,32 @@ def _get_healpy():
 
 def _mesh_cache_info(mesh, shape: tuple[int, ...] | list[int]):
     if mesh.coord_system == "cartesian":
+        x_edges = mesh.edges_f64("x", "cm")
+        y_edges = mesh.edges_f64("y", "cm")
+        z_edges = mesh.edges_f64("z", "cm")
         return {
             "coord": "cartesian",
             "shape": list(shape),
-            "xmin": float(mesh.edges("x").to("cm").magnitude[0]),
-            "xmax": float(mesh.edges("x").to("cm").magnitude[-1]),
-            "ymin": float(mesh.edges("y").to("cm").magnitude[0]),
-            "ymax": float(mesh.edges("y").to("cm").magnitude[-1]),
-            "zmin": float(mesh.edges("z").to("cm").magnitude[0]),
-            "zmax": float(mesh.edges("z").to("cm").magnitude[-1]),
+            "xmin": float(x_edges[0]),
+            "xmax": float(x_edges[-1]),
+            "ymin": float(y_edges[0]),
+            "ymax": float(y_edges[-1]),
+            "zmin": float(z_edges[0]),
+            "zmax": float(z_edges[-1]),
         }
     if mesh.coord_system == "spherical":
+        r_edges = mesh.edges_f64("r", "cm")
+        th_edges = mesh.edges_f64("theta", "rad")
+        ph_edges = mesh.edges_f64("phi", "rad")
         return {
             "coord": "spherical",
             "shape": list(shape),
-            "rmin": float(mesh.edges("r").to("cm").magnitude[0]),
-            "rmax": float(mesh.edges("r").to("cm").magnitude[-1]),
-            "thmin": float(mesh.edges("theta").to("rad").magnitude[0]),
-            "thmax": float(mesh.edges("theta").to("rad").magnitude[-1]),
-            "phmin": float(mesh.edges("phi").to("rad").magnitude[0]),
-            "phmax": float(mesh.edges("phi").to("rad").magnitude[-1]),
+            "rmin": float(r_edges[0]),
+            "rmax": float(r_edges[-1]),
+            "thmin": float(th_edges[0]),
+            "thmax": float(th_edges[-1]),
+            "phmin": float(ph_edges[0]),
+            "phmax": float(ph_edges[-1]),
         }
     return {"coord": mesh.coord_system, "shape": list(shape)}
 
@@ -196,8 +199,12 @@ def _load_npz_cache(
 
 
 def _as_f64(name: str, x) -> np.ndarray:
+    if hasattr(x, "magnitude") and hasattr(x, "units"):
+        raise TypeError(f"{name} must be a float64 numpy array (no unit-carrying objects).")
     a = np.asarray(x, dtype=np.float64)
-    return a
+    if a.dtype == object:
+        raise TypeError(f"{name} must be float64; got dtype=object")
+    return np.ascontiguousarray(a, dtype=np.float64)
 
 
 def _prepare_candidate_mask(
@@ -275,14 +282,14 @@ def compute_L_geo_from_pathlengths(
         - "percentile_30": 30th percentile
         - "harmonic": harmonic mean (penalizes long rays)
     L_min : float
-        Minimum allowed L_geo (cm). Prevents tiny values.
+        Minimum allowed L_geo. Prevents tiny values.
     L_max : float
-        Maximum allowed L_geo (cm). Caps at domain scale.
+        Maximum allowed L_geo. Caps at domain scale.
     
     Returns
     -------
     L_geo : ndarray, shape (n_cells,)
-        Geometric escape length per cell (cm).
+        Geometric escape length per cell.
     """
     eps = 1e-30
     
@@ -321,34 +328,34 @@ def compute_gradv_nh_weighted(
     Parameters
     ----------
     NH_rays : ndarray, shape (n_cells, n_dirs)
-        H column density along each HEALPix direction (cm^-2).
+        H column density along each HEALPix direction.
     dirs : ndarray, shape (n_dirs, 3)
-        Unit direction vectors (Cartesian).
+        Direction vectors.
     Omega : ndarray, shape (n_cells,)
-        Angular velocity |v_phi|/R (s^-1) per cell.
+        Angular velocity |v_phi|/R per cell.
     eR : ndarray, shape (n_cells, 3)
         Cylindrical radial unit vector per cell.
     L_cell : ndarray, shape (n_cells,)
-        Cell size (cm) per cell.
+        Cell size per cell.
     b_kms : float
-        Doppler parameter / microturbulence (km/s). Default 0.3.
+        Doppler parameter / microturbulence. Default 0.3.
     q : float
         Shear parameter. Default 1.5 (Keplerian).
     N0 : float
-        Column density scale for weighting (cm^-2). Default 1e21.
+        Column density scale for weighting. Default 1e21.
     p : float
         Power for NH weighting. Default 1.0.
     f_corr : float
         Correlation length factor for turbulence. Default 4.0.
     gmin : float
-        Minimum gradv (s^-1). Default 1e-20.
+        Minimum gradv. Default 1e-20.
     gmax : float
-        Maximum gradv (s^-1). Default 1e-8.
+        Maximum gradv. Default 1e-8.
     
     Returns
     -------
     gradv : ndarray, shape (n_cells,)
-        Effective velocity gradient per cell (s^-1).
+        Effective velocity gradient per cell.
     
     Notes
     -----
@@ -422,24 +429,20 @@ class SphericalHealpixRayTracer:
         self.nside = int(nside)
 
         # Axis edges in CGS / radians
-        r_edges_q = mesh.edges("r")
-        th_edges_q = mesh.edges("theta")
-        ph_edges_q = mesh.edges("phi")
-
-        self.r_edges = r_edges_q.to("cm").magnitude
-        self.theta_edges = th_edges_q.to("rad").magnitude
-        self.phi_edges = ph_edges_q.to("rad").magnitude
+        self.r_edges = mesh.edges_f64("r", "cm")
+        self.theta_edges = mesh.edges_f64("theta", "rad")
+        self.phi_edges = mesh.edges_f64("phi", "rad")
 
         # Precompute cell centers as plain arrays for speed
-        self.r_centers = mesh.axes["r"].centers.to("cm").magnitude
-        self.theta_centers = mesh.axes["theta"].centers.to("rad").magnitude
-        self.phi_centers = mesh.axes["phi"].centers.to("rad").magnitude
+        self.r_centers = mesh.centers_f64("r", "cm")
+        self.theta_centers = mesh.centers_f64("theta", "rad")
+        self.phi_centers = mesh.centers_f64("phi", "rad")
 
         # Step size: fraction of the minimum dr
         dr = np.diff(self.r_edges)
         self.ds = float(ds_fraction * dr.min())
 
-        # HEALPix directions (unit vectors on sphere)
+        # HEALPix directions
         npix = hp.nside2npix(self.nside)
         # hp.pix2vec -> (x, y, z) arrays of length npix
         dirs = hp.pix2vec(self.nside, np.arange(npix))
@@ -478,7 +481,7 @@ class SphericalHealpixRayTracer:
     # ------------- basic geometry helpers -------------
 
     def cell_center_xyz(self, ir: int, it: int, ip: int) -> Tuple[float, float, float]:
-        """Return Cartesian (x, y, z) position of a cell center in cm."""
+        """Return Cartesian (x, y, z) position of a cell center."""
         r = self.r_centers[ir]
         th = self.theta_centers[it]
         ph = self.phi_centers[ip]
@@ -530,18 +533,14 @@ class CartesianHealpixRayTracer:
         self.nside = int(nside)
 
         # Axis edges in CGS
-        x_edges_q = mesh.edges("x")
-        y_edges_q = mesh.edges("y")
-        z_edges_q = mesh.edges("z")
-
-        self.x_edges = x_edges_q.to("cm").magnitude
-        self.y_edges = y_edges_q.to("cm").magnitude
-        self.z_edges = z_edges_q.to("cm").magnitude
+        self.x_edges = mesh.edges_f64("x", "cm")
+        self.y_edges = mesh.edges_f64("y", "cm")
+        self.z_edges = mesh.edges_f64("z", "cm")
 
         # Precompute cell centers as plain arrays for speed
-        self.x_centers = mesh.axes["x"].centers.to("cm").magnitude
-        self.y_centers = mesh.axes["y"].centers.to("cm").magnitude
-        self.z_centers = mesh.axes["z"].centers.to("cm").magnitude
+        self.x_centers = mesh.centers_f64("x", "cm")
+        self.y_centers = mesh.centers_f64("y", "cm")
+        self.z_centers = mesh.centers_f64("z", "cm")
 
         # Step size: fraction of the minimum cell size
         dx_min = np.min(np.diff(self.x_edges))
@@ -549,7 +548,7 @@ class CartesianHealpixRayTracer:
         dz_min = np.min(np.diff(self.z_edges))
         self.ds = float(ds_fraction * min(dx_min, dy_min, dz_min))
 
-        # Precompute HEALPix directions (unit vectors)
+        # Precompute HEALPix directions
         npix = hp.nside2npix(self.nside)
         dirs = hp.pix2vec(self.nside, np.arange(npix))
         self.dirs = np.vstack(dirs).T  # shape (npix, 3)
@@ -570,13 +569,13 @@ class CartesianHealpixRayTracer:
         logger.info(
             f"Initialized CartesianHealpixRayTracer: "
             f"nx={self.nx}, ny={self.ny}, nz={self.nz}, "
-            f"nside={self.nside}, npix={npix}, ds={self.ds:.3e} cm"
+            f"nside={self.nside}, npix={npix}, ds={self.ds:.3e}"
         )
 
     # ------------- basic geometry helpers -------------
 
     def cell_center_xyz(self, ix: int, iy: int, iz: int) -> Tuple[float, float, float]:
-        """Return Cartesian (x, y, z) position of a cell center in cm."""
+        """Return Cartesian (x, y, z) position of a cell center."""
         x = self.x_centers[ix]
         y = self.y_centers[iy]
         z = self.z_centers[iz]
@@ -717,12 +716,12 @@ def compute_column_rays_healpix(
 
 def compute_co_shielding_healpix(
     mesh,
-    nH,
-    chi,
+    nH: np.ndarray,
+    chi: np.ndarray,
     visser: VisserShielding,
     *,
-    nCO=None,
-    nH2=None,
+    nCO: np.ndarray,
+    nH2: np.ndarray,
     nside: int = 4,
     b_kms: Optional[float] = None,
     candidate_mask: Optional[np.ndarray] = None,
@@ -731,14 +730,8 @@ def compute_co_shielding_healpix(
     self_weight: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     nH_cgs = _as_f64("nH", nH)
-    chi_arr = _as_f64("chi", chi)  # chi is in Draine units
-
-    if nCO is None:
-        raise ValueError("compute_co_shielding_healpix requires nCO")
+    chi_arr = _as_f64("chi", chi)
     nCO_cgs = _as_f64("nCO", nCO)
-
-    if nH2 is None:
-        raise ValueError("compute_co_shielding_healpix requires nH2")
     nH2_cgs = _as_f64("nH2", nH2)
 
     if nCO_cgs.shape != nH_cgs.shape or nH2_cgs.shape != nH_cgs.shape:
@@ -770,13 +763,13 @@ def compute_co_shielding_healpix(
 
 def compute_pdr_shielding_healpix(
     mesh,
-    nH,
-    chi,
+    nH: np.ndarray,
+    chi: np.ndarray,
     visser: Optional[VisserShielding] = None,
     *,
-    nCO=None,
-    nC=None,
-    nH2=None,
+    nCO: Optional[np.ndarray] = None,
+    nC: np.ndarray,
+    nH2: np.ndarray,
     nside: int = 4,
     b_kms: float = 0.3,
     candidate_mask: Optional[np.ndarray] = None,
@@ -786,13 +779,7 @@ def compute_pdr_shielding_healpix(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
-
-    if nH2 is None:
-        raise ValueError("compute_pdr_shielding_healpix requires nH2")
     nH2_cgs = _as_f64("nH2", nH2)
-
-    if nC is None:
-        raise ValueError("compute_pdr_shielding_healpix requires nC")
     nC_cgs = _as_f64("nC", nC)
 
     fields = {"h2": nH2_cgs, "c": nC_cgs}

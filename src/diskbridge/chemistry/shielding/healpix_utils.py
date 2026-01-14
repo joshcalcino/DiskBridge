@@ -791,7 +791,7 @@ def integrate_rays(
     cell_centers : ndarray, shape (n_cells, 3)
         Starting positions in Cartesian (x, y, z) coordinates.
     directions : ndarray, shape (n_dirs, 3)
-        Unit direction vectors.
+        Direction vectors.
     n_field : ndarray
         Density field to integrate.
     max_steps : int, optional

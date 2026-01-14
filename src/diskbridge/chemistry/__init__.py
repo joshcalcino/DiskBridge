@@ -144,10 +144,10 @@ def evolve_co_time_dependent_infall_age(
             logger.info("Computing CO shielding...")
             visser = VisserShielding(b_kms=float(b_kms))
 
-            nH_cm3 = nH.to("cm^-3").magnitude
-            chi_dim = chi.to("dimensionless").magnitude
+            nH_cm3 = np.ascontiguousarray(nH.to("cm^-3").magnitude, dtype=np.float64)
+            chi_dim = np.ascontiguousarray(chi.to("dimensionless").magnitude, dtype=np.float64)
             nco_guess_cm3 = np.ascontiguousarray(float(Xco_tot) * nH_cm3, dtype=np.float64)
-            nH2_cm3 = rad.nH2.to("cm^-3").magnitude
+            nH2_cm3 = np.ascontiguousarray(rad.nH2.to("cm^-3").magnitude, dtype=np.float64)
             theta_co, chi_eff = compute_co_shielding_healpix(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
