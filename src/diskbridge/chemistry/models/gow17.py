@@ -612,6 +612,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         for code in (0, -1):
             status_hist[int(code)] = int(np.sum(status == code))
 
+    Zd = float(np.mean(Zd_arr))
+
     meta = {
         "model": "gow17",
         "nside": int(nside),

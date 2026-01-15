@@ -364,6 +364,11 @@ def run_external_iteration(
     mix: float = 0.5,
     verbose: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray, Dict]:
+    from diskbridge.chemistry.models._gow17_numba import (
+        evolve_gow17_be_cells_cgs,
+        solve_gow17_equilibrium_cells_cgs,
+    )
+
     radm = _build_1d_cartesian_model(nH_cm3=nH_cm3, NH=NH)
 
     NH = np.asarray(NH, dtype=float)

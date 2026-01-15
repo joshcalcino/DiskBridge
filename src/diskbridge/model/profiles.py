@@ -71,3 +71,76 @@ def compute_volume_weighted_mean_radial_profile(
 
     return r, profile
 
+
+def find_r_split(
+    r_au: np.ndarray,
+    r_edges_au: np.ndarray,
+    chi_profile: np.ndarray,
+    T_profile: np.ndarray,
+    tol_chi: float = 0.01,
+    tol_T: float = 0.01,
+    window_fraction: float = 0.1,
+    r_clip_min_au: float = 1.0,
+) -> Tuple[float, dict]:
+    nr = int(len(r_au))
+    if nr == 0:
+        raise ValueError("r_au is empty")
+
+    if chi_profile.shape != (nr,) or T_profile.shape != (nr,):
+        raise ValueError("chi_profile and T_profile must match r_au shape")
+
+    r_max = float(r_au[-1])
+    r_min = float(r_au[0])
+    window_r_min = r_max - float(window_fraction) * (r_max - r_min)
+    window_mask = r_au >= window_r_min
+
+    if not np.any(window_mask):
+        raise ValueError(f"Asymptote window is empty (window_r_min={window_r_min:.2f} AU)")
+
+    chi_asymptote = float(np.mean(chi_profile[window_mask]))
+    T_asymptote = float(np.mean(T_profile[window_mask]))
+
+    if chi_asymptote <= 0.0:
+        raise ValueError(f"Invalid chi_asymptote={chi_asymptote}")
+    if T_asymptote <= 0.0:
+        raise ValueError(f"Invalid T_asymptote={T_asymptote}")
+
+    chi_dev = np.abs(chi_profile - chi_asymptote) / chi_asymptote
+    T_dev = np.abs(T_profile - T_asymptote) / T_asymptote
+
+    within_tol = (chi_dev <= float(tol_chi)) & (T_dev <= float(tol_T))
+
+    r_split_idx = None
+    for i in range(nr - 2, -1, -1):
+        if within_tol[i]:
+            r_split_idx = i
+        else:
+            break
+
+    if r_split_idx is None:
+        for i in range(nr - 1, -1, -1):
+            if not within_tol[i]:
+                r_split_idx = i + 1
+                break
+        if r_split_idx is None or r_split_idx >= nr:
+            raise ValueError("Could not find valid R_split: profiles never reach asymptote")
+
+    r_split_au = float(r_edges_au[int(r_split_idx)])
+
+    if r_split_au < float(r_clip_min_au):
+        raise ValueError(
+            f"R_split={r_split_au:.2f} AU < r_clip_min={float(r_clip_min_au):.2f} AU. "
+            "The stellar radiation dominates too far out for segmented RT."
+        )
+
+    info = {
+        "chi_asymptote": float(chi_asymptote),
+        "T_asymptote": float(T_asymptote),
+        "r_split_cell_idx": int(r_split_idx),
+        "window_r_min": float(window_r_min),
+        "chi_dev_at_split": float(chi_dev[int(r_split_idx)]) if int(r_split_idx) < nr else np.nan,
+        "T_dev_at_split": float(T_dev[int(r_split_idx)]) if int(r_split_idx) < nr else np.nan,
+    }
+
+    return r_split_au, info
+
