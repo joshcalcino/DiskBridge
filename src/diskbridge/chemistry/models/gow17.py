@@ -10,7 +10,17 @@ import numpy as np
 from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
-from diskbridge._constants import SIGMA_D_PER_H, EPS_CHI, LOG_CHI_OVER_NH_PDISS
+from diskbridge._constants import (
+    SIGMA_D_PER_H,
+    EPS_CHI,
+    LOG_CHI_OVER_NH_PDISS,
+    E_BIND_CO,
+    NU0_CO,
+    F_DRAINE,
+    N_LAY,
+    N_SURF,
+    Y_CO,
+)
 from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
@@ -48,6 +58,7 @@ I_HEP = _gow17.I_HEP
 I_OHX = _gow17.I_OHX
 I_CHX = _gow17.I_CHX
 I_CO = _gow17.I_CO
+I_CO_ICE = _gow17.I_CO_ICE
 I_CP = _gow17.I_CP
 I_HCOP = _gow17.I_HCOP
 I_H2 = _gow17.I_H2
@@ -323,12 +334,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     y0_single[I_CP] = 1.0e-4
     y0_single[I_CO] = 1.0e-7
     y0_single[I_H2] = 0.1
+    y0_single[I_CO_ICE] = 0.0
 
     abstol = np.full(N_Y, abstol0, dtype=np.float64)
     abstol[I_HEP] = 1.0e-15
     abstol[I_OHX] = 1.0e-15
     abstol[I_CHX] = 1.0e-15
     abstol[I_CO] = 1.0e-15
+    abstol[I_CO_ICE] = 1.0e-15
     abstol[I_CP] = 1.0e-15
     abstol[I_HCOP] = 1.0e-30
     abstol[I_H2] = 1.0e-8
@@ -365,12 +378,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
 
         xCO = y_guess[:, I_CO]
+        xCO_ice = y_guess[:, I_CO_ICE]
         xH2 = y_guess[:, I_H2]
 
         xC_neutral = xCtot_flat - (
             y_guess[:, I_HCOP]
             + y_guess[:, I_CHX]
             + xCO
+            + xCO_ice
             + y_guess[:, I_CP]
         )
         xC_neutral = np.maximum(xC_neutral, 0.0)
@@ -458,6 +473,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             fSplusgr=fSplusgr,
             fSiplusgr=fSiplusgr,
             fCplusCR=fCplusCR,
+            co_sigma_d_per_H_ref=float(sigma_d_per_H_ref),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=userJac,
             verbose=verbose,
         )
@@ -482,9 +504,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     status = status_acc.reshape(shape)
 
     xCO = y_out[..., I_CO]
+    xCO_ice = y_out[..., I_CO_ICE]
     xH2 = y_out[..., I_H2]
 
     nco_gas = Quantity(xCO * nH_cm3, "cm^-3")
+    nco_ice = Quantity(xCO_ice * nH_cm3, "cm^-3")
     nH2_out = Quantity(xH2 * nH_cm3, "cm^-3")
 
     xe = (
@@ -514,6 +538,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         y_out[..., I_HCOP]
         + y_out[..., I_CHX]
         + y_out[..., I_CO]
+        + y_out[..., I_CO_ICE]
         + y_out[..., I_CP]
     )
 
@@ -532,13 +557,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             nHI=nH_atom,
             nC=nC,
             nCplus=nCplus,
-            nco_total=nco_gas,
+            nco_total=Quantity(nco_gas.magnitude + nco_ice.magnitude, "cm^-3"),
             check_pd=False,
             rtol=float(reltol),
         )
 
     abundances = {
         "co": Quantity(xCO, "dimensionless"),
+        "co_ice": Quantity(xCO_ice, "dimensionless"),
     }
 
     number_densities = {
@@ -551,14 +577,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     }
 
     fields = {
+        "co_ice": nco_ice,
         "theta_co": Quantity(theta_co_arr.reshape(shape), "dimensionless"),
         "theta_h2": Quantity(theta_h2_arr.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_arr.reshape(shape), "dimensionless"),
+        "chi_eff": Quantity(chi_dust_arr * theta_co_arr.reshape(shape), "dimensionless"),
     }
 
     rad.gow17_y = y_out
     rad.nco_gas = nco_gas
-    rad.theta_co = Quantity(theta_co_arr.reshape(shape), "dimensionless")
+    rad.nco_ice = nco_ice
+    rad.theta_co = fields["theta_co"]
+    rad.chi_eff = fields["chi_eff"]
     rad.nH2 = nH2_out
     rad.nH_atom = nH_atom
     rad.nCplus = nCplus
@@ -584,7 +614,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     meta = {
         "model": "gow17",
-        "backend": "native",
         "nside": int(nside),
         "b_kms": float(b_kms),
         "ion_rate_s": float(ion_rate_s),

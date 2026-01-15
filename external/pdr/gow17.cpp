@@ -2,6 +2,7 @@
  * Implimentation of the gow17 class
  */
 #include "gow17.h"
+#include "co_phase.h"
 
 /*------------Initialize static members of the class --------*/
 /*species list and map*/
@@ -9,7 +10,7 @@ const std::string gow17::spec_list_[kDimen+n_ghost_] =
 		{"He+", "OHx", "CHx", "CO", "C+", "HCO+", "H2", "H+", "H3+",
 		/*below are ghost species. The aboundances of ghost species are
 		 * recalculated in RHS everytime by other species. */
-		  "H2+", "S+", "Si+", "O+", "E", "*Si", "*S", "*C", "*O", "*He", "*e", "*H"};
+		  "H2+", "S+", "Si+", "O+", "CO_ice", "E", "*Si", "*S", "*C", "*O", "*He", "*e", "*H"};
 
 const gow17::SpecMap gow17::spec_index_map = InitMap_();
 
@@ -240,6 +241,7 @@ const double gow17::cSip_[7] = {2.166, 5.678e-8, 1.874, 4.375e4, 1.635e-6,
 gow17::gow17()
   :Ode(),
 	 iCO_(id("CO")),
+	 iCOice_(id("CO_ice")),
 	 iH_(id("*H")),
 	 iH2_(id("H2")),
 	 ie_(id("*e")),
@@ -296,6 +298,15 @@ gow17::gow17()
   Zg_ = 1.;
   Zd_ = 1.;
   Tdust_ = 10.;
+
+  co_sigma_d_per_H_ref_ = 0.0;
+  co_E_bind_ = 0.0;
+  co_nu0_ = 0.0;
+  co_F_DRAINE_ = 0.0;
+  co_Y_CO_ = 0.0;
+  co_N_SURF_ = 0.0;
+  co_N_LAY_ = 0;
+
   xC_ = Zg_ * xC_std_;
   xO_ = Zg_ * xO_std_;
   xS_ = Zg_ * xS_std_;
@@ -356,6 +367,34 @@ int gow17::RHS(const sunrealtype t, const N_Vector y, N_Vector ydot)
 		ydot_[inph_[i]] -= rate;
 		ydot_[outph1_[i]] += rate;
 	}
+
+
+  if (co_sigma_d_per_H_ref_ > 0.0 && co_N_LAY_ > 0) {
+    double Tgas;
+    if (const_temp_) {
+      Tgas = temp_;
+    } else {
+      Tgas = yprev[iE_] / Thermo::CvCold(yprev[iH2_], xHe_, yprev[ie_]);
+    }
+
+    const double sigma_d_per_H = Zd_ * co_sigma_d_per_H_ref_;
+    const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, Thermo::kb_, mCO_);
+    const double k_td = co_phase::co_thermal_desorption_rate(Tdust_, co_nu0_, co_E_bind_);
+    const double chi_pd = (GISRF_ != NULL) ? (*GISRF_) : 0.0;
+    const double k_pd_surf = co_phase::co_photodesorption_surface_rate(
+        chi_pd, co_F_DRAINE_, co_Y_CO_, co_N_SURF_, co_N_LAY_);
+
+    const double nco_ice_cm3 = yprev[iCOice_] * nH_;
+    double n_ice_act_max = 0.0;
+    double n_ice_act = 0.0;
+    co_phase::co_active_ice(nH_, sigma_d_per_H, nco_ice_cm3, co_N_SURF_, co_N_LAY_, n_ice_act_max, n_ice_act);
+
+    const double R_pd_cm3s = co_phase::co_photodesorption_R(k_pd_surf, n_ice_act);
+    const double r_pd_per_H = (nH_ > 0.0) ? (R_pd_cm3s / nH_) : 0.0;
+
+    ydot_[iCO_] += (-k_fo * yprev[iCO_] + k_td * yprev[iCOice_] + r_pd_per_H);
+    ydot_[iCOice_] += (k_fo * yprev[iCO_] - k_td * yprev[iCOice_] - r_pd_per_H);
+  }
 
   /*energy equation*/
   if (!const_temp_) {
@@ -671,10 +710,8 @@ void gow17::SetGhostSpec_(const N_Vector y, double yghost[kDimen+n_ghost_]) {
 		yghost[i] = NV_Ith_S(y, i);
 	}
 	/*set the ghost species*/
- 	yghost[iC_] = xC_ - yghost[iHCOplus_] -  yghost[iCH_]
-                     - yghost[iCO_] - yghost[iCplus_];
-	yghost[iO_] = xO_ - yghost[iHCOplus_] -  yghost[iOH_]
-                     - yghost[iCO_] - yghost[iOplus_];
+ 	yghost[iC_] = xC_ - yghost[iHCOplus_] -  yghost[iCH_] - yghost[iCO_] - yghost[iCOice_] - yghost[iCplus_];
+	yghost[iO_] = xO_ - yghost[iHCOplus_] -  yghost[iOH_] - yghost[iCO_] - yghost[iCOice_] - yghost[iOplus_];
 	yghost[iHe_] = xHe_ - yghost[iHeplus_]; /*HeI*/
 	yghost[iS_] = xS_ - yghost[iSplus_]; /*SI*/
 	yghost[iSi_] = xSi_ - yghost[iSiplus_]; /*SiI*/
@@ -715,6 +752,20 @@ void gow17::SetZg(const double Zg) {
 
 void gow17::SetTdust(const double Tdust) {
   Tdust_ = Tdust;
+  return;
+}
+
+
+void gow17::SetCOPhaseParams(const double sigma_d_per_H_ref, const double E_bind_co,
+                             const double nu0_co, const double F_DRAINE,
+                             const double Y_CO, const double N_SURF, const int N_LAY) {
+  co_sigma_d_per_H_ref_ = sigma_d_per_H_ref;
+  co_E_bind_ = E_bind_co;
+  co_nu0_ = nu0_co;
+  co_F_DRAINE_ = F_DRAINE;
+  co_Y_CO_ = Y_CO;
+  co_N_SURF_ = N_SURF;
+  co_N_LAY_ = N_LAY;
   return;
 }
 

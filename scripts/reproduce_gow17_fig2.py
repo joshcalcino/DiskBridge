@@ -9,32 +9,27 @@ import numpy as np
 
 import diskbridge
 import diskbridge._gow17 as gow17_native
+from diskbridge._constants import E_BIND_CO, F_DRAINE, N_LAY, N_SURF, NU0_CO, SIGMA_D_PER_H, Y_CO
 from diskbridge._units import Quantity
 from diskbridge._constants import K_B, X_C_TOT
 from diskbridge.chemistry.api import run_chemistry
-from diskbridge.chemistry.models._gow17_numba import (
-    solve_gow17_equilibrium_cells_cgs,
-    evolve_gow17_be_cells_cgs,
-)
 from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-from diskbridge.chemistry.models._gow17_network import (
-    I_CHX,
-    I_CO,
-    I_CO_ICE,
-    I_CP,
-    I_H2,
-    I_H2P,
-    I_H3P,
-    I_HCOP,
-    I_HEP,
-    I_HP,
-    I_OHX,
-    I_OP,
-    I_SIP,
-    I_SP,
-    N_Y,
-)
+I_CHX = gow17_native.I_CHX
+I_CO = gow17_native.I_CO
+I_CO_ICE = gow17_native.I_CO_ICE
+I_CP = gow17_native.I_CP
+I_H2 = gow17_native.I_H2
+I_H2P = gow17_native.I_H2P
+I_H3P = gow17_native.I_H3P
+I_HCOP = gow17_native.I_HCOP
+I_HEP = gow17_native.I_HEP
+I_HP = gow17_native.I_HP
+I_OHX = gow17_native.I_OHX
+I_OP = gow17_native.I_OP
+I_SIP = gow17_native.I_SIP
+I_SP = gow17_native.I_SP
+N_Y = gow17_native.N_Y
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
@@ -221,6 +216,8 @@ def run_native_slab(
     y0[gow17_native.I_CP] = 1.0e-4
     y0[gow17_native.I_CO] = 1.0e-7
     y0[gow17_native.I_H2] = 0.1
+    if hasattr(gow17_native, "I_CO_ICE"):
+        y0[gow17_native.I_CO_ICE] = 0.0
 
     # Match example_simple.cpp:
     #   y0[E] = GetE(temp, 0.1, 0.)
@@ -297,6 +294,13 @@ def run_native_slab(
         fSplusgr=0.6,
         fSiplusgr=0.6,
         fCplusCR=1.0,
+        co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+        co_E_bind_co=float(E_BIND_CO),
+        co_nu0_co=float(NU0_CO),
+        co_F_DRAINE=float(F_DRAINE),
+        co_Y_CO=float(Y_CO),
+        co_N_SURF=float(N_SURF),
+        co_N_LAY=int(N_LAY),
         userJac=False,
     )
 

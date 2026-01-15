@@ -240,6 +240,74 @@ def _compute_healpix_geometry_cache_key(
     return hashlib.md5(params_str.encode()).hexdigest()
 
 
+def _prepare_healpix_geometry(
+    mesh,
+    *,
+    nside: int,
+    candidate_mask: np.ndarray,
+    cache_dir: Optional[Path | str] = None,
+):
+    candidate_mask = np.asarray(candidate_mask, dtype=bool)
+    cache_key = None
+    if cache_dir is not None:
+        cache_key = _compute_healpix_geometry_cache_key(mesh, int(nside), candidate_mask)
+        loaded = _load_healpix_geometry_cache(cache_dir, cache_key)
+        if loaded is not None:
+            candidate_idx, dirs, cell_centers, _metadata = loaded
+            if mesh.coord_system == "spherical":
+                tracer = SphericalHealpixRayTracer(mesh, nside=int(nside))
+            elif mesh.coord_system == "cartesian":
+                tracer = CartesianHealpixRayTracer(mesh, nside=int(nside))
+            else:
+                raise ValueError(
+                    "healpix geometry requires spherical or cartesian mesh, "
+                    f"got {mesh.coord_system!r}"
+                )
+            return (
+                tracer,
+                _as_f64("dirs", dirs),
+                np.asarray(candidate_idx),
+                _as_f64("cell_centers", cell_centers),
+            )
+
+    if mesh.coord_system == "spherical":
+        tracer = SphericalHealpixRayTracer(mesh, nside=int(nside))
+    elif mesh.coord_system == "cartesian":
+        tracer = CartesianHealpixRayTracer(mesh, nside=int(nside))
+    else:
+        raise ValueError(
+            "healpix geometry requires spherical or cartesian mesh, "
+            f"got {mesh.coord_system!r}"
+        )
+
+    dirs = _as_f64("dirs", tracer.dirs)
+    candidate_idx = np.argwhere(candidate_mask)
+
+    n_candidates = int(candidate_idx.shape[0])
+    cell_centers = np.zeros((n_candidates, 3), dtype=np.float64)
+    for i in range(n_candidates):
+        idx = candidate_idx[i]
+        cell_centers[i, :] = tracer.cell_center_xyz(int(idx[0]), int(idx[1]), int(idx[2]))
+
+    if cache_dir is not None and cache_key is not None:
+        metadata = {
+            "mesh": _mesh_cache_info(mesh, candidate_mask.shape),
+            "nside": int(nside),
+            "n_candidates": int(n_candidates),
+            "npix": int(dirs.shape[0]),
+        }
+        _save_healpix_geometry_cache(
+            cache_dir,
+            cache_key,
+            np.asarray(candidate_idx),
+            np.asarray(dirs),
+            np.asarray(cell_centers),
+            metadata=metadata,
+        )
+
+    return tracer, dirs, candidate_idx, cell_centers
+
+
 def _compute_healpix_column_cache_key(
     mesh,
     nside: int,

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import diskbridge._gow17 as _gow17
+from diskbridge._constants import E_BIND_CO, F_DRAINE, N_LAY, N_SURF, NU0_CO, SIGMA_D_PER_H, Y_CO
 
 
 N_Y = _gow17.N_Y
@@ -106,6 +107,13 @@ class TestBatchSolverBasic:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -160,6 +168,13 @@ class TestBatchSolverBasic:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -225,6 +240,13 @@ class TestNoDoubleAttenuation:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -261,6 +283,13 @@ class TestNoDoubleAttenuation:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -344,6 +373,13 @@ class TestRadiationFieldScaling:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -380,6 +416,13 @@ class TestRadiationFieldScaling:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -433,7 +476,7 @@ class TestThermoEvolution:
         xH2_init = y0[0, 6]
         xe_init = y0[0, 0] + y0[0, 4]
         Cv_init = 1.5 * KB_CGS * ((1.0 - 2.0 * xH2_init) + xH2_init + XHE + xe_init)
-        y0[:, 13] = Cv_init * Tgas
+        y0[:, _gow17.I_E] = Cv_init * Tgas
 
         result = _gow17.solve_batch_equilibrium(
             y0=y0,
@@ -464,6 +507,13 @@ class TestThermoEvolution:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
+            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_F_DRAINE=float(F_DRAINE),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
             userJac=False,
             verbose=False,
         )
@@ -472,9 +522,9 @@ class TestThermoEvolution:
 
         y_out = result["y"]
         assert np.all(np.isfinite(y_out)), "Output contains non-finite values"
-        assert np.all(y_out[:, :13] >= 0), "Abundances contain negative values"
+        assert np.all(y_out[:, :_gow17.I_E] >= 0), "Abundances contain negative values"
 
-        E_out = y_out[:, 13]
+        E_out = y_out[:, _gow17.I_E]
         assert np.all(E_out > 0), f"Energy should be positive, got {E_out}"
 
         xH2_out = y_out[:, 6]
@@ -525,12 +575,12 @@ class TestModuleConstants:
         assert _gow17.I_H2 == 6
         assert _gow17.I_CO == 3
         assert _gow17.I_CP == 4
-        assert _gow17.I_E == 13
+        assert _gow17.I_E == (_gow17.N_Y - 1)
         assert _gow17.XHE == 0.1
 
     def test_constants_values(self):
         """Constants should have expected values."""
-        assert _gow17.N_Y == 14
+        assert _gow17.N_Y == 15
         assert _gow17.N_PH == 7
         assert _gow17.IPH_C == 0
         assert _gow17.IPH_CO == 2

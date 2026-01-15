@@ -9,6 +9,7 @@
 #include <math.h> /*a^x = pow(a,x)*/
 #include <string>
 #include <map>
+#include <stdexcept>
 #include <algorithm> /*std::min*/
 #include <sundials/sundials_types.h> /* realtype type*/
 #include <nvector/nvector_serial.h> /* N_Vector type*/
@@ -68,6 +69,10 @@ class gow17 : public Ode {
     void SetZd(const double Zd);
     void SetZg(const double Zg);
     void SetTdust(const double Tdust);
+
+    void SetCOPhaseParams(const double sigma_d_per_H_ref, const double E_bind_co,
+                          const double nu0_co, const double F_DRAINE,
+                          const double Y_CO, const double N_SURF, const int N_LAY);
     void SetIonRate(const double ion_rate);
     void SetRadField(double *GPE, double *Gph, double *GISRF);
     /* Set total C and O abundance */
@@ -121,7 +126,7 @@ class gow17 : public Ode {
     void CopyThermoRates(double *y) const;
 
   private:
-    static const int kDimen = 14;
+    static const int kDimen = 15;
 		/*number of ghost species: the abundances of which are calculated from
 		 * other species or a fixed value.*/
 		static const int n_ghost_ = 7;
@@ -168,6 +173,7 @@ class gow17 : public Ode {
 		/*----------------------Chemical reactions----------------------------*/
 		/*store index for useful species*/
 		const int iCO_;
+		const int iCOice_;
 		const int iH_;
 		const int iH2_;
 		const int ie_;
@@ -188,6 +194,14 @@ class gow17 : public Ode {
 		const int iSi_;
 		const int iSiplus_;
     const int iE_; /* internal energy index */
+
+    double co_sigma_d_per_H_ref_;
+    double co_E_bind_;
+    double co_nu0_;
+    double co_F_DRAINE_;
+    double co_Y_CO_;
+    double co_N_SURF_;
+    int co_N_LAY_;
 
 		/*initialize chemistry reations.
      *Arguments:

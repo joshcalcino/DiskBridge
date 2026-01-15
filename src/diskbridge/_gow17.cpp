@@ -1,17 +1,20 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cvodeDense.h"
+#include "co_phase.h"
 #include "gow17.h"
 #include "slab.h"
 
 namespace py = pybind11;
 
-static constexpr int N_Y = 14;
+static constexpr int N_Y = 15;
 static constexpr int N_PH = 7;
 static constexpr int IPH_C = 0;
 static constexpr int IPH_CH = 1;
@@ -57,6 +60,14 @@ static py::dict solve_slab_1d_equilibrium(
     const double fSplusgr,
     const double fSiplusgr,
     const double fCplusCR,
+
+    const double co_sigma_d_per_H_ref,
+    const double co_E_bind_co,
+    const double co_nu0_co,
+    const double co_F_DRAINE,
+    const double co_Y_CO,
+    const double co_N_SURF,
+    const int co_N_LAY,
     const bool userJac) {
     gow17 ode;
     const int dim = ode.Dimen();
@@ -76,6 +87,7 @@ static py::dict solve_slab_1d_equilibrium(
     ode.SetIonRate(ion_rate);
     ode.SetZg(Zg);
     ode.SetZd(Zd);
+    ode.SetTdust(Tgas);
 
     ode.SetfH2gr(fH2gr);
     ode.SetfHplusgr(fHplusgr);
@@ -84,6 +96,15 @@ static py::dict solve_slab_1d_equilibrium(
     ode.SetfSplusgr(fSplusgr);
     ode.SetfSiplusgr(fSiplusgr);
     ode.SetfCplusCR(fCplusCR);
+
+    ode.SetCOPhaseParams(
+        co_sigma_d_per_H_ref,
+        co_E_bind_co,
+        co_nu0_co,
+        co_F_DRAINE,
+        co_Y_CO,
+        co_N_SURF,
+        co_N_LAY);
 
     ode.SetGradv(gradv);
     ode.SetNCOeffGlobal(NCOeff_global);
@@ -162,11 +183,19 @@ static py::dict solve_batch_equilibrium(
     const double fSplusgr,
     const double fSiplusgr,
     const double fCplusCR,
+
+    const double co_sigma_d_per_H_ref,
+    const double co_E_bind_co,
+    const double co_nu0_co,
+    const double co_F_DRAINE,
+    const double co_Y_CO,
+    const double co_N_SURF,
+    const int co_N_LAY,
     const bool userJac,
     const bool verbose) {
 
     if (y0.ndim() != 2 || y0.shape(1) != N_Y) {
-        throw std::invalid_argument("y0 must be 2D with shape (Ncells, 14)");
+        throw std::invalid_argument("y0 must be 2D with shape (Ncells, 15)");
     }
     const py::ssize_t Ncells = y0.shape(0);
 
@@ -198,7 +227,7 @@ static py::dict solve_batch_equilibrium(
         throw std::invalid_argument("Gph must be 2D with shape (Ncells, 7)");
     }
     if (abstol.ndim() != 1 || abstol.size() != N_Y) {
-        throw std::invalid_argument("abstol must be 1D with length 14");
+        throw std::invalid_argument("abstol must be 1D with length 15");
     }
     if (Leff_CO_max.ndim() != 1 || Leff_CO_max.size() != Ncells) {
         throw std::invalid_argument("Leff_CO_max must be 1D with length Ncells");
@@ -245,6 +274,16 @@ static py::dict solve_batch_equilibrium(
         ode.SetfCplusCR(fCplusCR);
         ode.SetGradv(gradv_ptr[i]);
         ode.SetTdust(Tdust_ptr[i]);
+
+        ode.SetCOPhaseParams(
+            co_sigma_d_per_H_ref,
+            co_E_bind_co,
+            co_nu0_co,
+            co_F_DRAINE,
+            co_Y_CO,
+            co_N_SURF,
+            co_N_LAY);
+
         ode.Leff_CO_max(Leff_CO_max_ptr[i]);
         ode.IsDustCooling(isDust_cooling);
         ode.SetCoolingCOThin(isCoolingCOThin);
@@ -302,6 +341,7 @@ PYBIND11_MODULE(_gow17, m) {
     m.attr("I_OHX") = gow17::id("OHx");
     m.attr("I_CHX") = gow17::id("CHx");
     m.attr("I_CO") = gow17::id("CO");
+    m.attr("I_CO_ICE") = gow17::id("CO_ice");
     m.attr("I_CP") = gow17::id("C+");
     m.attr("I_HCOP") = gow17::id("HCO+");
     m.attr("I_H2") = gow17::id("H2");
@@ -351,6 +391,13 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("fSplusgr"),
         py::arg("fSiplusgr"),
         py::arg("fCplusCR"),
+        py::arg("co_sigma_d_per_H_ref"),
+        py::arg("co_E_bind_co"),
+        py::arg("co_nu0_co"),
+        py::arg("co_F_DRAINE"),
+        py::arg("co_Y_CO"),
+        py::arg("co_N_SURF"),
+        py::arg("co_N_LAY"),
         py::arg("userJac"));
 
     m.def(
@@ -385,6 +432,72 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("fSplusgr"),
         py::arg("fSiplusgr"),
         py::arg("fCplusCR"),
+        py::arg("co_sigma_d_per_H_ref"),
+        py::arg("co_E_bind_co"),
+        py::arg("co_nu0_co"),
+        py::arg("co_F_DRAINE"),
+        py::arg("co_Y_CO"),
+        py::arg("co_N_SURF"),
+        py::arg("co_N_LAY"),
         py::arg("userJac"),
         py::arg("verbose") = false);
+
+    m.def(
+        "co_freezeout_rate_cgs",
+        [](const double nH_cm3, const double Tgas_K, const double sigma_d_per_H_cm2,
+           const double kB, const double mCO) {
+            return co_phase::co_freezeout_rate(
+                nH_cm3, Tgas_K, sigma_d_per_H_cm2, kB, mCO);
+        },
+        py::arg("nH_cm3"),
+        py::arg("Tgas_K"),
+        py::arg("sigma_d_per_H_cm2"),
+        py::arg("kB"),
+        py::arg("mCO"));
+
+    m.def(
+        "co_thermal_desorption_rate_cgs",
+        [](const double Tdust_K, const double nu0_co, const double E_bind_co) {
+            return co_phase::co_thermal_desorption_rate(Tdust_K, nu0_co, E_bind_co);
+        },
+        py::arg("Tdust_K"),
+        py::arg("nu0_co"),
+        py::arg("E_bind_co"));
+
+    m.def(
+        "co_photodesorption_surface_rate_cgs",
+        [](const double chi, const double F_DRAINE, const double Y_CO, const double N_SURF,
+           const int N_LAY) {
+            return co_phase::co_photodesorption_surface_rate(
+                chi, F_DRAINE, Y_CO, N_SURF, N_LAY);
+        },
+        py::arg("chi"),
+        py::arg("F_DRAINE"),
+        py::arg("Y_CO"),
+        py::arg("N_SURF"),
+        py::arg("N_LAY"));
+
+    m.def(
+        "co_active_ice_cgs",
+        [](const double nH_cm3, const double sigma_d_per_H_cm2, const double nco_ice_cm3,
+           const double N_SURF, const int N_LAY) {
+            double n_act_max = 0.0;
+            double n_act = 0.0;
+            co_phase::co_active_ice(
+                nH_cm3, sigma_d_per_H_cm2, nco_ice_cm3, N_SURF, N_LAY, n_act_max, n_act);
+            return std::make_pair(n_act_max, n_act);
+        },
+        py::arg("nH_cm3"),
+        py::arg("sigma_d_per_H_cm2"),
+        py::arg("nco_ice_cm3"),
+        py::arg("N_SURF"),
+        py::arg("N_LAY"));
+
+    m.def(
+        "co_photodesorption_R_cgs",
+        [](const double k_pd_surf_s, const double n_ice_act_cm3) {
+            return co_phase::co_photodesorption_R(k_pd_surf_s, n_ice_act_cm3);
+        },
+        py::arg("k_pd_surf_s"),
+        py::arg("n_ice_act_cm3"));
 }

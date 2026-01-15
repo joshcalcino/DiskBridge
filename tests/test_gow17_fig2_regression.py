@@ -12,9 +12,17 @@ import pytest
 
 import diskbridge
 from diskbridge.chemistry.api import run_chemistry
-from diskbridge.chemistry.models._gow17_network import (
-    I_HEP, I_OHX, I_CHX, I_CO, I_CP, I_HCOP, I_H2, I_CO_ICE, N_Y
-)
+import diskbridge._gow17 as _gow17
+
+I_HEP = _gow17.I_HEP
+I_OHX = _gow17.I_OHX
+I_CHX = _gow17.I_CHX
+I_CO = _gow17.I_CO
+I_CP = _gow17.I_CP
+I_HCOP = _gow17.I_HCOP
+I_H2 = _gow17.I_H2
+I_CO_ICE = _gow17.I_CO_ICE
+N_Y = _gow17.N_Y
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
@@ -105,7 +113,7 @@ def run_gow17_slab(radm: RadModel, nH: float, chi0: float = 2.0, n_iter: int = 4
 
     res = None
     for _ in range(n_iter):
-        res = run_chemistry(radm, model="gow17_pdr", config=config)
+        res = run_chemistry(radm, model="gow17", config=config)
         radm.nco_gas = res.number_densities["co"]
 
     return res
