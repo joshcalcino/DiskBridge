@@ -481,6 +481,38 @@ int gow17::Jac(const sunrealtype t,
 		J_[ic][ia] += rate_pa;
 	}
 
+	if (co_sigma_d_per_H_ref_ > 0.0 && co_N_LAY_ > 0) {
+		double Tgas;
+		if (const_temp_) {
+			Tgas = temp_;
+		} else {
+			Tgas = yprev[iE_] / Thermo::CvCold(yprev[iH2_], xHe_, yprev[ie_]);
+		}
+
+		const double sigma_d_per_H = Zd_ * co_sigma_d_per_H_ref_;
+		const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, Thermo::kb_, mCO_);
+		const double k_td = co_phase::co_thermal_desorption_rate(Tdust_, co_nu0_, co_E_bind_);
+		const double chi_pd = (GISRF_ != NULL) ? (*GISRF_) : 0.0;
+		const double k_pd_surf = co_phase::co_photodesorption_surface_rate(
+				chi_pd, co_F_DRAINE_, co_Y_CO_, co_N_SURF_, co_N_LAY_);
+
+		const double nco_ice_cm3 = yprev[iCOice_] * nH_;
+		double n_ice_act_max = 0.0;
+		double n_ice_act = 0.0;
+		co_phase::co_active_ice(
+				nH_, sigma_d_per_H, nco_ice_cm3, co_N_SURF_, co_N_LAY_, n_ice_act_max, n_ice_act);
+
+		double drpd = 0.0;
+		if (nH_ > 0.0 && nco_ice_cm3 < n_ice_act_max) {
+			drpd = k_pd_surf;
+		}
+
+		J_[iCO_][iCO_] += -k_fo;
+		J_[iCO_][iCOice_] += k_td + drpd;
+		J_[iCOice_][iCO_] += k_fo;
+		J_[iCOice_][iCOice_] += -k_td - drpd;
+	}
+
 	/*copy J to return*/
 	for (int i=0; i<kDimen; i++) {
 		for (int j=0; j<kDimen; j++) {

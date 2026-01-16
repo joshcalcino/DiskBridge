@@ -456,9 +456,73 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("mCO"));
 
     m.def(
+        "co_freezeout_rate_field_cgs",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> nH_cm3,
+           py::array_t<double, py::array::c_style | py::array::forcecast> Tgas_K,
+           py::array_t<double, py::array::c_style | py::array::forcecast> sigma_d_per_H_cm2,
+           const double kB, const double mCO) {
+            const auto b_nH = nH_cm3.request();
+            const auto b_T = Tgas_K.request();
+            const auto b_sig = sigma_d_per_H_cm2.request();
+            if (b_T.size != b_nH.size || b_sig.size != b_nH.size) {
+                throw std::invalid_argument("co_freezeout_rate_field_cgs: input arrays must have same size");
+            }
+            if (b_T.ndim != b_nH.ndim || b_sig.ndim != b_nH.ndim) {
+                throw std::invalid_argument("co_freezeout_rate_field_cgs: input arrays must have same ndim");
+            }
+            for (py::ssize_t d = 0; d < b_nH.ndim; ++d) {
+                if (b_T.shape[d] != b_nH.shape[d] || b_sig.shape[d] != b_nH.shape[d]) {
+                    throw std::invalid_argument("co_freezeout_rate_field_cgs: input arrays must have same shape");
+                }
+            }
+
+            std::vector<py::ssize_t> out_shape(static_cast<size_t>(b_nH.ndim));
+            for (py::ssize_t d = 0; d < b_nH.ndim; ++d) {
+                out_shape[static_cast<size_t>(d)] = b_nH.shape[d];
+            }
+            py::array_t<double> out(out_shape);
+            auto b_out = out.request();
+            const double *nH_ptr = static_cast<const double *>(b_nH.ptr);
+            const double *T_ptr = static_cast<const double *>(b_T.ptr);
+            const double *sig_ptr = static_cast<const double *>(b_sig.ptr);
+            double *out_ptr = static_cast<double *>(b_out.ptr);
+            for (py::ssize_t i = 0; i < b_nH.size; ++i) {
+                out_ptr[i] = co_phase::co_freezeout_rate(nH_ptr[i], T_ptr[i], sig_ptr[i], kB, mCO);
+            }
+            return out;
+        },
+        py::arg("nH_cm3"),
+        py::arg("Tgas_K"),
+        py::arg("sigma_d_per_H_cm2"),
+        py::arg("kB"),
+        py::arg("mCO"));
+
+    m.def(
         "co_thermal_desorption_rate_cgs",
         [](const double Tdust_K, const double nu0_co, const double E_bind_co) {
             return co_phase::co_thermal_desorption_rate(Tdust_K, nu0_co, E_bind_co);
+        },
+        py::arg("Tdust_K"),
+        py::arg("nu0_co"),
+        py::arg("E_bind_co"));
+
+    m.def(
+        "co_thermal_desorption_rate_field_cgs",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> Tdust_K,
+           const double nu0_co, const double E_bind_co) {
+            const auto b_Td = Tdust_K.request();
+            std::vector<py::ssize_t> out_shape(static_cast<size_t>(b_Td.ndim));
+            for (py::ssize_t d = 0; d < b_Td.ndim; ++d) {
+                out_shape[static_cast<size_t>(d)] = b_Td.shape[d];
+            }
+            py::array_t<double> out(out_shape);
+            auto b_out = out.request();
+            const double *Td_ptr = static_cast<const double *>(b_Td.ptr);
+            double *out_ptr = static_cast<double *>(b_out.ptr);
+            for (py::ssize_t i = 0; i < b_Td.size; ++i) {
+                out_ptr[i] = co_phase::co_thermal_desorption_rate(Td_ptr[i], nu0_co, E_bind_co);
+            }
+            return out;
         },
         py::arg("Tdust_K"),
         py::arg("nu0_co"),
@@ -470,6 +534,31 @@ PYBIND11_MODULE(_gow17, m) {
            const int N_LAY) {
             return co_phase::co_photodesorption_surface_rate(
                 chi, F_DRAINE, Y_CO, N_SURF, N_LAY);
+        },
+        py::arg("chi"),
+        py::arg("F_DRAINE"),
+        py::arg("Y_CO"),
+        py::arg("N_SURF"),
+        py::arg("N_LAY"));
+
+    m.def(
+        "co_photodesorption_surface_rate_field_cgs",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> chi,
+           const double F_DRAINE, const double Y_CO, const double N_SURF, const int N_LAY) {
+            const auto b_chi = chi.request();
+            std::vector<py::ssize_t> out_shape(static_cast<size_t>(b_chi.ndim));
+            for (py::ssize_t d = 0; d < b_chi.ndim; ++d) {
+                out_shape[static_cast<size_t>(d)] = b_chi.shape[d];
+            }
+            py::array_t<double> out(out_shape);
+            auto b_out = out.request();
+            const double *chi_ptr = static_cast<const double *>(b_chi.ptr);
+            double *out_ptr = static_cast<double *>(b_out.ptr);
+            for (py::ssize_t i = 0; i < b_chi.size; ++i) {
+                out_ptr[i] = co_phase::co_photodesorption_surface_rate(
+                    chi_ptr[i], F_DRAINE, Y_CO, N_SURF, N_LAY);
+            }
+            return out;
         },
         py::arg("chi"),
         py::arg("F_DRAINE"),
@@ -494,9 +583,97 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("N_LAY"));
 
     m.def(
+        "co_active_ice_field_cgs",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> nH_cm3,
+           py::array_t<double, py::array::c_style | py::array::forcecast> sigma_d_per_H_cm2,
+           py::array_t<double, py::array::c_style | py::array::forcecast> nco_ice_cm3,
+           const double N_SURF, const int N_LAY) {
+            const auto b_nH = nH_cm3.request();
+            const auto b_sig = sigma_d_per_H_cm2.request();
+            const auto b_nco = nco_ice_cm3.request();
+            if (b_sig.size != b_nH.size || b_nco.size != b_nH.size) {
+                throw std::invalid_argument("co_active_ice_field_cgs: input arrays must have same size");
+            }
+            if (b_sig.ndim != b_nH.ndim || b_nco.ndim != b_nH.ndim) {
+                throw std::invalid_argument("co_active_ice_field_cgs: input arrays must have same ndim");
+            }
+            for (py::ssize_t d = 0; d < b_nH.ndim; ++d) {
+                if (b_sig.shape[d] != b_nH.shape[d] || b_nco.shape[d] != b_nH.shape[d]) {
+                    throw std::invalid_argument("co_active_ice_field_cgs: input arrays must have same shape");
+                }
+            }
+
+            std::vector<py::ssize_t> out_shape(static_cast<size_t>(b_nH.ndim));
+            for (py::ssize_t d = 0; d < b_nH.ndim; ++d) {
+                out_shape[static_cast<size_t>(d)] = b_nH.shape[d];
+            }
+            py::array_t<double> out_max(out_shape);
+            py::array_t<double> out_act(out_shape);
+            auto b_out_max = out_max.request();
+            auto b_out_act = out_act.request();
+
+            const double *nH_ptr = static_cast<const double *>(b_nH.ptr);
+            const double *sig_ptr = static_cast<const double *>(b_sig.ptr);
+            const double *nco_ptr = static_cast<const double *>(b_nco.ptr);
+            double *out_max_ptr = static_cast<double *>(b_out_max.ptr);
+            double *out_act_ptr = static_cast<double *>(b_out_act.ptr);
+
+            for (py::ssize_t i = 0; i < b_nH.size; ++i) {
+                double n_act_max = 0.0;
+                double n_act = 0.0;
+                co_phase::co_active_ice(
+                    nH_ptr[i], sig_ptr[i], nco_ptr[i], N_SURF, N_LAY, n_act_max, n_act);
+                out_max_ptr[i] = n_act_max;
+                out_act_ptr[i] = n_act;
+            }
+
+            return std::make_pair(out_max, out_act);
+        },
+        py::arg("nH_cm3"),
+        py::arg("sigma_d_per_H_cm2"),
+        py::arg("nco_ice_cm3"),
+        py::arg("N_SURF"),
+        py::arg("N_LAY"));
+
+    m.def(
         "co_photodesorption_R_cgs",
         [](const double k_pd_surf_s, const double n_ice_act_cm3) {
             return co_phase::co_photodesorption_R(k_pd_surf_s, n_ice_act_cm3);
+        },
+        py::arg("k_pd_surf_s"),
+        py::arg("n_ice_act_cm3"));
+
+    m.def(
+        "co_photodesorption_R_field_cgs",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> k_pd_surf_s,
+           py::array_t<double, py::array::c_style | py::array::forcecast> n_ice_act_cm3) {
+            const auto b_k = k_pd_surf_s.request();
+            const auto b_n = n_ice_act_cm3.request();
+            if (b_k.size != b_n.size) {
+                throw std::invalid_argument("co_photodesorption_R_field_cgs: input arrays must have same size");
+            }
+            if (b_k.ndim != b_n.ndim) {
+                throw std::invalid_argument("co_photodesorption_R_field_cgs: input arrays must have same ndim");
+            }
+            for (py::ssize_t d = 0; d < b_k.ndim; ++d) {
+                if (b_k.shape[d] != b_n.shape[d]) {
+                    throw std::invalid_argument("co_photodesorption_R_field_cgs: input arrays must have same shape");
+                }
+            }
+
+            std::vector<py::ssize_t> out_shape(static_cast<size_t>(b_k.ndim));
+            for (py::ssize_t d = 0; d < b_k.ndim; ++d) {
+                out_shape[static_cast<size_t>(d)] = b_k.shape[d];
+            }
+            py::array_t<double> out(out_shape);
+            auto b_out = out.request();
+            const double *k_ptr = static_cast<const double *>(b_k.ptr);
+            const double *n_ptr = static_cast<const double *>(b_n.ptr);
+            double *out_ptr = static_cast<double *>(b_out.ptr);
+            for (py::ssize_t i = 0; i < b_k.size; ++i) {
+                out_ptr[i] = co_phase::co_photodesorption_R(k_ptr[i], n_ptr[i]);
+            }
+            return out;
         },
         py::arg("k_pd_surf_s"),
         py::arg("n_ice_act_cm3"));

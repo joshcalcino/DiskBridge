@@ -84,32 +84,40 @@ def co_freezeout_rate_field_cgs(
     Tgas_K: np.ndarray,
     sigma_d_per_H_cm2: np.ndarray,
 ) -> np.ndarray:
-    out = np.empty(np.shape(nH_cm3), dtype=np.float64)
-    nH_flat = np.asarray(nH_cm3, dtype=np.float64).ravel()
-    T_flat = np.asarray(Tgas_K, dtype=np.float64).ravel()
-    sig_flat = np.asarray(sigma_d_per_H_cm2, dtype=np.float64).ravel()
-    out_flat = out.ravel()
-    for i in range(out_flat.size):
-        out_flat[i] = co_freezeout_rate_cgs(float(nH_flat[i]), float(T_flat[i]), float(sig_flat[i]))
-    return out
+    return np.asarray(
+        _gow17.co_freezeout_rate_field_cgs(
+            np.asarray(nH_cm3, dtype=np.float64),
+            np.asarray(Tgas_K, dtype=np.float64),
+            np.asarray(sigma_d_per_H_cm2, dtype=np.float64),
+            float(K_B),
+            float(M_CO_CGS),
+        ),
+        dtype=np.float64,
+    )
 
 
 def co_thermal_desorption_rate_field_cgs(Tdust_K: np.ndarray) -> np.ndarray:
-    out = np.empty(np.shape(Tdust_K), dtype=np.float64)
-    T_flat = np.asarray(Tdust_K, dtype=np.float64).ravel()
-    out_flat = out.ravel()
-    for i in range(out_flat.size):
-        out_flat[i] = co_thermal_desorption_rate_cgs(float(T_flat[i]))
-    return out
+    return np.asarray(
+        _gow17.co_thermal_desorption_rate_field_cgs(
+            np.asarray(Tdust_K, dtype=np.float64),
+            float(NU0_CO),
+            float(E_BIND_CO),
+        ),
+        dtype=np.float64,
+    )
 
 
 def co_photodesorption_surface_rate_field_cgs(chi: np.ndarray) -> np.ndarray:
-    out = np.empty(np.shape(chi), dtype=np.float64)
-    chi_flat = np.asarray(chi, dtype=np.float64).ravel()
-    out_flat = out.ravel()
-    for i in range(out_flat.size):
-        out_flat[i] = co_photodesorption_surface_rate_cgs(float(chi_flat[i]))
-    return out
+    return np.asarray(
+        _gow17.co_photodesorption_surface_rate_field_cgs(
+            np.asarray(chi, dtype=np.float64),
+            float(F_DRAINE),
+            float(Y_CO),
+            float(N_SURF),
+            int(N_LAY),
+        ),
+        dtype=np.float64,
+    )
 
 
 def co_active_ice_field_cgs(
@@ -117,32 +125,21 @@ def co_active_ice_field_cgs(
     sigma_d_per_H_cm2: np.ndarray,
     nco_ice_cm3: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    out_max = np.empty(np.shape(nH_cm3), dtype=np.float64)
-    out_act = np.empty(np.shape(nH_cm3), dtype=np.float64)
-
-    nH_flat = np.asarray(nH_cm3, dtype=np.float64).ravel()
-    sig_flat = np.asarray(sigma_d_per_H_cm2, dtype=np.float64).ravel()
-    nco_ice_flat = np.asarray(nco_ice_cm3, dtype=np.float64).ravel()
-
-    out_max_flat = out_max.ravel()
-    out_act_flat = out_act.ravel()
-    for i in range(out_max_flat.size):
-        n_ice_act_max, n_ice_act = co_active_ice_cgs(
-            float(nH_flat[i]),
-            float(sig_flat[i]),
-            float(nco_ice_flat[i]),
-        )
-        out_max_flat[i] = n_ice_act_max
-        out_act_flat[i] = n_ice_act
-
-    return out_max, out_act
+    out_max, out_act = _gow17.co_active_ice_field_cgs(
+        np.asarray(nH_cm3, dtype=np.float64),
+        np.asarray(sigma_d_per_H_cm2, dtype=np.float64),
+        np.asarray(nco_ice_cm3, dtype=np.float64),
+        float(N_SURF),
+        int(N_LAY),
+    )
+    return np.asarray(out_max, dtype=np.float64), np.asarray(out_act, dtype=np.float64)
 
 
 def co_photodesorption_R_field_cgs(k_pd_surf_s: np.ndarray, n_ice_act_cm3: np.ndarray) -> np.ndarray:
-    out = np.empty(np.shape(n_ice_act_cm3), dtype=np.float64)
-    k_flat = np.asarray(k_pd_surf_s, dtype=np.float64).ravel()
-    n_flat = np.asarray(n_ice_act_cm3, dtype=np.float64).ravel()
-    out_flat = out.ravel()
-    for i in range(out_flat.size):
-        out_flat[i] = co_photodesorption_R_cgs(float(k_flat[i]), float(n_flat[i]))
-    return out
+    return np.asarray(
+        _gow17.co_photodesorption_R_field_cgs(
+            np.asarray(k_pd_surf_s, dtype=np.float64),
+            np.asarray(n_ice_act_cm3, dtype=np.float64),
+        ),
+        dtype=np.float64,
+    )
