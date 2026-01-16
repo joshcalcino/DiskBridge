@@ -11,7 +11,7 @@ import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._logging import logger
 from diskbridge._constants import (
-    K0_CO, SIGMA_D_PER_H, E_BIND_CO, NU0_CO, TAU_CO_FORM,
+    K0_CO, E_BIND_CO, NU0_CO, TAU_CO_FORM,
     TAU_FORM_N0, TAU_FORM_TAU0, TAU_FORM_TAU_MIN, TAU_FORM_ALPHA
 )
 from diskbridge.chemistry.api import run_chemistry, run_thermochemistry

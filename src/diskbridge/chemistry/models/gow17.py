@@ -11,7 +11,6 @@ from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
 from diskbridge._constants import (
-    SIGMA_D_PER_H,
     EPS_CHI,
     LOG_CHI_OVER_NH_PDISS,
     E_BIND_CO,
@@ -114,7 +113,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     Zg = float(cfg.get("Zg", 1.0))
     Zd_mode = str(cfg.get("Zd_mode", "scalar"))
-    sigma_d_per_H_ref = float(cfg.get("sigma_d_per_H_ref", SIGMA_D_PER_H))
 
     enable_co_phase = bool(cfg.get("enable_co_phase", False))
 
@@ -186,6 +184,21 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     sigma_d = rad.ensure_sigma_d_per_H()
     sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
+
+    sigma_d_per_H_ref_cfg = cfg.get("sigma_d_per_H_ref", None)
+    if sigma_d_per_H_ref_cfg is None:
+        valid = np.isfinite(sigma_d_cm2) & (sigma_d_cm2 > 0.0)
+        if not np.any(valid):
+            raise ValueError(
+                "gow17: cannot infer sigma_d_per_H_ref because sigma_d_per_H has no positive finite values"
+            )
+        sigma_d_per_H_ref = float(np.nanmedian(sigma_d_cm2[valid]))
+    else:
+        if isinstance(sigma_d_per_H_ref_cfg, str):
+            sigma_d_per_H_ref = float(Quantity(sigma_d_per_H_ref_cfg).to("cm^2").magnitude)
+        else:
+            sigma_d_per_H_ref = float(sigma_d_per_H_ref_cfg)
+
     Zd_arr = np.divide(
         sigma_d_cm2,
         sigma_d_per_H_ref,

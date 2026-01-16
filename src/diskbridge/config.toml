@@ -118,7 +118,6 @@ X_O_tot = 3.2e-4               # Total oxygen abundance
 # CO molecular properties
 E_bind_co = "855.0 K"          # CO binding energy to grain surface
 nu0_co = "1.0e12 Hz"           # Thermal desorption attempt frequency
-sigma_d_per_H = "1.0e-21 cm^2" # Dust cross-section per H nucleus
 
 # =============================================================================
 # PINTE SWITCHES MODEL
@@ -252,35 +251,3 @@ n_iter = 3                     # Number of thermal iterations
 tol = 0.01                     # Convergence tolerance
 max_bisect_iter = 60           # Maximum bisection iterations
 bisect_tol = 1.0e-6            # Bisection tolerance
-
-
-[chemistry.gow17_pdr]
-mode = "equilibrium"
-nside = 4
-b_kms = 0.3
-ion_rate = "1.0e-17 s^-1"
-Zg = 1.0
-Zd = 1.0
-fH2gr = 1.0
-fHplusgr = 1.0
-fCplusgr = 1.0
-fHeplusgr = 1.0
-fSplusgr = 1.0
-fSiplusgr = 1.0
-fCplusCR = 1.0
-const_temp = true
-max_iter = 60
-reltol = 1.0e-2
-abstol0 = 1.0e-9
-
-shielding_max_iter = 6
-shielding_reltol = 1.0e-2
-shielding_abstol = 1.0e-9
-shielding_outer_coupling = "pseudotime"
-shielding_dt_schedule = "triangular"
-shielding_self_weight = 1.0
-
-# Time-dependent mode parameters
-t_end = "1.0e3 yr"
-dt = "1.0 yr"
-shielding_update_every = 10

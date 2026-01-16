@@ -64,7 +64,6 @@ X_O_TOT = float(_chem_common['X_O_tot'])
 # CO molecular properties
 E_BIND_CO = Quantity(_chem_common['E_bind_co']).to_base_units().magnitude    # K
 NU0_CO = Quantity(_chem_common['nu0_co']).to_base_units().magnitude          # Hz (s^-1)
-SIGMA_D_PER_H = Quantity(_chem_common['sigma_d_per_H']).to_base_units().magnitude  # cm^2
 
 # =============================================================================
 # PINTE SWITCHES MODEL

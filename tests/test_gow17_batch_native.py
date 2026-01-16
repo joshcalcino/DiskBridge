@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 import diskbridge._gow17 as _gow17
-from diskbridge._constants import E_BIND_CO, F_DRAINE, N_LAY, N_SURF, NU0_CO, SIGMA_D_PER_H, Y_CO
+from diskbridge._constants import E_BIND_CO, F_DRAINE, N_LAY, N_SURF, NU0_CO, Y_CO
 
 
 N_Y = _gow17.N_Y
@@ -107,7 +107,7 @@ class TestBatchSolverBasic:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -168,7 +168,7 @@ class TestBatchSolverBasic:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -240,7 +240,7 @@ class TestNoDoubleAttenuation:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -283,7 +283,7 @@ class TestNoDoubleAttenuation:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -373,7 +373,7 @@ class TestRadiationFieldScaling:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -416,7 +416,7 @@ class TestRadiationFieldScaling:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
@@ -507,7 +507,7 @@ class TestThermoEvolution:
             fSplusgr=1.0,
             fSiplusgr=1.0,
             fCplusCR=1.0,
-            co_sigma_d_per_H_ref=float(SIGMA_D_PER_H),
+            co_sigma_d_per_H_ref=1.0e-21,
             co_E_bind_co=float(E_BIND_CO),
             co_nu0_co=float(NU0_CO),
             co_F_DRAINE=float(F_DRAINE),
