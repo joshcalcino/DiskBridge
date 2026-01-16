@@ -116,6 +116,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Zd_mode = str(cfg.get("Zd_mode", "scalar"))
     sigma_d_per_H_ref = float(cfg.get("sigma_d_per_H_ref", SIGMA_D_PER_H))
 
+    enable_co_phase = bool(cfg.get("enable_co_phase", False))
+
     fH2gr = float(cfg.get("fH2gr", 1.0))
     fHplusgr = float(cfg.get("fHplusgr", 1.0))
     fCplusgr = float(cfg.get("fCplusgr", 1.0))
@@ -360,6 +362,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         for j in range(N_Y):
             y_guess[:, j] = y0_single[j]
 
+    if not enable_co_phase:
+        y_guess[:, I_CO_ICE] = 0.0
+
     if not const_temp and not warm_start:
         xe0 = _electron_abundance(y_guess)
         Cv0 = _cv_cold(y_guess[:, I_H2], xe0)
@@ -473,13 +478,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             fSplusgr=fSplusgr,
             fSiplusgr=fSiplusgr,
             fCplusCR=fCplusCR,
-            co_sigma_d_per_H_ref=float(sigma_d_per_H_ref),
-            co_E_bind_co=float(E_BIND_CO),
-            co_nu0_co=float(NU0_CO),
-            co_F_DRAINE=float(F_DRAINE),
-            co_Y_CO=float(Y_CO),
-            co_N_SURF=float(N_SURF),
-            co_N_LAY=int(N_LAY),
+            co_sigma_d_per_H_ref=(float(sigma_d_per_H_ref) if enable_co_phase else 0.0),
+            co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
+            co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
+            co_F_DRAINE=(float(F_DRAINE) if enable_co_phase else 0.0),
+            co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
+            co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
+            co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
             userJac=userJac,
             verbose=verbose,
         )
@@ -502,6 +507,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     y_out = y_guess.reshape(shape + (N_Y,))
     status = status_acc.reshape(shape)
+
+    if not enable_co_phase:
+        y_out[..., I_CO_ICE] = 0.0
 
     xCO = y_out[..., I_CO]
     xCO_ice = y_out[..., I_CO_ICE]
@@ -616,6 +624,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     meta = {
         "model": "gow17",
+        "enable_co_phase": bool(enable_co_phase),
         "nside": int(nside),
         "b_kms": float(b_kms),
         "ion_rate_s": float(ion_rate_s),
