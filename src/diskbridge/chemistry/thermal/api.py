@@ -83,6 +83,18 @@ def run_thermal(
     else:
         logger.info("Computing chi from mean intensity")
         chi_for_thermal = rad.ensure_chi()
+
+    if (
+        (getattr(rad, "nCplus", None) is None)
+        or (getattr(rad, "nC", None) is None)
+        or (getattr(rad, "ne", None) is None)
+        or (getattr(rad, "nH2", None) is None)
+        or (getattr(rad, "nH_atom", None) is None)
+    ):
+        raise RuntimeError(
+            "thermal_balance requires chemistry outputs (nCplus, nC, ne, nH2, nH_atom). "
+            "Run carbon_reduced first, then iterate in run_thermochemistry."
+        )
     
     logger.info("Building thermal state...")
     state = ThermalState(
@@ -103,33 +115,13 @@ def run_thermal(
         state.nco_gas = rad.nco_gas
         state.nco_ice = rad.nco_ice
     
-    # Carbon closure products from chemistry (required)
-    if rad.nCplus is not None:
-        logger.info("Including carbon closure from chemistry (nCplus, nC, ne)")
-        missing = []
-        if rad.nC is None:
-            missing.append("rad.nC")
-        if rad.ne is None:
-            missing.append("rad.ne")
-        if missing:
-            raise ValueError(
-                "Carbon closure incomplete on RadModel. Missing: "
-                + ", ".join(missing)
-                + ". Chemistry must provide nCplus, nC, and ne together."
-            )
-        state.nCplus = rad.nCplus
-        state.nC = rad.nC
-        state.ne = rad.ne
-    
-    cfg = resolve_model_config(("thermal", model), overrides=config)
-
-    if rad.nH2 is None or rad.nH_atom is None:
-        raise ValueError(
-            "Missing hydrogen partition on RadModel (nH2/nH_atom). "
-            "Compute it in chemistry and store it on rad before calling run_thermal."
-        )
+    state.nCplus = rad.nCplus
+    state.nC = rad.nC
+    state.ne = rad.ne
     state.nH2 = rad.nH2
     state.nH_atom = rad.nH_atom
+
+    cfg = resolve_model_config(("thermal", model), overrides=config)
 
     # Only pass solver control parameters and user overrides
     params = {

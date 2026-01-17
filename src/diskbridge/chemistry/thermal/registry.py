@@ -68,7 +68,6 @@ def run_thermal_balance(
         params=params,
         n_iter=n_iter,
         tol=tol,
-        update_closure=True,
         max_bisect_iter=max_bisect_iter,
         bisect_tol=bisect_tol,
         store_terms=store_terms,

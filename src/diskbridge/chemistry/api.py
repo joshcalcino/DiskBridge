@@ -89,7 +89,7 @@ def run_thermochemistry(
     *,
     chemistry_model: str,
     chemistry_config: Optional[dict] = None,
-    thermal_model: str = "thermal_balance_v1",
+    thermal_model: str = "thermal_balance",
     thermal_config: Optional[dict] = None,
     n_iter: int = 3,
     convergence: Optional[dict] = None,
@@ -142,13 +142,18 @@ def run_thermochemistry(
     ... )
     """
     from diskbridge.chemistry.thermal import run_thermal
-    from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
     
     if chemistry_config is None:
         chemistry_config = {}
     if thermal_config is None:
         thermal_config = {}
     
+    if str(chemistry_model).lower() != "carbon_reduced":
+        raise ValueError(
+            "run_thermochemistry requires chemistry_model='carbon_reduced' to enforce an explicit "
+            "chemistry-first thermal contract."
+        )
+
     logger.info("=" * 60)
     logger.info("Running coupled thermochemistry")
     logger.info("=" * 60)
@@ -156,33 +161,23 @@ def run_thermochemistry(
     chem_result = None
     therm_result = None
 
-    chi_dust = rad.chi if rad.chi is not None else rad.ensure_chi()
-    nH = rad.ensure_nH()
-
-    if str(chemistry_model).lower() not in {"gow17"}:
-        ensure_h2_partition(rad, nH=nH, chi_dust=chi_dust)
-
-    enable_convergence = convergence is not None
-    if enable_convergence:
-        if not convergence:
-            raise ValueError(
-                "convergence must specify at least one threshold: "
-                "tgas_atol, tgas_rtol, nco_atol, nco_rtol"
-            )
-        tgas_atol = convergence.get("tgas_atol", None)
-        tgas_rtol = convergence.get("tgas_rtol", None)
-        nco_atol = convergence.get("nco_atol", None)
-        nco_rtol = convergence.get("nco_rtol", None)
-        if tgas_atol is None and tgas_rtol is None and nco_atol is None and nco_rtol is None:
-            raise ValueError(
-                "convergence must specify at least one threshold: "
-                "tgas_atol, tgas_rtol, nco_atol, nco_rtol"
-            )
-    else:
-        tgas_atol = None
+    if convergence is None:
+        enable_convergence = False
         tgas_rtol = None
-        nco_atol = None
         nco_rtol = None
+    else:
+        enable_convergence = True
+        if not isinstance(convergence, dict) or (not convergence):
+            raise ValueError("convergence must be a dict with keys: tgas_rtol and optionally nco_rtol")
+        unknown = set(convergence.keys()) - {"tgas_rtol", "nco_rtol"}
+        if unknown:
+            raise ValueError(f"Unknown convergence keys: {sorted(unknown)}")
+        if convergence.get("tgas_rtol", None) is None:
+            raise ValueError("convergence requires tgas_rtol")
+        tgas_rtol = float(convergence["tgas_rtol"])
+        nco_rtol = convergence.get("nco_rtol", None)
+        if nco_rtol is not None:
+            nco_rtol = float(nco_rtol)
 
     prev_tgas_K = None
     prev_nco_total = None
@@ -196,7 +191,7 @@ def run_thermochemistry(
             rad,
             model=chemistry_model,
             config=chemistry_config,
-            write=(write and (not enable_convergence) and iteration == n_iter - 1),
+            write=False,
         )
         
         if chem_result.number_densities:
@@ -218,8 +213,10 @@ def run_thermochemistry(
             rad,
             model=thermal_model,
             config=thermal_config,
-            write=(write and (not enable_convergence) and iteration == n_iter - 1),
+            write=False,
         )
+
+        rad.gas_temperature = therm_result.tgas
         
         logger.info(f"Iteration {iteration + 1} complete")
         logger.info(f"  Tgas range: {therm_result.tgas.to('K').magnitude.min():.1f} - "
@@ -239,35 +236,25 @@ def run_thermochemistry(
             elif rad.nco_ice is not None:
                 nco_total = rad.nco_ice.to('cm^-3').magnitude
 
-            if (nco_atol is not None or nco_rtol is not None) and nco_total is None:
+            if (nco_rtol is not None) and nco_total is None:
                 raise ValueError(
-                    "CO convergence requested (nco_atol/nco_rtol) but no CO fields "
+                    "CO convergence requested (nco_rtol) but no CO fields "
                     "are available on rad (nco_gas/nco_ice)."
                 )
 
             if prev_tgas_K is not None:
-                need_t = (tgas_atol is not None) or (tgas_rtol is not None)
-                need_co = (nco_atol is not None) or (nco_rtol is not None)
+                dt = np.abs(tgas_K - prev_tgas_K)
+                denom_t = np.where(prev_tgas_K != 0.0, np.abs(prev_tgas_K), np.inf)
+                t_ok = (np.max(dt / denom_t) <= float(tgas_rtol))
 
-                t_ok = True
-                if need_t:
-                    dt = np.abs(tgas_K - prev_tgas_K)
-                    if tgas_atol is not None:
-                        t_ok = t_ok and (np.max(dt) <= float(tgas_atol))
-                    if tgas_rtol is not None:
-                        denom = np.where(prev_tgas_K != 0.0, np.abs(prev_tgas_K), np.inf)
-                        t_ok = t_ok and (np.max(dt / denom) <= float(tgas_rtol))
-
-                co_ok = True
-                if need_co:
+                if nco_rtol is None:
+                    co_ok = True
+                else:
                     dn = np.abs(nco_total - prev_nco_total)
-                    if nco_atol is not None:
-                        co_ok = co_ok and (np.max(dn) <= float(nco_atol))
-                    if nco_rtol is not None:
-                        denom = np.where(prev_nco_total != 0.0, np.abs(prev_nco_total), np.inf)
-                        co_ok = co_ok and (np.max(dn / denom) <= float(nco_rtol))
+                    denom_n = np.where(prev_nco_total != 0.0, np.abs(prev_nco_total), np.inf)
+                    co_ok = (np.max(dn / denom_n) <= float(nco_rtol))
 
-                converged = (not need_t or t_ok) and (not need_co or co_ok)
+                converged = t_ok and co_ok
                 if converged:
                     logger.info(
                         f"Converged after {iteration + 1} iterations; stopping early"
@@ -281,7 +268,7 @@ def run_thermochemistry(
     logger.info("Thermochemistry complete!")
     logger.info("=" * 60)
 
-    if write and enable_convergence:
+    if write:
         if chem_result is not None and chem_result.number_densities:
             write_many(rad, chem_result.number_densities)
         if therm_result is not None:

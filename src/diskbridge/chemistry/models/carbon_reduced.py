@@ -21,8 +21,8 @@ from diskbridge.chemistry.hydrogen.api import ensure_h2_partition
 from diskbridge.chemistry.models._carbon_reduced_math import (
     solve_carbon_reduced_steady_state_cgs,
     evolve_carbon_reduced_time_dependent,
-    carbon_closure_cell_param_cgs,
 )
+from diskbridge.chemistry.processes.carbon_closure import carbon_closure_cell_param_cgs
 from diskbridge.chemistry.tau_form import compute_tau_form_co_cgs
 from diskbridge.chemistry.validation import validate_chemistry_state
 from diskbridge._logging import logger
