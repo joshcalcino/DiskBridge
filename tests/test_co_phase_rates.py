@@ -38,28 +38,5 @@ def test_co_phase_rates_qualitative_behavior() -> None:
     assert k_pd_1 > 0.0
     assert k_pd_10 > k_pd_1
 
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return
-
-    out_dir = Path(__file__).parent.parent / "visualization_tests"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    Td = np.linspace(5.0, 120.0, 400)
-    k_des = np.array([co_thermal_desorption_rate_cgs(float(t)) for t in Td], dtype=float)
-
-    fig, ax = plt.subplots(figsize=(6.0, 4.0))
-    ax.semilogy(Td, np.maximum(k_des, 1e-300), color="k")
-    ax.set_xlabel("Tdust [K]")
-    ax.set_ylabel("k_des [1/s]")
-    fig.tight_layout()
-    fig.savefig(out_dir / "co_desorption_rate_vs_T.png", dpi=150)
-    plt.close(fig)
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

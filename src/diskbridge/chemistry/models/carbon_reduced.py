@@ -393,13 +393,6 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     if bool(skip_shielding):
         shielding_iter = 0
 
-    visser = None
-    compute_co_shielding_healpix = None
-    if not bool(skip_shielding):
-        # Shielding backend is selected inside _compute_co_shielding.
-        # For effectively-1D meshes we do not require healpy.
-        pass
-
     min_rate = float(cfg.get('min_rate', 0.0))
 
     for _ in range(int(shielding_iter) + 1):

@@ -131,14 +131,3 @@ def test_run_thermochemistry_convergence_metrics_reasonable() -> None:
 
     if len(metrics) >= 2:
         assert float(metrics[-1]) <= float(metrics[0])
-
-    out_dir = Path(__file__).parent.parent / "visualization_tests"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(6.0, 4.0))
-    ax.plot(np.arange(1, len(metrics) + 1), metrics, color="k")
-    ax.set_xlabel("outer iteration (from 2nd iter)")
-    ax.set_ylabel("max rel dT")
-    fig.tight_layout()
-    fig.savefig(out_dir / "thermochemistry_convergence_metric.png", dpi=150)
-    plt.close(fig)

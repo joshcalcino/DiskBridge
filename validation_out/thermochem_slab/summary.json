@@ -1,0 +1,14 @@
+{
+  "Av_max": 5.0,
+  "Tdust_K": 20.0,
+  "chi0": 1.0,
+  "job": "thermochem_slab",
+  "nH_cm3": 10000.0,
+  "n_cells": 256,
+  "shielding_iter": 2,
+  "tgas_rel_metrics": [
+    0.0
+  ],
+  "thermochemistry_n_iter": 2,
+  "time": "2026-01-18T16:07:02"
+}

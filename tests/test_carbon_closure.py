@@ -73,26 +73,5 @@ def test_carbon_closure_monotonic_vs_chi() -> None:
     diffs = np.diff(nCplus)
     assert np.min(diffs) >= -1e-12 * float(X_C_TOT) * nH
 
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return
-
-    out_dir = Path(__file__).parent.parent / "visualization_tests"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(6.0, 4.0))
-    ax.plot(np.log10(chi_grid), nCplus / (float(X_C_TOT) * nH), color="k")
-    ax.set_xlabel("log10 chi")
-    ax.set_ylabel("nCplus / (X_C_tot * nH)")
-    ax.set_ylim(-0.05, 1.05)
-    fig.tight_layout()
-    fig.savefig(out_dir / "carbon_closure_monotonicity.png", dpi=150)
-    plt.close(fig)
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

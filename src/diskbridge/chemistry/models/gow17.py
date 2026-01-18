@@ -175,6 +175,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "max"))
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
+    slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
 
     nH = rad.ensure_nH()
     Tgas = rad.ensure_gas_temperature()
@@ -207,6 +208,233 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         if Av_arr.shape != shape:
             raise ValueError(f"gow17: rad.Av shape {Av_arr.shape} does not match nH shape {shape}")
         Av_flat = Av_arr.reshape(ncells)
+
+    if slab_1d_equilibrium:
+        if not chi_is_incident:
+            raise ValueError("gow17: slab_1d_equilibrium requires chi_is_incident=True")
+        if not is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            raise ValueError("gow17: slab_1d_equilibrium requires an effectively-1D mesh")
+        if Av_flat is None:
+            raise RuntimeError("gow17: internal error (Av_flat missing)")
+
+        NH_total_cfg = cfg.get("NH_total", None)
+        NH_min_cfg = cfg.get("NH_min", None)
+        if NH_total_cfg is None or NH_min_cfg is None:
+            raise ValueError("gow17: slab_1d_equilibrium requires NH_total and NH_min in config")
+
+        NH_total = _maybe_quantity_to_float(NH_total_cfg, "cm^-2")
+        NH_min = _maybe_quantity_to_float(NH_min_cfg, "cm^-2")
+        logNH = bool(cfg.get("logNH", True))
+        field_geo = int(cfg.get("field_geo", 0))
+        isdust = bool(cfg.get("isdust", True))
+        isfsH2 = bool(cfg.get("isfsH2", True))
+        isfsCO = bool(cfg.get("isfsCO", True))
+        isfsC = bool(cfg.get("isfsC", True))
+
+        nH0 = float(nH_flat[0])
+        if not np.allclose(nH_flat, nH0, rtol=0.0, atol=0.0):
+            raise ValueError("gow17: slab_1d_equilibrium requires uniform nH")
+
+        chi0 = float(chi_dust_flat[0])
+        if not np.allclose(chi_dust_flat, chi0, rtol=0.0, atol=0.0):
+            raise ValueError("gow17: slab_1d_equilibrium requires uniform chi")
+
+        sigma_d = rad.ensure_sigma_d_per_H()
+        sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
+        valid = np.isfinite(sigma_d_cm2) & (sigma_d_cm2 > 0.0)
+        if not np.any(valid):
+            raise ValueError("gow17: slab_1d_equilibrium requires positive finite sigma_d_per_H")
+        sigma_d_per_H_ref = float(np.nanmedian(sigma_d_cm2[valid]))
+        Zd0 = float(np.nanmedian(sigma_d_cm2[valid]) / sigma_d_per_H_ref)
+
+        Zg0 = float(Zg)
+        ion0 = float(ion_rate_s)
+        gradv0 = float(gradv_scalar)
+
+        NCOeff_global = bool(cfg.get("NCOeff_global", True))
+        bCO_L = bool(cfg.get("bCO_L", True))
+
+        y0 = np.zeros(N_Y, dtype=np.float64)
+        y0[I_HEP] = 1.450654e-08
+        y0[I_H3P] = 2.681411e-07
+        y0[I_CP] = 1.0e-4
+        y0[I_CO] = 1.0e-7
+        y0[I_H2] = 0.1
+        y0[I_CO_ICE] = 0.0
+        if not const_temp:
+            Cv0 = _cv_cold(
+                np.asarray([y0[I_H2]], dtype=np.float64),
+                np.asarray([0.0], dtype=np.float64),
+            )[0]
+            y0[I_E] = Cv0 * float(T_flat[0])
+
+        abstol = np.full(N_Y, abstol0, dtype=np.float64)
+        abstol[I_HEP] = 1.0e-15
+        abstol[I_OHX] = 1.0e-15
+        abstol[I_CHX] = 1.0e-15
+        abstol[I_CO] = 1.0e-15
+        abstol[I_CO_ICE] = 1.0e-15
+        abstol[I_CP] = 1.0e-15
+        abstol[I_HCOP] = 1.0e-30
+        abstol[I_H2] = 1.0e-8
+        abstol[I_HP] = 1.0e-15
+        abstol[I_H3P] = 1.0e-15
+        abstol[I_H2P] = 1.0e-15
+        abstol[I_E] = float(
+            _cv_cold(
+                np.asarray([0.1], dtype=np.float64),
+                np.asarray([0.0], dtype=np.float64),
+            )[0]
+        )
+
+        slab = _gow17.solve_slab_1d_equilibrium(
+            nH=nH0,
+            G0=(2.0 * chi0),
+            ngrid=int(ncells),
+            NH_total=float(NH_total),
+            logNH=bool(logNH),
+            NH_min=float(NH_min),
+            field_geo=int(field_geo),
+            isdust=bool(isdust),
+            isfsH2=bool(isfsH2),
+            isfsCO=bool(isfsCO),
+            isfsC=bool(isfsC),
+            Zg=float(Zg0),
+            Zd=float(Zd0),
+            ion_rate=float(ion0),
+            reltol=float(reltol),
+            abstol=abstol,
+            mxsteps=int(mxsteps),
+            maxord=int(maxord),
+            tolfac=float(tolfac),
+            tmin=float(tmin),
+            tmax=float(tmax),
+            verbose=bool(verbose),
+            y0=y0,
+            const_temp=bool(const_temp),
+            Tgas=float(T_flat[0]),
+            gradv=float(gradv0),
+            NCOeff_global=bool(NCOeff_global),
+            bCO_L=bool(bCO_L),
+            fH2gr=float(fH2gr),
+            fHplusgr=float(fHplusgr),
+            fCplusgr=float(fCplusgr),
+            fHeplusgr=float(fHeplusgr),
+            fSplusgr=float(fSplusgr),
+            fSiplusgr=float(fSiplusgr),
+            fCplusCR=float(fCplusCR),
+            co_sigma_d_per_H_ref=0.0,
+            co_E_bind_co=0.0,
+            co_nu0_co=0.0,
+            co_F_DRAINE=0.0,
+            co_Y_CO=0.0,
+            co_N_SURF=0.0,
+            co_N_LAY=0,
+            userJac=bool(userJac),
+        )
+
+        y_guess = np.asarray(slab["y"], dtype=np.float64).reshape(ncells, N_Y)
+        theta_h2_arr = np.asarray(slab["fShieldH2"], dtype=np.float64).reshape(shape)
+        theta_co_arr = np.asarray(slab["fShieldCO"], dtype=np.float64).reshape(shape)
+        theta_c_arr = np.ones_like(theta_co_arr, dtype=np.float64)
+
+        y_out = y_guess.reshape(shape + (N_Y,))
+        status = np.zeros(shape, dtype=np.int32)
+
+        xCO = y_out[..., I_CO]
+        xCO_ice = y_out[..., I_CO_ICE]
+        xH2 = y_out[..., I_H2]
+
+        nco_gas = Quantity(xCO * nH_cm3, "cm^-3")
+        nco_ice = Quantity(xCO_ice * nH_cm3, "cm^-3")
+        nH2_out = Quantity(xH2 * nH_cm3, "cm^-3")
+
+        xe = _electron_abundance(y_out)
+
+        xH_atom = 1.0 - (
+            y_out[..., I_OHX]
+            + y_out[..., I_CHX]
+            + y_out[..., I_HCOP]
+            + 3.0 * y_out[..., I_H3P]
+            + 2.0 * y_out[..., I_H2P]
+            + y_out[..., I_HP]
+            + 2.0 * y_out[..., I_H2]
+        )
+
+        xCtot = np.full(shape, float(Zg0) * float(XC_STD), dtype=np.float64)
+        xC_neutral = xCtot - (
+            y_out[..., I_HCOP]
+            + y_out[..., I_CHX]
+            + y_out[..., I_CO]
+            + y_out[..., I_CO_ICE]
+            + y_out[..., I_CP]
+        )
+
+        nCplus = Quantity(y_out[..., I_CP] * nH_cm3, "cm^-3")
+        nC = Quantity(np.maximum(xC_neutral, 0.0) * nH_cm3, "cm^-3")
+        ne = Quantity(xe * nH_cm3, "cm^-3")
+        nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
+
+        abundances = {
+            "co": Quantity(xCO, "dimensionless"),
+            "co_ice": Quantity(xCO_ice, "dimensionless"),
+        }
+
+        number_densities = {
+            "co": nco_gas,
+            "c+": nCplus,
+            "catom": nC,
+            "e": ne,
+            "h2": nH2_out,
+            "h": nH_atom,
+        }
+
+        fields = {
+            "co_ice": nco_ice,
+            "theta_co": Quantity(theta_co_arr, "dimensionless"),
+            "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
+            "theta_c": Quantity(theta_c_arr, "dimensionless"),
+            "chi_eff": Quantity(chi_dust_arr * theta_co_arr, "dimensionless"),
+        }
+
+        rad.gow17_y = y_out
+        rad.nco_gas = nco_gas
+        rad.nco_ice = nco_ice
+        rad.theta_co = fields["theta_co"]
+        rad.chi_eff = fields["chi_eff"]
+        rad.nH2 = nH2_out
+        rad.nH_atom = nH_atom
+        rad.nCplus = nCplus
+        rad.nC = nC
+        rad.ne = ne
+
+        n_fail = 0
+        max_status = 0
+
+        meta = {
+            "model": "gow17",
+            "enable_co_phase": bool(enable_co_phase),
+            "nside": int(nside),
+            "b_kms": float(b_kms),
+            "ion_rate_s": float(ion_rate_s),
+            "Zg": float(Zg0),
+            "Zd": float(Zd0),
+            "reltol": float(reltol),
+            "abstol0": float(abstol0),
+            "shielding_max_iter": int(shielding_max_iter),
+            "shielding_reltol": float(shielding_reltol),
+            "n_fail": int(n_fail),
+            "max_status": int(max_status),
+            "fail_idx_head": [],
+            "status_hist": {0: int(ncells), -1: 0},
+        }
+
+        return ChemistryResult(
+            abundances=abundances,
+            number_densities=number_densities,
+            fields=fields,
+            meta=meta,
+        )
 
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
@@ -449,17 +677,61 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
 
         if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
-                mesh=rad.model.mesh,
-                nH=nH_cm3,
-                chi=chi_dust_arr,
-                visser=visser,
-                nCO=nCO_cm3,
-                nC=nC_cm3,
-                nH2=nH2_cm3,
-                b_kms=b_kms,
-                outer=shielding_outer_1d,
-            )
+            if chi_is_incident:
+                if Av_flat is None:
+                    raise RuntimeError("gow17: internal error (Av_flat missing)")
+
+                NH_over_Zd = Av_flat * (1.87e21)
+                NH_flat = np.divide(
+                    NH_over_Zd,
+                    Zd_arr,
+                    out=np.zeros_like(NH_over_Zd, dtype=np.float64),
+                    where=(Zd_arr > 0.0),
+                )
+
+                dNH = np.empty_like(NH_flat, dtype=np.float64)
+                dNH[:-1] = NH_flat[1:] - NH_flat[:-1]
+                dNH[-1] = 0.0
+
+                xH2_use = np.ascontiguousarray(xH2, dtype=np.float64)
+                xCO_use = np.ascontiguousarray(xCO, dtype=np.float64)
+                xC_use = np.ascontiguousarray(xC_neutral, dtype=np.float64)
+
+                N_H2 = np.zeros_like(NH_flat, dtype=np.float64)
+                N_CO = np.zeros_like(NH_flat, dtype=np.float64)
+                N_C = np.zeros_like(NH_flat, dtype=np.float64)
+                if NH_flat.size >= 2:
+                    N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
+                    N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
+                    N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
+
+                from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
+
+                theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
+                theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+
+                AH2 = 1.17e-8
+                tau_H2 = 1.2e-14 * 2.0 * N_H2
+                y = AH2 * tau_H2
+                ry = np.exp(-y) / (1.0 + y)
+                rc = np.exp(-1.6e-17 * N_C)
+                theta_c_flat = rc * ry
+
+                theta_h2_arr = theta_h2_flat.reshape(shape)
+                theta_co_arr = theta_co_flat.reshape(shape)
+                theta_c_arr = theta_c_flat.reshape(shape)
+            else:
+                theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
+                    mesh=rad.model.mesh,
+                    nH=nH_cm3,
+                    chi=chi_dust_arr,
+                    visser=visser,
+                    nCO=nCO_cm3,
+                    nC=nC_cm3,
+                    nH2=nH2_cm3,
+                    b_kms=b_kms,
+                    outer=shielding_outer_1d,
+                )
         else:
             from diskbridge.chemistry.shielding.healpix_columns import (
                 compute_pdr_shielding_healpix,

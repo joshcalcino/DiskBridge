@@ -49,6 +49,9 @@ def _compute_Av(mesh, nH_cm3: np.ndarray, sigma_d_per_H_cm2: np.ndarray) -> np.n
     return mag_per_tau * tau
 
 
+_NH_PER_AV_CM2 = 1.87e21
+
+
 def _setup_matplotlib():
     import matplotlib
 
@@ -202,7 +205,7 @@ def _plot_carbon_budget_vs_Av(
     plt.close(fig)
 
 
-def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: float):
+def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: float, Av_max: float):
     from diskbridge._units import Quantity, units
     from diskbridge.model.core import Model, SubModel
     from diskbridge.model.field import Field
@@ -211,9 +214,20 @@ def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: floa
 
     m_H = units("m_H")
 
-    x_centers = np.linspace(0.5, float(n_cells) - 0.5, int(n_cells))
+    Av_edges = np.linspace(0.0, float(Av_max), int(n_cells) + 1, dtype=float)
+    NH_edges = Av_edges * _NH_PER_AV_CM2
+
+    dNH = np.diff(NH_edges)
+    dx_cm = dNH / float(nH_cm3)
+
+    x_edges_cm = np.empty(int(n_cells) + 1, dtype=float)
+    x_edges_cm[0] = 0.0
+    x_edges_cm[1:] = np.cumsum(dx_cm)
+
+    Av_centers = 0.5 * (Av_edges[:-1] + Av_edges[1:])
+
     mesh = Mesh.cartesian(
-        x=Axis(centers=Quantity(x_centers, "cm")),
+        x=Axis(edges=Quantity(x_edges_cm, "cm")),
         y=Axis(edges=Quantity(np.array([0.0, 1.0]), "cm")),
         z=Axis(edges=Quantity(np.array([0.0, 1.0]), "cm")),
     )
@@ -226,7 +240,8 @@ def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: floa
     rho = (Quantity(np.full(mesh.shape, float(nH_cm3)), "cm^-3") * (1.4 * m_H)).to("g/cm^3")
     model.gas_register("density", Field(quantity="density", data=rho, axis_order=("x", "y", "z")))
 
-    sigma = Quantity(np.full(mesh.shape, 1e-21), "cm^2")
+    sigma_d_per_H_cm2 = 1.0 / (1.086 * float(_NH_PER_AV_CM2))
+    sigma = Quantity(np.full(mesh.shape, sigma_d_per_H_cm2), "cm^2")
     model.gas_register(
         "sigma_d_per_H",
         Field(quantity="sigma_d_per_H", data=sigma, axis_order=("x", "y", "z")),
@@ -235,11 +250,12 @@ def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: floa
     rad = RadModel(model)
     rad.dust_temperature = Quantity(np.full(mesh.shape, float(Tdust_K)), "K")
     rad.chi = Quantity(np.full(mesh.shape, float(chi)), "dimensionless")
+    rad.Av = Quantity(Av_centers.reshape(mesh.shape), "dimensionless")
 
     return rad
 
 
-def _case_A_slab_carbon_reduced(out_dir: Path, *, n_cells: int = 128):
+def _case_A_slab_carbon_reduced(out_dir: Path, *, n_cells: int = 128, Av_max: float = 10.0):
     from diskbridge._units import Quantity
     from diskbridge._constants import TAU_CO_FORM
     from diskbridge.chemistry.api import run_chemistry
@@ -250,7 +266,13 @@ def _case_A_slab_carbon_reduced(out_dir: Path, *, n_cells: int = 128):
     chi0 = 1.0
     Tdust_K = 20.0
 
-    rad = _build_radmodel_1d(n_cells=n_cells, nH_cm3=nH_cm3, chi=chi0, Tdust_K=Tdust_K)
+    rad = _build_radmodel_1d(
+        n_cells=n_cells,
+        nH_cm3=nH_cm3,
+        chi=chi0,
+        Tdust_K=Tdust_K,
+        Av_max=float(Av_max),
+    )
 
     tau_form = Quantity(np.full(rad.model.mesh.shape, float(TAU_CO_FORM)), "s")
 
@@ -311,12 +333,13 @@ def _case_A_slab_carbon_reduced(out_dir: Path, *, n_cells: int = 128):
     now = datetime.now().isoformat(timespec="seconds")
     commit = _get_git_commit(Path(__file__).resolve().parents[1])
 
+    sigma_d_per_H_cm2 = 1.0 / (1.086 * float(_NH_PER_AV_CM2))
     params_box = [
         f"case=slab_carbon_reduced",
         f"nH={nH_cm3:.3e} cm^-3",
         f"chi0={chi0}",
         f"Tdust={Tdust_K} K",
-        f"sigma_d/H={1e-21:.3e} cm^2",
+        f"sigma_d/H={sigma_d_per_H_cm2:.3e} cm^2",
         f"time={now}",
         f"commit={commit}",
     ]
@@ -522,7 +545,9 @@ def _plot_heating_cooling_budget(out_png: Path, Av: np.ndarray, therm_fields: di
     plt.close(fig)
 
 
-def _case_B_thermochemistry_convergence(out_dir: Path, *, n_cells: int = 64, n_iter: int = 5):
+def _case_B_thermochemistry_convergence(
+    out_dir: Path, *, n_cells: int = 64, n_iter: int = 5, Av_max: float = 10.0
+):
     from diskbridge.chemistry.api import run_chemistry
     from diskbridge.chemistry.thermal import run_thermal
 
@@ -530,7 +555,13 @@ def _case_B_thermochemistry_convergence(out_dir: Path, *, n_cells: int = 64, n_i
     chi0 = 1.0
     Tdust_K = 20.0
 
-    rad = _build_radmodel_1d(n_cells=n_cells, nH_cm3=nH_cm3, chi=chi0, Tdust_K=Tdust_K)
+    rad = _build_radmodel_1d(
+        n_cells=n_cells,
+        nH_cm3=nH_cm3,
+        chi=chi0,
+        Tdust_K=Tdust_K,
+        Av_max=float(Av_max),
+    )
 
     metrics: list[float] = []
     Tgas_by_iter: list[np.ndarray] = []
