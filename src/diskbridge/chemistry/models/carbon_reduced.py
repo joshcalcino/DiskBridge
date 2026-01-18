@@ -184,22 +184,40 @@ def _compute_co_shielding(
     nside: int,
     b_kms: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+    from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
     from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
+    if is_effectively_1d(rad.model.mesh, tuple(nH_cm3.shape)):
+        from diskbridge.chemistry.shielding.columns_1d import compute_co_shielding_1d
+
     visser = VisserShielding(b_kms=float(b_kms))
-    theta_co, chi_eff = compute_co_shielding_healpix(
-        mesh=rad.model.mesh,
-        nH=nH_cm3,
-        chi=chi,
-        visser=visser,
-        nCO=nCO_cm3,
-        nH2=nH2_cm3,
-        nside=int(nside),
-        b_kms=float(b_kms),
-        progress_chunks=None,
-        cache_dir=None,
-    )
+
+    if is_effectively_1d(rad.model.mesh, tuple(nH_cm3.shape)):
+        theta_co, chi_eff = compute_co_shielding_1d(
+            rad.model.mesh,
+            nH_cm3,
+            chi,
+            visser=visser,
+            nCO=nCO_cm3,
+            nH2=nH2_cm3,
+            b_kms=float(b_kms),
+            outer="max",
+        )
+    else:
+        from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
+
+        theta_co, chi_eff = compute_co_shielding_healpix(
+            mesh=rad.model.mesh,
+            nH=nH_cm3,
+            chi=chi,
+            visser=visser,
+            nCO=nCO_cm3,
+            nH2=nH2_cm3,
+            nside=int(nside),
+            b_kms=float(b_kms),
+            progress_chunks=None,
+            cache_dir=None,
+        )
     return theta_co, chi_eff
 
 
@@ -378,27 +396,22 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     visser = None
     compute_co_shielding_healpix = None
     if not bool(skip_shielding):
-        from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix
-        from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-
-        visser = VisserShielding(b_kms=float(b_kms))
-        compute_co_shielding_healpix = compute_co_shielding_healpix
+        # Shielding backend is selected inside _compute_co_shielding.
+        # For effectively-1D meshes we do not require healpy.
+        pass
 
     min_rate = float(cfg.get('min_rate', 0.0))
 
     for _ in range(int(shielding_iter) + 1):
         if not bool(skip_shielding):
-            theta_arr, chi_eff_arr = compute_co_shielding_healpix(
-                mesh=rad.model.mesh,
-                nH=nH_cm3,
+            theta_arr, chi_eff_arr = _compute_co_shielding(
+                rad=rad,
+                nH_cm3=nH_cm3,
                 chi=chi_dim,
-                visser=visser,
-                nCO=nco_guess_cm3,
-                nH2=nH2_cm3,
+                nCO_cm3=nco_guess_cm3,
+                nH2_cm3=nH2_cm3,
                 nside=int(nside),
                 b_kms=float(b_kms),
-                progress_chunks=None,
-                cache_dir=None,
             )
 
         theta_flat = _flat_view(theta_arr)

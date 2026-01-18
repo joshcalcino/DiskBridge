@@ -71,6 +71,10 @@ I_E = _gow17.I_E
 
 KB_CGS = 1.380649e-16
 
+_KPH_AVFAC = np.asarray([3.76, 2.12, 3.88, 2.66, 4.18, 3.10, 2.61], dtype=np.float64)
+_SIGMA_PE_CGS = 1.0e-21
+_SIGMA_ISRF_CGS = 3.0e-22
+
 
 def _cv_cold(xH2: np.ndarray, xe: np.ndarray) -> np.ndarray:
     """Heat capacity per H nucleus for cold gas (cgs: erg/K per H)."""
@@ -170,6 +174,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "max"))
 
+    chi_is_incident = bool(cfg.get("chi_is_incident", False))
+
     nH = rad.ensure_nH()
     Tgas = rad.ensure_gas_temperature()
     if Tgas is None:
@@ -191,6 +197,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     T_flat = T_K.reshape(ncells)
     Tdust_flat = Tdust_K.reshape(ncells)
     chi_dust_flat = chi_dust_arr.reshape(ncells)
+
+    Av_flat = None
+    if chi_is_incident:
+        Av_q = getattr(rad, "Av", None)
+        if Av_q is None:
+            raise ValueError("gow17: chi_is_incident=True requires rad.Av to be set")
+        Av_arr = _as_cgs_f64(Av_q, "dimensionless")
+        if Av_arr.shape != shape:
+            raise ValueError(f"gow17: rad.Av shape {Av_arr.shape} does not match nH shape {shape}")
+        Av_flat = Av_arr.reshape(ncells)
 
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
@@ -467,13 +483,34 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         theta_c_flat = theta_c_arr.reshape(ncells)
 
         Gph = np.empty((ncells, N_PH), dtype=np.float64)
-        Gph[:, :] = chi_dust_flat[:, None]
+        if chi_is_incident:
+            if Av_flat is None:
+                raise RuntimeError("gow17: internal error (Av_flat missing)")
+            G0_half = 0.5 * chi_dust_flat
+            Gph[:, :] = G0_half[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
+            NH_over_Zd = Av_flat * (1.87e21)
+            NH_flat = np.divide(
+                NH_over_Zd,
+                Zd_arr,
+                out=np.zeros_like(NH_over_Zd, dtype=np.float64),
+                where=(Zd_arr > 0.0),
+            )
+            GPE = np.ascontiguousarray(
+                G0_half * np.exp(-NH_flat * _SIGMA_PE_CGS * Zd_arr),
+                dtype=np.float64,
+            )
+            GISRF = np.ascontiguousarray(
+                G0_half * np.exp(-NH_flat * _SIGMA_ISRF_CGS * Zd_arr),
+                dtype=np.float64,
+            )
+        else:
+            Gph[:, :] = chi_dust_flat[:, None]
+            GPE = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
+            GISRF = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
+
         Gph[:, IPH_C] *= theta_c_flat
         Gph[:, IPH_CO] *= theta_co_flat
         Gph[:, IPH_H2] *= theta_h2_flat
-
-        GPE = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
-        GISRF = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
 
         result = _gow17.solve_batch_equilibrium(
             y0=np.ascontiguousarray(y_guess, dtype=np.float64),

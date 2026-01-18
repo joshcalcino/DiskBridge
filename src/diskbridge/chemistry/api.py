@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.registry import REGISTRY
+from diskbridge.chemistry.registry import available_models, get_model_callable
 from diskbridge.chemistry.io import write_many
 
 
@@ -67,15 +67,15 @@ def run_chemistry(
         config = {}
     
     model_lower = model.lower()
-    
-    if model_lower not in REGISTRY:
-        available = ', '.join(REGISTRY.keys())
+
+    try:
+        model_fn = get_model_callable(model_lower)
+    except ValueError:
+        available = ", ".join(available_models())
         raise ValueError(
             f"Unknown chemistry model: {model!r}. "
             f"Available models: {available}"
         )
-    
-    model_fn = REGISTRY[model_lower]
     result = model_fn(rad, config)
     
     if write and result.number_densities:

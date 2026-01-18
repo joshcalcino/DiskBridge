@@ -72,7 +72,7 @@ def test_run_thermochemistry_provides_closure_and_updates_temperature() -> None:
         chemistry_config={"skip_shielding": True},
         thermal_model="thermal_balance",
         thermal_config={},
-        n_iter=2,
+        n_iter=5,
         convergence=None,
         write=False,
     )

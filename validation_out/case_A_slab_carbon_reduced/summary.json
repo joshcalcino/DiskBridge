@@ -1,0 +1,12 @@
+{
+  "Tdust_K": 20.0,
+  "case": "slab_carbon_reduced",
+  "chem_meta": {
+    "model": "carbon_reduced"
+  },
+  "chi0": 1.0,
+  "commit": "3baca3d99e8c1395df68c4d1587f12539d2187ef",
+  "nH_cm3": 10000.0,
+  "n_cells": 128,
+  "time": "2026-01-18T14:14:06"
+}

@@ -132,14 +132,6 @@ def test_run_thermochemistry_convergence_metrics_reasonable() -> None:
     if len(metrics) >= 2:
         assert float(metrics[-1]) <= float(metrics[0])
 
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return
-
     out_dir = Path(__file__).parent.parent / "visualization_tests"
     out_dir.mkdir(parents=True, exist_ok=True)
 

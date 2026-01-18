@@ -1,18 +1,36 @@
 from __future__ import annotations
 
+from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
     from diskbridge.chemistry.types import ChemistryResult
 
-from diskbridge.chemistry.models import pinte_switches
-from diskbridge.chemistry.models import gow17
-from diskbridge.chemistry.models import carbon_reduced
-
-
-REGISTRY: dict[str, Callable[['RadModel', dict], 'ChemistryResult']] = {
-    'pinte_switches': pinte_switches.run_pinte_switches,
-    'gow17': gow17.run_gow17,
-    'carbon_reduced': carbon_reduced.run_carbon_reduced,
+_MODEL_SPECS: dict[str, tuple[str, str]] = {
+    "pinte_switches": ("diskbridge.chemistry.models.pinte_switches", "run_pinte_switches"),
+    "gow17": ("diskbridge.chemistry.models.gow17", "run_gow17"),
+    "carbon_reduced": ("diskbridge.chemistry.models.carbon_reduced", "run_carbon_reduced"),
 }
+
+
+def available_models() -> list[str]:
+    return sorted(_MODEL_SPECS.keys())
+
+
+def get_model_callable(model: str) -> Callable[["RadModel", dict], "ChemistryResult"]:
+    model_lower = str(model).lower()
+    if model_lower not in _MODEL_SPECS:
+        available = ", ".join(available_models())
+        raise ValueError(f"Unknown chemistry model: {model!r}. Available models: {available}")
+
+    module_path, fn_name = _MODEL_SPECS[model_lower]
+    mod = import_module(module_path)
+    fn = getattr(mod, fn_name)
+    return fn
+
+
+__all__ = [
+    "available_models",
+    "get_model_callable",
+]

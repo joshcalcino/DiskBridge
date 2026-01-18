@@ -160,3 +160,37 @@ def compute_pdr_shielding_1d(
     theta_pdr = theta_h2 * theta_co
     chi_eff_pdr = chi_arr * theta_pdr
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
+
+
+def compute_co_shielding_1d(
+    mesh,
+    nH: np.ndarray,
+    chi: np.ndarray,
+    *,
+    visser: VisserShielding,
+    nCO: np.ndarray,
+    nH2: np.ndarray,
+    b_kms: float,
+    outer: str = "max",
+):
+    nH_cgs = _as_f64("nH", nH)
+    chi_arr = _as_f64("chi", chi)
+    nH2_cgs = _as_f64("nH2", nH2)
+    nCO_cgs = _as_f64("nCO", nCO)
+
+    if nH2_cgs.shape != nH_cgs.shape or nCO_cgs.shape != nH_cgs.shape or chi_arr.shape != nH_cgs.shape:
+        raise ValueError("nH, chi, nH2, and nCO must have the same shape")
+
+    shape = tuple(nH_cgs.shape)
+    axis_name, axis_index = effective_1d_axis(mesh, shape)
+
+    N_H2 = column_to_outer_boundary_1d(
+        mesh, nH2_cgs, axis_name=axis_name, axis_index=axis_index, outer=outer
+    )
+    N_CO = column_to_outer_boundary_1d(
+        mesh, nCO_cgs, axis_name=axis_name, axis_index=axis_index, outer=outer
+    )
+
+    theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+    chi_eff = chi_arr * theta_co
+    return theta_co, chi_eff
