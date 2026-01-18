@@ -79,8 +79,16 @@ def column_to_outer_boundary_1d(
     elif outer == "min":
         cum = np.cumsum(contrib)
         N_line = cum - 0.5 * contrib
+    elif outer == "both":
+        cum_max = np.cumsum(contrib[::-1])[::-1]
+        N_max = cum_max - 0.5 * contrib
+
+        cum_min = np.cumsum(contrib)
+        N_min = cum_min - 0.5 * contrib
+
+        N_line = np.minimum(N_min, N_max)
     else:
-        raise ValueError(f"outer must be 'max' or 'min', got {outer!r}")
+        raise ValueError(f"outer must be 'max', 'min', or 'both', got {outer!r}")
 
     if n_field.ndim == 1:
         return np.ascontiguousarray(N_line, dtype=np.float64)

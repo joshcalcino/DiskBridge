@@ -113,7 +113,7 @@ def run_thermochemistry(
     chemistry_config : dict, optional
         Chemistry model configuration
     thermal_model : str, optional
-        Thermal model name (default "thermal_balance_v1")
+        Thermal model name (default "thermal_balance")
     thermal_config : dict, optional
         Thermal model configuration
     n_iter : int, optional
@@ -136,7 +136,7 @@ def run_thermochemistry(
     ...     rad,
     ...     chemistry_model="carbon_reduced",
     ...     chemistry_config={"Xco_tot": 1e-4, "nside": 4},
-    ...     thermal_model="thermal_balance_v1",
+    ...     thermal_model="thermal_balance",
     ...     thermal_config={"pah_scale": 0.5},
     ...     n_iter=3,
     ... )
@@ -181,8 +181,12 @@ def run_thermochemistry(
 
     prev_tgas_K = None
     prev_nco_total = None
+    outer_n_iter = 0
+    tgas_rel_metrics = []
+    nco_rel_metrics = []
     
     for iteration in range(n_iter):
+        outer_n_iter = iteration + 1
         logger.info(f"\nThermochemistry iteration {iteration + 1}/{n_iter}")
         logger.info("-" * 60)
         
@@ -245,14 +249,18 @@ def run_thermochemistry(
             if prev_tgas_K is not None:
                 dt = np.abs(tgas_K - prev_tgas_K)
                 denom_t = np.where(prev_tgas_K != 0.0, np.abs(prev_tgas_K), np.inf)
-                t_ok = (np.max(dt / denom_t) <= float(tgas_rtol))
+                t_rel = float(np.max(dt / denom_t))
+                tgas_rel_metrics.append(t_rel)
+                t_ok = (t_rel <= float(tgas_rtol))
 
                 if nco_rtol is None:
                     co_ok = True
                 else:
                     dn = np.abs(nco_total - prev_nco_total)
                     denom_n = np.where(prev_nco_total != 0.0, np.abs(prev_nco_total), np.inf)
-                    co_ok = (np.max(dn / denom_n) <= float(nco_rtol))
+                    n_rel = float(np.max(dn / denom_n))
+                    nco_rel_metrics.append(n_rel)
+                    co_ok = (n_rel <= float(nco_rtol))
 
                 converged = t_ok and co_ok
                 if converged:
@@ -267,6 +275,12 @@ def run_thermochemistry(
     logger.info("=" * 60)
     logger.info("Thermochemistry complete!")
     logger.info("=" * 60)
+
+    if therm_result is not None:
+        therm_result.meta["thermochemistry_n_iter"] = int(outer_n_iter)
+        if enable_convergence:
+            therm_result.meta["tgas_rel_metrics"] = list(tgas_rel_metrics)
+            therm_result.meta["nco_rel_metrics"] = list(nco_rel_metrics)
 
     if write:
         if chem_result is not None and chem_result.number_densities:

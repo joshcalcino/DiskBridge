@@ -103,6 +103,12 @@ def _broadcast_scalar_or_array(val, ncells: int) -> np.ndarray:
     return np.ascontiguousarray(arr.reshape(ncells), dtype=np.float64)
 
 
+def _maybe_quantity_to_float(val, unit: str) -> float:
+    if isinstance(val, str):
+        return float(Quantity(val).to(unit).magnitude)
+    return float(val)
+
+
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
 
@@ -145,16 +151,24 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     reltol = float(cfg.get("reltol", 1e-4))
     abstol0 = float(cfg.get("abstol0", 1e-15))
     tolfac = float(cfg.get("tolfac", 10.0))
-    tmin = float(cfg.get("tmin", 3.16e10))
-    tmax = float(cfg.get("tmax", 3.16e14))
+    tmin = _maybe_quantity_to_float(cfg.get("tmin", 3.16e10), "s")
+
+    tmax_val = cfg.get("tmax", None)
+    if tmax_val is None:
+        tmax_val = cfg.get("t_end", 3.16e14)
+    tmax = _maybe_quantity_to_float(tmax_val, "s")
     mxsteps = int(cfg.get("mxsteps", 10000))
     maxord = int(cfg.get("maxord", 5))
     userJac = bool(cfg.get("userJac", False))
     verbose = bool(cfg.get("verbose", False))
 
-    shielding_max_iter = int(cfg.get("shielding_max_iter", 10))
+    shielding_max_iter_cfg = cfg.get("shielding_max_iter", None)
+    if shielding_max_iter_cfg is None:
+        shielding_max_iter_cfg = cfg.get("max_iter", 10)
+    shielding_max_iter = int(shielding_max_iter_cfg)
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
+    shielding_outer_1d = str(cfg.get("shielding_outer_1d", "max"))
 
     nH = rad.ensure_nH()
     Tgas = rad.ensure_gas_temperature()
@@ -428,7 +442,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nC=nC_cm3,
                 nH2=nH2_cm3,
                 b_kms=b_kms,
-                outer="max",
+                outer=shielding_outer_1d,
             )
         else:
             from diskbridge.chemistry.shielding.healpix_columns import (

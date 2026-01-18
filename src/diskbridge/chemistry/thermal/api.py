@@ -36,7 +36,7 @@ def run_thermal(
     rad : RadModel
         RADMC-3D model wrapper with radiative transfer outputs
     model : str, optional
-        Thermal model name (default "thermal_balance_v1")
+        Thermal model name (default "thermal_balance")
     config : dict, optional
         Model-specific configuration (merged with defaults)
     write : bool, optional
@@ -51,7 +51,7 @@ def run_thermal(
     --------
     >>> from diskbridge.chemistry.thermal import run_thermal
     >>> 
-    >>> result = run_thermal(rad, model="thermal_balance_v1")
+    >>> result = run_thermal(rad, model="thermal_balance")
     >>> print(f"Gas temperature: {result.tgas.to('K')}")
     >>> 
     >>> result = run_thermal(

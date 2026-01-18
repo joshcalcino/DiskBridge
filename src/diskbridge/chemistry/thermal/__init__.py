@@ -9,7 +9,7 @@ Examples
 --------
 >>> from diskbridge.chemistry.thermal import run_thermal
 >>> 
->>> result = run_thermal(rad, model="thermal_balance_v1")
+>>> result = run_thermal(rad, model="thermal_balance")
 >>> print(f"Gas temperature: {result.tgas.to('K')}")
 """
 
