@@ -461,6 +461,8 @@ def plot_phi_avg_rz_slice(
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     vline_x: Optional[float] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ):
     mesh = model.mesh
     r = mesh.centers("r").to("au").magnitude
@@ -480,16 +482,23 @@ def plot_phi_avg_rz_slice(
     x_axis_norm = x_axis.strip().lower()
     y_axis_norm = y_axis.strip().lower()
 
-    vmin = None
-    vmax = None
+    vmin_plot = None
+    vmax_plot = None
     if log10:
         tiny = np.finfo(np.float64).tiny
         z_plot = np.log10(np.maximum(data_phi_avg, tiny))
-        vmax = float(np.nanmax(z_plot))
-        if (log10_dyn_range_dex is not None) and np.isfinite(vmax):
-            vmin = vmax - float(log10_dyn_range_dex)
+        if vmax is not None:
+            vmax_plot = vmax
+        else:
+            vmax_plot = float(np.nanmax(z_plot))
+        if vmin is not None:
+            vmin_plot = vmin
+        elif (log10_dyn_range_dex is not None) and np.isfinite(vmax_plot):
+            vmin_plot = vmax_plot - float(log10_dyn_range_dex)
     else:
         z_plot = data_phi_avg
+        vmin_plot = vmin
+        vmax_plot = vmax
 
     fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -500,7 +509,7 @@ def plot_phi_avg_rz_slice(
         if y1[0] > y1[-1]:
             y1 = y1[::-1]
             c = c[::-1, :]
-        pc = ax.pcolormesh(x1, y1, c, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+        pc = ax.pcolormesh(x1, y1, c, shading="auto", cmap=cmap, vmin=vmin_plot, vmax=vmax_plot)
         ax.set_xlabel("r [au]")
         ax.set_ylabel("z/r")
     else:
@@ -519,7 +528,7 @@ def plot_phi_avg_rz_slice(
             ylabel = "z [au]"
 
         tri = mtri.Triangulation(x_pts.ravel(), y_pts.ravel())
-        pc = ax.tripcolor(tri, z_plot.ravel(), shading="flat", cmap=cmap, vmin=vmin, vmax=vmax)
+        pc = ax.tripcolor(tri, z_plot.ravel(), shading="flat", cmap=cmap, vmin=vmin_plot, vmax=vmax_plot)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
 

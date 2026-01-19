@@ -485,7 +485,7 @@ class SubModel:
         """Access to dust with region-aware configuration."""
         if not hasattr(self.parent, 'dust') or self.parent.dust is None:
             raise AttributeError("Parent model has no dust submodel")
-        from .disk_component import _RegionDustConfigurator
+        from .disk import _RegionDustConfigurator
 
         return _RegionDustConfigurator(
             global_dust=self.parent.dust,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Union, List, Optional, Dict, get_origin, get_args, get_type_hints
+import re
 
 from ._units import Quantity, units
 
@@ -193,10 +194,11 @@ def _parse_value(raw: str, target_type, param_name: str = ''):
                     scalar_type = next((t for t in args if t is not list_type), None)
                     inner = scalar_type if scalar_type else str
                 
-                vals = raw.strip("[]")
+                vals = raw.strip("[]").strip()
                 if not vals:
                     return []
-                return [_parse_scalar(part.strip(), inner, param_name) for part in vals.split(",")]
+                parts = [p for p in re.split(r"[\s,]+", vals) if p]
+                return [_parse_scalar(part.strip(), inner, param_name) for part in parts]
             else:
                 # Parse as scalar - find the non-list type in the Union
                 scalar_type = next((t for t in args if get_origin(t) is not list and t is not list), None)
@@ -208,10 +210,11 @@ def _parse_value(raw: str, target_type, param_name: str = ''):
     # List[T]
     if origin is list:
         inner = get_args(target_type)[0]
-        vals = raw.strip("[]")
+        vals = raw.strip("[]").strip()
         if not vals:
             return []
-        return [_parse_scalar(part.strip(), inner, param_name) for part in vals.split(",")]
+        parts = [p for p in re.split(r"[\s,]+", vals) if p]
+        return [_parse_scalar(part.strip(), inner, param_name) for part in parts]
 
     return _parse_scalar(raw, target_type, param_name)
 

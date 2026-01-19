@@ -50,6 +50,11 @@ from __future__ import annotations
 # Core classes
 from .backend import VisualizationBackend
 from .dataset import DiskBridgeDataset, create_dataset
+from .yt_backend import (
+    Visualizer,
+    quick_slice,
+    quick_projection,
+)
 
 # Profile utilities
 from .profiles import (
@@ -73,12 +78,6 @@ from .units import (
     pint_to_unyt,
     pint_to_unyt_cgs,
     unyt_to_pint,
-)
-
-from .yt_backend import (
-    Visualizer,
-    quick_slice,
-    quick_projection,
 )
 
 

@@ -10,8 +10,9 @@ This script:
 """
 
 import diskbridge
-from diskbridge.visualization import plot_phi_avg_rz_slice
+from diskbridge.visualization.profiles import plot_phi_avg_rz_slice
 import numpy as np
+from diskbridge.model.field import Field
 
 
 # Load parameters for this example and update the global params
@@ -72,32 +73,112 @@ print(f"mask fraction (theta) = {mask.mean():.6f}")
 # Configure dust size distribution inside the masked disk region
 disk.dust.set_distribution(mode="settling")
 
+ism_mask = ~disk.mask.data.magnitude.astype(bool)
+ism = model.set_mask_from_array(ism_mask, is_a_disk=False)
+ism.dust.set_distribution(mode="proportional")
+
 dust_density = model.dust["density"]
 
 r_plot = mesh.centers("r").to("au").magnitude
 r_positive = r_plot[np.isfinite(r_plot) & (r_plot > 0.0)]
 r_min = float(np.min(r_positive))
 
-plot_phi_avg_rz_slice(
-    model,
-    "disk_mask",
-    output="disk_mask_theta_zoverr_vs_r.png",
-    x_axis="r",
-    y_axis="z/r",
-    log10=False,
-    xscale="log",
-    xlim=(r_min, 300.0),
-)
-plot_phi_avg_rz_slice(
-    model,
-    "density",
-    output="gas_density_zoverr_vs_r.png",
-    x_axis="r",
-    y_axis="z/r",
-    log10=True,
-    xscale="log",
-    xlim=(r_min, 300.0),
-)
+# plot_phi_avg_rz_slice(
+#     model,
+#     "disk_mask",
+#     output="disk_mask_theta_zoverr_vs_r.png",
+#     x_axis="r",
+#     y_axis="z/r",
+#     log10=False,
+#     xscale="log",
+#     xlim=(r_min, 300.0),
+# )
+
+# component_totals = {}
+
+# for bin_name, dust_bin in model.dust.bins.items():
+#     bin_density = dust_bin["density"]
+
+#     if hasattr(model.dust, "_global_bins"):
+#         comp_idx, local_idx = model.dust._global_bins[bin_name]
+#         prefix = f"dust_bin_comp{comp_idx}_local{local_idx}_"
+#     else:
+#         prefix = "dust_bin_"
+#         comp_idx = -1
+#         local_idx = -1
+
+#     if comp_idx not in component_totals:
+#         component_totals[comp_idx] = bin_density.data.copy()
+#     else:
+#         component_totals[comp_idx] = component_totals[comp_idx] + bin_density.data
+
+#     size_um = float(dust_bin.size.to("um").magnitude)
+#     output = f"{prefix}{bin_name}_{size_um:.6g}um_zoverr_vs_r.png"
+
+#     plot_phi_avg_rz_slice(
+#         model,
+#         bin_density,
+#         output=output,
+#         x_axis="r",
+#         y_axis="z/r",
+#         log10=True,
+#         xscale="log",
+#         xlim=(r_min, 300.0),
+#     )
+
+# if 0 in component_totals:
+#     dust_density_disk_total = Field(
+#         data=component_totals[0],
+#         quantity=dust_density.quantity,
+#         axis_order=dust_density.axis_order,
+#     )
+#     plot_phi_avg_rz_slice(
+#         model,
+#         dust_density_disk_total,
+#         output="dust_density_disk_total_zoverr_vs_r.png",
+#         x_axis="r",
+#         y_axis="z/r",
+#         log10=True,
+#         xscale="log",
+#         xlim=(r_min, 300.0),
+#     )
+
+# if 1 in component_totals:
+#     dust_density_ism_total = Field(
+#         data=component_totals[1],
+#         quantity=dust_density.quantity,
+#         axis_order=dust_density.axis_order,
+#     )
+#     plot_phi_avg_rz_slice(
+#         model,
+#         dust_density_ism_total,
+#         output="dust_density_ism_total_zoverr_vs_r.png",
+#         x_axis="r",
+#         y_axis="z/r",
+#         log10=True,
+#         xscale="log",
+#         xlim=(r_min, 300.0),
+#     )
+
+# plot_phi_avg_rz_slice(
+#     model,
+#     "density",
+#     output="gas_density_zoverr_vs_r.png",
+#     x_axis="r",
+#     y_axis="z/r",
+#     log10=True,
+#     xscale="log",
+#     xlim=(r_min, 300.0),
+# )
+# Plot global total dust density with full colorbar range
+dust_density_data = dust_density.data.to("g/cm^3").magnitude
+positive = dust_density_data > 0.0
+if not np.any(positive):
+    raise ValueError("Global dust density has no positive values; cannot compute log10 color limits")
+dust_density_log = np.log10(dust_density_data[positive])
+vmin_global = float(np.nanmax(dust_density_log)) - 16
+vmax_global = float(np.nanmax(dust_density_log)) - 3
+
 plot_phi_avg_rz_slice(
     model,
     dust_density,
@@ -107,35 +188,7 @@ plot_phi_avg_rz_slice(
     log10=True,
     xscale="log",
     xlim=(r_min, 300.0),
+    vmin=vmin_global,
+    vmax=vmax_global,
 )
-
-
-
-# Write RADMC-3D input files and compute dust opacities
-# writer = RadWriter(model)
-# writer.write_all_input_files()
-# writer.compute_and_write_dust_opacities()
-#
-# # Initialize RADMC-3D model wrapper
-# rad = RadModel(model)
-#
-# # Compute dust temperature with Monte Carlo
-# rad.compute_temperature()
-#
-# # Compute CO abundance using Pinte+2018 switches from params
-# X_co, n_co = chemistry.compute_abundance(
-#     rad,
-#     molecule="co",
-#     X0=p.abundance,
-#     write_output=True,
-# )
-#
-# mean_X = float(X_co.magnitude.mean())
-# print(f"CO mean abundance X = {mean_X:.3e}")
-#
-# img = RadImage(model_dir=".", model=model)
-# img.make_line_image(
-#     molecule="co",
-#     transition=p.iline,
-# )
 
