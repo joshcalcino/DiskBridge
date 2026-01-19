@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, TYPE_CHECKING, Tuple, Union
+from typing import Callable, Dict, Optional, TYPE_CHECKING, Tuple, Union
 
 import numpy as np
 
@@ -305,7 +305,40 @@ def _compute_ring_criteria(
     rho_disk_min: Quantity,
     fthres_use: Union[float, np.ndarray],
     fthres_vr_use: Union[float, np.ndarray],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    """Compute Joos ring-level criteria and diagnostics.
+
+    Cells are binned into (r_bin, theta_from_midplane_bin). For each ring, this computes:
+
+    - Volume-weighted averages of |vphi|, |vR|, |vz|
+    - Average density
+    - Average rotational energy density ~ 0.5 * rho * vphi^2
+    - Average thermal pressure
+
+    It then evaluates the Joos-style boolean criteria per ring and returns
+    ring_pass = c1 & c2 & c3 & c5.
+
+    Args:
+        rho: Gas density.
+        dV_mag: Cell volumes (magnitude array).
+        disk_frame: Disk-frame velocities and theta_from_midplane.
+        Pth: Thermal pressure.
+        r_grid: Cell-center radii.
+        r_edges: Radial bin edges.
+        theta_edges: theta_from_midplane bin edges.
+        nR: Number of radial bins.
+        n_theta_bins: Number of theta bins.
+        rho_disk_min: Density threshold.
+        fthres_use: Threshold for vphi vs vz and rot vs P.
+        fthres_vr_use: Threshold for vphi vs vR.
+
+    Returns:
+        ring_pass: Boolean array (nR, n_theta_bins) of rings passing all criteria.
+        sum_w_2d: Volume weights per ring (nR, n_theta_bins).
+        theta_edges: The theta_from_midplane edges used for binning.
+        diag: Dict of ring-averaged diagnostic arrays with keys:
+            vphi, vR, vz, rot, P, rho (each shaped (nR, n_theta_bins)).
+    """
     r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
     t_bin = np.digitize(disk_frame.theta_from_midplane, theta_edges) - 1
     valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
@@ -360,6 +393,24 @@ def _apply_connectivity(
     nR: int,
     n_theta_bins: int,
 ) -> np.ndarray:
+    """Enforce per-radius connectivity around the midplane.
+
+    For each radial bin, selects a contiguous band of theta bins that:
+
+    - Are populated (nonzero volume weight)
+    - Pass the Joos criteria
+    - Are connected to the midplane seed (closest theta bin to 0 among pass-candidates)
+
+    Args:
+        ring_pass: Boolean array (nR, n_theta_bins) from ring-level criteria.
+        sum_w_2d: Volume weights per ring (nR, n_theta_bins).
+        theta_edges: theta_from_midplane bin edges.
+        nR: Number of radial bins.
+        n_theta_bins: Number of theta bins.
+
+    Returns:
+        connected: Boolean array (nR, n_theta_bins) for connected disk rings.
+    """
     theta_centers = 0.5 * (theta_edges[:-1] + theta_edges[1:])
     connected = np.zeros_like(ring_pass, dtype=bool)
     for i in range(nR):
@@ -406,11 +457,73 @@ def set_mask_from_joos_disk(
     weight_m0: float = 0.25,
     weight_floor: float = 1e-4,
 ) -> "SubModel":
+    """Create a disk region mask using the Joos et al. (2012) kinematic/pressure criteria.
+
+    This function:
+
+    1) Estimates the disk angular-momentum axis and transforms velocities into a disk frame.
+    2) Bins cells into (r, theta_from_midplane) rings and computes ring-averaged diagnostics.
+    3) Applies Joos-style criteria:
+       - vphi dominates over vR and vz (with thresholds fthres / fthres_vr)
+       - rotational support dominates over thermal pressure
+       - density exceeds rho_disk_min
+    4) Enforces per-radius connectivity (a contiguous band around the midplane).
+    5) Returns a SubModel with a boolean mask.
+
+    Optionally, it can also compute a continuous weight field w in [0, 1] and register it
+    into model.gas[weight_name]. This is intended for soft transitions (e.g., dust mixing)
+    while keeping the disk mask itself crisp.
+
+    Weight modes:
+    - none: no weight is computed/registered.
+    - distance: weight is a sigmoid of signed distance (in theta-bin units) from the
+      connected disk band boundary.
+    - margins: weight is a sigmoid of the weakest (minimum) log-margin among the Joos
+      criteria, multiplied by a soft connectivity weight derived from the connected band.
+
+      Note: In margins mode, if both numerator and denominator in a criterion are near zero,
+      the log-margin can be near 0, mapping to ~0.5 before the connectivity factor. This is
+      usually suppressed by the connectivity weight.
+
+    Args:
+        model: DiskBridge Model with spherical mesh and gas fields.
+        rho_disk_min: Minimum gas density to be considered disk-like.
+        fthres: Threshold(s) for vphi vs vz and rotational vs thermal support. May be a
+            scalar, a length-nR array, or a callable f(R_au)->array.
+        fthres_vr: Threshold(s) for vphi vs vR. If None, defaults to fthres.
+        rho_core_min: Density used to define the core region when estimating the disk axis.
+            If None, defaults to 10 * rho_disk_min.
+        r_max_for_axis: If provided, restricts the axis-estimation core region to r <= this.
+        n_r_bins: Optional downsampling of radial bins (cannot refine beyond native).
+        n_theta_bins: Number of theta_from_midplane bins used for ring averages.
+        r_max: Optional maximum radius included in the final boolean mask.
+        weight_mode: none, distance, or margins.
+        weight_name: Name of the registered gas Field that stores the weight.
+        weight_delta_bins: Boundary-layer thickness for distance (and connectivity softening
+            in margins), in theta-bin units. Must be > 0.
+        weight_m0: Softness of the criterion-margin sigmoid in margins. Must be > 0.
+        weight_floor: Values below this are clipped to 0, and above (1 - weight_floor)
+            clipped to 1.
+
+    Returns:
+        SubModel representing the disk region. The returned SubModel.mask is boolean.
+
+    Raises:
+        ValueError: If mesh is not spherical, binning yields no valid cells, or weight
+            parameters are invalid.
+        KeyError: If required gas fields are missing.
+    """
     mesh = model.mesh
     if mesh.coord_system != "spherical":
         raise ValueError(
             f"set_mask_from_joos_disk only supports spherical coordinates, got {mesh.coord_system}"
         )
+
+    if weight_mode != "none":
+        if float(weight_delta_bins) <= 0.0:
+            raise ValueError("weight_delta_bins must be > 0")
+        if weight_mode == "margins" and float(weight_m0) <= 0.0:
+            raise ValueError("weight_m0 must be > 0 for weight_mode='margins'")
 
     r_c = mesh.centers("r")
     theta_c = mesh.centers("theta")
@@ -493,6 +606,7 @@ def set_mask_from_joos_disk(
 
     if weight_mode != "none":
         def _sigmoid(x: np.ndarray) -> np.ndarray:
+            x = np.clip(x, -60.0, 60.0)
             return 1.0 / (1.0 + np.exp(-x))
 
         if weight_mode == "distance":

@@ -771,20 +771,25 @@ class Dust(SubModel):
     
     
     def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust settling in spherical coordinates with mass conservation.
-        
-        Computes settled dust density directly in spherical coordinates by:
-        1. Computing z = r*cos(theta) for each spherical cell
-        2. Evaluating the Gaussian vertical profile at that height
-        3. Normalizing each radial column to conserve surface density
-        
+        """Compute dust density using an analytic settling profile in spherical coordinates.
+
+        This routine builds a simple settling-diffusion equilibrium scaling using midplane
+        gas properties to compute H_g and H_d, and applies a Gaussian profile
+        exp(-z^2 / (2 H_d^2)).
+
+        Note:
+            This routine does not renormalize columns to enforce exact mass conservation.
+
+        If component.mask is set, the resulting density is multiplied by the mask field.
+        The mask may be boolean or float weights; values are clipped to [0, 1].
+
         Args:
-            component: DustComponent instance
-            local_bin_idx: Dust bin index within component
-            gas_density: Gas density field in spherical coordinates
-            
+            component: DustComponent instance.
+            local_bin_idx: Dust bin index within component.
+            gas_density: Gas density field in spherical coordinates.
+
         Returns:
-            Dust density field with vertical settling profile
+            Dust density field with vertical settling profile.
         """
         mesh = self.parent.mesh
         grain_size = component.distribution.bin_centers[local_bin_idx]
