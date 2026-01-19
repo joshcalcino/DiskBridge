@@ -416,7 +416,7 @@ def set_mask_from_joos_disk(
     dcos = np.cos(theta_e_rad[:-1]) - np.cos(theta_e_rad[1:])
     phi_e_rad = phi_e.to("radian").magnitude
     dphi = phi_e_rad[1:] - phi_e_rad[:-1]
-    dV = r3[:, None, None] * dphi[None, :, None] * dcos[None, None, :]
+    dV = r3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
     dV_mag = dV.to_base_units().magnitude
 
     rho = model.gas["density"].data.to_base_units()
@@ -424,10 +424,10 @@ def set_mask_from_joos_disk(
     vphi = model.gas["vphi"].data.to_base_units()
     vtheta = model.gas["vtheta"].data.to_base_units()
 
-    r_grid_mag, phi_grid_mag, theta_grid_mag = np.meshgrid(
+    r_grid_mag, theta_grid_mag, phi_grid_mag = np.meshgrid(
         r_c.to_base_units().magnitude,
-        phi_c.to("radian").magnitude,
         theta_c.to("radian").magnitude,
+        phi_c.to("radian").magnitude,
         indexing="ij",
     )
     r_grid = r_grid_mag * r_c.to_base_units().units

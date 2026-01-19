@@ -76,15 +76,13 @@ class Params:
     co_tau_form_model: str
 
     # segmented RT
-    segmented_tol_T: float
-    segmented_tol_chi: float
+    segmented_tol: float
     segmented_window_fraction: float
     segmented_shell_ncells: int
     segmented_r_clip_min: Quantity
     segmented_max_splits: int
     segmented_stop_factor: float
-    segmented_nphot_thermal: int
-    segmented_nphot_mono: int
+    segmented_nphot_ratio: float
 
     # star
     rstar: Quantity

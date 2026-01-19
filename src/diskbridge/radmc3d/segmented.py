@@ -140,11 +140,25 @@ class SegmentedRadRunner:
         if stop_factor <= 0.0 or stop_factor >= 1.0:
             raise ValueError("segmented_stop_factor must be in (0, 1)")
 
-        nphot_therm_intermediate = int(params.segmented_nphot_thermal)
-        nphot_mono_intermediate = int(params.segmented_nphot_mono)
-
         nphot_therm_final = int(params.nphot_thermal) if nphot_therm is None else int(nphot_therm)
         nphot_mono_final = int(params.nphot_mono) if nphot_mono is None else int(nphot_mono)
+
+        nphot_ratio = float(params.segmented_nphot_ratio)
+        if nphot_ratio <= 0.0:
+            raise ValueError("segmented_nphot_ratio must be > 0")
+
+        nphot_therm_intermediate = int(nphot_ratio * nphot_therm_final)
+        nphot_mono_intermediate = int(nphot_ratio * nphot_mono_final)
+        if nphot_therm_intermediate < 1:
+            raise ValueError(
+                f"segmented_nphot_ratio={nphot_ratio} yields nphot_therm_intermediate={nphot_therm_intermediate}. "
+                "Increase segmented_nphot_ratio or nphot_thermal."
+            )
+        if nphot_mono_intermediate < 1:
+            raise ValueError(
+                f"segmented_nphot_ratio={nphot_ratio} yields nphot_mono_intermediate={nphot_mono_intermediate}. "
+                "Increase segmented_nphot_ratio or nphot_mono."
+            )
 
         if max_splits is None:
             max_splits = int(params.segmented_max_splits)

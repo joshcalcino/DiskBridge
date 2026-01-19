@@ -23,17 +23,7 @@ class DimensionInfo:
 # helpers
 # -----------------
 
-R_GAS = units('R_gas')  # J / (mol K)
-R_MU_FARGO_CGS = units('R_MU_FARGO_CGS')  # erg / (g K)
-
-MU_FARGO_CGS = (R_GAS.to('erg/(mol*K)') / R_MU_FARGO_CGS).to('g/mol')
-
-FARGO_DEFAULT_MU = float(MU_FARGO_CGS.magnitude)
-
 G_phys = units('G').to("m^3 / (kg s^2)")
-
-au = 1.0*units('au')
-solar_mass = 1.0*units('solar_mass')
 
 au = units('au')
 solar_mass = units('solar_mass')
@@ -280,7 +270,7 @@ def _load_edges_2d(
             raise FileNotFoundError("used_rad.dat not found and no valid RMIN/RMAX; cannot build radial edges")
     
     redge = redge * unit_dict['unit_length']
-    pedge = _build_pedge(nsec) * units('radians')
+    pedge = _build_pedge(nsec) * units('radian')
     return redge, pedge, nrad, nsec
 
 
@@ -296,7 +286,7 @@ def _load_edges_3d(
     
     if px.exists():
         try:
-            pedge = np.loadtxt(px) * units('radians')
+            pedge = np.loadtxt(px) * units('radian')
         except Exception:
             logger.warning(f"Failed reading {px}; will try building phi edges from NX")
     else:
@@ -312,7 +302,7 @@ def _load_edges_3d(
     
     if pz.exists():
         try:
-            tedge = np.loadtxt(pz) * units('radians')
+            tedge = np.loadtxt(pz) * units('radian')
         except Exception:
             logger.warning(f"Failed reading {pz}; will try building theta edges from NZ")
     else:
@@ -339,7 +329,7 @@ def _load_edges_3d(
         try:
             nsec = int(variables.get("NX"))
             if nsec > 0:
-                pedge = _build_pedge(nsec) * units('radians')
+                pedge = _build_pedge(nsec) * units('radian')
                 logger.warning("domain_x.dat missing; built phi edges from NX")
         except Exception:
             pass
@@ -347,7 +337,7 @@ def _load_edges_3d(
     if tedge is None:
         if nz > 1:
             ncol = nz
-            tedge = np.linspace(0.0, np.pi, ncol + 1) * units('radians')
+            tedge = np.linspace(0.0, np.pi, ncol + 1) * units('radian')
             logger.warning("domain_z.dat missing; built theta edges uniformly from NZ between 0 and pi")
 
     if redge is None or pedge is None or tedge is None:
@@ -479,6 +469,7 @@ def _derive_temperature(
     variables: Dict[str, Any],
     compile_options: Dict[str, Optional[bool]],
     is_3d: bool,
+    unit_dict: Dict[str, Quantity],
     norm_units: str,
 ) -> None:
     gasenergy_field = gas_fields.get("gasenergy")
@@ -529,20 +520,40 @@ def _derive_temperature(
     temp_data = None
     
     if is_isothermal:
-        c_s = gasenergy_field.data.magnitude
-        temp_data = c_s ** 2
-        logger.debug(f"Isothermal: c_s range = {c_s.min():.3e} - {c_s.max():.3e}")
+        c_s = Quantity(gasenergy_field.data.magnitude, unit_dict['unit_velocity'])
+        rho = gas_fields.get("density")
+        if rho is not None:
+            gas_fields["pressure"] = Field(
+                data=rho.data * c_s ** 2,
+                quantity="pressure",
+                axis_order=rho.axis_order,
+            )
+
+        temp_data = c_s.to(unit_dict['unit_velocity']).magnitude ** 2
+        logger.debug(
+            f"Isothermal: c_s range = {c_s.magnitude.min():.3e} - {c_s.magnitude.max():.3e}"
+        )
         logger.debug(f"T_code range = {temp_data.min():.3e} - {temp_data.max():.3e}")
     else:
         gamma = variables.get("GAMMA")
         if is_3d:
-            rho = gas_fields["density"].data.magnitude
+            rho_field = gas_fields.get("density")
+            if rho_field is None:
+                return
+            rho = rho_field.data.magnitude
             e = gasenergy_field.data.magnitude
             temp_data = (gamma - 1.0) * e / rho
+
+            e_density = Quantity(gasenergy_field.data.magnitude, unit_dict['unit_density'] * unit_dict['unit_velocity'] ** 2)
+            gas_fields["pressure"] = Field(
+                data=(gamma - 1.0) * e_density,
+                quantity="pressure",
+                axis_order=gasenergy_field.axis_order,
+            )
         else:
             logger.warning("Temperature calculation for 2D non-isothermal requires vertical puffing")
-    
-    if temp_data is not None:
+
+    if temp_data is not None and "MU" in variables:
         if norm_units == "code":
             code_mass_kg = (1.0 * solar_mass).to('kg').magnitude
             code_length_m = (1.0 * au).to('m').magnitude
@@ -556,7 +567,7 @@ def _derive_temperature(
             cutemp = (mu * units('m_H') / units('k_B')).to('K*s^2/m^2').magnitude
         else:
             cutemp = 1.0
-        
+
         temp_data_K = temp_data * cutemp
         temp_field = Field(
             data=Quantity(temp_data_K, 'K'),
@@ -612,13 +623,6 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     compile_options, macros = _read_summary(directory, file_n)
 
     norm_units = (file_units or "code").lower()
-    if "MU" not in variables:
-        if norm_units == "cgs":
-            variables["MU"] = float(MU_FARGO_CGS.to('g/mol').magnitude)
-        elif compile_options.get("CGS", False):
-            variables["MU"] = float(MU_FARGO_CGS.to('g/mol').magnitude)
-        else:
-            variables["MU"] = float(FARGO_DEFAULT_MU)
 
     dim_info = _detect_dimensionality(directory, variables)
     
@@ -641,7 +645,16 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     )
     
     _apply_frame_corrections(gas_fields, variables, redge, dim_info.is_3d, unit_dict)
-    _derive_temperature(directory, file_n, gas_fields, variables, compile_options, dim_info.is_3d, norm_units)
+    _derive_temperature(
+        directory,
+        file_n,
+        gas_fields,
+        variables,
+        compile_options,
+        dim_info.is_3d,
+        unit_dict,
+        norm_units,
+    )
     disk_parameters = _build_disk_parameters(variables, unit_dict, norm_units)
 
     return {

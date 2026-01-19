@@ -75,7 +75,6 @@ from .units import (
     unyt_to_pint,
 )
 
-# yt backend (assumed available; yt is a hard dependency)
 from .yt_backend import (
     Visualizer,
     quick_slice,

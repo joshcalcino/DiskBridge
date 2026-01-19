@@ -789,10 +789,12 @@ class Dust(SubModel):
         grain_size = component.distribution.bin_centers[local_bin_idx]
         mass_fraction = component.distribution.mass_fractions[local_bin_idx]
         
-        # Need temperature to compute Stokes number
-        if 'temperature' not in self.parent.gas:
-            raise ValueError("Settling mode requires temperature field")
-        gas_temp = self.parent.gas['temperature'].data
+        has_temperature = 'temperature' in self.parent.gas
+        has_pressure = 'pressure' in self.parent.gas
+        if not has_temperature and not has_pressure:
+            raise ValueError("Settling mode requires temperature or pressure field")
+        gas_temp = self.parent.gas['temperature'].data if has_temperature else None
+        gas_pressure = self.parent.gas['pressure'].data if has_pressure else None
         
         logger.debug(
             f"Computing dust settling directly in spherical coordinates for "
@@ -818,7 +820,12 @@ class Dust(SubModel):
         
         # Get midplane properties
         rho_g0 = gas_density.data[:, theta_mid_idx, :]
-        T0 = gas_temp[:, theta_mid_idx, :]
+        T0 = gas_temp[:, theta_mid_idx, :] if gas_temp is not None else None
+        P0 = gas_pressure[:, theta_mid_idx, :] if gas_pressure is not None else None
+
+        mu = component.mean_molecular_weight
+        if T0 is None:
+            T0 = (mu * m_H / k_B) * (P0 / rho_g0)
         
         # Get stellar mass
         M_star = units('solar_mass')
@@ -831,7 +838,6 @@ class Dust(SubModel):
         Omega_K = Omega_K_1d[:, None]
         
         # Sound speed at midplane
-        mu = component.mean_molecular_weight
         c_s0 = np.sqrt(k_B * T0 / (mu * m_H))
         
         # Gas scale height at midplane: H_g = c_s / Omega_K
@@ -845,7 +851,7 @@ class Dust(SubModel):
             gas_temperature=T0,
             keplerian_freq=Omega_K,
             grain_density=component.distribution.grain_density,
-            mean_molecular_weight=component.mean_molecular_weight,
+            mean_molecular_weight=mu,
         )
         
         # Dust scale height from midplane Stokes number

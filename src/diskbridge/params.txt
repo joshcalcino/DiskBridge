@@ -60,15 +60,13 @@ co_self_shielding = F              # enable CO self-shielding via HEALPix rays (
 co_tau_form_model = off            # CO formation timescale model: off|density_capped
 
 # Segmented RT (two-run outer/inner workflow)
-segmented_tol_T            = 0.01  # fractional tolerance for T asymptote (R_split criterion)
-segmented_tol_chi          = 0.01  # fractional tolerance for chi asymptote (R_split criterion)
+segmented_tol              = 0.01  # fractional tolerance for T and chi asymptote (R_split criterion)
 segmented_window_fraction  = 0.1   # fraction of radial domain for asymptote window
 segmented_shell_ncells     = 3     # number of radial cells for shell spectrum extraction
 segmented_r_clip_min       = 1.0   # minimum allowed R_split in au
 segmented_max_splits        = 1
 segmented_stop_factor       = 0.9
-segmented_nphot_thermal     = 1e7
-segmented_nphot_mono        = 1e7
+segmented_nphot_ratio       = 1.0
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii
