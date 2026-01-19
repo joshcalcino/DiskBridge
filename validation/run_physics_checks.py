@@ -38,7 +38,7 @@ def _column_to_outer_boundary(mesh, field_cm3: np.ndarray) -> np.ndarray:
         field_cm3,
         axis_name=axis_name,
         axis_index=axis_index,
-        outer="max",
+        outer="min",
     )
 
 
@@ -50,6 +50,7 @@ def _compute_Av(mesh, nH_cm3: np.ndarray, sigma_d_per_H_cm2: np.ndarray) -> np.n
 
 
 _NH_PER_AV_CM2 = 1.87e21
+_GAMMA_DUST_ATTEN = 3.02
 
 
 def _setup_matplotlib():
@@ -249,7 +250,8 @@ def _build_radmodel_1d(*, n_cells: int, nH_cm3: float, chi: float, Tdust_K: floa
 
     rad = RadModel(model)
     rad.dust_temperature = Quantity(np.full(mesh.shape, float(Tdust_K)), "K")
-    rad.chi = Quantity(np.full(mesh.shape, float(chi)), "dimensionless")
+    chi_local = float(chi) * np.exp(-float(_GAMMA_DUST_ATTEN) * Av_centers)
+    rad.chi = Quantity(chi_local.reshape(mesh.shape), "dimensionless")
     rad.Av = Quantity(Av_centers.reshape(mesh.shape), "dimensionless")
 
     return rad

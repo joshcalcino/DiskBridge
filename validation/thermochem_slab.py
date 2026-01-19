@@ -60,6 +60,9 @@ def _annotate(ax, lines: list[str]) -> None:
 def _build_slab_on_Av_grid(cfg: ThermochemSlabConfig) -> tuple[RadModel, np.ndarray]:
     m_H = units("m_H")
 
+    gamma = 3.02
+    NH_per_Av = 1.87e21
+
     Av_edges = np.linspace(0.0, float(cfg.Av_max), int(cfg.n_cells) + 1, dtype=float)
     NH_edges = Av_edges * 1.87e21
 
@@ -88,7 +91,8 @@ def _build_slab_on_Av_grid(cfg: ThermochemSlabConfig) -> tuple[RadModel, np.ndar
         "density", Field(quantity="density", data=rho, axis_order=("x", "y", "z"))
     )
 
-    sigma = Quantity(np.full(mesh.shape, 1.0e-21), "cm^2")
+    sigma_d_per_H_cm2 = 1.0 / (1.086 * float(NH_per_Av))
+    sigma = Quantity(np.full(mesh.shape, sigma_d_per_H_cm2), "cm^2")
     model.gas_register(
         "sigma_d_per_H",
         Field(quantity="sigma_d_per_H", data=sigma, axis_order=("x", "y", "z")),
@@ -100,7 +104,8 @@ def _build_slab_on_Av_grid(cfg: ThermochemSlabConfig) -> tuple[RadModel, np.ndar
 
     Av_centers = 0.5 * (Av_edges[:-1] + Av_edges[1:])
     rad.Av = Quantity(Av_centers.reshape(mesh.shape), "dimensionless")
-    rad.chi = Quantity(np.full(mesh.shape, float(cfg.chi0)), "dimensionless")
+    chi_local = float(cfg.chi0) * np.exp(-float(gamma) * Av_centers)
+    rad.chi = Quantity(chi_local.reshape(mesh.shape), "dimensionless")
 
     return rad, Av_centers
 
@@ -308,6 +313,19 @@ def run(out_dir: Path) -> None:
         _annotate(ax, params_box)
         fig.tight_layout()
         fig.savefig(out_dir / "abundances_vs_Av.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7.0, 4.5))
+        ax.plot(Av, _logx(nco_gas_cm3), label="CO(gas)")
+        ax.plot(Av, _logx(nco_ice_cm3), label="CO(ice)")
+        ax.plot(Av, _logx(nco_total_cm3), label="CO(total)")
+        ax.set_xlabel("Av")
+        ax.set_ylabel("log10(x)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+        _annotate(ax, params_box)
+        fig.tight_layout()
+        fig.savefig(out_dir / "co_partition_vs_Av.png", dpi=150)
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(7.0, 4.5))

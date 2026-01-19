@@ -2,7 +2,7 @@
   "Tdust_K": 20.0,
   "case": "thermochemistry_convergence",
   "chi0": 1.0,
-  "commit": "3c788bdfeceb439ac0bb22a7df097eeab0f4752b",
+  "commit": "013714da9c0c6e8bf229627254cfe6cda5b84e27",
   "metrics": [
     0.0,
     0.0,
@@ -12,5 +12,5 @@
   "nH_cm3": 100000.0,
   "n_cells": 64,
   "n_iter": 5,
-  "time": "2026-01-18T17:42:40"
+  "time": "2026-01-19T09:32:31"
 }

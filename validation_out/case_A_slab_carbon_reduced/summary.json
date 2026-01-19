@@ -5,8 +5,8 @@
     "model": "carbon_reduced"
   },
   "chi0": 1.0,
-  "commit": "3c788bdfeceb439ac0bb22a7df097eeab0f4752b",
+  "commit": "013714da9c0c6e8bf229627254cfe6cda5b84e27",
   "nH_cm3": 10000.0,
   "n_cells": 128,
-  "time": "2026-01-18T17:42:39"
+  "time": "2026-01-19T09:32:30"
 }

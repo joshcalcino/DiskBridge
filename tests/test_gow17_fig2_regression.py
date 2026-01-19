@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import pytest
 
-pytest.skip("Replaced by validation job: python -m diskbridge.validation.run_all", allow_module_level=True)
-
 import numpy as np
 from pathlib import Path
 

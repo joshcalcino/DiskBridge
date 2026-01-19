@@ -70,7 +70,7 @@ def compute_h2_partition(
                 nH2_cgs,
                 axis_name=axis_name,
                 axis_index=axis_index,
-                outer="max",
+                outer="min",
             )
             f_sh_eff = h2_self_shielding_db96(N_H2, b5=b5).reshape(-1)
 

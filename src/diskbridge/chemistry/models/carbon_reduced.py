@@ -201,7 +201,7 @@ def _compute_co_shielding(
             nCO=nCO_cm3,
             nH2=nH2_cm3,
             b_kms=float(b_kms),
-            outer="max",
+            outer="min",
         )
     else:
         from diskbridge.chemistry.shielding.healpix_columns import compute_co_shielding_healpix

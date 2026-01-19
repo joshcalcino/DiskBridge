@@ -172,7 +172,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_max_iter = int(shielding_max_iter_cfg)
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
-    shielding_outer_1d = str(cfg.get("shielding_outer_1d", "max"))
+    shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
     slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
