@@ -750,8 +750,9 @@ class Dust(SubModel):
             
             # Apply component mask if set
             if component.mask is not None:
-                mask_array = component.mask.data.magnitude.astype(bool)
-                dust_density_data = dust_density_data * mask_array
+                w = np.asarray(component.mask.data.to("dimensionless").magnitude, dtype=float)
+                w = np.clip(w, 0.0, 1.0)
+                dust_density_data = dust_density_data * w
                 
             dust_field = Field(
                 data=dust_density_data,
@@ -878,8 +879,9 @@ class Dust(SubModel):
 
         # Apply mask if set
         if component.mask is not None:
-            mask_array = component.mask.data.magnitude.astype(bool)
-            dust_density_data = dust_density_data * mask_array
+            w = np.asarray(component.mask.data.to("dimensionless").magnitude, dtype=float)
+            w = np.clip(w, 0.0, 1.0)
+            dust_density_data = dust_density_data * w
 
         # Ensure numerical stability
         dust_density_data = np.where(np.isfinite(dust_density_data), dust_density_data, 0.0)

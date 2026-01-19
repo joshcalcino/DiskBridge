@@ -341,7 +341,16 @@ def _compute_ring_criteria(
     c5 = rho_avg_base > rho_disk_min.to_base_units().magnitude
     ring_pass = c1 & c2 & c3 & c5
 
-    return ring_pass, sum_w.reshape(nR, n_theta_bins), theta_edges
+    diag = dict(
+        vphi=vphi_avg,
+        vR=vR_avg,
+        vz=vz_avg,
+        rot=rot_avg,
+        P=P_avg,
+        rho=rho_avg_base,
+    )
+
+    return ring_pass, sum_w.reshape(nR, n_theta_bins), theta_edges, diag
 
 
 def _apply_connectivity(
@@ -391,6 +400,11 @@ def set_mask_from_joos_disk(
     n_r_bins: Optional[int] = None,
     n_theta_bins: Optional[int] = None,
     r_max: Optional[Quantity] = None,
+    weight_mode: str = "none",
+    weight_name: str = "disk_weight",
+    weight_delta_bins: float = 3.0,
+    weight_m0: float = 0.25,
+    weight_floor: float = 1e-4,
 ) -> "SubModel":
     mesh = model.mesh
     if mesh.coord_system != "spherical":
@@ -459,7 +473,7 @@ def set_mask_from_joos_disk(
         fthres, fthres_vr, r_edges, nR
     )
 
-    ring_pass, sum_w_2d, theta_edges = _compute_ring_criteria(
+    ring_pass, sum_w_2d, theta_edges, diag = _compute_ring_criteria(
         rho, dV_mag, disk_frame, Pth, r_grid, r_edges, theta_edges,
         nR, n_theta_bins, rho_disk_min, fthres_use, fthres_vr_use
     )
@@ -476,6 +490,70 @@ def set_mask_from_joos_disk(
     mask = np.zeros_like(r_grid_mag, dtype=bool)
     mask_valid = connected_flat[ring_index_flat]
     mask[valid] = mask_valid
+
+    if weight_mode != "none":
+        def _sigmoid(x: np.ndarray) -> np.ndarray:
+            return 1.0 / (1.0 + np.exp(-x))
+
+        if weight_mode == "distance":
+            w_ring = np.zeros_like(connected, dtype=float)
+            j = np.arange(n_theta_bins)
+            for i in range(nR):
+                idx = np.flatnonzero(connected[i])
+                if idx.size == 0:
+                    continue
+                j0, j1 = int(idx[0]), int(idx[-1])
+                inside = (j >= j0) & (j <= j1)
+                d = np.empty_like(j, dtype=float)
+                d[inside] = np.minimum(j[inside] - j0, j1 - j[inside])
+                d[~inside] = -np.minimum(np.abs(j[~inside] - j0), np.abs(j[~inside] - j1))
+                w_ring[i] = _sigmoid(d / float(weight_delta_bins))
+        elif weight_mode == "margins":
+            eps = np.finfo(np.float64).tiny
+            vphi = diag["vphi"]
+            vR = diag["vR"]
+            vz = diag["vz"]
+            rot = diag["rot"]
+            P = diag["P"]
+            rho_avg = diag["rho"]
+
+            m1 = np.log((vphi + eps) / (fthres_vr_use * vR + eps))
+            m2 = np.log((vphi + eps) / (fthres_use * vz + eps))
+            m3 = np.log((rot + eps) / (fthres_use * P + eps))
+            m5 = np.log((rho_avg + eps) / (rho_disk_min.to_base_units().magnitude + eps))
+            m = np.minimum.reduce([m1, m2, m3, m5])
+            w_marg = _sigmoid(m / float(weight_m0))
+
+            w_conn = np.zeros_like(connected, dtype=float)
+            j = np.arange(n_theta_bins)
+            for i in range(nR):
+                idx = np.flatnonzero(connected[i])
+                if idx.size == 0:
+                    continue
+                j0, j1 = int(idx[0]), int(idx[-1])
+                inside = (j >= j0) & (j <= j1)
+                d = np.empty_like(j, dtype=float)
+                d[inside] = np.minimum(j[inside] - j0, j1 - j[inside])
+                d[~inside] = -np.minimum(np.abs(j[~inside] - j0), np.abs(j[~inside] - j1))
+                w_conn[i] = _sigmoid(d / float(weight_delta_bins))
+
+            w_ring = w_marg * w_conn
+        else:
+            raise ValueError(f"Unknown weight_mode={weight_mode!r}")
+
+        w_grid = np.zeros_like(r_grid_mag, dtype=float)
+        w_flat = w_ring.reshape(-1)
+        w_grid[valid] = w_flat[ring_index_flat]
+        w_grid = np.clip(w_grid, 0.0, 1.0)
+        w_grid[w_grid < weight_floor] = 0.0
+        w_grid[w_grid > 1.0 - weight_floor] = 1.0
+
+        w_field = Field(
+            data=Quantity(w_grid, "dimensionless"),
+            quantity="mask",
+            axis_order=mesh.axis_names(),
+        )
+        model.gas_register(weight_name, w_field)
 
     if r_max is not None:
         mask &= (r_grid <= r_max)

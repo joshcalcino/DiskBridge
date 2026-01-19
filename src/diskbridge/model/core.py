@@ -299,6 +299,11 @@ class Model:
         n_r_bins: Optional[int] = None,
         n_theta_bins: Optional[int] = None,
         r_max: Optional[Quantity] = None,
+        weight_mode: str = "none",
+        weight_name: str = "disk_weight",
+        weight_delta_bins: float = 3.0,
+        weight_m0: float = 0.25,
+        weight_floor: float = 1e-4,
     ) -> SubModel:
         from .masking import set_mask_from_joos_disk as _set_mask_from_joos_disk
 
@@ -312,6 +317,11 @@ class Model:
             n_r_bins=n_r_bins,
             n_theta_bins=n_theta_bins,
             r_max=r_max,
+            weight_mode=weight_mode,
+            weight_name=weight_name,
+            weight_delta_bins=weight_delta_bins,
+            weight_m0=weight_m0,
+            weight_floor=weight_floor,
         )
 
     def set_mask_from_array(
