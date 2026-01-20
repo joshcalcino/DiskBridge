@@ -925,6 +925,8 @@ class RadImage:
         noscat_flag = getattr(self.params, 'noscat', False)
         if noscat_flag:
             cmd.append('noscat')
+
+        doppcatch_flag = getattr(self.params, 'doppcatch', False)
         
         # Wavelength or line parameters
         if wavelength is not None:
@@ -935,6 +937,8 @@ class RadImage:
                 cmd += ['widthkms', str(widthkms)]
             if linenlam is not None:
                 cmd += ['linenlam', str(linenlam)]
+            if doppcatch_flag:
+                cmd.append('doppcatch')
         
         if stokes:
             cmd += ['stokes']

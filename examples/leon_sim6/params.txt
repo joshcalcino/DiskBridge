@@ -104,3 +104,5 @@ append_name      = '_mdot_{mdot}_Pd_{photodissociation}'
 # - setthreads: number of CPU threads (currently uses nbcores)
 # - Image command flags: npix, incl, posang, phi, sizeau, lambda, iline, widthkms, linenlam, stokes
 # - Commands: mctherm, mcmono, image
+
+doppcatch       = F

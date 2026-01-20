@@ -78,6 +78,7 @@ accretion_fill_factor = 0.05
 # RADMC 
 secondorder      = F
 noscat           = F
+doppcatch        = F
 
 # Naming (optional)
 prepend_name     =

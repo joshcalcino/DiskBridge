@@ -95,6 +95,7 @@ class Params:
     # radmc
     secondorder: bool
     noscat: bool
+    doppcatch: bool
 
     # naming
     prepend_name: str
