@@ -72,7 +72,6 @@ class Params:
 
     external_uv: bool
     external_uv_chi: float
-    co_self_shielding: bool
 
     co_tau_form_model: str
 

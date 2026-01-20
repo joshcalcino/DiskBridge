@@ -77,8 +77,6 @@ uv_min       = 91.2                # UV range lower bound (nm)
 uv_max       = 205.0               # UV range upper bound (nm)
 uv_n_wavelengths = 50                 # Number of wavelengths for integration
 
-co_self_shielding = T                 # enable CO self-shielding via HEALPix rays (T/F)
-co_self_shielding_method = uniform    # self-shielding integrator: 'uniform' (fast) or 'sortedsearch' (reference)
 
 
 ######################
@@ -100,7 +98,7 @@ secondorder     = T                   # second-order ray tracing (T/F)
 
 # Naming (optional)
 prepend_name     =
-append_name      = '_mdot_{mdot}_Pd_{photodissociation}_cs_{co_self_shielding}'
+append_name      = '_mdot_{mdot}_Pd_{photodissociation}'
 
 # Other radmc3d flags found in code (not yet added as parameters):
 # - setthreads: number of CPU threads (currently uses nbcores)

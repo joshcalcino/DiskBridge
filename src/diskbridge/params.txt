@@ -55,8 +55,7 @@ uv_max           = 111.8           # max uv wavelength in nanometers
 uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
 external_uv      = F               # include external uv photons 
 external_uv_chi  = 1.0             # uv field strength in Draine units 
-co_self_shielding = F              # enable CO self-shielding via HEALPix rays (T/F)
-
+ 
 co_tau_form_model = off            # CO formation timescale model: off|density_capped
 
 # Segmented RT (two-run outer/inner workflow)

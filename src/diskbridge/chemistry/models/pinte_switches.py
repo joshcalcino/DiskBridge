@@ -22,6 +22,9 @@ def run_pinte_switches(rad: 'RadModel', config: dict) -> ChemistryResult:
     photodissociation = config.get('photodissociation', diskbridge.params.photodissociation)
     freezeout = config.get('freezeout', diskbridge.params.freezeout)
     photodesorption = config.get('photodesorption', diskbridge.params.photodesorption)
+    t_frz = config.get('t_frz', T_FRZ)
+    eps_frz = config.get('eps_frz', EPS_FRZ)
+    eps_chi = config.get('eps_chi', EPS_CHI)
     smooth_log_chi_nH_dex = config.get('smooth_log_chi_nH_dex', 0.0)
     smooth_Tfrz_K = config.get('smooth_Tfrz_K', 0.0)
 
@@ -45,6 +48,9 @@ def run_pinte_switches(rad: 'RadModel', config: dict) -> ChemistryResult:
         photodissociation=bool(photodissociation),
         freezeout=bool(freezeout),
         photodesorption=bool(photodesorption),
+        t_frz=float(t_frz),
+        eps_frz=float(eps_frz),
+        eps_chi=float(eps_chi),
         smooth_log_chi_nH_dex=float(smooth_log_chi_nH_dex),
         smooth_Tfrz_K=float(smooth_Tfrz_K),
     )
@@ -73,6 +79,9 @@ def compute_abundance_pinte(
     photodissociation: bool,
     freezeout: bool,
     photodesorption: bool,
+    t_frz: float,
+    eps_frz: float,
+    eps_chi: float,
     smooth_log_chi_nH_dex: float = 0.0,
     smooth_Tfrz_K: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -93,7 +102,7 @@ def compute_abundance_pinte(
 
     if freezeout:
         freeze_factor, mask_frz = compute_freezeout_factor(
-            T_vals, T_FRZ, EPS_FRZ, smooth_Tfrz_K,
+            T_vals, float(t_frz), float(eps_frz), float(smooth_Tfrz_K),
         )
         X *= freeze_factor
         n_frz = int(np.sum(mask_frz))
@@ -111,8 +120,8 @@ def compute_abundance_pinte(
     if chi_eff_use is not None and (photodissociation or photodesorption):
         if chi_eff_use.shape != nH_cm3.shape:
             raise ValueError('chi/chi_eff must have the same shape as nH_cm3')
-        ratio = chi_eff_use / (nH_cm3 + EPS_CHI)
-        chi_over_nH = np.log10(np.maximum(ratio, EPS_CHI))
+        ratio = chi_eff_use / (nH_cm3 + float(eps_chi))
+        chi_over_nH = np.log10(np.maximum(ratio, float(eps_chi)))
 
     mask_pdes = np.zeros_like(T_vals, dtype=bool)
     if photodesorption and chi_over_nH is not None:
