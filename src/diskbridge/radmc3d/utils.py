@@ -51,6 +51,8 @@ def create_symlinks_for_file_map(
                 if not source.exists():
                     continue
 
+                source_resolved = source.resolve()
+
                 target = model_dir / source.name
 
                 if target.is_symlink() and target.resolve() == source.resolve():
@@ -60,7 +62,7 @@ def create_symlinks_for_file_map(
                 if target.exists() or target.is_symlink():
                     target.unlink()
 
-                os.symlink(source, target)
+                os.symlink(str(source_resolved), str(target))
                 active_symlinks.append(target)
                 logger.debug(f"Created symlink: {target} -> {source}")
 

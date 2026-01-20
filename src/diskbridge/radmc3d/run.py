@@ -111,7 +111,7 @@ class SymlinkContext:
         if target.exists() or target.is_symlink():
             target.unlink()
         
-        os.symlink(source, target)
+        os.symlink(str(source.resolve()), str(target))
         self._active_symlinks.append(target)
         logger.debug(f"Created symlink: {target} -> {source}")
 
