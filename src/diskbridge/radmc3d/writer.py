@@ -8,10 +8,7 @@ from Pint Quantities to CGS units.
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, List, Tuple
 from pathlib import Path
-import os
 import numpy as np
-from shutil import which
-import urllib.request
 
 if TYPE_CHECKING:
     from diskbridge.model.core import Model
@@ -686,20 +683,13 @@ class RadWriter:
 
         logger.info("All RADMC-3D input files written successfully")
     
-    def _ensure_isrf_file(self, path: Path, url: str) -> Path:
+    def _ensure_isrf_file(self, path: Path) -> Path:
         if path.is_file():
             return path
-        if which('curl') is None:
-            try:
-                urllib.request.urlretrieve(url, str(path))
-                return path
-            except Exception as e:
-                raise RuntimeError(f"Failed to download ISRF file without curl: {e}")
-        cmd = f"curl -k -L -o {path} {url}"
-        os.system(cmd)
-        if not path.is_file():
-            raise RuntimeError("Failed to download ISRF.dat")
-        return path
+        raise FileNotFoundError(
+            "ISRF.dat not found. DiskBridge does not download this file at runtime. "
+            f"Expected to find it at: {path}"
+        )
     
     def _parse_isrf_table(self, path: Path, quantity: str = 'auto') -> tuple[np.ndarray, np.ndarray, str]:
         lam = []
@@ -837,13 +827,10 @@ class RadWriter:
     ) -> None:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'external')
-        url = "https://home.strw.leidenuniv.nl/~ewine/photo/data/photo_data/radiation_fields/ISRF.dat"
-        isrf_path = Path(isrf_path)
-        if not isrf_path.is_absolute():
-            data_dir = Path(__file__).resolve().parents[3] / 'data'
-            data_dir.mkdir(parents=True, exist_ok=True)
-            isrf_path = data_dir / isrf_path.name
-        isrf_file = self._ensure_isrf_file(isrf_path, url)
+        data_dir = Path(__file__).resolve().parents[3] / 'data'
+        isrf_name = Path(isrf_path).name
+        isrf_path = data_dir / isrf_name
+        isrf_file = self._ensure_isrf_file(isrf_path)
         wav_file = output_dir / 'wavelength_micron.inp'
         lam_um = self._read_wavelength_grid_from_file(wav_file)
         lam_cm = lam_um * 1.0e-4
