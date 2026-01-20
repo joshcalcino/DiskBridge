@@ -101,6 +101,25 @@ class Model:
                             f"dust field '{name}' has axis_order={field.axis_order}; expected {target}"
                         )
 
+    def save_hdf5(
+        self,
+        path: Union[str, Path],
+        *,
+        include_disk: bool = True,
+        include_dust: bool = True,
+        overwrite: bool = True,
+    ) -> Path:
+        """Save a portable HDF5 snapshot of this Model."""
+        from .io_hdf5 import save_model_hdf5
+
+        return save_model_hdf5(
+            self,
+            path,
+            include_disk=include_disk,
+            include_dust=include_dust,
+            overwrite=overwrite,
+        )
+
     def _apply_rescaling(self, length_scale=None, mass_scale=None) -> None:
         """
         Internal method to apply length and mass rescaling during initialization.
@@ -213,6 +232,11 @@ class Model:
         p = Path(path)
         
         if p.is_file():
+            if p.suffix.lower() in {".h5", ".hdf5"}:
+                from .io_hdf5 import load_model_hdf5
+
+                return load_model_hdf5(p)
+
             with open(p, 'rb') as f:
                 return pickle.load(f)
         
