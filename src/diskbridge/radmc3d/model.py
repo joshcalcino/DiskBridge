@@ -3,14 +3,19 @@
 This module provides the RADMC3DModel class that wraps a DiskBridge Model
 and provides high-level operations for RADMC-3D workflows:
 - Reading RADMC-3D output files (via radmc3dData)
-- Computing UV fields and photochemistry
-- Computing molecular abundances with photodissociation/freeze-out
+- Computing UV fields from mean intensity
+- Applying photochemistry prescriptions (Pinte et al. 2018)
 - Writing molecular number density files
+    
+This class does NOT build models or write RADMC-3D input files - use
+RADMC3DWriter for that. This separation mirrors the radmc3dPy structure
+where data (reading), setup (writing), and models (high-level) are separate.
 """
 
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple, Sequence
 from pathlib import Path
+import hashlib
 import numpy as np
 import shutil
 import datetime
@@ -462,6 +467,10 @@ class RadModel:
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
         
+        cache_context = {
+            'nphot': int(nphot),
+        }
+        
         countwrite = max(1, int(nphot // 100))
         countwrite = min(countwrite, int(np.iinfo(np.int32).max))
         
@@ -476,7 +485,7 @@ class RadModel:
             current_params_path=self.model_dir / 'params.txt',
             param_keys=_MCTHERM_PARAM_KEYS,
             force=force,
-            use_params_nphot=use_params_nphot,
+            **cache_context,
         )
         
         if use_cache and cached_file:
@@ -510,6 +519,7 @@ class RadModel:
             model_dir=self.model_dir,
             output_files=['dust_temperature.dat', 'dust_temperature.bdat'],
             description=f'radmc3d mctherm nphot={nphot}',
+            cache_context=cache_context,
         )
         
         temp_file = find_cached_output(
@@ -697,6 +707,7 @@ class RadModel:
         mcmono_lam_um: np.ndarray,
         nphot: int,
         countwrite: int,
+        cache_context: Optional[dict] = None,
     ) -> None:
         """Run RADMC-3D mcmono and organize outputs."""
         with SymlinkContext(
@@ -730,6 +741,7 @@ class RadModel:
             model_dir=self.model_dir,
             output_files=['mean_intensity.out', 'mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
             description=f'radmc3d mcmono range_{mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g}micron_{mcmono_lam_um.size}wavelengths',
+            cache_context=cache_context,
         )
     
     def compute_mcmono(
@@ -768,6 +780,24 @@ class RadModel:
             nphot, uv_min, uv_max, n_wavelengths, wavelengths_um
         )
         
+        cache_context = {
+            'nphot': int(nphot),
+            'uv_min_um': float(uv_min.to('micron').magnitude),
+            'uv_max_um': float(uv_max.to('micron').magnitude),
+            'n_wavelengths': int(n_wavelengths),
+        }
+
+        if wavelengths_um is not None:
+            wav = np.asarray(wavelengths_um, dtype=np.float64)
+            cache_context.update(
+                {
+                    'wavelengths_sha256': hashlib.sha256(wav.tobytes()).hexdigest(),
+                    'wavelengths_size': int(wav.size),
+                    'wavelengths_min_um': float(np.min(wav)),
+                    'wavelengths_max_um': float(np.max(wav)),
+                }
+            )
+        
         if output_dir is None:
             output_dir = self.outputs_dir
         else:
@@ -779,7 +809,7 @@ class RadModel:
             current_params_path=self.model_dir / 'params.txt',
             param_keys=_MCTHERM_PARAM_KEYS + _MCMONO_EXTRA_PARAM_KEYS,
             force=force,
-            use_params_nphot=all_params_used,
+            **cache_context,
         )
         
         if use_cache and cached_file:
@@ -793,7 +823,7 @@ class RadModel:
             wavelengths_um, uv_min, uv_max, n_wavelengths
         )
         self._prepare_mcmono_run(output_dir)
-        self._run_mcmono(output_dir, mcmono_lam_um, nphot, countwrite)
+        self._run_mcmono(output_dir, mcmono_lam_um, nphot, countwrite, cache_context=cache_context)
         
         mean_intensity_file = find_cached_output(
             output_dir,

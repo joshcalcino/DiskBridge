@@ -6,7 +6,8 @@ RADMC-3D runs and executing RADMC-3D commands with proper logging.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Sequence, TYPE_CHECKING
+import json
+from typing import Optional, Sequence, TYPE_CHECKING, Any
 import shutil
 import datetime
 
@@ -185,6 +186,7 @@ def organize_outputs(
     model_dir: Path,
     output_files: Sequence[str],
     description: str,
+    cache_context: Optional[dict[str, Any]] = None,
 ) -> None:
     """Move RADMC-3D output files to organized directory.
     
@@ -221,6 +223,17 @@ def organize_outputs(
         moved_count += 1
     
     if moved_count > 0:
+        params_src = model_dir / 'params.txt'
+        if params_src.exists():
+            params_dst = output_dir / 'params.txt'
+            if params_dst.exists():
+                params_dst.unlink()
+            shutil.copy2(str(params_src), str(params_dst))
+
+        if cache_context is not None:
+            ctx_path = output_dir / 'cache_context.json'
+            ctx_path.write_text(json.dumps(cache_context, sort_keys=True))
+
         readme = output_dir / 'README.txt'
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         with open(readme, 'w') as f:

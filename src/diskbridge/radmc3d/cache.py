@@ -6,7 +6,8 @@ are still valid based on parameter snapshots and signatures.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Sequence, Optional
+import json
+from typing import Sequence, Optional, Any
 
 from diskbridge._logging import logger
 from .utils import _read_params_snapshot, _params_signature
@@ -152,16 +153,36 @@ def should_use_cache(
     cached_file = find_cached_output(output_dir, candidate_files)
     if cached_file is None:
         return False, None
-    
-    # Check if any parameter overrides were used
-    has_overrides = not all(override_flags.values())
-    if has_overrides:
-        logger.info(
-            f"Existing output found at {cached_file} but parameter "
-            "overrides were used; will recompute."
-        )
-        return False, cached_file
-    
+
+    cache_context: dict[str, Any] = dict(override_flags)
+    if cache_context:
+        ctx_path = output_dir / 'cache_context.json'
+        if not ctx_path.exists():
+            logger.info(
+                f"Existing output found at {cached_file} but cache context "
+                "file is missing; will recompute."
+            )
+            return False, cached_file
+
+        try:
+            saved_context = json.loads(ctx_path.read_text())
+        except Exception as e:
+            logger.info(
+                f"Existing output found at {cached_file} but cache context "
+                f"could not be read ({e}); will recompute."
+            )
+            return False, cached_file
+
+        changed_keys = [
+            k for k, v in cache_context.items() if saved_context.get(k) != v
+        ]
+        if changed_keys:
+            logger.info(
+                f"Existing output found at {cached_file} but cache context "
+                f"changed ({', '.join(changed_keys)}); will recompute."
+            )
+            return False, cached_file
+
     saved_params_path = output_dir / 'params.txt'
     is_valid = check_cache_validity(
         output_file=cached_file,

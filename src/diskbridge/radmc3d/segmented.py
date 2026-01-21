@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
+import shutil
 
 from diskbridge._logging import logger
 from diskbridge._units import units, Quantity
@@ -42,7 +43,7 @@ class SegmentedRadRunner:
             **{f"{ax}_max": v[1] for ax, v in segment.bounds.items() if v[1] is not None},
         )
         return clipped, indexer
-    
+
     def _setup_segment(
         self,
         seg_model: Model,
@@ -52,13 +53,21 @@ class SegmentedRadRunner:
         """Setup segment: create RadModel, write inputs, link opacities."""
         from diskbridge.radmc3d.model import RadModel
         from diskbridge.radmc3d.utils import link_dustkappa_opacities
-        
+
         work_dir.mkdir(parents=True, exist_ok=True)
+
+        base_params = self.base_model_dir / 'params.txt'
+        if base_params.exists():
+            seg_params = work_dir / 'params.txt'
+            if seg_params.exists():
+                seg_params.unlink()
+            shutil.copy2(str(base_params), str(seg_params))
+
         rad = RadModel(seg_model, model_dir=work_dir)
         rad.writer.write_all_input_files(work_dir)
         link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
         return rad
-    
+
     def _inherit_external_source(
         self,
         outer_rad: 'RadModel',
