@@ -257,7 +257,7 @@ def ensure_temperature_symlink(
     import os
     
     # Check if temperature already exists in model_dir
-    for suffix in ['.bdat', '.dat', '.binp']:
+    for suffix in ['.bdat', '.dat']:
         dst_temp = model_dir / f'dust_temperature{suffix}'
         if dst_temp.exists():
             return dst_temp
@@ -271,7 +271,7 @@ def ensure_temperature_symlink(
         search_paths.insert(0, output_dir.parent / 'temperature')
         search_paths.insert(0, output_dir)
     
-    for suffix in ['.bdat', '.dat', '.binp']:
+    for suffix in ['.bdat', '.dat']:
         for search_dir in search_paths:
             src_temp = search_dir / f'dust_temperature{suffix}'
             if not src_temp.exists():

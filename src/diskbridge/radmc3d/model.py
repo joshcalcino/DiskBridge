@@ -472,7 +472,7 @@ class RadModel:
 
         use_cache, cached_file = should_use_cache(
             output_dir=output_dir,
-            candidate_files=['dust_temperature.bdat', 'dust_temperature.dat', 'dust_temperature.binp'],
+            candidate_files=['dust_temperature.bdat', 'dust_temperature.dat'],
             current_params_path=self.model_dir / 'params.txt',
             param_keys=_MCTHERM_PARAM_KEYS,
             force=force,
@@ -508,13 +508,13 @@ class RadModel:
         organize_outputs(
             output_dir=output_dir,
             model_dir=self.model_dir,
-            output_files=['dust_temperature.dat', 'dust_temperature.bdat', 'dust_temperature.binp'],
+            output_files=['dust_temperature.dat', 'dust_temperature.bdat'],
             description=f'radmc3d mctherm nphot={nphot}',
         )
         
         temp_file = find_cached_output(
             output_dir,
-            ['dust_temperature.bdat', 'dust_temperature.dat', 'dust_temperature.binp'],
+            ['dust_temperature.bdat', 'dust_temperature.dat'],
         )
         if temp_file:
             self.read_dust_temperature(fname=str(temp_file))
