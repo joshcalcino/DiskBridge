@@ -78,6 +78,15 @@ LOG_CHI_OVER_NH_PDES = float(_pinte['log_chi_over_nH_pdes'])    # dimensionless
 EPS_CHI = float(_pinte['eps_chi'])                            # dimensionless
 
 # =============================================================================
+# ABUNDANCE SWITCHES MODEL
+# =============================================================================
+
+_ab_switch = _cfg['chemistry']['abundance_switches']
+
+CD_THRESHOLD_PDES = Quantity(_ab_switch['CD_threshold_pdes']).to_base_units().magnitude  # cm^-2
+CD_THRESHOLD_PDISS = Quantity(_ab_switch['CD_threshold_pdiss']).to_base_units().magnitude  # cm^-2
+
+# =============================================================================
 # CO TWO-PHASE MODEL
 # =============================================================================
 
