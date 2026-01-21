@@ -268,7 +268,7 @@ def ensure_temperature_symlink(
         Path to created symlink, or None if temperature not found
     """
     import os
-    
+
     # Check if temperature already exists in model_dir
     for suffix in ['.bdat', '.dat']:
         dst_temp = model_dir / f'dust_temperature{suffix}'
@@ -289,9 +289,21 @@ def ensure_temperature_symlink(
             src_temp = search_dir / f'dust_temperature{suffix}'
             if not src_temp.exists():
                 continue
-            
+
+            src_resolved = src_temp.resolve()
             dst_temp = model_dir / f'dust_temperature{suffix}'
-            os.symlink(src_temp, dst_temp)
+
+            if dst_temp.is_symlink():
+                try:
+                    if dst_temp.resolve() == src_resolved:
+                        return dst_temp
+                except Exception:
+                    pass
+
+            if dst_temp.exists() or dst_temp.is_symlink():
+                dst_temp.unlink()
+
+            os.symlink(str(src_resolved), str(dst_temp))
             logger.debug(f"Created temperature symlink: {dst_temp} -> {src_temp}")
             return dst_temp
     

@@ -720,13 +720,17 @@ class RadModel:
                 outputs_dir=self.outputs_dir,
                 output_dir=output_dir,
             )
-            if temp_symlink:
-                ctx._active_symlinks.append(temp_symlink)
+            if not temp_symlink:
+                raise RuntimeError(
+                    "mcmono requires dust_temperature.dat or dust_temperature.bdat, but no temperature file was found."
+                )
+
+            ctx._active_symlinks.append(temp_symlink)
             
             setthreads = self.params.nbcores
             logger.info(
                 f"Running mcmono: {mcmono_lam_um.size} wavelengths "
-                f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} µm), "
+                f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} um), "
                 f"{nphot} photons"
             )
             run_radmc3d(
