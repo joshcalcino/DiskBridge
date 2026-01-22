@@ -169,6 +169,17 @@ class SegmentedRadRunner:
                 "Increase segmented_nphot_ratio or nphot_mono."
             )
 
+        logger.info(
+            "Segmented RT photons: ratio=%.6g, mctherm=%d/%d, mcmono=%d/%d"
+            % (
+                float(nphot_ratio),
+                int(nphot_therm_intermediate),
+                int(nphot_therm_final),
+                int(nphot_mono_intermediate),
+                int(nphot_mono_final),
+            )
+        )
+
         if max_splits is None:
             max_splits = int(params.segmented_max_splits)
         max_splits = int(max_splits)

@@ -238,6 +238,47 @@ class RadModel:
         except Exception as e:
             raise RuntimeError(f"Failed to update {radmc_inp_path}: {e}")
     
+    def _update_radmc3d_inp_int_params(self, updates: dict[str, int]) -> None:
+        radmc_inp_path = self.inputs_dir / 'radmc3d.inp'
+        if not radmc_inp_path.exists():
+            raise FileNotFoundError(
+                f"Missing required input file: {radmc_inp_path}. "
+                "Generate RADMC-3D inputs (including radmc3d.inp) before running mctherm/mcmono."
+            )
+
+        try:
+            lines = radmc_inp_path.read_text().splitlines(True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read {radmc_inp_path}: {e}")
+
+        pending = {str(k): int(v) for k, v in updates.items()}
+        updated_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if (not stripped) or stripped.startswith('#') or ('=' not in line):
+                updated_lines.append(line)
+                continue
+
+            name, _value = line.split('=', 1)
+            key = name.strip()
+            if key not in pending:
+                updated_lines.append(line)
+                continue
+
+            updated_lines.append(f'{key} = {pending.pop(key)}\n')
+
+        if pending:
+            if updated_lines and not updated_lines[-1].endswith('\n'):
+                updated_lines[-1] = updated_lines[-1] + '\n'
+            for key, val in pending.items():
+                updated_lines.append(f'{key} = {val}\n')
+
+        try:
+            radmc_inp_path.write_text(''.join(updated_lines))
+        except Exception as e:
+            raise RuntimeError(f"Failed to update {radmc_inp_path}: {e}")
+    
     def read_gas_temperature(self) -> Quantity:
         """Read gas_temperature file using radmc3dData.
         
@@ -493,6 +534,7 @@ class RadModel:
             return self.dust_temperature
         
         output_dir.mkdir(parents=True, exist_ok=True)
+        self._update_radmc3d_inp_int_params({'nphot': int(nphot)})
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         if getattr(self.params, 'external_uv', False):
@@ -821,6 +863,8 @@ class RadModel:
         
         output_dir.mkdir(parents=True, exist_ok=True)
         countwrite = max(1, min(int(nphot // 100), int(np.iinfo(np.int32).max)))
+
+        self._update_radmc3d_inp_int_params({'nphot_mono': int(nphot)})
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         mcmono_lam_um = self._prepare_mcmono_wavelengths(
