@@ -136,7 +136,7 @@ eps_chi = 1.0e-99              # Numerical floor for chi/nH ratio
 # Fortran-style vertical-column thresholds (layered CO prescription)
 # =============================================================================
 
-[chemistry.abundance_switches]
+[chemistry.layered_column_switches]
 CD_threshold_pdes = "1.272e21 1/cm^2"      # 0.8 * 1.59e21
 CD_threshold_pdiss = "8.268e20 1/cm^2"    # 0.8 * 1.59e21 * 0.65
 

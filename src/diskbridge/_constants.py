@@ -81,7 +81,7 @@ EPS_CHI = float(_pinte['eps_chi'])                            # dimensionless
 # ABUNDANCE SWITCHES MODEL
 # =============================================================================
 
-_ab_switch = _cfg['chemistry']['abundance_switches']
+_ab_switch = _cfg['chemistry']['layered_column_switches']
 
 CD_THRESHOLD_PDES = Quantity(_ab_switch['CD_threshold_pdes']).to_base_units().magnitude  # cm^-2
 CD_THRESHOLD_PDISS = Quantity(_ab_switch['CD_threshold_pdiss']).to_base_units().magnitude  # cm^-2

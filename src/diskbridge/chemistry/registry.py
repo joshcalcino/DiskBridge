@@ -8,7 +8,8 @@ if TYPE_CHECKING:
     from diskbridge.chemistry.types import ChemistryResult
 
 _MODEL_SPECS: dict[str, tuple[str, str]] = {
-    "abundance_switches": ("diskbridge.chemistry.models.abundance_switches", "run_abundance_switches"),
+    "pinte_switches": ("diskbridge.chemistry.models.pinte_switches", "run_pinte_switches"),
+    "layered_column_switches": ("diskbridge.chemistry.models.abundance_switches", "run_abundance_switches"),
     "gow17": ("diskbridge.chemistry.models.gow17", "run_gow17"),
     "carbon_reduced": ("diskbridge.chemistry.models.carbon_reduced", "run_carbon_reduced"),
 }
