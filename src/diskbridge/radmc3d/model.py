@@ -237,6 +237,155 @@ class RadModel:
             radmc_inp_path.write_text(''.join(updated_lines))
         except Exception as e:
             raise RuntimeError(f"Failed to update {radmc_inp_path}: {e}")
+
+    def extract_shell_spectrum(
+        self,
+        r_split_au: float,
+        shell_ncells: int,
+        mcmono_dir: Path,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        mcmono_dir = Path(mcmono_dir)
+        wl_path = mcmono_dir / 'mcmono_wavelength_micron.inp'
+        if not wl_path.exists():
+            raise FileNotFoundError(f"Missing mcmono wavelength file: {wl_path}")
+
+        with open(wl_path, 'r') as f:
+            n = int(f.readline().strip())
+            wavelengths_um = np.array([float(f.readline().strip()) for _ in range(n)], dtype=float)
+
+        mean_candidates = [mcmono_dir / 'mean_intensity.bout', mcmono_dir / 'mean_intensity.out']
+        mean_path = None
+        for p in mean_candidates:
+            if p.exists():
+                mean_path = p
+                break
+        if mean_path is None:
+            raise FileNotFoundError(
+                f"Missing mean intensity output in {mcmono_dir} (expected mean_intensity.bout or mean_intensity.out)"
+            )
+
+        _freq_hz, Jnu_flat = self.data.read_mean_intensity_file(mean_path)
+
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError("Model has no mesh")
+        if mesh.coord_system != 'spherical':
+            raise ValueError(f"extract_shell_spectrum requires spherical mesh, got {mesh.coord_system}")
+
+        r_edges_au = mesh.edges('r').to('au').magnitude
+        nr = int(len(mesh.centers('r')))
+        ntheta = int(len(mesh.centers('theta')))
+        nphi = int(len(mesh.centers('phi')))
+        ncells_expected = nr * ntheta * nphi
+        if int(Jnu_flat.magnitude.shape[0]) != ncells_expected:
+            raise ValueError(
+                "Mean intensity cell count mismatch: got %d, expected %d" % (int(Jnu_flat.magnitude.shape[0]), int(ncells_expected))
+            )
+
+        r_split_idx = int(np.searchsorted(r_edges_au, float(r_split_au), side='left'))
+        if r_split_idx <= 0 or r_split_idx >= nr:
+            raise ValueError(f"r_split_au={r_split_au} AU outside grid range")
+
+        shell_ncells = int(shell_ncells)
+        if shell_ncells < 1:
+            raise ValueError("shell_ncells must be >= 1")
+
+        shell_start = r_split_idx
+        shell_end = min(r_split_idx + shell_ncells, nr)
+        if shell_end <= shell_start:
+            raise ValueError(
+                "Shell is empty: r_split_idx=%d, nr=%d" % (int(r_split_idx), int(nr))
+            )
+
+        ir_sel = np.arange(shell_start, shell_end, dtype=np.int64)
+
+        itheta = np.arange(ntheta, dtype=np.int64)[None, :, None]
+        iphi = np.arange(nphi, dtype=np.int64)[None, None, :]
+        ir = ir_sel[:, None, None]
+        idx = ir + nr * itheta + (nr * ntheta) * iphi
+        idx_flat = idx.reshape(-1)
+
+        J = np.asarray(Jnu_flat.magnitude, dtype=float)
+        from diskbridge.model.profiles import compute_cell_volumes
+        volumes = compute_cell_volumes(self.model)
+        volumes_flat = np.asarray(volumes, dtype=float).reshape(-1, order='F')
+        w = volumes_flat[idx_flat]
+        wsum = float(np.sum(w))
+        if wsum <= 0.0:
+            raise ValueError("Non-positive shell volume sum")
+
+        shell_spec = np.sum(J[idx_flat, :] * w[:, None], axis=0) / wsum
+
+        if shell_spec.shape[0] != wavelengths_um.shape[0]:
+            raise ValueError(
+                "Mean intensity wavelength count mismatch: got %d, expected %d" % (int(shell_spec.shape[0]), int(wavelengths_um.shape[0]))
+            )
+
+        return wavelengths_um, shell_spec
+
+    def write_effective_external_source(
+        self,
+        wavelengths_um: np.ndarray,
+        spectrum: np.ndarray,
+        output_dir: Path,
+        require_coverage: bool = True,
+    ) -> Path:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        wav_path = output_dir / 'wavelength_micron.inp'
+        if not wav_path.exists():
+            raise FileNotFoundError(f"Missing wavelength grid file: {wav_path}")
+
+        with open(wav_path, 'r') as f:
+            n = int(f.readline().strip())
+            wav_um = np.array([float(f.readline().strip()) for _ in range(n)], dtype=float)
+
+        wav_in = np.asarray(wavelengths_um, dtype=float)
+        spec_in = np.asarray(spectrum, dtype=float)
+        if wav_in.ndim != 1 or spec_in.ndim != 1:
+            raise ValueError("wavelengths_um and spectrum must be 1D")
+        if wav_in.size != spec_in.size:
+            raise ValueError("wavelengths_um and spectrum must have same length")
+        if wav_in.size < 2:
+            raise ValueError("wavelengths_um must contain at least 2 points")
+
+        sort_idx = np.argsort(wav_in)
+        wav_in = wav_in[sort_idx]
+        spec_in = spec_in[sort_idx]
+
+        if require_coverage:
+            if wav_in[0] > wav_um[0] or wav_in[-1] < wav_um[-1]:
+                raise ValueError(
+                    "Effective external spectrum does not cover wavelength_micron.inp: "
+                    "spec=[%.6g, %.6g] um, grid=[%.6g, %.6g] um" % (float(wav_in[0]), float(wav_in[-1]), float(wav_um[0]), float(wav_um[-1]))
+                )
+
+        if np.any(spec_in <= 0.0):
+            raise ValueError("loglog interpolation requires strictly positive spectrum values")
+
+        if wav_in.size == wav_um.size and np.allclose(wav_in, wav_um, rtol=0.0, atol=0.0):
+            spec_out = spec_in
+        else:
+            spec_out = np.exp(
+                np.interp(
+                    np.log(wav_um),
+                    np.log(wav_in),
+                    np.log(spec_in),
+                )
+            )
+
+        ext_path = output_dir / 'external_source.inp'
+        with open(ext_path, 'w') as f:
+            f.write('2\n')
+            f.write(f"{wav_um.size}\n")
+            for w in wav_um:
+                f.write(f"{w:13.6e}\n")
+            for val in spec_out:
+                f.write(f"{float(val):13.6e}\n")
+
+        logger.info(f"Wrote external_source.inp file: {ext_path}")
+        return ext_path
     
     def _update_radmc3d_inp_int_params(self, updates: dict[str, int]) -> None:
         radmc_inp_path = self.inputs_dir / 'radmc3d.inp'
