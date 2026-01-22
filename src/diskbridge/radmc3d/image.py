@@ -150,9 +150,10 @@ class RadImage:
             output_files=output_files,
         )
 
-        temp_inp = self.model_dir / 'dust_temperature.inp'
-        if temp_inp.exists() or temp_inp.is_symlink():
-            temp_inp.unlink()
+        for fname in ['dust_temperature.inp', 'dust_temperature.dat', 'dust_temperature.bdat']:
+            p = self.model_dir / fname
+            if p.exists() or p.is_symlink():
+                p.unlink()
 
         temp_symlink = ensure_temperature_symlink(
             model_dir=self.model_dir,
