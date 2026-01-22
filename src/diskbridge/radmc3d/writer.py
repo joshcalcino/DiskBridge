@@ -941,46 +941,111 @@ class RadWriter:
         output_dir.mkdir(parents=True, exist_ok=True)
         fpath = output_dir / 'dust_temperature.dat'
 
-        temp = temperature.to('K').magnitude
+        temp = np.asarray(temperature.to('K').magnitude)
 
         mesh = self.model.mesh
         if mesh is None:
             raise ValueError('Model has no mesh defined')
 
-        if mesh.coord_system == 'spherical':
-            temp = transpose_to_axis_order(
-                np.asarray(temp),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-            temp_flat = np.asarray(temp).flatten(order='C')
-        elif mesh.coord_system == 'cartesian':
-            temp = transpose_to_axis_order(
-                np.asarray(temp),
-                from_order=mesh.axis_names(),
-                to_order=('x', 'y', 'z'),
-            )
-            temp_flat = np.asarray(temp).flatten(order='F')
-        else:
-            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
-
         nspec_i = int(nspec)
         if nspec_i <= 0:
             raise ValueError(f'nspec must be > 0, got {nspec_i}')
 
-        ncells = int(temp_flat.size)
+        if temp.ndim not in (3, 4):
+            raise ValueError(
+                f"dust_temperature must be 3D (single species) or 4D (nspec, ...), got shape={temp.shape}"
+            )
+
+        if temp.ndim == 4 and int(temp.shape[0]) != nspec_i:
+            raise ValueError(
+                f"dust_temperature nspec mismatch: nspec={nspec_i}, temperature.shape[0]={int(temp.shape[0])}"
+            )
+
+        if mesh.coord_system == 'spherical':
+            if temp.ndim == 3:
+                temp = transpose_to_axis_order(
+                    np.asarray(temp),
+                    from_order=mesh.axis_names(),
+                    to_order=('phi', 'theta', 'r'),
+                )
+                temp_flat = np.asarray(temp).flatten(order='C')
+            else:
+                temp_flat = None
+        elif mesh.coord_system == 'cartesian':
+            if temp.ndim == 3:
+                temp = transpose_to_axis_order(
+                    np.asarray(temp),
+                    from_order=mesh.axis_names(),
+                    to_order=('x', 'y', 'z'),
+                )
+                temp_flat = np.asarray(temp).flatten(order='F')
+            else:
+                temp_flat = None
+        else:
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
+
+        if temp.ndim == 3:
+            if temp_flat is None:
+                raise ValueError('Internal error: missing flattened temperature array')
+            ncells = int(temp_flat.size)
+        else:
+            if mesh.coord_system == 'spherical':
+                nr = len(mesh.axes['r'].centers)
+                ntheta = len(mesh.axes['theta'].centers)
+                nphi = len(mesh.axes['phi'].centers)
+                ncells = int(nr * ntheta * nphi)
+            elif mesh.coord_system == 'cartesian':
+                nx = len(mesh.axes['x'].centers)
+                ny = len(mesh.axes['y'].centers)
+                nz = len(mesh.axes['z'].centers)
+                ncells = int(nx * ny * nz)
+            else:
+                raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
 
         logger.info(
             f"Writing dust temperature to {fpath}: {ncells} cells, nspec={nspec_i}, "
-            f"T_range=[{float(np.min(temp_flat)):.1f}, {float(np.max(temp_flat)):.1f}] K"
+            f"T_range=[{float(np.min(temp)):.1f}, {float(np.max(temp)):.1f}] K"
         )
 
         with open(fpath, 'w') as f:
             f.write('1\n')
             f.write(f'{ncells}\n')
             f.write(f'{nspec_i}\n')
-            for T in temp_flat:
-                f.write(f'{float(T):.6e}\n')
+
+            if temp.ndim == 3:
+                if temp_flat is None:
+                    raise ValueError('Internal error: missing flattened temperature array')
+                for _ in range(nspec_i):
+                    for T in temp_flat:
+                        f.write(f'{float(T):.6e}\n')
+            else:
+                for ispec in range(nspec_i):
+                    temp_s = temp[ispec, ...]
+
+                    if mesh.coord_system == 'spherical':
+                        temp_s = transpose_to_axis_order(
+                            np.asarray(temp_s),
+                            from_order=mesh.axis_names(),
+                            to_order=('phi', 'theta', 'r'),
+                        )
+                        temp_s_flat = np.asarray(temp_s).flatten(order='C')
+                    elif mesh.coord_system == 'cartesian':
+                        temp_s = transpose_to_axis_order(
+                            np.asarray(temp_s),
+                            from_order=mesh.axis_names(),
+                            to_order=('x', 'y', 'z'),
+                        )
+                        temp_s_flat = np.asarray(temp_s).flatten(order='F')
+                    else:
+                        raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
+
+                    if int(temp_s_flat.size) != ncells:
+                        raise ValueError(
+                            f"dust_temperature ncells mismatch: got {int(temp_s_flat.size)}, expected {ncells}"
+                        )
+
+                    for T in temp_s_flat:
+                        f.write(f'{float(T):.6e}\n')
 
         self.written_files[fpath.name] = fpath
         logger.info(f"Wrote {fpath}")

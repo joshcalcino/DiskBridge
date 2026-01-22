@@ -378,10 +378,31 @@ class SegmentedRadRunner:
         base_rad.dust_temperature = merged_T
         base_rad.chi = merged_chi
         base_rad.outputs_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.base_model.dust is None:
+            raise ValueError("Segmented RT requires dust model to write dust_temperature")
+        nspec = int(self.base_model.dust.nbin)
+        if nspec <= 0:
+            raise ValueError(f"Invalid dust nbin={nspec}")
+
+        dustopac_path = base_rad.inputs_dir / 'dustopac.inp'
+        if dustopac_path.exists():
+            with open(dustopac_path, 'r') as f:
+                _fmt = f.readline().strip()
+                nbin_line = f.readline().strip()
+            try:
+                nbin_file = int(nbin_line)
+            except Exception as e:
+                raise ValueError(f"Could not parse dustopac.inp nbin from {dustopac_path}: {e}")
+            if nbin_file != nspec:
+                raise ValueError(
+                    "dust species mismatch: model.dust.nbin=%d but dustopac.inp declares %d" % (int(nspec), int(nbin_file))
+                )
+
         base_rad.writer.write_dust_temperature(
             merged_T,
             output_dir=base_rad.outputs_dir,
-            nspec=1,
+            nspec=nspec,
         )
 
         logger.info(
