@@ -19,6 +19,7 @@ REPO_ROOT = PACKAGE_ROOT.parent.parent
 from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
+from .run import ensure_temperature_symlink
 import diskbridge
 from .molecule import RadMolecule
 
@@ -138,7 +139,7 @@ class RadImage:
         ]
         
         # All output files from radmc3d_outputs
-        output_files = ['dust_temperature.*', 'mean_intensity.out']
+        output_files = ['mean_intensity.out']
 
         create_radmc3d_symlinks(
             model_dir=self.model_dir,
@@ -148,6 +149,23 @@ class RadImage:
             outputs_dir=self.outputs_dir,
             output_files=output_files,
         )
+
+        temp_inp = self.model_dir / 'dust_temperature.inp'
+        if temp_inp.exists() or temp_inp.is_symlink():
+            temp_inp.unlink()
+
+        temp_symlink = ensure_temperature_symlink(
+            model_dir=self.model_dir,
+            outputs_dir=self.outputs_dir,
+            output_dir=self.outputs_dir,
+        )
+        if not temp_symlink:
+            raise RuntimeError(
+                "radmc3d image requires dust_temperature.dat or dust_temperature.bdat, but no temperature file was found."
+            )
+
+        if temp_symlink not in self._active_symlinks:
+            self._active_symlinks.append(temp_symlink)
     
     def cleanup_symlinks(self) -> None:
         """Remove all symlinks created by create_symlinks().
