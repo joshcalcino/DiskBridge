@@ -1030,6 +1030,37 @@ class RadModel:
             raise FileNotFoundError(f"Mean intensity file not found in {output_dir}")
         
         return self._postprocess_chi(mean_intensity_file, uv_min, uv_max)
+
+    def compute_segmented_rt(
+        self,
+        nphot_therm: Optional[int] = None,
+        nphot_mono: Optional[int] = None,
+        mcmono_n_wavelengths: Optional[int] = None,
+        mcmono_uv_n_wavelengths: Optional[int] = None,
+        mcmono_wavelength_source: str = 'external',
+        mcmono_wavelength_spacing: str = 'log',
+        mcmono_wavelengths_um: Optional[np.ndarray] = None,
+        max_splits: Optional[int] = None,
+        force: bool = False,
+    ) -> dict:
+        from diskbridge.radmc3d.segmented import SegmentedRadRunner
+
+        runner = SegmentedRadRunner(self.model, self.model_dir)
+        out = runner.run_segmented_rt(
+            nphot_therm=nphot_therm,
+            nphot_mono=nphot_mono,
+            mcmono_n_wavelengths=mcmono_n_wavelengths,
+            mcmono_uv_n_wavelengths=mcmono_uv_n_wavelengths,
+            mcmono_wavelength_source=mcmono_wavelength_source,
+            mcmono_wavelength_spacing=mcmono_wavelength_spacing,
+            mcmono_wavelengths_um=mcmono_wavelengths_um,
+            max_splits=max_splits,
+            force=force,
+        )
+
+        self.dust_temperature = out.get('temperature')
+        self.chi = out.get('chi')
+        return out
     
     def ensure_dust_temperature(self, force: bool = False) -> Quantity:
         """Ensure dust temperature field exists, reading or computing as needed.

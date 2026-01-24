@@ -70,8 +70,11 @@ def check_wavelength_range(
     
     global_min_um = global_min.to('micron').magnitude
     global_max_um = global_max.to('micron').magnitude
-    
-    if lam_min < global_min_um or lam_max > global_max_um:
+
+    min_allow = float(np.nextafter(global_min_um, -np.inf))
+    max_allow = float(np.nextafter(global_max_um, np.inf))
+
+    if lam_min < min_allow or lam_max > max_allow:
         raise ValueError(
             f"{grid_name} is outside the global wavelength grid: "
             f"requested=[{lam_min:.6g},{lam_max:.6g}] micron, "
@@ -125,6 +128,9 @@ def build_wavelength_grid(
         )
     else:
         raise ValueError(f"Unknown spacing: {spacing}")
+
+    wavelengths[0] = wmin_um
+    wavelengths[-1] = wmax_um
     
     validate_wavelength_array(wavelengths, "wavelength grid")
     return wavelengths

@@ -44,7 +44,7 @@ def co_photodesorption_surface_rate_cgs(chi: float) -> float:
 
 @njit(inline='always')
 def co_active_ice_max_cgs(nH_cm3: float, sigma_d_per_H_cm2: float) -> float:
-    return (sigma_d_per_H_cm2 * nH_cm3) * N_SURF * float(N_LAY)
+    return (4.0 * sigma_d_per_H_cm2 * nH_cm3) * N_SURF * float(N_LAY)
 
 
 @njit(inline='always')

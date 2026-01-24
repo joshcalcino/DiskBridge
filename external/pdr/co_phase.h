@@ -28,7 +28,7 @@ inline double co_photodesorption_surface_rate(const double chi, const double F_D
 
 inline double co_active_ice_max(const double nH, const double sigma_d_per_H, const double N_SURF,
                                const int N_LAY) {
-    return (sigma_d_per_H * nH) * N_SURF * static_cast<double>(N_LAY);
+    return (4.0 * sigma_d_per_H * nH) * N_SURF * static_cast<double>(N_LAY);
 }
 
 inline void co_active_ice(const double nH, const double sigma_d_per_H, const double nco_ice,

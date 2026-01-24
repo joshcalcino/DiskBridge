@@ -87,6 +87,8 @@ class SegmentedRadRunner:
             output_dir=inner_rad.inputs_dir,
             require_coverage=True,
         )
+
+        inner_rad._update_radmc3d_inp_int_params({'incl_isrf': 1})
     
     def _run_segment_rt(
         self,
@@ -137,6 +139,7 @@ class SegmentedRadRunner:
         force: bool = False,
     ) -> Dict[str, Any]:
         from diskbridge.radmc3d.model import RadModel
+        from diskbridge.radmc3d.writer import RadWriter
         
         import diskbridge
         params = diskbridge.params
@@ -202,6 +205,15 @@ class SegmentedRadRunner:
 
         base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
+
+        if not list(base_opacity_dir.glob('dustkappa_*.inp')):
+            RadWriter(self.base_model, organize_files=True).compute_and_write_dust_opacities(
+                self.base_model_dir
+            )
+            if not list(base_opacity_dir.glob('dustkappa_*.inp')):
+                raise RuntimeError(
+                    f"No dustkappa_*.inp files found in {base_opacity_dir} after computing dust opacities"
+                )
 
         for level in range(max_splits + 1):
             if level == 0:

@@ -188,6 +188,9 @@ class RadWriter:
         waves[0] = wmin
         for i in range(1, nwav):
             waves[i] = wmin * Pw ** i
+
+        waves[0] = wmin
+        waves[-1] = wmax
         
         with open(filepath, 'w') as f:
             f.write(f'{nwav}\n')
@@ -562,6 +565,8 @@ class RadWriter:
         # Create wavelength grid in cm
         Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
         waves_micron = wmin_micron * Pw ** np.arange(nwav)
+        waves_micron[0] = wmin_micron
+        waves_micron[-1] = wmax_micron
         waves_cm = waves_micron * 1e-4
         
         # Create angular grid for scattering.
