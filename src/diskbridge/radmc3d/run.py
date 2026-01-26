@@ -270,10 +270,9 @@ def ensure_temperature_symlink(
     import os
 
     # Check if temperature already exists in model_dir
-    for suffix in ['.bdat', '.dat']:
-        dst_temp = model_dir / f'dust_temperature{suffix}'
-        if dst_temp.exists():
-            return dst_temp
+    dst_temp = model_dir / 'dust_temperature.bdat'
+    if dst_temp.exists():
+        return dst_temp
     
     # Search for temperature file in candidate locations
     search_paths: list[Path] = [
@@ -287,91 +286,89 @@ def ensure_temperature_symlink(
     # Also consider direct organized path relative to model_dir
     search_paths.append(model_dir / 'radmc3d_outputs' / 'temperature')
 
-    for suffix in ['.bdat', '.dat']:
-        for search_dir in search_paths:
-            src_temp = search_dir / f'dust_temperature{suffix}'
-            if (not src_temp.exists()) and (not src_temp.is_symlink()):
-                continue
+    for search_dir in search_paths:
+        src_temp = search_dir / 'dust_temperature.bdat'
+        if (not src_temp.exists()) and (not src_temp.is_symlink()):
+            continue
 
-            # Guard against broken/self-referential symlinks (can happen after job stop)
-            if src_temp.is_symlink():
+        # Guard against broken/self-referential symlinks (can happen after job stop)
+        if src_temp.is_symlink():
+            try:
+                resolved = src_temp.resolve(strict=True)
+            except Exception:
                 try:
-                    resolved = src_temp.resolve(strict=True)
-                except Exception:
-                    try:
-                        src_temp.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-                if resolved == src_temp:
-                    try:
-                        src_temp.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-            src_resolved = src_temp.resolve()
-            dst_temp = model_dir / f'dust_temperature{suffix}'
-
-            if dst_temp.is_symlink():
-                try:
-                    if dst_temp.resolve() == src_resolved:
-                        return dst_temp
+                    src_temp.unlink()
                 except Exception:
                     pass
+                continue
 
-            if dst_temp.exists() or dst_temp.is_symlink():
-                dst_temp.unlink()
+            if resolved == src_temp:
+                try:
+                    src_temp.unlink()
+                except Exception:
+                    pass
+                continue
 
-            os.symlink(str(src_resolved), str(dst_temp))
-            logger.debug(f"Created temperature symlink: {dst_temp} -> {src_temp}")
-            return dst_temp
+        src_resolved = src_temp.resolve()
+        dst_temp = model_dir / 'dust_temperature.bdat'
+
+        if dst_temp.is_symlink():
+            try:
+                if dst_temp.resolve() == src_resolved:
+                    return dst_temp
+            except Exception:
+                pass
+
+        if dst_temp.exists() or dst_temp.is_symlink():
+            dst_temp.unlink()
+
+        os.symlink(str(src_resolved), str(dst_temp))
+        logger.debug(f"Created temperature symlink: {dst_temp} -> {src_temp}")
+        return dst_temp
 
     # As a last resort, search recursively within outputs_dir
-    for suffix in ['.bdat', '.dat']:
-        pattern = f'dust_temperature{suffix}'
-        try:
-            matches = list(outputs_dir.rglob(pattern))
-        except Exception:
-            matches = []
-        for src_temp in matches:
-            if (not src_temp.exists()) and (not src_temp.is_symlink()):
-                continue
+    pattern = 'dust_temperature.bdat'
+    try:
+        matches = list(outputs_dir.rglob(pattern))
+    except Exception:
+        matches = []
+    for src_temp in matches:
+        if (not src_temp.exists()) and (not src_temp.is_symlink()):
+            continue
 
-            if src_temp.is_symlink():
+        if src_temp.is_symlink():
+            try:
+                resolved = src_temp.resolve(strict=True)
+            except Exception:
                 try:
-                    resolved = src_temp.resolve(strict=True)
-                except Exception:
-                    try:
-                        src_temp.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-                if resolved == src_temp:
-                    try:
-                        src_temp.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-            src_resolved = src_temp.resolve()
-            dst_temp = model_dir / f'dust_temperature{suffix}'
-
-            if dst_temp.is_symlink():
-                try:
-                    if dst_temp.resolve() == src_resolved:
-                        return dst_temp
+                    src_temp.unlink()
                 except Exception:
                     pass
+                continue
 
-            if dst_temp.exists() or dst_temp.is_symlink():
-                dst_temp.unlink()
+            if resolved == src_temp:
+                try:
+                    src_temp.unlink()
+                except Exception:
+                    pass
+                continue
 
-            os.symlink(str(src_resolved), str(dst_temp))
-            logger.debug(f"Created temperature symlink: {dst_temp} -> {src_temp}")
-            return dst_temp
+        src_resolved = src_temp.resolve()
+        dst_temp = model_dir / 'dust_temperature.bdat'
+
+        if dst_temp.is_symlink():
+            try:
+                if dst_temp.resolve() == src_resolved:
+                    return dst_temp
+            except Exception:
+                pass
+
+        if dst_temp.exists() or dst_temp.is_symlink():
+            dst_temp.unlink()
+
+        os.symlink(str(src_resolved), str(dst_temp))
+        logger.debug(f"Created temperature symlink: {dst_temp} -> {src_temp}")
+        return dst_temp
     
-    logger.warning("No dust_temperature file found for symlinking")
+    logger.warning("No dust_temperature.bdat file found for symlinking")
     return None

@@ -195,14 +195,10 @@ class RadData:
         return fpath
 
     def _read_scalar_data(self, fpath: Path) -> np.ndarray:
-        if self._isBinary(fpath):
-            return self._readScalarFieldBinary(fpath)
-        return self._readScalarFieldASCII(fpath)
+        return self._readScalarFieldBinary(fpath)
 
     def _read_vector_data(self, fpath: Path) -> np.ndarray:
-        if self._isBinary(fpath):
-            return self._readVectorFieldBinary(fpath)
-        return self._readVectorFieldASCII(fpath)
+        return self._readVectorFieldBinary(fpath)
 
     def _reshape_scalar_to_mesh(self, data: np.ndarray) -> np.ndarray:
         nx, ny, nz = self._getMeshShape()
@@ -699,48 +695,64 @@ class RadData:
             j_vals = self._read_n_floats_from_text(f, nwav * nrcells)
             j_lambda = j_vals.reshape((nwav, nrcells)).T * units('erg/(s*cm^2*Hz*sr)')
             return freq_hz, j_lambda
-    
-    def _readScalarFieldASCII(self, fname: Path) -> np.ndarray:
-        """Read a scalar field from ASCII file.
-        
+
+    def _findDataFile(self, basename: str) -> Optional[Path]:
+        """Find a data file with strict binary-only extension mapping.
+
         Parameters
         ----------
-        fname : Path
-            File to read
-            
+        basename : str
+            Base filename without extension
+
         Returns
         -------
-        np.ndarray
-            Data array
+        Path or None
+            Path to found file, or None if not found
+
+        Raises
+        ------
+        RuntimeError
+            If basename is not in the allowed list or if non-binary file is found
         """
-        with open(fname, 'r') as f:
-            # Read header
-            iformat = int(f.readline().strip())
-            
-            # Read number of cells
-            ncells = int(f.readline().strip())
-            
-            # Check for number of species (dust only)
-            line = f.readline().strip()
-            try:
-                nspec = int(line)
-                # Multiple species
-                data = np.loadtxt(f)
-                if data.size == ncells * nspec:
-                    data = data.reshape((nspec, ncells))
-            except ValueError:
-                # Single species, line already contains data
-                first_val = float(line)
-                rest = np.loadtxt(f)
-                data = np.concatenate([[first_val], rest])
-        
-        return data
-    
+        # Strict mapping: basename → allowed binary extensions only
+        _ALLOWED_FORMATS = {
+            'dust_temperature': ['.bdat'],
+            'mean_intensity':   ['.bout'],
+            'image':            ['.bout'],
+            'dust_density':     ['.binp'],
+            'gas_velocity':     ['.binp'],
+            'microturbulence':  ['.binp'],
+            'gas_temperature':  ['.binp'],
+        }
+
+        # Extract base name (e.g., 'numberdens_co' -> 'numberdens')
+        base_pattern = basename.split('_')[0] if '_' in basename else basename
+
+        # Handle numberdens_* pattern
+        if base_pattern == 'numberdens':
+            allowed_exts = ['.binp']
+        elif basename in _ALLOWED_FORMATS:
+            allowed_exts = _ALLOWED_FORMATS[basename]
+        else:
+            # Unknown basename - raise error
+            raise RuntimeError(
+                f"DiskBridge is configured for binary RADMC-3D files only. "
+                f"Unknown or unsupported file basename: '{basename}'"
+            )
+
+        found_files = []
+        for ext in allowed_exts:
+            fpath = self.model_dir / (basename + ext)
+            if fpath.exists():
+                found_files.append(fpath)
+
+        if len(found_files) > 1:
+            logger.warning(f"Multiple binary files for basename '{basename}' found. Using {found_files[0]}")
+
+        return found_files[0] if found_files else None
+
     def _readScalarFieldBinary(self, fname: Path) -> np.ndarray:
         """Read a scalar field from binary file.
-        
-        Parameters
-        ----------
         fname : Path
             File to read
             
@@ -783,29 +795,6 @@ class RadData:
                 data = data.reshape((nspec, ncells))
         
         return data
-    
-    def _readVectorFieldASCII(self, fname: Path) -> np.ndarray:
-        """Read a vector field from ASCII file.
-        
-        Parameters
-        ----------
-        fname : Path
-            File to read
-            
-        Returns
-        -------
-        np.ndarray
-            Data array with shape (ncells * 3,)
-        """
-        with open(fname, 'r') as f:
-            # Read header
-            iformat = int(f.readline().strip())
-            ncells = int(f.readline().strip())
-            
-            # Read velocity data (3 components per cell)
-            data = np.loadtxt(f)
-            
-        return data.flatten()  # Returns (ncells * 3,) array
     
     def _readVectorFieldBinary(self, fname: Path) -> np.ndarray:
         """Read a vector field from binary file.

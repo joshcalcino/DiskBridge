@@ -926,7 +926,7 @@ class RadWriter:
         output_dir: str | Path = '.',
         nspec: int = 1,
     ) -> None:
-        """Write dust temperature to dust_temperature.dat.
+        """Write dust temperature to dust_temperature.bdat.
 
         Parameters
         ----------
@@ -939,12 +939,12 @@ class RadWriter:
 
         Notes
         -----
-        Writes ASCII format dust_temperature.dat. The file format matches what
-        RadData.readDustTemp() expects: format=1, ncells, nspec, then values.
+        Writes binary format dust_temperature.bdat. The file format matches what
+        RadData._readScalarFieldBinary() expects: header [iformat=1, prec=8, ncells, nspec], then values.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        fpath = output_dir / 'dust_temperature.dat'
+        fpath = output_dir / 'dust_temperature.bdat'
 
         temp = np.asarray(temperature.to('K').magnitude)
 
@@ -1012,18 +1012,21 @@ class RadWriter:
             f"T_range=[{float(np.min(temp)):.1f}, {float(np.max(temp)):.1f}] K"
         )
 
-        with open(fpath, 'w') as f:
-            f.write('1\n')
-            f.write(f'{ncells}\n')
-            f.write(f'{nspec_i}\n')
+        # Write binary format: header [iformat=1, prec=8, ncells, nspec], then data
+        with open(fpath, 'wb') as f:
+            # Write header: format=1, precision=8 (float64), ncells, nspec
+            header = np.array([1, 8, ncells, nspec_i], dtype=np.int64)
+            header.tofile(f)
 
+            # Write temperature data
             if temp.ndim == 3:
                 if temp_flat is None:
                     raise ValueError('Internal error: missing flattened temperature array')
+                # Write same temperature for all species
                 for _ in range(nspec_i):
-                    for T in temp_flat:
-                        f.write(f'{float(T):.6e}\n')
+                    temp_flat.astype(np.float64).tofile(f)
             else:
+                # Write each species separately
                 for ispec in range(nspec_i):
                     temp_s = temp[ispec, ...]
 
@@ -1049,8 +1052,7 @@ class RadWriter:
                             f"dust_temperature ncells mismatch: got {int(temp_s_flat.size)}, expected {ncells}"
                         )
 
-                    for T in temp_s_flat:
-                        f.write(f'{float(T):.6e}\n')
+                    temp_s_flat.astype(np.float64).tofile(f)
 
         self.written_files[fpath.name] = fpath
         logger.info(f"Wrote {fpath}")

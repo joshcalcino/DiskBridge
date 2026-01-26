@@ -161,10 +161,10 @@ class RadModel:
         return [
             'amr_grid.inp', 'wavelength_micron.inp',
             'stars.inp', 'dustopac.inp',
-            'dust_density.binp', 'dust_density.inp',
-            'gas_velocity.binp', 'gas_velocity.inp',
+            'dust_density.binp',
+            'gas_velocity.binp',
             'radmc3d.inp', 'external_source.inp',
-            'numberdens_*.inp', 'numberdens_*.binp'
+            'numberdens_*.binp',
         ]
 
     def _ensure_cntdump_ge_countwrite(self, countwrite: int, nphot: int) -> None:
@@ -253,7 +253,7 @@ class RadModel:
             n = int(f.readline().strip())
             wavelengths_um = np.array([float(f.readline().strip()) for _ in range(n)], dtype=float)
 
-        mean_candidates = [mcmono_dir / 'mean_intensity.bout', mcmono_dir / 'mean_intensity.out']
+        mean_candidates = [mcmono_dir / 'mean_intensity.bout']
         mean_path = None
         for p in mean_candidates:
             if p.exists():
@@ -671,7 +671,7 @@ class RadModel:
 
         use_cache, cached_file = should_use_cache(
             output_dir=output_dir,
-            candidate_files=['dust_temperature.bdat', 'dust_temperature.dat'],
+            candidate_files=['dust_temperature.bdat'],
             current_params_path=self.model_dir / 'params.txt',
             param_keys=_MCTHERM_PARAM_KEYS,
             force=force,
@@ -692,10 +692,9 @@ class RadModel:
                 writer = RadWriter(self.model, organize_files=True)
                 writer.write_external_source(self.model_dir)
 
-        for suffix in ['.bdat', '.dat']:
-            stale = self.model_dir / f'dust_temperature{suffix}'
-            if stale.is_symlink():
-                stale.unlink()
+        stale = self.model_dir / 'dust_temperature.bdat'
+        if stale.is_symlink():
+            stale.unlink()
         
         with SymlinkContext(
             model_dir=self.model_dir,
@@ -713,14 +712,14 @@ class RadModel:
         organize_outputs(
             output_dir=output_dir,
             model_dir=self.model_dir,
-            output_files=['dust_temperature.dat', 'dust_temperature.bdat'],
+            output_files=['dust_temperature.bdat'],
             description=f'radmc3d mctherm nphot={nphot}',
             cache_context=cache_context,
         )
         
         temp_file = find_cached_output(
             output_dir,
-            ['dust_temperature.bdat', 'dust_temperature.dat'],
+            ['dust_temperature.bdat'],
         )
         if temp_file:
             self.read_dust_temperature(fname=str(temp_file))
@@ -942,7 +941,7 @@ class RadModel:
         organize_outputs(
             output_dir=output_dir,
             model_dir=self.model_dir,
-            output_files=['mean_intensity.out', 'mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
+            output_files=['mean_intensity.bout', 'mcmono_wavelength_micron.inp'],
             description=f'radmc3d mcmono range_{mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g}micron_{mcmono_lam_um.size}wavelengths',
             cache_context=cache_context,
         )
@@ -1009,7 +1008,7 @@ class RadModel:
         
         use_cache, cached_file = should_use_cache(
             output_dir=output_dir,
-            candidate_files=['mean_intensity.bout', 'mean_intensity.out'],
+            candidate_files=['mean_intensity.bout'],
             current_params_path=self.model_dir / 'params.txt',
             param_keys=_MCTHERM_PARAM_KEYS + _MCMONO_EXTRA_PARAM_KEYS,
             force=force,
@@ -1040,7 +1039,7 @@ class RadModel:
         
         mean_intensity_file = find_cached_output(
             output_dir,
-            ['mean_intensity.bout', 'mean_intensity.out'],
+            ['mean_intensity.bout'],
         )
         if not mean_intensity_file:
             raise FileNotFoundError(f"Mean intensity file not found in {output_dir}")

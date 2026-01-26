@@ -131,9 +131,9 @@ class RadImage:
         input_files = [
             'amr_grid.inp', 'wavelength_micron.inp',
             'stars.inp', 'dustopac.inp',
-            'dust_density.binp', 'dust_density.inp',
-            'gas_velocity.binp', 'gas_velocity.inp',
-            'numberdens_*.binp', 'numberdens_*.inp',
+            'dust_density.binp',
+            'gas_velocity.binp',
+            'numberdens_*.binp',
             'radmc3d.inp', 'lines.inp', 'molecule_*.inp',
             'external_source.inp'
         ]
@@ -150,10 +150,10 @@ class RadImage:
             output_files=output_files,
         )
 
-        for fname in ['dust_temperature.inp', 'dust_temperature.dat', 'dust_temperature.bdat']:
-            p = self.model_dir / fname
-            if p.exists() or p.is_symlink():
-                p.unlink()
+        # Clean up any old temperature files before symlinking
+        p = self.model_dir / 'dust_temperature.bdat'
+        if p.exists() or p.is_symlink():
+            p.unlink()
 
         temp_symlink = ensure_temperature_symlink(
             model_dir=self.model_dir,
@@ -162,7 +162,7 @@ class RadImage:
         )
         if not temp_symlink:
             raise RuntimeError(
-                "radmc3d image requires dust_temperature.dat or dust_temperature.bdat, but no temperature file was found."
+                "radmc3d image requires dust_temperature.bdat, but no temperature file was found."
             )
 
         if temp_symlink not in self._active_symlinks:
@@ -197,10 +197,7 @@ class RadImage:
         
         logger.info(f"Reading RADMC-3D image: {fname}")
         
-        if binary:
-            self._readImageBinary(fname)
-        else:
-            self._readImageASCII(fname)
+        self._readImageBinary(fname)
             
         # Convert to Jy/pixel (at 1 pc distance for unit conversion)
         conv = self.sizepix_x * self.sizepix_y / PC**2 * 1e23
@@ -213,62 +210,7 @@ class RadImage:
         logger.info(f"Image read: shape=({self.nx}, {self.ny}, {self.nfreq}), "
                    f"pixel_size=({self.sizepix_x/AU:.3f}, {self.sizepix_y/AU:.3f}) AU")
         
-    def _readImageASCII(self, fname: Path) -> None:
-        """Read ASCII format image.out file."""
-        with open(fname, 'r') as f:
-            # Format number
-            iformat = int(f.readline())
-            
-            # Number of pixels
-            line = f.readline().split()
-            self.nx = int(line[0])
-            self.ny = int(line[1])
-            
-            # Number of frequencies
-            self.nfreq = int(f.readline())
-            self.nwav = self.nfreq
-            
-            # Pixel sizes
-            line = f.readline().split()
-            self.sizepix_x = float(line[0])
-            self.sizepix_y = float(line[1])
-            
-            # Wavelengths
-            self.wav = np.zeros(self.nwav, dtype=np.float64)
-            for iwav in range(self.nwav):
-                self.wav[iwav] = float(f.readline())
-            self.freq = C_LIGHT / self.wav * 1e4  # Convert cm to Hz
-            
-            # Read image data
-            if iformat == 1:
-                # Normal intensity image
-                self.stokes = False
-                self.image = np.zeros([self.nx, self.ny, self.nwav], dtype=np.float64)
-                
-                for iwav in range(self.nwav):
-                    # Blank line
-                    f.readline()
-                    for iy in range(self.ny):
-                        for ix in range(self.nx):
-                            self.image[ix, iy, iwav] = float(f.readline())
-                            
-            elif iformat == 3:
-                # Full Stokes image
-                self.stokes = True
-                self.image = np.zeros([self.nx, self.ny, 4, self.nwav], dtype=np.float64)
-                
-                for iwav in range(self.nwav):
-                    # Blank line
-                    f.readline()
-                    for iy in range(self.ny):
-                        for ix in range(self.nx):
-                            line = f.readline().split()
-                            self.image[ix, iy, 0, iwav] = float(line[0])  # I
-                            self.image[ix, iy, 1, iwav] = float(line[1])  # Q
-                            self.image[ix, iy, 2, iwav] = float(line[2])  # U
-                            self.image[ix, iy, 3, iwav] = float(line[3])  # V
-            else:
-                raise ValueError(f"Unknown image format: {iformat}")
+
                 
     def _readImageBinary(self, fname: Path) -> None:
         """Read binary format image.bout file."""
