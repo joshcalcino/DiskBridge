@@ -87,8 +87,6 @@ class SegmentedRadRunner:
             output_dir=inner_rad.inputs_dir,
             require_coverage=True,
         )
-
-        inner_rad._update_radmc3d_inp_int_params({'incl_isrf': 1})
     
     def _run_segment_rt(
         self,

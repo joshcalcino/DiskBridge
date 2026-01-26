@@ -691,6 +691,11 @@ class RadModel:
             if not external_source_path.exists():
                 writer = RadWriter(self.model, organize_files=True)
                 writer.write_external_source(self.model_dir)
+
+        for suffix in ['.bdat', '.dat']:
+            stale = self.model_dir / f'dust_temperature{suffix}'
+            if stale.is_symlink():
+                stale.unlink()
         
         with SymlinkContext(
             model_dir=self.model_dir,
@@ -898,6 +903,7 @@ class RadModel:
         mcmono_lam_um: np.ndarray,
         nphot: int,
         countwrite: int,
+        setthreads: Optional[int] = None,
         cache_context: Optional[dict] = None,
     ) -> None:
         """Run RADMC-3D mcmono and organize outputs."""
@@ -918,7 +924,9 @@ class RadModel:
 
             ctx._active_symlinks.append(temp_symlink)
             
-            setthreads = self.params.nbcores
+            if setthreads is None:
+                setthreads = self.params.nbcores
+            setthreads = int(setthreads)
             logger.info(
                 f"Running mcmono: {mcmono_lam_um.size} wavelengths "
                 f"({mcmono_lam_um[0]:.6g}-{mcmono_lam_um[-1]:.6g} um), "
@@ -947,7 +955,8 @@ class RadModel:
         wavelengths_um: Optional[np.ndarray] = None,
         uv_min: Quantity = None,
         uv_max: Quantity = None,
-        n_wavelengths: int = None
+        n_wavelengths: int = None,
+        setthreads: Optional[int] = None,
     ) -> Quantity:
         """Run RADMC-3D monochromatic Monte Carlo for UV field.
         
@@ -1020,7 +1029,14 @@ class RadModel:
             wavelengths_um, uv_min, uv_max, n_wavelengths
         )
         self._prepare_mcmono_run(output_dir)
-        self._run_mcmono(output_dir, mcmono_lam_um, nphot, countwrite, cache_context=cache_context)
+        self._run_mcmono(
+            output_dir,
+            mcmono_lam_um,
+            nphot,
+            countwrite,
+            setthreads=setthreads,
+            cache_context=cache_context,
+        )
         
         mean_intensity_file = find_cached_output(
             output_dir,

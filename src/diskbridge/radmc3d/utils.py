@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional, get_type_hints
 from dataclasses import fields
+import os
+import shlex
+import shutil
 import subprocess
 import numpy as np
 
@@ -96,8 +99,29 @@ def link_dustkappa_opacities(src_inputs_dir: Path, dest_inputs_dir: Path) -> Non
 
 
 def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]:
+    if not cmd:
+        raise ValueError("RADMC-3D command list is empty")
+
+    use_shell = False
+    if cmd[0] == 'radmc3d':
+        exe_override = os.environ.get('RADMC3D_EXECUTABLE')
+        if exe_override:
+            cmd = [exe_override] + cmd[1:]
+        else:
+            resolved = shutil.which('radmc3d')
+            if resolved is not None:
+                cmd = [resolved] + cmd[1:]
+            else:
+                use_shell = True
+
+    popen_cmd: list[str] | str
+    if use_shell:
+        popen_cmd = ['bash', '-lc', shlex.join(cmd)]
+    else:
+        popen_cmd = cmd
+
     process = subprocess.Popen(
-        cmd,
+        popen_cmd,
         cwd=str(model_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -111,7 +135,8 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
             for line in process.stdout:
                 logger.info(line.rstrip())
                 stdout_lines.append(line)
-                if "error:" in line.lower():
+                lower = line.lstrip().lower()
+                if lower.startswith("error") or ("error:" in lower):
                     saw_error = True
         process.wait()
         stderr_text = ""
