@@ -55,6 +55,7 @@ uv_max           = 111.8           # max uv wavelength in nanometers
 uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
 external_uv      = F               # include external uv photons 
 external_uv_chi  = 1.0             # uv field strength in Draine units 
+ nside            = 4
  
 co_tau_form_model = off            # CO formation timescale model: off|density_capped
 

@@ -75,6 +75,8 @@ class Params:
 
     co_tau_form_model: str
 
+    nside: int
+
     # segmented RT
     segmented_tol: float
     segmented_window_fraction: float

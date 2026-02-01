@@ -4,11 +4,12 @@ from typing import TYPE_CHECKING, Tuple
 
 import numpy as np
 
+import diskbridge
+
 from diskbridge._logging import logger
 from diskbridge._constants import (
     H2P_K0_DISS,
     H2P_N_ITER,
-    H2P_NSIDE,
     H2P_R_FORM,
 )
 from diskbridge.chemistry.shielding.columns_1d import (
@@ -39,7 +40,7 @@ def compute_h2_partition(
     chi_dust: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
 
-    nside = H2P_NSIDE
+    nside = int(diskbridge.params.nside)
     n_iter = H2P_N_ITER
     R_form = H2P_R_FORM
     k0_diss = H2P_K0_DISS

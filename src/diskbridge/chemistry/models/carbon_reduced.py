@@ -294,7 +294,7 @@ def _prepare_common(
 ) -> tuple[Quantity, Quantity, Quantity, np.ndarray, float, bool, int, float, int]:
     Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
     skip_shielding = bool(config.get('skip_shielding', False))
-    nside = int(config.get('nside', 4))
+    nside = int(diskbridge.params.nside)
     b_kms = float(config.get('b_kms', 0.3))
     shielding_iter = int(config.get('shielding_iter', 1))
 

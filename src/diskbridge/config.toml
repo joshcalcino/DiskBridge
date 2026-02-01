@@ -169,7 +169,6 @@ tau_form_alpha = 1.0           # Density scaling exponent
 # =============================================================================
 
 [chemistry.h2_partition]
-nside = 1
 n_iter = 4
 R_form = "3.0e-17 cm^3/s"
 k0_diss = "4.2e-11 s^-1"

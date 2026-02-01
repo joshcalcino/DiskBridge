@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
@@ -116,7 +117,7 @@ def _maybe_quantity_to_float(val, unit: str) -> float:
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
 
-    nside = int(cfg.get("nside", 8))
+    nside = int(diskbridge.params.nside)
     b_kms = float(cfg.get("b_kms", 0.3))
 
     ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude

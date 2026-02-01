@@ -95,6 +95,40 @@ model.dust.add_component_from_mask(mask=ism_weight_field, mode="proportional")
 
 dust_density = model.dust["density"]
 
+rho_g = model.gas["density"].data.to("g/cm^3").magnitude
+rho_d = dust_density.data.to("g/cm^3").magnitude
+
+r_e = mesh.edges("r")
+theta_e = mesh.edges("theta")
+phi_e = mesh.edges("phi")
+if r_e is None or theta_e is None or phi_e is None:
+    raise ValueError("Mesh is missing one or more spherical edge axes")
+
+r3 = (r_e[1:] ** 3 - r_e[:-1] ** 3) / 3.0
+theta_e_rad = theta_e.to("radian").magnitude
+dcos = np.cos(theta_e_rad[:-1]) - np.cos(theta_e_rad[1:])
+phi_e_rad = phi_e.to("radian").magnitude
+dphi = phi_e_rad[1:] - phi_e_rad[:-1]
+dV = r3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
+dV_mag = dV.to("cm^3").magnitude
+
+gas_mass_disk = float(np.sum(rho_g[mask] * dV_mag[mask]))
+dust_mass_disk = float(np.sum(rho_d[mask] * dV_mag[mask]))
+if gas_mass_disk <= 0.0:
+    raise ValueError("Disk gas mass is non-positive; cannot compute dust-to-gas ratio")
+dtg_disk_mass = dust_mass_disk / gas_mass_disk
+print(f"disk dust_to_gas_mass_ratio = {dtg_disk_mass:.6e}")
+
+local_dtg = np.full_like(rho_g, np.nan, dtype=float)
+sel = mask & (rho_g > 0.0)
+local_dtg[sel] = rho_d[sel] / rho_g[sel]
+print(
+    "disk local_dust_to_gas_ratio (rho_d/rho_g): "
+    f"min={np.nanmin(local_dtg):.6e} "
+    f"median={np.nanmedian(local_dtg):.6e} "
+    f"max={np.nanmax(local_dtg):.6e}"
+)
+
 r_plot = mesh.centers("r").to("au").magnitude
 r_positive = r_plot[np.isfinite(r_plot) & (r_plot > 0.0)]
 r_min = float(np.min(r_positive))
@@ -159,6 +193,35 @@ if 0 in component_totals:
         xlim=(r_min, 300.0),
     )
 
+    rho_d_disk = dust_density_disk_total.data.to("g/cm^3").magnitude
+    rho_g_disk = model.gas["density"].data.to("g/cm^3").magnitude
+    dtg_disk = np.full_like(rho_g_disk, np.nan, dtype=float)
+    sel_dtg_disk = rho_g_disk > 0.0
+    dtg_disk[sel_dtg_disk] = rho_d_disk[sel_dtg_disk] / rho_g_disk[sel_dtg_disk]
+    ok_dtg_disk = np.isfinite(dtg_disk) & (dtg_disk > 0.0)
+    if not np.any(ok_dtg_disk):
+        raise ValueError("Disk-component dust-to-gas ratio has no positive finite values")
+    dtg_disk_log = np.log10(dtg_disk[ok_dtg_disk])
+    vmin_dtg_disk = float(np.nanpercentile(dtg_disk_log, 1.0))
+    vmax_dtg_disk = float(np.nanpercentile(dtg_disk_log, 99.0))
+    dtg_disk_field = Field(
+        data=diskbridge.Quantity(dtg_disk, "dimensionless"),
+        quantity="mask",
+        axis_order=dust_density.axis_order,
+    )
+    plot_phi_avg_rz_slice(
+        model,
+        dtg_disk_field,
+        output="dust_to_gas_disk_total_zoverr_vs_r.png",
+        x_axis="r",
+        y_axis="z/r",
+        log10=True,
+        xscale="log",
+        xlim=(r_min, 300.0),
+        vmin=vmin_dtg_disk,
+        vmax=vmax_dtg_disk,
+    )
+
 if 1 in component_totals:
     dust_density_ism_total = Field(
         data=component_totals[1],
@@ -174,6 +237,35 @@ if 1 in component_totals:
         log10=True,
         xscale="log",
         xlim=(r_min, 300.0),
+    )
+
+    rho_d_ism = dust_density_ism_total.data.to("g/cm^3").magnitude
+    rho_g_ism = model.gas["density"].data.to("g/cm^3").magnitude
+    dtg_ism = np.full_like(rho_g_ism, np.nan, dtype=float)
+    sel_dtg_ism = rho_g_ism > 0.0
+    dtg_ism[sel_dtg_ism] = rho_d_ism[sel_dtg_ism] / rho_g_ism[sel_dtg_ism]
+    ok_dtg_ism = np.isfinite(dtg_ism) & (dtg_ism > 0.0)
+    if not np.any(ok_dtg_ism):
+        raise ValueError("ISM-component dust-to-gas ratio has no positive finite values")
+    dtg_ism_log = np.log10(dtg_ism[ok_dtg_ism])
+    vmin_dtg_ism = float(np.nanpercentile(dtg_ism_log, 1.0))
+    vmax_dtg_ism = float(np.nanpercentile(dtg_ism_log, 99.0))
+    dtg_ism_field = Field(
+        data=diskbridge.Quantity(dtg_ism, "dimensionless"),
+        quantity="mask",
+        axis_order=dust_density.axis_order,
+    )
+    plot_phi_avg_rz_slice(
+        model,
+        dtg_ism_field,
+        output="dust_to_gas_ism_total_zoverr_vs_r.png",
+        x_axis="r",
+        y_axis="z/r",
+        log10=True,
+        xscale="log",
+        xlim=(r_min, 300.0),
+        vmin=vmin_dtg_ism,
+        vmax=vmax_dtg_ism,
     )
 
 plot_phi_avg_rz_slice(
@@ -206,6 +298,34 @@ plot_phi_avg_rz_slice(
     xlim=(r_min, 300.0),
     vmin=vmin_global,
     vmax=vmax_global,
+)
+
+dtg_total = np.full_like(rho_g, np.nan, dtype=float)
+sel_dtg_total = rho_g > 0.0
+dtg_total[sel_dtg_total] = rho_d[sel_dtg_total] / rho_g[sel_dtg_total]
+ok_dtg_total = np.isfinite(dtg_total) & (dtg_total > 0.0)
+if not np.any(ok_dtg_total):
+    raise ValueError("Global dust-to-gas ratio has no positive finite values")
+dtg_total_log = np.log10(dtg_total[ok_dtg_total])
+vmin_dtg_total = float(np.nanpercentile(dtg_total_log, 1.0))
+vmax_dtg_total = float(np.nanpercentile(dtg_total_log, 99.0))
+dtg_total_field = Field(
+    data=diskbridge.Quantity(dtg_total, "dimensionless"),
+    quantity="mask",
+    axis_order=dust_density.axis_order,
+)
+
+plot_phi_avg_rz_slice(
+    model,
+    dtg_total_field,
+    output=f"dust_to_gas_zoverr_vs_r_{WEIGHT_MODE}.png",
+    x_axis="r",
+    y_axis="z/r",
+    log10=True,
+    xscale="log",
+    xlim=(r_min, 300.0),
+    vmin=vmin_dtg_total,
+    vmax=vmax_dtg_total,
 )
 
 plot_phi_avg_rz_slice(

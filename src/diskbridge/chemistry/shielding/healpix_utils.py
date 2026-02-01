@@ -124,20 +124,19 @@ def integrate_ray_cartesian_dda_3d(
         if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
             break
 
-        if tMaxX < tMaxY:
-            if tMaxX < tMaxZ:
-                t_next = tMaxX
-                hit_axis = 0
-            else:
-                t_next = tMaxZ
-                hit_axis = 2
-        else:
-            if tMaxY < tMaxZ:
-                t_next = tMaxY
-                hit_axis = 1
-            else:
-                t_next = tMaxZ
-                hit_axis = 2
+        # Use a tie-aware DDA step. If the ray hits an edge/corner (multiple
+        # boundaries at the same parametric distance), we must step all
+        # involved axes to avoid systematic grid-aligned bias.
+        t_next = tMaxX
+        if tMaxY < t_next:
+            t_next = tMaxY
+        if tMaxZ < t_next:
+            t_next = tMaxZ
+
+        tol = 1e-12 * (1.0 + np.abs(t_next))
+        hit_x = np.abs(tMaxX - t_next) <= tol
+        hit_y = np.abs(tMaxY - t_next) <= tol
+        hit_z = np.abs(tMaxZ - t_next) <= tol
 
         ds_loc = t_next - t_curr
         if ds_loc <= 0.0 or not np.isfinite(ds_loc):
@@ -151,13 +150,13 @@ def integrate_ray_cartesian_dda_3d(
         s_total += ds_loc
         t_curr = t_next
 
-        if hit_axis == 0:
+        if hit_x:
             ix += step_x
             tMaxX += tDeltaX
-        elif hit_axis == 1:
+        if hit_y:
             iy += step_y
             tMaxY += tDeltaY
-        else:
+        if hit_z:
             iz += step_z
             tMaxZ += tDeltaZ
 
@@ -699,20 +698,19 @@ def _integrate_all_rays_cartesian_dda_multi(
                 if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
                     break
 
-                if tMaxX < tMaxY:
-                    if tMaxX < tMaxZ:
-                        t_next = tMaxX
-                        hit_axis = 0
-                    else:
-                        t_next = tMaxZ
-                        hit_axis = 2
-                else:
-                    if tMaxY < tMaxZ:
-                        t_next = tMaxY
-                        hit_axis = 1
-                    else:
-                        t_next = tMaxZ
-                        hit_axis = 2
+                # Use a tie-aware DDA step. If the ray hits an edge/corner (multiple
+                # boundaries at the same parametric distance), we must step all
+                # involved axes to avoid systematic grid-aligned bias.
+                t_next = tMaxX
+                if tMaxY < t_next:
+                    t_next = tMaxY
+                if tMaxZ < t_next:
+                    t_next = tMaxZ
+
+                tol = 1e-12 * (1.0 + np.abs(t_next))
+                hit_x = np.abs(tMaxX - t_next) <= tol
+                hit_y = np.abs(tMaxY - t_next) <= tol
+                hit_z = np.abs(tMaxZ - t_next) <= tol
 
                 ds_loc = t_next - t_curr
                 if ds_loc <= 0.0 or not np.isfinite(ds_loc):
@@ -728,13 +726,13 @@ def _integrate_all_rays_cartesian_dda_multi(
 
                 t_curr = t_next
 
-                if hit_axis == 0:
+                if hit_x:
                     ix += step_x
                     tMaxX += tDeltaX
-                elif hit_axis == 1:
+                if hit_y:
                     iy += step_y
                     tMaxY += tDeltaY
-                else:
+                if hit_z:
                     iz += step_z
                     tMaxZ += tDeltaZ
 

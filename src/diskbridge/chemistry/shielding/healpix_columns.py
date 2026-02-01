@@ -207,6 +207,39 @@ def _as_f64(name: str, x) -> np.ndarray:
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
+def _scatter_candidates_3d(
+    target: np.ndarray,
+    candidate_idx: np.ndarray,
+    values: np.ndarray,
+) -> None:
+    """Scatter candidate-reduced values back onto a full 3D array.
+
+    Parameters
+    ----------
+    target : ndarray
+        Full 3D array to write into (modified in place).
+    candidate_idx : ndarray
+        Integer indices with shape (n_candidates, 3) giving (i0, i1, i2) for
+        each candidate cell.
+    values : ndarray
+        Per-candidate values with shape (n_candidates,).
+    """
+    idx = np.asarray(candidate_idx, dtype=np.int64)
+    if idx.ndim != 2 or int(idx.shape[1]) != 3:
+        raise ValueError(
+            f"candidate_idx must have shape (n, 3), got {idx.shape}"
+        )
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    if int(v.size) != int(idx.shape[0]):
+        raise ValueError(
+            f"values must have length {int(idx.shape[0])}, got {int(v.size)}"
+        )
+    i0 = idx[:, 0]
+    i1 = idx[:, 1]
+    i2 = idx[:, 2]
+    target[i0, i1, i2] = v
+
+
 def _prepare_candidate_mask(
     nH_cgs: np.ndarray,
     chi_arr: np.ndarray,
