@@ -183,6 +183,7 @@ def _compute_co_shielding(
     nH2_cm3: np.ndarray,
     nside: int,
     b_kms: float,
+    avg_mode: str = "isotropic_mean",
 ) -> tuple[np.ndarray, np.ndarray]:
     from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
     from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
@@ -217,6 +218,7 @@ def _compute_co_shielding(
             b_kms=float(b_kms),
             progress_chunks=None,
             cache_dir=None,
+            avg_mode=avg_mode,
         )
     return theta_co, chi_eff
 

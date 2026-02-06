@@ -12,8 +12,6 @@ from diskbridge._units import Quantity
 from diskbridge._config import resolve_model_config
 from diskbridge._logging import logger
 from diskbridge._constants import (
-    EPS_CHI,
-    LOG_CHI_OVER_NH_PDISS,
     E_BIND_CO,
     NU0_CO,
     F_DRAINE,
@@ -481,9 +479,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         or (Leff_CO_max_mode == "geo")
     )
     if use_healpix_geometry and (not is_effectively_1d(rad.model.mesh, nH_cm3.shape)):
-        ratio = np.where(nH_cm3 > 0.0, chi_dust_arr / nH_cm3, 0.0)
-        log_ratio = np.log10(np.maximum(ratio, EPS_CHI))
-        candidate_mask_arr = log_ratio > LOG_CHI_OVER_NH_PDISS
+        candidate_mask_arr = np.ones(shape, dtype=bool)
         tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
             rad.model.mesh,
             nside=int(nside),
@@ -748,7 +744,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 nside=nside,
                 b_kms=b_kms,
-                candidate_mask=candidate_mask_arr,
             )
 
         theta_h2_flat = theta_h2_arr.reshape(ncells)

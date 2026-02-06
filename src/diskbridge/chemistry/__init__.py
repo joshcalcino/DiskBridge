@@ -35,6 +35,7 @@ def evolve_co_time_dependent_infall_age(
     Xco_tot: float = 1.0e-4,
     tau_form: Optional[Quantity] = None,
     eps_vr: float = 1e-30,
+    config: Optional[Dict] = None,
 ) -> Tuple[Quantity, Quantity, Quantity, Dict]:
     """One-call CO two-phase chemistry with UV boundary and synthetic infall ages.
     
@@ -124,6 +125,9 @@ def evolve_co_time_dependent_infall_age(
     from diskbridge.chemistry.models.carbon_reduced import compute_boundary_co_ic
     from diskbridge.chemistry.tau_form import compute_tau_form_co
     from diskbridge.chemistry.models._carbon_reduced_math import evolve_carbon_reduced_time_dependent
+    if config is None:
+        config = {}
+
     logger.info("=" * 60)
     logger.info("CO two-phase with infall age workflow")
     logger.info("=" * 60)
@@ -148,6 +152,7 @@ def evolve_co_time_dependent_infall_age(
             chi_dim = np.ascontiguousarray(chi.to("dimensionless").magnitude, dtype=np.float64)
             nco_guess_cm3 = np.ascontiguousarray(float(Xco_tot) * nH_cm3, dtype=np.float64)
             nH2_cm3 = np.ascontiguousarray(rad.nH2.to("cm^-3").magnitude, dtype=np.float64)
+            avg_mode = config.get("shielding_avg_mode", "isotropic_mean")
             theta_co, chi_eff = compute_co_shielding_healpix(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
@@ -158,6 +163,7 @@ def evolve_co_time_dependent_infall_age(
                 nside=int(nside),
                 b_kms=float(b_kms),
                 progress_chunks=None,
+                avg_mode=avg_mode,
             )
             rad.theta_co = Quantity(theta_co, "dimensionless")
             rad.chi_eff = Quantity(chi_eff, "dimensionless")
