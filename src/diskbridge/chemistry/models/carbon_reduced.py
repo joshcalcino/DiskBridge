@@ -223,6 +223,100 @@ def _compute_co_shielding(
     return theta_co, chi_eff
 
 
+def _compute_c_shielding(
+    *,
+    rad: 'RadModel',
+    nH_cm3: np.ndarray,
+    chi: np.ndarray,
+    nC_cm3: np.ndarray,
+    nH2_cm3: np.ndarray,
+    nside: int,
+    b_kms: float,
+    W_rays: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute C photoionization shielding factor and effective UV field.
+
+    Uses column-integrated C and H2 densities to compute:
+
+    .. math::
+
+        \\theta_C = \\exp(-1.6 \\times 10^{-17} N_C)
+                    \\cdot \\frac{\\exp(-y)}{1 + y}
+
+    where :math:`y = A_{H2} \\cdot 1.2 \\times 10^{-14} \\cdot 2 N_{H2}`.
+
+    Dispatches to 1D or HEALPix column integration based on mesh geometry.
+
+    References
+    ----------
+    - van Dishoeck & Black 1988, ApJ, 334, 771 (C shielding)
+    - Tielens & Hollenbach 1985, ApJ, 291, 722 (H2 cross-shielding of C)
+
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper.
+    nH_cm3 : ndarray
+        Total hydrogen number density (cm^-3).
+    chi : ndarray
+        Dust-attenuated UV field (dimensionless, Draine units).
+    nC_cm3 : ndarray
+        Atomic carbon number density (cm^-3).
+    nH2_cm3 : ndarray
+        H2 number density (cm^-3).
+    nside : int
+        HEALPix Nside for 3D ray integration.
+    b_kms : float
+        Doppler parameter in km/s (passed through for H2 shielding).
+    W_rays : ndarray or None, optional
+        Per-direction UV weights for directional averaging.
+
+    Returns
+    -------
+    theta_c : ndarray
+        C photoionization shielding factor per cell.
+    chi_eff_c : ndarray
+        Effective UV field for C photoionization = chi * theta_c.
+    """
+    from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
+
+    if is_effectively_1d(rad.model.mesh, tuple(nH_cm3.shape)):
+        from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d
+        _theta_h2, _theta_co, theta_c, _theta_pdr, _chi_eff_pdr = compute_pdr_shielding_1d(
+            rad.model.mesh,
+            nH_cm3,
+            chi,
+            visser=None,
+            nCO=None,
+            nC=nC_cm3,
+            nH2=nH2_cm3,
+            b_kms=float(b_kms),
+            outer="min",
+        )
+        theta_c = np.ascontiguousarray(theta_c, dtype=np.float64)
+    else:
+        from diskbridge.chemistry.shielding.healpix_columns import compute_pdr_shielding_healpix
+        _theta_h2, _theta_co, theta_c, _theta_pdr, _chi_eff_pdr = compute_pdr_shielding_healpix(
+            mesh=rad.model.mesh,
+            nH=nH_cm3,
+            chi=chi,
+            visser=None,
+            nCO=None,
+            nC=nC_cm3,
+            nH2=nH2_cm3,
+            nside=int(nside),
+            b_kms=float(b_kms),
+            progress_chunks=None,
+            cache_dir=None,
+            self_weight=1.0,
+            W_rays=W_rays,
+        )
+        theta_c = np.ascontiguousarray(theta_c, dtype=np.float64)
+
+    chi_eff_c = np.ascontiguousarray(chi * theta_c, dtype=np.float64)
+    return theta_c, chi_eff_c
+
+
 def _run_carbon_closure(
     *,
     rad: 'RadModel',
@@ -293,27 +387,60 @@ def _carbon_closure_cgs(
 def _prepare_common(
     rad: 'RadModel',
     config: dict,
-) -> tuple[Quantity, Quantity, Quantity, np.ndarray, float, bool, int, float, int]:
+) -> dict:
+    """Extract common parameters from config and ensure prerequisites.
+
+    Returns
+    -------
+    dict
+        Keys: nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding,
+        nside, b_kms, shielding_iter, h2_self_shielding,
+        co_self_shielding, c_self_shielding, c_shielding_iter.
+    """
     Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
     skip_shielding = bool(config.get('skip_shielding', False))
     nside = int(diskbridge.params.nside)
     b_kms = float(config.get('b_kms', 0.3))
     shielding_iter = int(config.get('shielding_iter', 1))
 
+    # Per-molecule self-shielding flags (default: all enabled)
+    h2_self_shielding = bool(config.get('h2_self_shielding', True))
+    co_self_shielding = bool(config.get('co_self_shielding', True))
+    c_self_shielding = bool(config.get('c_self_shielding', True))
+    c_shielding_iter = int(config.get('c_shielding_iter', 1))
+
     nH = rad.ensure_nH()
     Tdust = rad.ensure_dust_temperature()
     chi = rad.ensure_chi()
 
-    ensure_h2_partition(rad, nH=nH, chi_dust=chi)
+    ensure_h2_partition(rad, nH=nH, chi_dust=chi, h2_self_shielding=h2_self_shielding)
     nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
     tau_form_s = _resolve_tau_form(rad, config=config, nH2_cm3=nH2_cm3)
 
-    return nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter
+    return {
+        'nH': nH,
+        'Tdust': Tdust,
+        'chi': chi,
+        'tau_form_s': tau_form_s,
+        'Xco_tot': Xco_tot,
+        'skip_shielding': skip_shielding,
+        'nside': nside,
+        'b_kms': b_kms,
+        'shielding_iter': shielding_iter,
+        'h2_self_shielding': h2_self_shielding,
+        'co_self_shielding': co_self_shielding,
+        'c_self_shielding': c_self_shielding,
+        'c_shielding_iter': c_shielding_iter,
+    }
 
 
-def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
+def run_steady(
+    rad: 'RadModel',
+    config: dict,
+    iteration_history: Optional[list] = None,
+) -> ChemistryResult:
     """Run steady-state CO two-phase chemistry.
-    
+
     Parameters
     ----------
     rad : RadModel
@@ -325,14 +452,31 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         - skip_shielding: bool (default: False)
         - nside: int (default: 4)
         - b_kms: float (default: 0.3)
-        
+    iteration_history : list or None, optional
+        If a list is provided, a snapshot dict is appended at each shielding
+        iteration with keys ``theta_co``, ``nco_gas``, ``nco_ice``, and
+        ``chi_eff`` (all plain numpy arrays in CGS).  Useful for convergence
+        diagnostics.
+
     Returns
     -------
     ChemistryResult
         Result with abundances, number_densities, and diagnostic fields
     """
     cfg = resolve_model_config(("chemistry", "carbon_reduced"), overrides=config)
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
+    common = _prepare_common(rad, cfg)
+    nH = common['nH']
+    Tdust = common['Tdust']
+    chi = common['chi']
+    tau_form_s = common['tau_form_s']
+    Xco_tot = common['Xco_tot']
+    skip_shielding = common['skip_shielding']
+    nside = common['nside']
+    b_kms = common['b_kms']
+    shielding_iter = common['shielding_iter']
+    co_self_shielding = common['co_self_shielding']
+    c_self_shielding = common['c_self_shielding']
+    c_shielding_iter = common['c_shielding_iter']
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
@@ -392,13 +536,15 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     out_k_pd_surf = np.empty(ncells, dtype=np.float64)
     out_R_pd = np.empty(ncells, dtype=np.float64)
 
-    if bool(skip_shielding):
+    # CO self-shielding: skip if either skip_shielding or co_self_shielding=False
+    do_co_shielding = (not bool(skip_shielding)) and bool(co_self_shielding)
+    if not do_co_shielding:
         shielding_iter = 0
 
     min_rate = float(cfg.get('min_rate', 0.0))
 
     for _ in range(int(shielding_iter) + 1):
-        if not bool(skip_shielding):
+        if do_co_shielding:
             theta_arr, chi_eff_arr = _compute_co_shielding(
                 rad=rad,
                 nH_cm3=nH_cm3,
@@ -407,6 +553,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
                 nH2_cm3=nH2_cm3,
                 nside=int(nside),
                 b_kms=float(b_kms),
+                W_rays=getattr(rad, 'W_rays', None),
             )
 
         theta_flat = _flat_view(theta_arr)
@@ -440,6 +587,14 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
 
         nco_guess_cm3 = np.ascontiguousarray(out_nco_gas.reshape(orig_shape), dtype=np.float64)
 
+        if iteration_history is not None:
+            iteration_history.append({
+                'theta_co': theta_arr.copy(),
+                'nco_gas': out_nco_gas.reshape(orig_shape).copy(),
+                'nco_ice': out_nco_ice.reshape(orig_shape).copy(),
+                'chi_eff': chi_eff_arr.copy(),
+            })
+
     Xco_gas = Quantity(out_Xco_gas.reshape(orig_shape), 'dimensionless')
     nco_gas = Quantity(out_nco_gas.reshape(orig_shape), 'cm^-3')
     nco_ice = Quantity(out_nco_ice.reshape(orig_shape), 'cm^-3')
@@ -464,12 +619,45 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         Tg_K = T_K
         logger.info("Carbon closure using dust temperature (gas T not available)")
 
+    # --- Carbon closure: first pass (unshielded chi) ---
     nCplus_flat, nC_flat, ne_flat = _carbon_closure_cgs(
         nH_cm3=nH_cm3,
         chi=chi_dim,
         Tg_K=Tg_K,
         nco_total_cm3=nco_total_cm3.reshape(orig_shape),
     )
+
+    # --- C self-shielding refinement ---
+    theta_c_arr = np.ones_like(nH_cm3, dtype=np.float64)
+    chi_eff_c_arr = chi_dim.copy()
+
+    if c_self_shielding:
+        nC_arr = nC_flat.reshape(orig_shape)
+
+        for c_iter in range(max(int(c_shielding_iter), 1)):
+            theta_c_arr, chi_eff_c_arr = _compute_c_shielding(
+                rad=rad,
+                nH_cm3=nH_cm3,
+                chi=chi_dim,
+                nC_cm3=nC_arr,
+                nH2_cm3=nH2_cm3,
+                nside=int(nside),
+                b_kms=float(b_kms),
+                W_rays=getattr(rad, 'W_rays', None),
+            )
+            logger.info(
+                f"C self-shielding iter {c_iter + 1}/{c_shielding_iter}: "
+                f"min(theta_c)={theta_c_arr.min():.3e}, max(theta_c)={theta_c_arr.max():.3e}"
+            )
+
+            nCplus_flat, nC_flat, ne_flat = _carbon_closure_cgs(
+                nH_cm3=nH_cm3,
+                chi=chi_eff_c_arr,
+                Tg_K=Tg_K,
+                nco_total_cm3=nco_total_cm3.reshape(orig_shape),
+            )
+            nC_arr = nC_flat.reshape(orig_shape)
+
     nCplus = Quantity(nCplus_flat.reshape(orig_shape), 'cm^-3')
     nC = Quantity(nC_flat.reshape(orig_shape), 'cm^-3')
     ne = Quantity(ne_flat.reshape(orig_shape), 'cm^-3')
@@ -500,6 +688,8 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
     rad.nCplus = nCplus
     rad.nC = nC
     rad.ne = ne
+    rad.theta_c = Quantity(theta_c_arr, 'dimensionless')
+    rad.chi_eff_c = Quantity(chi_eff_c_arr, 'dimensionless')
 
     return ChemistryResult(
         abundances={'co': Xco_gas},
@@ -516,6 +706,8 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
             'tau_diss_co': tau_pd,
             'theta_co': theta_co,
             'chi_eff': chi_eff,
+            'theta_c': Quantity(theta_c_arr, 'dimensionless'),
+            'chi_eff_c': Quantity(chi_eff_c_arr, 'dimensionless'),
             'co_ice': nco_ice,
             'n_ice_act_max': diag.get('n_ice_act_max'),
             'n_ice_act': diag.get('n_ice_act'),
@@ -569,13 +761,29 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     if formation_model == 'nl97':
         raise ValueError("formation_model='nl97' is not supported in time-dependent carbon_reduced")
 
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
+    common = _prepare_common(rad, cfg)
+    nH = common['nH']
+    Tdust = common['Tdust']
+    chi = common['chi']
+    tau_form_s = common['tau_form_s']
+    Xco_tot = common['Xco_tot']
+    skip_shielding = common['skip_shielding']
+    nside = common['nside']
+    b_kms = common['b_kms']
+    shielding_iter = common['shielding_iter']
+    co_self_shielding = common['co_self_shielding']
+    c_self_shielding = common['c_self_shielding']
+    c_shielding_iter = common['c_shielding_iter']
+
     tau_form = Quantity(tau_form_s, 's')
 
     if int(shielding_iter) != 0:
         raise ValueError("shielding_iter must be 0 for time-dependent carbon_reduced")
 
-    if bool(skip_shielding):
+    # CO self-shielding: skip if either skip_shielding or co_self_shielding=False
+    do_co_shielding = (not bool(skip_shielding)) and bool(co_self_shielding)
+
+    if not do_co_shielding:
         theta_co = Quantity(np.ones_like(chi.magnitude), 'dimensionless')
         chi_eff = chi
     else:
@@ -591,6 +799,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
             nH2_cm3=_as_cgs_f64(rad.nH2, 'cm^-3'),
             nside=nside,
             b_kms=b_kms,
+            W_rays=getattr(rad, 'W_rays', None),
         )
 
         theta_co = Quantity(theta_co, 'dimensionless')
@@ -612,6 +821,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         dt=dt,
     )
 
+    # --- Carbon closure: first pass (unshielded chi) ---
     nCplus, nC, ne, nco_total = _run_carbon_closure(
         rad=rad,
         nH=nH,
@@ -620,6 +830,52 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
         nco_gas=nco_gas,
         nco_ice=nco_ice,
     )
+
+    # --- C self-shielding refinement ---
+    nH_cm3 = _as_cgs_f64(nH, 'cm^-3')
+    nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
+    chi_dim = _as_cgs_f64(chi, 'dimensionless')
+    orig_shape = nH_cm3.shape
+
+    theta_c_arr = np.ones_like(nH_cm3, dtype=np.float64)
+    chi_eff_c_arr = chi_dim.copy()
+
+    if c_self_shielding:
+        nco_total_cm3 = (nco_gas.to('cm^-3').magnitude + nco_ice.to('cm^-3').magnitude)
+        nC_arr = nC.to('cm^-3').magnitude
+
+        if rad.gas_temperature is not None:
+            Tg_K = _as_cgs_f64(rad.gas_temperature, 'K')
+        else:
+            Tg_K = _as_cgs_f64(Tdust, 'K')
+
+        for c_iter in range(max(int(c_shielding_iter), 1)):
+            theta_c_arr, chi_eff_c_arr = _compute_c_shielding(
+                rad=rad,
+                nH_cm3=nH_cm3,
+                chi=chi_dim,
+                nC_cm3=nC_arr,
+                nH2_cm3=nH2_cm3,
+                nside=int(nside),
+                b_kms=float(b_kms),
+                W_rays=getattr(rad, 'W_rays', None),
+            )
+            logger.info(
+                f"C self-shielding iter {c_iter + 1}/{c_shielding_iter}: "
+                f"min(theta_c)={theta_c_arr.min():.3e}, max(theta_c)={theta_c_arr.max():.3e}"
+            )
+
+            nCplus_flat, nC_flat, ne_flat = _carbon_closure_cgs(
+                nH_cm3=nH_cm3,
+                chi=chi_eff_c_arr,
+                Tg_K=Tg_K,
+                nco_total_cm3=nco_total_cm3.reshape(orig_shape),
+            )
+            nC_arr = nC_flat.reshape(orig_shape)
+
+        nCplus = Quantity(nCplus_flat.reshape(orig_shape), 'cm^-3')
+        nC = Quantity(nC_flat.reshape(orig_shape), 'cm^-3')
+        ne = Quantity(ne_flat.reshape(orig_shape), 'cm^-3')
 
     validate_chemistry_state(
         nH=nH,
@@ -646,6 +902,8 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     rad.nCplus = nCplus
     rad.nC = nC
     rad.ne = ne
+    rad.theta_c = Quantity(theta_c_arr, 'dimensionless')
+    rad.chi_eff_c = Quantity(chi_eff_c_arr, 'dimensionless')
 
     return ChemistryResult(
         abundances={'co': Xco_gas},
@@ -662,6 +920,8 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
             'tau_diss_co': tau_pd,
             'theta_co': theta_co,
             'chi_eff': chi_eff,
+            'theta_c': Quantity(theta_c_arr, 'dimensionless'),
+            'chi_eff_c': Quantity(chi_eff_c_arr, 'dimensionless'),
             'co_ice': nco_ice,
             'n_ice_act_max': diag.get('n_ice_act_max'),
             'n_ice_act': diag.get('n_ice_act'),

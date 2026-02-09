@@ -734,6 +734,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 compute_pdr_shielding_healpix,
             )
 
+            W_rays = getattr(rad, "W_rays", None)
             theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
                 mesh=rad.model.mesh,
                 nH=nH_cm3,
@@ -744,6 +745,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 nH2=nH2_cm3,
                 nside=nside,
                 b_kms=b_kms,
+                W_rays=W_rays,
             )
 
         theta_h2_flat = theta_h2_arr.reshape(ncells)

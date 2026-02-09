@@ -38,10 +38,34 @@ def compute_h2_partition(
     mesh: "Mesh",
     nH_cm3: np.ndarray,
     chi_dust: np.ndarray,
+    h2_self_shielding: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute H2/HI partition from formation-destruction balance.
 
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper.
+    mesh : Mesh
+        DiskBridge mesh instance.
+    nH_cm3 : ndarray
+        Total hydrogen number density (cm^-3).
+    chi_dust : ndarray
+        Dust-attenuated UV field (dimensionless, Draine units).
+    h2_self_shielding : bool, optional
+        If True (default), iterate with H2 self-shielding
+        (Draine & Bertoldi 1996). If False, use the unshielded
+        formation-destruction balance without column integration.
+
+    Returns
+    -------
+    nH2 : ndarray
+        H2 number density (cm^-3).
+    nH_atom : ndarray
+        Atomic hydrogen number density (cm^-3).
+    """
     nside = int(diskbridge.params.nside)
-    n_iter = H2P_N_ITER
+    n_iter = H2P_N_ITER if h2_self_shielding else 0
     R_form = H2P_R_FORM
     k0_diss = H2P_K0_DISS
 

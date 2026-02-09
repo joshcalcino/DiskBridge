@@ -2,10 +2,15 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <atomic>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "cvodeDense.h"
 #include "co_phase.h"
@@ -255,6 +260,12 @@ static py::dict solve_batch_equilibrium(
     double *y_out_ptr = static_cast<double *>(y_out.mutable_data());
     int *status_out_ptr = static_cast<int *>(status_out.mutable_data());
 
+    std::atomic<int> n_fail{0};
+
+    /* Release the GIL so threads can run in parallel. */
+    py::gil_scoped_release release;
+
+    #pragma omp parallel for schedule(dynamic)
     for (py::ssize_t i = 0; i < Ncells; ++i) {
         gow17 ode;
         CvodeDense solver(ode, reltol, abstol_ptr, userJac);
@@ -313,7 +324,16 @@ static py::dict solve_batch_equilibrium(
                 y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
             }
             status_out_ptr[i] = -1;
+            n_fail.fetch_add(1, std::memory_order_relaxed);
         }
+    }
+
+    /* Re-acquire the GIL before touching Python objects. */
+    py::gil_scoped_acquire acquire;
+
+    if (n_fail.load() > 0) {
+        printf("solve_batch_equilibrium: %d / %lld cells failed with exceptions.\n",
+               n_fail.load(), static_cast<long long>(Ncells));
     }
 
     py::dict out;

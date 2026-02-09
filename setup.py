@@ -54,9 +54,9 @@ def _gow17_extension() -> Extension:
         "sundials_core",
     ]
 
-    extra_compile_args = ["-O3", "-std=c++17"]
+    extra_compile_args = ["-O3", "-std=c++17", "-fopenmp"]
 
-    extra_link_args: list[str] = []
+    extra_link_args: list[str] = ["-fopenmp"]
     runtime_library_dirs: list[str] = []
     if os.name != "nt":
         runtime_library_dirs = [str(sundials_lib)]

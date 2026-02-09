@@ -142,6 +142,7 @@ def run(out_dir: Path) -> None:
     summary: dict = {}
 
     try:
+        # --- Run 1: baseline (no C self-shielding) ---
         chem = run_chemistry(
             rad,
             model="carbon_reduced",
@@ -149,6 +150,7 @@ def run(out_dir: Path) -> None:
                 "skip_shielding": False,
                 "shielding_iter": int(cfg.shielding_iter),
                 "tau_form": tau_form,
+                "c_self_shielding": False,
             },
             write=False,
         )
@@ -162,6 +164,11 @@ def run(out_dir: Path) -> None:
         nC_cm3 = _as_1d(rad.nC, "cm^-3")
 
         theta_co = _as_1d(rad.theta_co, "dimensionless")
+
+        # Save baseline C+/C for comparison
+        nCplus_baseline = nCplus_cm3.copy()
+        nC_baseline = nC_cm3.copy()
+        nco_gas_baseline = nco_gas_cm3.copy()
 
         NH_centers = Av * 1.87e21
         dNH = np.empty_like(NH_centers)
@@ -201,6 +208,35 @@ def run(out_dir: Path) -> None:
             (nCplus_cm3 + nC_cm3 + nco_total_cm3) / (float(X_C_TOT) * nH_cm3),
             np.nan,
         )
+
+        # --- Run 2: with C self-shielding ---
+        rad2, _ = _build_slab_on_Av_grid(cfg)
+        tau_form2 = Quantity(np.full(rad2.model.mesh.shape, float(TAU_CO_FORM)), "s")
+        chem2 = run_chemistry(
+            rad2,
+            model="carbon_reduced",
+            config={
+                "skip_shielding": False,
+                "shielding_iter": int(cfg.shielding_iter),
+                "tau_form": tau_form2,
+                "c_self_shielding": True,
+                "c_shielding_iter": 1,
+            },
+            write=False,
+        )
+
+        nCplus_shielded = _as_1d(rad2.nCplus, "cm^-3")
+        nC_shielded = _as_1d(rad2.nC, "cm^-3")
+        nco_gas_shielded = _as_1d(rad2.nco_gas, "cm^-3")
+        theta_c = _as_1d(rad2.theta_c, "dimensionless")
+
+        # Verify CO is essentially unchanged (only carbon closure changed)
+        co_reldiff = np.where(
+            nco_gas_baseline > 1e-30,
+            np.abs(nco_gas_shielded - nco_gas_baseline) / nco_gas_baseline,
+            0.0,
+        )
+        co_max_reldiff = float(np.max(co_reldiff))
 
         plt = _setup_matplotlib()
 
@@ -249,6 +285,7 @@ def run(out_dir: Path) -> None:
         fig, ax = plt.subplots(figsize=(7.0, 4.5))
         ax.plot(Av, np.maximum(theta_h2, 1.0e-300), label="theta_H2")
         ax.plot(Av, np.maximum(theta_co, 1.0e-300), label="theta_CO")
+        ax.plot(Av, np.maximum(theta_c, 1.0e-300), label="theta_C")
         ax.set_xlabel("Av")
         ax.set_ylabel("shielding factor")
         ax.set_yscale("log")
@@ -257,6 +294,32 @@ def run(out_dir: Path) -> None:
         _annotate(ax, params_box)
         fig.tight_layout()
         fig.savefig(out_dir / "shielding_vs_Av.png", dpi=150)
+        plt.close(fig)
+
+        # C self-shielding comparison plot
+        fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.5))
+        ax = axes[0]
+        ax.plot(Av, _logx(nCplus_baseline), label="C+ (no C shield)", ls="--")
+        ax.plot(Av, _logx(nCplus_shielded), label="C+ (C shielded)")
+        ax.plot(Av, _logx(nC_baseline), label="C (no C shield)", ls="--")
+        ax.plot(Av, _logx(nC_shielded), label="C (C shielded)")
+        ax.set_xlabel("Av")
+        ax.set_ylabel("log10(x)")
+        ax.set_title("C self-shielding effect on C/C+")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=7)
+        _annotate(ax, params_box)
+
+        ax = axes[1]
+        ax.plot(Av, theta_c, label="theta_C", color="tab:green")
+        ax.set_xlabel("Av")
+        ax.set_ylabel("theta_C")
+        ax.set_title(f"C shielding factor (CO max reldiff={co_max_reldiff:.2e})")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+
+        fig.tight_layout()
+        fig.savefig(out_dir / "c_self_shielding_comparison.png", dpi=150)
         plt.close(fig)
 
         def _log10_rate(r):
@@ -298,6 +361,11 @@ def run(out_dir: Path) -> None:
                 "min": float(np.nanmin(carbon_budget)),
                 "max": float(np.nanmax(carbon_budget)),
                 "p90": float(np.nanpercentile(carbon_budget, 90.0)),
+            },
+            "c_self_shielding": {
+                "co_max_reldiff": co_max_reldiff,
+                "theta_c_min": float(np.min(theta_c)),
+                "theta_c_max": float(np.max(theta_c)),
             },
         }
 

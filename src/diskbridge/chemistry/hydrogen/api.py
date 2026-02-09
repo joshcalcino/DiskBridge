@@ -14,7 +14,31 @@ def ensure_h2_partition(
     nH: Quantity,
     chi_dust: Quantity,
     force: bool = False,
+    h2_self_shielding: bool = True,
 ) -> Tuple[Quantity, Quantity]:
+    """Ensure H2/HI partition is computed and stored on ``rad``.
+
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper.
+    nH : Quantity
+        Total hydrogen number density.
+    chi_dust : Quantity
+        Dust-attenuated UV field (Draine units).
+    force : bool, optional
+        If True, recompute even if nH2/nH_atom already exist.
+    h2_self_shielding : bool, optional
+        If True (default), include H2 self-shielding iterations
+        (Draine & Bertoldi 1996). If False, use unshielded balance.
+
+    Returns
+    -------
+    nH2 : Quantity
+        H2 number density.
+    nH_atom : Quantity
+        Atomic hydrogen number density.
+    """
     if (not force) and getattr(rad, "nH2", None) is not None and getattr(rad, "nH_atom", None) is not None:
         return rad.nH2, rad.nH_atom
 
@@ -26,6 +50,7 @@ def ensure_h2_partition(
         mesh=rad.model.mesh,
         nH_cm3=nH_cm3,
         chi_dust=chi_dim,
+        h2_self_shielding=bool(h2_self_shielding),
     )
 
     rad.nH2 = Quantity(nH2_cm3, "cm^-3")

@@ -146,6 +146,12 @@ CD_threshold_pdiss = "8.268e20 1/cm^2"    # 0.8 * 1.59e21 * 0.65
 # =============================================================================
 
 [chemistry.carbon_reduced]
+# Per-molecule self-shielding toggles (default: all enabled)
+h2_self_shielding = true          # H2 self-shielding in H2 partition
+co_self_shielding = true          # CO self-shielding (Visser+09)
+c_self_shielding = true           # C photoionization shielding in carbon closure
+c_shielding_iter = 1              # Number of C shielding refinement iterations
+
 formation_model = "tau"
 tau_co_form = "1.0e5 yr"       # CO formation timescale
 k0_co = "2.0e-10 s^-1"         # Unshielded CO photodissociation rate

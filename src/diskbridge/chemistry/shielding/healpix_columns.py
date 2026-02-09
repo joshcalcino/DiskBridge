@@ -974,7 +974,8 @@ def compute_pdr_shielding_healpix(
     theta_co : ndarray
         CO shielding factor per cell (1.0 if visser is None).
     theta_c : ndarray
-        C shielding factor per cell (currently 1.0, placeholder).
+        C photoionization shielding factor per cell
+        (van Dishoeck & Black 1988; Tielens & Hollenbach 1985).
     theta_pdr : ndarray
         Combined PDR shielding factor = theta_h2 * theta_co.
     chi_eff_pdr : ndarray
@@ -1010,6 +1011,7 @@ def compute_pdr_shielding_healpix(
 
     if candidate_idx.shape[0] > 0:
         N_H2_rays = cols["h2"]
+        N_C_rays = cols["c"]
 
         f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
 
@@ -1019,6 +1021,23 @@ def compute_pdr_shielding_healpix(
         else:
             theta_h2_mean = f_sh_rays.mean(axis=1)
         _scatter_candidates_3d(theta_h2, candidate_idx, theta_h2_mean)
+
+        # C self-shielding 
+        # References: van Dishoeck & Black 1988; Tielens & Hollenbach 1985
+        # theta_c = exp(-sigma_C * N_C) * exp(-y)/(1+y)
+        # where y = AH2 * tau_H2, tau_H2 = sigma_H2 * 2 * N_H2
+        AH2 = 1.17e-8
+        tau_H2 = 1.2e-14 * 2.0 * N_H2_rays
+        y = AH2 * tau_H2
+        ry = np.exp(-y) / (1.0 + y)
+        rc = np.exp(-1.6e-17 * N_C_rays)
+        theta_c_rays = rc * ry
+
+        if W_rays is not None:
+            theta_c_mean = (W_rays * theta_c_rays).sum(axis=1)
+        else:
+            theta_c_mean = theta_c_rays.mean(axis=1)
+        _scatter_candidates_3d(theta_c, candidate_idx, theta_c_mean)
 
         theta_pdr_mean = theta_h2_mean
         _scatter_candidates_3d(theta_pdr, candidate_idx, theta_h2_mean)
