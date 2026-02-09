@@ -31,6 +31,11 @@ from .model import RadModel
 from .molecule import RadMolecule
 from .image import RadImage
 from .opacities import DustOpacityCalculator
+from .dustkappa_reader import (
+    read_dustkappa,
+    band_average_kext,
+    load_kext_uv_for_bins,
+)
 
 __all__ = [
     'RadWriter',
@@ -39,4 +44,7 @@ __all__ = [
     'RadMolecule',
     'RadImage',
     'DustOpacityCalculator',
+    'read_dustkappa',
+    'band_average_kext',
+    'load_kext_uv_for_bins',
 ]

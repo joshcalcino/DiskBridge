@@ -38,6 +38,8 @@ from diskbridge.chemistry.shielding.healpix_utils import (
 )
 
 from diskbridge._constants import SIGMA_DUST
+from diskbridge.chemistry.shielding.dust_uv_tau import compute_tau_uv_from_dust_columns
+from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 import healpy as hp  # type: ignore
 
 
@@ -809,6 +811,8 @@ def compute_co_shielding_healpix(
     cache_dir: Optional[Path | str] = None,
     self_weight: float = 1.0,
     avg_mode: str = "isotropic_mean",
+    dust_rho_bins: Optional[list[np.ndarray]] = None,
+    kext_uv: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute CO self-shielding factors and effective UV field via HEALPix rays.
 
@@ -823,17 +827,28 @@ def compute_co_shielding_healpix(
       roughly isotropic.
 
     * ``"dust_weighted_boundary"`` -- directions are weighted by
-      ``exp(-SIGMA_DUST * N_H)``, where ``N_H`` is the total hydrogen column
-      to the domain boundary along each ray.  This approximates the
-      directional UV field in the regime where the star is blocked and UV is
-      dominated by ISM/diffuse/scattered light, giving more weight to low-tau
-      escape cones.  Crucially this does **not** add a second dust attenuation
-      to ``chi``; it only uses ``exp(-tau)`` as a directional weighting for
-      the angular average of the molecular shielding factor.
+      ``exp(-tau_UV)`` where ``tau_UV`` is the UV optical depth along each ray.
+      When ``dust_rho_bins`` and ``kext_uv`` are provided (dustkappa mode),
+      the optical depth is computed from per-bin dust mass columns and the
+      actual absorption + scattering opacities from ``dustkappa_*.inp`` files:
 
-      Reference: Visser et al. 2009 (A&A 503, 323) for the shielding tables;
-      the directional weighting idea follows the standard escape-probability
-      formalism.
+      .. math::
+
+          \\tau_{\\rm UV}(k) = \\sum_b \\kappa^{(b)}_{\\rm ext,UV}
+                               \\Sigma^{(b)}_{\\rm dust}(k)
+
+      Otherwise (fallback), it uses the simpler ``SIGMA_DUST * N_H`` estimate.
+
+      This approximates the directional UV field in the regime where the star
+      is blocked and UV is dominated by ISM/diffuse/scattered light, giving
+      more weight to low-tau escape cones.  Crucially this does **not** add a
+      second dust attenuation to ``chi``; it only uses ``exp(-tau)`` as a
+      directional weighting for the angular average of the molecular shielding
+      factor.
+
+      References: Visser et al. 2009 (A&A 503, 323) for shielding tables;
+      Weingartner & Draine (2001) for dust opacities; the directional weighting
+      follows the standard escape-probability formalism.
 
     Parameters
     ----------
@@ -862,6 +877,13 @@ def compute_co_shielding_healpix(
     avg_mode : str, optional
         Averaging mode for combining per-ray shielding factors.
         One of ``"isotropic_mean"`` (default) or ``"dust_weighted_boundary"``.
+    dust_rho_bins : list of ndarray or None, optional
+        Per-bin dust density arrays (g/cm^3), each matching the mesh shape.
+        If provided together with ``kext_uv``, enables dustkappa-based UV
+        optical depth for the ``"dust_weighted_boundary"`` mode.
+    kext_uv : ndarray of shape (nbin,) or None, optional
+        Band-averaged UV extinction opacity per dust bin (cm^2/g).
+        Must be provided together with ``dust_rho_bins``.
 
     Returns
     -------
@@ -875,6 +897,14 @@ def compute_co_shielding_healpix(
             f"avg_mode must be one of {_VALID_AVG_MODES!r}, got {avg_mode!r}"
         )
 
+    # Determine whether dustkappa-based UV tau is available
+    use_dustkappa = (
+        avg_mode == "dust_weighted_boundary"
+        and dust_rho_bins is not None
+        and kext_uv is not None
+        and len(dust_rho_bins) > 0
+    )
+
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
     nCO_cgs = _as_f64("nCO", nCO)
@@ -885,10 +915,25 @@ def compute_co_shielding_healpix(
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
 
-    # Only request the "h" column when needed for dust-weighted averaging.
     fields: dict[str, np.ndarray] = {"co": nCO_cgs, "h2": nH2_cgs}
+
     if avg_mode == "dust_weighted_boundary":
-        fields["h"] = nH_cgs
+        if use_dustkappa:
+            # Integrate dust density per bin along rays
+            for ibin, rho_bin in enumerate(dust_rho_bins):
+                fields[f"dust_bin_{ibin}"] = _as_f64(
+                    f"dust_rho_bin_{ibin}", rho_bin
+                )
+            logger.info(
+                "dust_weighted_boundary: using dustkappa mode with %d dust bins",
+                len(dust_rho_bins),
+            )
+        else:
+            # Fallback: integrate nH along rays for SIGMA_DUST * N_H
+            fields["h"] = nH_cgs
+            logger.info(
+                "dust_weighted_boundary: using SIGMA_DUST * N_H fallback"
+            )
 
     candidate_idx, dirs, cols = compute_column_rays_healpix(
         mesh,
@@ -909,9 +954,15 @@ def compute_co_shielding_healpix(
         if avg_mode == "isotropic_mean":
             theta_eff = theta_rays.mean(axis=1)
         else:
-            # dust_weighted_boundary: weight directions by exp(-tau_dust)
-            N_H_rays = cols["h"]                      # (n_candidates, npix)
-            tau_rays = SIGMA_DUST * N_H_rays           # dimensionless
+            # dust_weighted_boundary: weight directions by exp(-tau_UV)
+            if use_dustkappa:
+                tau_rays = compute_tau_uv_from_dust_columns(
+                    cols, kext_uv, nbin=len(dust_rho_bins),
+                )
+            else:
+                N_H_rays = cols["h"]                  # (n_candidates, npix)
+                tau_rays = SIGMA_DUST * N_H_rays      # dimensionless
+
             wdir = np.exp(-tau_rays)                   # directional weights
             num = (wdir * theta_rays).sum(axis=1)
             den = wdir.sum(axis=1)
@@ -939,17 +990,106 @@ def compute_pdr_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     self_weight: float = 1.0,
+    avg_mode: str = "isotropic_mean",
+    dust_rho_bins: Optional[list[np.ndarray]] = None,
+    kext_uv: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute PDR shielding factors (H2, CO, C) and effective UV via HEALPix rays.
+
+    Integrates N(H2), N(C), and optionally N(CO) along HEALPix directions,
+    evaluates per-species self-shielding factors, then averages over directions.
+
+    Two averaging modes are supported (selected via ``avg_mode``):
+
+    * ``"isotropic_mean"`` (default) -- unweighted arithmetic mean.
+    * ``"dust_weighted_boundary"`` -- directions weighted by ``exp(-tau_UV)``.
+      When ``dust_rho_bins`` and ``kext_uv`` are provided, tau_UV is computed
+      from per-bin dust mass columns and actual dustkappa opacities; otherwise
+      falls back to ``SIGMA_DUST * N_H``.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        DiskBridge mesh (spherical or cartesian).
+    nH : ndarray
+        Total hydrogen number density (cm^-3), 3-D grid.
+    chi : ndarray
+        Dust-attenuated UV field (dimensionless, Draine units), 3-D grid.
+    visser : VisserShielding or None, optional
+        Preloaded Visser+09 shielding table instance. If provided, CO
+        shielding is computed alongside H2 shielding.
+    nCO : ndarray or None, optional
+        CO number density (cm^-3). Required if ``visser`` is provided.
+    nC : ndarray
+        Atomic carbon number density (cm^-3), 3-D grid.
+    nH2 : ndarray
+        H2 number density (cm^-3), 3-D grid.
+    nside : int, optional
+        HEALPix Nside. Default 4.
+    b_kms : float, optional
+        Doppler parameter in km/s. Default 0.3.
+    progress_chunks : int or None, optional
+        If set, split ray integration into chunks with logging.
+    cache_dir : Path or str or None, optional
+        Directory for caching ray geometry and column results.
+    self_weight : float, optional
+        Weight of starting cell contribution to column. Default 1.0.
+    avg_mode : str, optional
+        ``"isotropic_mean"`` or ``"dust_weighted_boundary"``. Default isotropic.
+    dust_rho_bins : list of ndarray or None, optional
+        Per-bin dust density arrays (g/cm^3) for dustkappa mode.
+    kext_uv : ndarray of shape (nbin,) or None, optional
+        Band-averaged UV extinction opacity per dust bin (cm^2/g).
+
+    Returns
+    -------
+    theta_h2 : ndarray
+        H2 self-shielding factor per cell.
+    theta_co : ndarray
+        CO shielding factor per cell (1.0 if visser is None).
+    theta_c : ndarray
+        C shielding factor per cell (currently 1.0, placeholder).
+    theta_pdr : ndarray
+        Combined PDR shielding factor = theta_h2 * theta_co.
+    chi_eff_pdr : ndarray
+        Effective UV field = chi * theta_pdr.
+    """
+    if avg_mode not in _VALID_AVG_MODES:
+        raise ValueError(
+            f"avg_mode must be one of {_VALID_AVG_MODES!r}, got {avg_mode!r}"
+        )
+
+    use_dustkappa = (
+        avg_mode == "dust_weighted_boundary"
+        and dust_rho_bins is not None
+        and kext_uv is not None
+        and len(dust_rho_bins) > 0
+    )
+
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
     nH2_cgs = _as_f64("nH2", nH2)
     nC_cgs = _as_f64("nC", nC)
 
-    fields = {"h2": nH2_cgs, "c": nC_cgs}
+    fields: dict[str, np.ndarray] = {"h2": nH2_cgs, "c": nC_cgs}
     if visser is not None:
         if nCO is None:
             raise ValueError("nCO is required if visser is provided")
         fields["co"] = _as_f64("nCO", nCO)
+
+    if avg_mode == "dust_weighted_boundary":
+        if use_dustkappa:
+            for ibin, rho_bin in enumerate(dust_rho_bins):
+                fields[f"dust_bin_{ibin}"] = _as_f64(
+                    f"dust_rho_bin_{ibin}", rho_bin
+                )
+            logger.info(
+                "PDR dust_weighted_boundary: dustkappa mode with %d bins",
+                len(dust_rho_bins),
+            )
+        else:
+            fields["h"] = nH_cgs
+            logger.info("PDR dust_weighted_boundary: SIGMA_DUST * N_H fallback")
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
 
@@ -973,7 +1113,27 @@ def compute_pdr_shielding_healpix(
         N_C_rays = cols["c"]
 
         f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
-        theta_h2_mean = f_sh_rays.mean(axis=1)
+
+        # Compute directional weights for dust_weighted_boundary mode
+        if avg_mode == "dust_weighted_boundary":
+            if use_dustkappa:
+                tau_rays = compute_tau_uv_from_dust_columns(
+                    cols, kext_uv, nbin=len(dust_rho_bins),
+                )
+            else:
+                N_H_rays = cols["h"]
+                tau_rays = SIGMA_DUST * N_H_rays
+            wdir = np.exp(-tau_rays)
+        else:
+            wdir = None
+
+        # H2 shielding: weighted or isotropic mean
+        if wdir is not None:
+            num = (wdir * f_sh_rays).sum(axis=1)
+            den = wdir.sum(axis=1)
+            theta_h2_mean = np.where(den > 0.0, num / den, f_sh_rays.mean(axis=1))
+        else:
+            theta_h2_mean = f_sh_rays.mean(axis=1)
         _scatter_candidates_3d(theta_h2, candidate_idx, theta_h2_mean)
 
         theta_pdr_mean = theta_h2_mean  # baseline
@@ -982,11 +1142,26 @@ def compute_pdr_shielding_healpix(
         if visser is not None:
             N_CO_rays = cols["co"]
             theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
-            theta_co_mean = theta_co_rays.mean(axis=1)
+
+            if wdir is not None:
+                num = (wdir * theta_co_rays).sum(axis=1)
+                den = wdir.sum(axis=1)
+                theta_co_mean = np.where(
+                    den > 0.0, num / den, theta_co_rays.mean(axis=1)
+                )
+            else:
+                theta_co_mean = theta_co_rays.mean(axis=1)
             _scatter_candidates_3d(theta_co, candidate_idx, theta_co_mean)
 
             theta_pdr_rays = f_sh_rays * theta_co_rays
-            theta_pdr_mean = theta_pdr_rays.mean(axis=1)
+            if wdir is not None:
+                num = (wdir * theta_pdr_rays).sum(axis=1)
+                den = wdir.sum(axis=1)
+                theta_pdr_mean = np.where(
+                    den > 0.0, num / den, theta_pdr_rays.mean(axis=1)
+                )
+            else:
+                theta_pdr_mean = theta_pdr_rays.mean(axis=1)
             _scatter_candidates_3d(theta_pdr, candidate_idx, theta_pdr_mean)
 
     chi_eff_pdr = chi_arr * theta_pdr
