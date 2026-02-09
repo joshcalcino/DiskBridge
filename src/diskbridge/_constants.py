@@ -34,6 +34,10 @@ EV_TO_ERG = units('eV').to('erg').magnitude            # erg/eV (1.602e-12)
 SIGMA_SB = units('sigma_SB').to_base_units().magnitude # erg/(cm^2 s K^4)
 G_GRAV = units('G').to_base_units().magnitude          # cm^3/(g s^2)
 
+# Draine ISRF UV energy density (erg/cm^3)
+# Reference: Draine 1978, ApJS, 36, 595
+U_DRAINE = 9.0e-14
+
 # =============================================================================
 # ASTRONOMICAL CONSTANTS (from config)
 # =============================================================================

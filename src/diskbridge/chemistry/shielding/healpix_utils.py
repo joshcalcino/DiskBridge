@@ -863,3 +863,296 @@ def integrate_rays_with_pathlength(
         self_weight=self_weight,
     )
     return N_all[:, :, 0], N_all[:, :, 1]
+
+
+# =============================================================================
+# STARWARD RAY INTEGRATION (one inward ray per cell toward origin)
+# =============================================================================
+
+
+@njit(parallel=True, cache=True)
+def _integrate_starward_radial_spherical(
+    fields_stack: np.ndarray,
+    r_edges: np.ndarray,
+    r_centers: np.ndarray,
+    candidate_idx: np.ndarray,
+    self_weight: float,
+) -> np.ndarray:
+    """Integrate fields radially inward (toward origin) for spherical meshes.
+
+    For a spherical mesh centered on the star, the star direction is purely
+    radial inward. The column from cell (ir, itheta, iphi) to the inner
+    boundary is a simple radial sum with no angular displacement.
+
+    Parameters
+    ----------
+    fields_stack : ndarray, shape (n_fields, nr, ntheta, nphi)
+        Density fields to integrate.
+    r_edges : ndarray, shape (nr+1,)
+        Radial cell edges in cm.
+    r_centers : ndarray, shape (nr,)
+        Radial cell centers in cm.
+    candidate_idx : ndarray, shape (n_cand, 3)
+        Integer indices (ir, itheta, iphi) per candidate cell.
+    self_weight : float
+        Weight applied to the starting cell contribution.
+
+    Returns
+    -------
+    cols : ndarray, shape (n_cand, n_fields)
+        Integrated column density per field per candidate cell.
+    """
+    n_cand = candidate_idx.shape[0]
+    n_fields = fields_stack.shape[0]
+
+    cols = np.zeros((n_cand, n_fields), dtype=np.float64)
+
+    for i in prange(n_cand):
+        ir_cell = candidate_idx[i, 0]
+        it = candidate_idx[i, 1]
+        ip = candidate_idx[i, 2]
+
+        # Self-cell: from cell center inward to inner edge of cell
+        ds_self = r_centers[ir_cell] - r_edges[ir_cell]
+        if ds_self > 0.0:
+            for k in range(n_fields):
+                cols[i, k] += self_weight * fields_stack[k, ir_cell, it, ip] * ds_self
+
+        # Inner cells: full radial extent of each cell
+        for j in range(ir_cell - 1, -1, -1):
+            ds = r_edges[j + 1] - r_edges[j]
+            for k in range(n_fields):
+                cols[i, k] += fields_stack[k, j, it, ip] * ds
+
+    return cols
+
+
+@njit(parallel=True, cache=True)
+def _integrate_starward_cartesian_dda_multi(
+    cell_centers: np.ndarray,
+    fields_stack: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    z_edges: np.ndarray,
+    max_steps: int,
+    self_weight: float,
+) -> np.ndarray:
+    """Integrate fields along rays toward origin for cartesian meshes.
+
+    Each cell gets its own direction vector pointing toward the origin.
+    Uses 3-D DDA ray marching identical to the boundary ray integrator.
+
+    Parameters
+    ----------
+    cell_centers : ndarray, shape (n_cells, 3)
+        Starting positions (x, y, z) in cm.
+    fields_stack : ndarray, shape (n_fields, nx, ny, nz)
+        Density fields to integrate.
+    x_edges, y_edges, z_edges : ndarray
+        Cell edge arrays in cm.
+    max_steps : int
+        Maximum DDA steps per ray.
+    self_weight : float
+        Weight for the starting cell.
+
+    Returns
+    -------
+    cols : ndarray, shape (n_cells, n_fields)
+        Integrated column density per field per cell.
+    """
+    n_cells = cell_centers.shape[0]
+    n_fields = fields_stack.shape[0]
+    nx = fields_stack.shape[1]
+    ny = fields_stack.shape[2]
+    nz = fields_stack.shape[3]
+
+    cols = np.zeros((n_cells, n_fields), dtype=np.float64)
+
+    xmin = x_edges[0]
+    xmax = x_edges[-1]
+    ymin = y_edges[0]
+    ymax = y_edges[-1]
+    zmin = z_edges[0]
+    zmax = z_edges[-1]
+
+    dx_cell = x_edges[1] - x_edges[0]
+    dy_cell = y_edges[1] - y_edges[0]
+    dz_cell = z_edges[1] - z_edges[0]
+
+    eps = 1e-12
+
+    for i in prange(n_cells):
+        x0 = cell_centers[i, 0]
+        y0 = cell_centers[i, 1]
+        z0 = cell_centers[i, 2]
+
+        # Direction toward origin
+        r_mag = np.sqrt(x0 * x0 + y0 * y0 + z0 * z0)
+        if r_mag < 1e-30:
+            continue
+        ux = -x0 / r_mag
+        uy = -y0 / r_mag
+        uz = -z0 / r_mag
+
+        x = x0
+        y = y0
+        z = z0
+
+        if x <= xmin:
+            x = xmin + eps
+        if x >= xmax:
+            x = xmax - eps
+        if y <= ymin:
+            y = ymin + eps
+        if y >= ymax:
+            y = ymax - eps
+        if z <= zmin:
+            z = zmin + eps
+        if z >= zmax:
+            z = zmax - eps
+
+        ix = np.searchsorted(x_edges, x) - 1
+        iy = np.searchsorted(y_edges, y) - 1
+        iz = np.searchsorted(z_edges, z) - 1
+
+        if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
+            continue
+
+        if ux > 0.0:
+            step_x = 1
+            tMaxX = (x_edges[ix + 1] - x) / ux
+            tDeltaX = dx_cell / ux
+        elif ux < 0.0:
+            step_x = -1
+            tMaxX = (x_edges[ix] - x) / ux
+            tDeltaX = dx_cell / (-ux)
+        else:
+            step_x = 0
+            tMaxX = np.inf
+            tDeltaX = np.inf
+
+        if uy > 0.0:
+            step_y = 1
+            tMaxY = (y_edges[iy + 1] - y) / uy
+            tDeltaY = dy_cell / uy
+        elif uy < 0.0:
+            step_y = -1
+            tMaxY = (y_edges[iy] - y) / uy
+            tDeltaY = dy_cell / (-uy)
+        else:
+            step_y = 0
+            tMaxY = np.inf
+            tDeltaY = np.inf
+
+        if uz > 0.0:
+            step_z = 1
+            tMaxZ = (z_edges[iz + 1] - z) / uz
+            tDeltaZ = dz_cell / uz
+        elif uz < 0.0:
+            step_z = -1
+            tMaxZ = (z_edges[iz] - z) / uz
+            tDeltaZ = dz_cell / (-uz)
+        else:
+            step_z = 0
+            tMaxZ = np.inf
+            tDeltaZ = np.inf
+
+        t_curr = 0.0
+        is_first = True
+
+        for _ in range(max_steps):
+            if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
+                break
+
+            t_next = tMaxX
+            if tMaxY < t_next:
+                t_next = tMaxY
+            if tMaxZ < t_next:
+                t_next = tMaxZ
+
+            tol = 1e-12 * (1.0 + np.abs(t_next))
+            hit_x = np.abs(tMaxX - t_next) <= tol
+            hit_y = np.abs(tMaxY - t_next) <= tol
+            hit_z = np.abs(tMaxZ - t_next) <= tol
+
+            ds_loc = t_next - t_curr
+            if ds_loc <= 0.0 or not np.isfinite(ds_loc):
+                break
+
+            if is_first:
+                for k in range(n_fields):
+                    cols[i, k] += self_weight * fields_stack[k, ix, iy, iz] * ds_loc
+                is_first = False
+            else:
+                for k in range(n_fields):
+                    cols[i, k] += fields_stack[k, ix, iy, iz] * ds_loc
+
+            t_curr = t_next
+
+            if hit_x:
+                ix += step_x
+                tMaxX += tDeltaX
+            if hit_y:
+                iy += step_y
+                tMaxY += tDeltaY
+            if hit_z:
+                iz += step_z
+                tMaxZ += tDeltaZ
+
+            if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
+                break
+
+    return cols
+
+
+def integrate_starward_rays_multi(
+    tracer,
+    cell_centers: np.ndarray,
+    fields_stack: np.ndarray,
+    self_weight: float = 1.0,
+    candidate_idx: np.ndarray = None,
+) -> np.ndarray:
+    """Integrate fields along rays from each cell toward the origin (star).
+
+    For spherical meshes, uses an efficient radial sum (exact, no DDA needed).
+    For cartesian meshes, uses per-cell DDA ray marching toward the origin.
+
+    Parameters
+    ----------
+    tracer : SphericalHealpixRayTracer or CartesianHealpixRayTracer
+        Ray tracer instance with precomputed grid edges.
+    cell_centers : ndarray, shape (n_cells, 3)
+        Cell center positions in Cartesian (x, y, z) coordinates, cm.
+    fields_stack : ndarray, shape (n_fields, dim0, dim1, dim2)
+        Density fields to integrate (e.g. dust bin densities in g/cm^3).
+    self_weight : float, optional
+        Weight for the starting cell's contribution. Default 1.0.
+    candidate_idx : ndarray, shape (n_cells, 3), optional
+        Grid indices per cell. Required for spherical meshes (ir, itheta, iphi).
+        If None and spherical, raises ValueError.
+
+    Returns
+    -------
+    cols : ndarray, shape (n_cells, n_fields)
+        Integrated column per field per cell (e.g. g/cm^2 for dust density).
+    """
+    kind = _tracer_kind(tracer)
+    fields_stack = _as_f64("fields_stack", fields_stack)
+    cell_centers = _as_f64("cell_centers", cell_centers)
+
+    if kind == "spherical":
+        if candidate_idx is None:
+            raise ValueError(
+                "candidate_idx is required for spherical starward integration"
+            )
+        candidate_idx = np.asarray(candidate_idx, dtype=np.int64)
+        edges = _tracer_edges_float64(tracer, kind)
+        r_centers = np.asarray(tracer.r_centers, dtype=np.float64)
+        return _integrate_starward_radial_spherical(
+            fields_stack, edges[0], r_centers, candidate_idx, float(self_weight),
+        )
+    else:
+        edges = _tracer_edges_float64(tracer, kind)
+        return _integrate_starward_cartesian_dda_multi(
+            cell_centers, fields_stack, *edges, 100000, float(self_weight),
+        )

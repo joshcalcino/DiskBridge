@@ -183,7 +183,7 @@ def _compute_co_shielding(
     nH2_cm3: np.ndarray,
     nside: int,
     b_kms: float,
-    avg_mode: str = "isotropic_mean",
+    W_rays: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
     from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
@@ -218,7 +218,7 @@ def _compute_co_shielding(
             b_kms=float(b_kms),
             progress_chunks=None,
             cache_dir=None,
-            avg_mode=avg_mode,
+            W_rays=W_rays,
         )
     return theta_co, chi_eff
 
@@ -293,13 +293,12 @@ def _carbon_closure_cgs(
 def _prepare_common(
     rad: 'RadModel',
     config: dict,
-) -> tuple[Quantity, Quantity, Quantity, np.ndarray, float, bool, int, float, int, str]:
+) -> tuple[Quantity, Quantity, Quantity, np.ndarray, float, bool, int, float, int]:
     Xco_tot = float(config.get('Xco_tot', float(diskbridge.params.abundance)))
     skip_shielding = bool(config.get('skip_shielding', False))
     nside = int(diskbridge.params.nside)
     b_kms = float(config.get('b_kms', 0.3))
     shielding_iter = int(config.get('shielding_iter', 1))
-    avg_mode = str(config.get('avg_mode', 'isotropic_mean'))
 
     nH = rad.ensure_nH()
     Tdust = rad.ensure_dust_temperature()
@@ -309,7 +308,7 @@ def _prepare_common(
     nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
     tau_form_s = _resolve_tau_form(rad, config=config, nH2_cm3=nH2_cm3)
 
-    return nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter, avg_mode
+    return nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter
 
 
 def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
@@ -333,7 +332,7 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
         Result with abundances, number_densities, and diagnostic fields
     """
     cfg = resolve_model_config(("chemistry", "carbon_reduced"), overrides=config)
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter, avg_mode = _prepare_common(rad, cfg)
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
 
     sigma_d_per_H = rad.ensure_sigma_d_per_H()
 
@@ -408,7 +407,6 @@ def run_steady(rad: 'RadModel', config: dict) -> ChemistryResult:
                 nH2_cm3=nH2_cm3,
                 nside=int(nside),
                 b_kms=float(b_kms),
-                avg_mode=avg_mode,
             )
 
         theta_flat = _flat_view(theta_arr)
@@ -571,7 +569,7 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
     if formation_model == 'nl97':
         raise ValueError("formation_model='nl97' is not supported in time-dependent carbon_reduced")
 
-    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter, avg_mode = _prepare_common(rad, cfg)
+    nH, Tdust, chi, tau_form_s, Xco_tot, skip_shielding, nside, b_kms, shielding_iter = _prepare_common(rad, cfg)
     tau_form = Quantity(tau_form_s, 's')
 
     if int(shielding_iter) != 0:
@@ -593,7 +591,6 @@ def run_time_dependent(rad: 'RadModel', config: dict) -> ChemistryResult:
             nH2_cm3=_as_cgs_f64(rad.nH2, 'cm^-3'),
             nside=nside,
             b_kms=b_kms,
-            avg_mode=avg_mode,
         )
 
         theta_co = Quantity(theta_co, 'dimensionless')
