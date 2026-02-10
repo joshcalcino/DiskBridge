@@ -35,6 +35,7 @@ from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_with_pathlength,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
 from diskbridge.chemistry.validation import validate_chemistry_state
 
 import diskbridge._gow17 as _gow17
@@ -183,6 +184,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Tdust = rad.ensure_dust_temperature()
 
     chi = rad.ensure_chi()
+
+    # Pre-compute directional UV weights (W_rays) once for reuse across
+    # shielding iterations.  Returns None for 1-D meshes or when dustkappa
+    # files are unavailable (shielding then falls back to isotropic averaging).
+    maybe_ensure_W_rays(rad, nside=nside)
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     T_K = _as_cgs_f64(Tgas, "K")

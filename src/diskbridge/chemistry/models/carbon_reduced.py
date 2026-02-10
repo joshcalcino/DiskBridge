@@ -24,6 +24,7 @@ from diskbridge.chemistry.models._carbon_reduced_math import (
 )
 from diskbridge.chemistry.processes.carbon_closure import carbon_closure_cell_param_cgs
 from diskbridge.chemistry.tau_form import compute_tau_form_co_cgs
+from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
 from diskbridge.chemistry.validation import validate_chemistry_state
 from diskbridge._logging import logger
 
@@ -412,6 +413,11 @@ def _prepare_common(
     nH = rad.ensure_nH()
     Tdust = rad.ensure_dust_temperature()
     chi = rad.ensure_chi()
+
+    # Pre-compute directional UV weights (W_rays) once for reuse across
+    # shielding iterations.  Returns None for 1-D meshes or when dustkappa
+    # files are unavailable (shielding then falls back to isotropic averaging).
+    maybe_ensure_W_rays(rad, nside=nside)
 
     ensure_h2_partition(rad, nH=nH, chi_dust=chi, h2_self_shielding=h2_self_shielding)
     nH2_cm3 = _as_cgs_f64(rad.nH2, 'cm^-3')
