@@ -36,7 +36,7 @@ from diskbridge.chemistry.shielding.healpix_utils import (
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
-from diskbridge.chemistry.validation import validate_chemistry_state
+from diskbridge.chemistry.validation import validate_chemistry_state, gow17_budget_diagnostics
 
 import diskbridge._gow17 as _gow17
 
@@ -172,6 +172,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_max_iter = int(shielding_max_iter_cfg)
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
+    shielding_mix = float(cfg.get("shielding_mix", 1.0))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
@@ -652,6 +653,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     status_acc = np.zeros(ncells, dtype=np.int32)
 
+    d_h2_hist = []
+    d_co_hist = []
+
     for it in range(shielding_max_iter):
         xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
         xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
@@ -780,9 +784,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 dtype=np.float64,
             )
         else:
-            Gph[:, :] = chi_dust_flat[:, None]
-            GPE = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
-            GISRF = np.ascontiguousarray(chi_dust_flat.copy(), dtype=np.float64)
+            # chi_dust_flat is the dust-attenuated UV from RADMC-3D (Draine units).
+            # The C solver convention (radfield.cpp) is Gph = (G0/2) * attenuation,
+            # so we must apply the same 0.5 factor here.
+            G0_half = 0.5 * chi_dust_flat
+            Gph[:, :] = G0_half[:, None]
+            GPE = np.ascontiguousarray(G0_half.copy(), dtype=np.float64)
+            GISRF = np.ascontiguousarray(G0_half.copy(), dtype=np.float64)
 
         Gph[:, IPH_C] *= theta_c_flat
         Gph[:, IPH_CO] *= theta_co_flat
@@ -833,7 +841,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         status_step = result["status"]
 
         status_acc = np.maximum(status_acc, np.asarray(status_step, dtype=np.int32))
-        y_guess[:, :] = y_new
+        if shielding_mix < 1.0:
+            y_guess[:, :] = shielding_mix * y_new + (1.0 - shielding_mix) * y_guess
+        else:
+            y_guess[:, :] = y_new
 
         xCO_new = y_guess[:, I_CO]
         xH2_new = y_guess[:, I_H2]
@@ -842,8 +853,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
         d_h2 = np.max(np.abs(xH2_new - xH2_old) / denom_h2)
         d_co = np.max(np.abs(xCO_new - xCO_old) / denom_co)
+        d_h2_hist.append(float(d_h2))
+        d_co_hist.append(float(d_co))
         if max(d_h2, d_co) <= shielding_reltol:
             break
+
+    n_shielding_iter = len(d_h2_hist)
 
     y_out = y_guess.reshape(shape + (N_Y,))
     status = status_acc.reshape(shape)
@@ -895,6 +910,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ne = Quantity(xe * nH_cm3, "cm^-3")
     nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
 
+    xCtot_scalar = float(np.mean(xCtot.ravel()))
+    budget_diag = gow17_budget_diagnostics(
+        y_out, xCtot=xCtot_scalar, rtol=float(reltol), logger=logger,
+    )
+
     if np.any(status != 0):
         bad = int(np.sum(status != 0))
         logger.warning(f"gow17: {bad} cells did not converge")
@@ -902,7 +922,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         validate_chemistry_state(
             nH=nH,
             nH2=nH2_out,
-            nHI=nH_atom,
             nC=nC,
             nCplus=nCplus,
             nco_total=Quantity(nco_gas.magnitude + nco_ice.magnitude, "cm^-3"),
@@ -923,6 +942,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "h2": nH2_out,
         "h": nH_atom,
     }
+
+    gow17_diag = {
+        "shielding_iter": n_shielding_iter,
+        "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
+        "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
+    }
+    gow17_diag.update(budget_diag)
 
     fields = {
         "co_ice": nco_ice,
@@ -978,6 +1004,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "max_status": int(max_status),
         "fail_idx_head": fail_idx_head.tolist(),
         "status_hist": status_hist,
+        "gow17_diagnostics": gow17_diag,
     }
 
     return ChemistryResult(

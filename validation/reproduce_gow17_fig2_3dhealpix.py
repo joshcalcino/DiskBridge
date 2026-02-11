@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
@@ -27,7 +28,9 @@ I_OHX = gow17_native.I_OHX
 I_OP = gow17_native.I_OP
 I_SIP = gow17_native.I_SIP
 I_SP = gow17_native.I_SP
+I_E = gow17_native.I_E
 N_Y = gow17_native.N_Y
+XHE = gow17_native.XHE
 from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.dust import Dust
@@ -236,17 +239,22 @@ def _ensure_dustkappa_files(
         shutil.copy2(src, dst)
 
 
-def _write_dust_temperature_dat(
+def _write_dust_temperature_bdat(
     *,
     model_dir: Path,
     mesh: Mesh,
     dust_temperature: Quantity,
     nspec: int,
 ) -> Path:
+    """Write dust_temperature.bdat in RADMC-3D binary format.
+
+    Format: int64 header [format=1, precis=8, ncells, nspec],
+    then nspec blocks of ncells float64 values.
+    """
     model_dir = Path(model_dir)
     out_dir = model_dir / "radmc3d_outputs" / "temperature"
     out_dir.mkdir(parents=True, exist_ok=True)
-    fpath = out_dir / "dust_temperature.dat"
+    fpath = out_dir / "dust_temperature.bdat"
 
     temp = np.asarray(dust_temperature.to("K").magnitude, dtype=float)
     if temp.shape != mesh.shape:
@@ -268,13 +276,12 @@ def _write_dust_temperature_dat(
 
     ncells = int(temp_flat.size)
 
-    with open(fpath, "w") as f:
-        f.write("1\n")
-        f.write(f"{ncells}\n")
-        f.write(f"{nspec}\n")
+    with open(fpath, "wb") as f:
+        header = np.array([1, 8, ncells, nspec], dtype=np.int64)
+        header.tofile(f)
+        data = np.asarray(temp_flat, dtype=np.float64)
         for _ in range(nspec):
-            for val in temp_flat:
-                f.write(f"{float(val):.15e}\n")
+            data.tofile(f)
 
     return fpath
 
@@ -355,13 +362,21 @@ def _compute_chi_with_radmc3d(
     dust_temp = getattr(radm, "dust_temperature", None)
     if dust_temp is None:
         raise RuntimeError("dust_temperature must be set on radm before running RADMC-3D mcmono")
-    _write_dust_temperature_dat(
+    _write_dust_temperature_bdat(
         model_dir=model_dir,
         mesh=radm.model.mesh,
         dust_temperature=dust_temp,
         nspec=int(radm.model.dust.nbin),
     )
-    chi = radm.ensure_chi(force=bool(force))
+    # The default UV band (91.2-111.8 nm) is too narrow and captures only
+    # ~16% of the FUV energy density, causing chi to be underestimated by ~6x
+    # relative to U_DRAINE = 9e-14 erg/cm^3.  Use the full FUV range.
+    chi = radm.ensure_chi(
+        force=bool(force),
+        uv_min=Quantity(91.2, "nm"),
+        uv_max=Quantity(200.0, "nm"),
+        n_wavelengths=30,
+    )
 
     diskbridge.params = prev_params
     _params_module.params = prev_params
@@ -419,12 +434,14 @@ def run_gow17_internal_3d_healpix_sphere(
     nH_cm3: float,
     chi0: float = 1.0,
     xi_cr: float = 2.0e-16,
-    shielding_max_iter: int = 30,
-    nside: int = 1,
+    shielding_max_iter: int = 20,
+    shielding_mix: float = 0.5,
+    const_temp: bool = True,
+    nside: int = 4,
     self_weight: float = 1.0,
-    nr: int = 64,
-    ntheta: int = 16,
-    nphi: int = 32,
+    nr: int = 128,
+    ntheta: int = 8,
+    nphi: int = 16,
     ref: RefSlab | None = None,
     nH_index: int = 0,
     use_radmc3d_chi: bool = False,
@@ -445,8 +462,7 @@ def run_gow17_internal_3d_healpix_sphere(
     R_cm = NH_max / float(nH_cm3)
 
     if radmc3d_model_dir is None:
-        root = Path(__file__).resolve().parents[1]
-        radmc3d_model_dir = root / "outputs" / "gow17_fig2_3dhealpix" / (
+        radmc3d_model_dir = Path(__file__).resolve().parent / "reproduce_gow17_fig2_3dhealpix" / (
             f"radmc3d_sphere_nH_{int(float(nH_cm3))}_nr_{int(nr)}_nt_{int(ntheta)}_np_{int(nphi)}"
         )
 
@@ -469,7 +485,6 @@ def run_gow17_internal_3d_healpix_sphere(
     inside = r3 <= float(R_cm)
     NH_depth = float(nH_cm3) * depth_cm
     Av_3d = NH_depth / 1.87e21
-    radm.Av = Quantity(Av_3d, "dimensionless")
 
     nH_index = int(nH_index)
     if nH_index < 0 or nH_index >= int(ref.nH_values.size):
@@ -486,6 +501,10 @@ def run_gow17_internal_3d_healpix_sphere(
     radm.gas_temperature = Quantity(T_init, "K")
     radm.dust_temperature = Quantity(T_init, "K")
 
+    # -- Av: perpendicular depth with Gong+17 Appendix 3D-slab factor (x2) --
+    Av_perp = NH_depth / 1.87e21
+    radm.Av = Quantity(2.0 * Av_perp, "dimensionless")
+
     if use_radmc3d_chi:
         chi_rt = _compute_chi_with_radmc3d(
             radm=radm,
@@ -499,8 +518,9 @@ def run_gow17_internal_3d_healpix_sphere(
         )
         radm.chi = chi_rt
     else:
-        chi_pe = 0.5 * chi0_incident * np.exp(-NH_depth * 1.0e-21)
-        radm.chi = Quantity(chi_pe, "dimensionless")
+        # Incident (unattenuated) field everywhere; dust attenuation
+        # is handled inside the chemistry via chi_is_incident=True.
+        radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
 
     y0 = np.zeros(N_Y, dtype=float)
     y0[I_HEP] = 1.450654e-08
@@ -533,11 +553,27 @@ def run_gow17_internal_3d_healpix_sphere(
     y_init[..., I_OP] = np.where(inside, _interp("O+"), y_init[..., I_OP])
     y_init[..., I_CO_ICE] = 0.0
 
+    # Energy species: E = Cv * T, matching _cv_cold in gow17.py
+    xH2_init = y_init[..., I_H2]
+    xe_init = (
+        y_init[..., I_HEP]
+        + y_init[..., I_CP]
+        + y_init[..., I_HCOP]
+        + y_init[..., I_HP]
+        + y_init[..., I_H3P]
+        + y_init[..., I_H2P]
+        + y_init[..., I_SP]
+        + y_init[..., I_SIP]
+        + y_init[..., I_OP]
+    )
+    Cv_init = 1.5 * K_B * ((1.0 - 2.0 * xH2_init) + xH2_init + XHE + xe_init)
+    y_init[..., I_E] = Cv_init * T_init
+
     radm.gow17_y = np.ascontiguousarray(y_init, dtype=np.float64)
 
-    config = {
+    gow17_cfg = {
         "mode": "equilibrium",
-        "const_temp": False,
+        "const_temp": bool(const_temp),
         "t_end": "2.0e9 yr",
         "nside": int(nside),
         "chi0": float(chi0_incident),
@@ -559,11 +595,16 @@ def run_gow17_internal_3d_healpix_sphere(
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-6,
         "shielding_abstol": 1.0e-20,
-        "shielding_mix": 0.5,
+        "shielding_mix": float(shielding_mix),
         "shielding_self_weight": float(self_weight),
+        "enable_co_phase": False,
     }
+    if use_radmc3d_chi:
+        gow17_cfg["chi_is_incident"] = False
+    else:
+        gow17_cfg["chi_is_incident"] = True
 
-    run_chemistry(radm, model="gow17", config=config)
+    chem_result = run_chemistry(radm, model="gow17", config=gow17_cfg)
 
     y_out = np.asarray(radm.gow17_y, dtype=float)
     Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float)
@@ -619,6 +660,8 @@ def run_gow17_internal_3d_healpix_sphere(
     xC = 1.6e-4
     abd["C"] = xC - abd["CHx"] - abd["CO"] - abd["C+"] - abd["HCO+"]
 
+    gow17_diag = chem_result.meta.get("gow17_diagnostics", {})
+
     info = {
         "shielding_mode": "gow17_internal_3d_healpix_sphere",
         "nside": int(nside),
@@ -630,6 +673,7 @@ def run_gow17_internal_3d_healpix_sphere(
         "ntheta": int(ntheta),
         "nphi": int(nphi),
         "use_radmc3d_chi": bool(use_radmc3d_chi),
+        "gow17_diagnostics": gow17_diag,
     }
 
     return np.asarray(y_out, dtype=float), abd, np.asarray(ref.Av, dtype=float), info
@@ -848,58 +892,569 @@ def _plot_compare(
     plt.close(fig)
 
 
+def _save_convergence_json(
+    outdir: Path,
+    diag: dict,
+    fname: str = "gow17_convergence.json",
+) -> Path:
+    """Save convergence diagnostics dict to JSON, converting numpy arrays."""
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for k, v in diag.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist()
+        else:
+            out[k] = v
+    p = outdir / fname
+    p.write_text(json.dumps(out, indent=2) + "\n")
+    return p
+
+
+def _plot_convergence(
+    outdir: Path,
+    diag: dict,
+    fname: str = "gow17_convergence.png",
+) -> Path:
+    """Plot shielding iteration convergence history with budget summary."""
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    d_h2 = np.asarray(diag.get("d_h2_hist", []), dtype=float)
+    d_co = np.asarray(diag.get("d_co_hist", []), dtype=float)
+    iters = np.arange(1, len(d_h2) + 1)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
+    if iters.size > 0:
+        ax.semilogy(iters, d_h2, "o-", lw=1.2, ms=4, label="d_h2")
+        ax.semilogy(iters, d_co, "s-", lw=1.2, ms=4, label="d_co")
+    ax.set_xlabel("Shielding iteration")
+    ax.set_ylabel("Max relative change")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, which="both", alpha=0.25)
+
+    text_lines = [
+        f"shielding_iter = {diag.get('shielding_iter', '?')}",
+        f"h_xH_atom_min = {diag.get('h_xH_atom_min', '?'):.3e}",
+        f"c_xC_neutral_min = {diag.get('c_xC_neutral_min', '?'):.3e}",
+        f"h_budget_maxabs = {diag.get('h_budget_closure_maxabs', '?'):.3e}",
+        f"c_budget_maxabs = {diag.get('c_budget_closure_maxabs', '?'):.3e}",
+    ]
+    ax.text(
+        0.98, 0.98, "\n".join(text_lines),
+        transform=ax.transAxes, fontsize=7, verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(boxstyle="round,pad=0.3", fc="wheat", alpha=0.7),
+    )
+
+    fig.tight_layout()
+    p = outdir / fname
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
+def _shell_average_sphere(
+    *,
+    y_out: np.ndarray,
+    Av_3d: np.ndarray,
+    nbins: int = 64,
+) -> Dict[str, np.ndarray]:
+    """Shell-average abundances by Av bin and return binned profiles.
+
+    Bins cells by their ``Av_3d`` value (which is a monotonic function
+    of depth from the sphere surface) and computes the mean abundance
+    in each bin.
+
+    Parameters
+    ----------
+    y_out : np.ndarray
+        GOW17 abundance array, shape ``(nr, ntheta, nphi, N_Y)``.
+    Av_3d : np.ndarray
+        Visual extinction array, shape ``(nr, ntheta, nphi)``.
+    nbins : int
+        Number of Av bins.
+
+    Returns
+    -------
+    dict
+        Keys: ``Av``, ``xH2``, ``xCO``, ``xCplus``, with 1-D arrays of
+        length *nbins*.
+    """
+    av_flat = Av_3d.ravel()
+    av_min, av_max = float(av_flat.min()), float(av_flat.max())
+    bin_edges = np.linspace(av_min, av_max, nbins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    idx = np.digitize(av_flat, bin_edges) - 1
+    idx = np.clip(idx, 0, nbins - 1)
+
+    def _bin_mean(field_flat: np.ndarray) -> np.ndarray:
+        sums = np.bincount(idx, weights=field_flat, minlength=nbins).astype(float)
+        counts = np.bincount(idx, minlength=nbins).astype(float)
+        out = np.zeros(nbins, dtype=float)
+        m = counts > 0
+        out[m] = sums[m] / counts[m]
+        return out
+
+    xH2_prof = _bin_mean(y_out[..., I_H2].ravel())
+    xCO_prof = _bin_mean(y_out[..., I_CO].ravel())
+    xCplus_prof = _bin_mean(y_out[..., I_CP].ravel())
+
+    return {
+        "Av": bin_centers,
+        "xH2": xH2_prof,
+        "xCO": xCO_prof,
+        "xCplus": xCplus_prof,
+    }
+
+
+def _save_sphere_profile(
+    outdir: Path,
+    profile: Dict[str, np.ndarray],
+    fname: str = "sphere_profile.csv",
+) -> Path:
+    """Save shell-averaged profile to CSV."""
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    p = outdir / fname
+    header = "Av,xH2,xCO,xCplus"
+    data = np.column_stack([
+        profile["Av"], profile["xH2"], profile["xCO"], profile["xCplus"],
+    ])
+    np.savetxt(p, data, delimiter=",", header=header, comments="")
+    return p
+
+
+def _run_slab_reference(
+    *,
+    Av_ref: np.ndarray,
+    nH_cm3: float,
+    chi0: float,
+    xi_cr: float,
+    shielding_max_iter: int = 20,
+    shielding_mix: float = 0.5,
+    const_temp: bool = True,
+    nside: int = 4,
+) -> Dict[str, np.ndarray]:
+    """Run 1-D slab reference with Gong+17 Appendix factors.
+
+    Uses the same parameters as the sphere run: ``chi_is_incident=True``
+    and ``Av = 2 * Av_perp`` (the doubling is already baked into
+    *Av_ref* from the sphere run).
+
+    Parameters
+    ----------
+    Av_ref : np.ndarray
+        1-D array of Av values (already doubled).
+    nH_cm3 : float
+        Hydrogen number density [cm^-3].
+    chi0 : float
+        Draine-field chi_0 parameter.
+    xi_cr : float
+        Cosmic-ray ionisation rate [1/s].
+    shielding_max_iter : int
+        Max shielding iterations.
+
+    Returns
+    -------
+    dict
+        Keys: ``Av``, ``xH2``, ``xCO``, ``xCplus``.
+    """
+    units = diskbridge.units
+    m_H = units("m_H")
+    chi0_incident = 2.0 * float(chi0)
+
+    ncells = int(Av_ref.size)
+    NH_flat = Av_ref * 1.87e21
+
+    dr = np.empty(ncells, dtype=float)
+    dr[0] = NH_flat[0] / float(nH_cm3) if nH_cm3 > 0 else 1.0
+    dr[1:] = np.diff(NH_flat) / float(nH_cm3)
+    dr = np.maximum(dr, 1.0)
+
+    r_edges = np.zeros(ncells + 1, dtype=float)
+    r_edges[1:] = np.cumsum(dr)
+
+    r_axis = Axis(edges=Quantity(r_edges, "cm"))
+    theta_axis = Axis(edges=Quantity(np.array([0.0, np.pi]), "rad"))
+    phi_axis = Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "rad"))
+
+    mesh = Mesh.spherical(r=r_axis, theta=theta_axis, phi=phi_axis)
+    shape = mesh.shape
+    axis_order = mesh.axis_names()
+
+    model = Model()
+    model.coord_system = mesh.coord_system
+    model.mesh = mesh
+    model.gas = SubModel(model)
+
+    nH_field = np.full(shape, float(nH_cm3), dtype=float)
+    rho = (Quantity(nH_field, "cm^-3") * (1.4 * m_H)).to("g/cm^3")
+    model.gas_register("density", Field(quantity="density", data=rho, axis_order=axis_order))
+
+    sigma = Quantity(np.full(shape, 1.0e-21, dtype=float), "cm^2")
+    model.gas_register(
+        "sigma_d_per_H",
+        Field(quantity="sigma_d_per_H", data=sigma, axis_order=axis_order),
+    )
+
+    radm = RadModel(model, model_dir=".")
+
+    radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
+    radm.Av = Quantity(Av_ref.reshape(shape), "dimensionless")
+    radm.gas_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
+    radm.dust_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
+
+    y0 = np.zeros(N_Y, dtype=float)
+    y0[I_HEP] = 1.450654e-08
+    y0[I_H3P] = 2.681411e-07
+    y0[I_CP] = 1.0e-4
+    y0[I_CO] = 1.0e-7
+    y0[I_H2] = 0.1
+    y0[I_CO_ICE] = 0.0
+
+    y_init = np.zeros(shape + (N_Y,), dtype=float)
+    for j in range(N_Y):
+        y_init[..., j] = y0[j]
+    radm.gow17_y = np.ascontiguousarray(y_init, dtype=np.float64)
+
+    gow17_cfg = {
+        "mode": "equilibrium",
+        "const_temp": bool(const_temp),
+        "t_end": "2.0e9 yr",
+        "nside": int(nside),
+        "chi0": float(chi0_incident),
+        "ion_rate": f"{float(xi_cr)} 1/s",
+        "max_iter": 80,
+        "reltol": 1.0e-2,
+        "abstol0": 1.0e-9,
+        "b_kms": 0.3,
+        "Zg": 1.0,
+        "Zd": 1.0,
+        "fH2gr": 1.0,
+        "fHplusgr": 0.6,
+        "fCplusgr": 0.6,
+        "fHeplusgr": 0.6,
+        "fSplusgr": 0.6,
+        "fSiplusgr": 0.6,
+        "fCplusCR": 1.0,
+        "shielding_max_iter": int(shielding_max_iter),
+        "shielding_reltol": 1.0e-6,
+        "shielding_abstol": 1.0e-20,
+        "shielding_mix": float(shielding_mix),
+        "enable_co_phase": False,
+        "chi_is_incident": True,
+    }
+
+    run_chemistry(radm, model="gow17", config=gow17_cfg)
+
+    y_slab = np.asarray(radm.gow17_y, dtype=float)
+    Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float).ravel()
+
+    return {
+        "Av": Av_out,
+        "xH2": y_slab[..., I_H2].ravel(),
+        "xCO": y_slab[..., I_CO].ravel(),
+        "xCplus": y_slab[..., I_CP].ravel(),
+    }
+
+
+def _plot_sphere_vs_slab(
+    outdir: Path,
+    sphere: Dict[str, np.ndarray],
+    slab: Dict[str, np.ndarray],
+    fname: str = "sphere_vs_slab.png",
+) -> Path:
+    """Overlay plot comparing sphere shell-average to 1-D slab reference."""
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
+
+    for key, label, color in [
+        ("xH2", "H2", "#1f77b4"),
+        ("xCO", "CO", "#d62728"),
+        ("xCplus", "C+", "#ff7f0e"),
+    ]:
+        ax.plot(
+            sphere["Av"], _safe_log10(sphere[key]),
+            lw=1.4, color=color, label=f"{label} sphere",
+        )
+        ax.plot(
+            slab["Av"], _safe_log10(slab[key]),
+            lw=1.4, ls="--", color=color, label=f"{label} slab",
+        )
+
+    ax.set_xlabel("A_V")
+    ax.set_ylabel("log10 abundance per H")
+    ax.set_ylim(-14.0, 0.0)
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(loc="best", fontsize=7, ncol=2)
+
+    fig.tight_layout()
+    p = outdir / fname
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
+def _plot_mode_comparison(
+    outdir: Path,
+    sphere1: Dict[str, np.ndarray],
+    sphere2: Dict[str, np.ndarray],
+    label1: str = "mode1 (analytic)",
+    label2: str = "RADMC-3D",
+    fname: str = "mode1_vs_radmc3d.png",
+) -> Path:
+    """Overlay shell-averaged profiles from two modes."""
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
+
+    for key, label_sp, color in [
+        ("xH2", "H2", "#1f77b4"),
+        ("xCO", "CO", "#d62728"),
+        ("xCplus", "C+", "#ff7f0e"),
+    ]:
+        ax.plot(
+            sphere1["Av"], _safe_log10(sphere1[key]),
+            lw=1.4, color=color, label=f"{label_sp} {label1}",
+        )
+        ax.plot(
+            sphere2["Av"], _safe_log10(sphere2[key]),
+            lw=1.4, ls="--", color=color, label=f"{label_sp} {label2}",
+        )
+
+    ax.set_xlabel("A_V")
+    ax.set_ylabel("log10 abundance per H")
+    ax.set_ylim(-14.0, 0.0)
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(loc="best", fontsize=7, ncol=2)
+
+    fig.tight_layout()
+    p = outdir / fname
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
+def _postprocess_run(
+    *,
+    outdir: Path,
+    y_out: np.ndarray,
+    info: dict,
+    Av_3d: np.ndarray,
+    nH_cm3: float,
+    chi0: float,
+    xi_cr: float,
+    shielding_max_iter: int,
+    shielding_mix: float = 0.5,
+    const_temp: bool = True,
+    nside: int = 4,
+    suffix: str = "",
+) -> Dict[str, np.ndarray]:
+    """Common post-processing: save convergence, shell-avg, slab ref, overlay.
+
+    Returns the shell-averaged sphere profile dict.
+    """
+    diag = info.get("gow17_diagnostics", {})
+
+    conv_json_name = f"gow17_convergence{suffix}.json"
+    conv_plot_name = f"gow17_convergence{suffix}.png"
+    sphere_csv_name = f"sphere_profile{suffix}.csv"
+    overlay_name = f"sphere_vs_slab{suffix}.png"
+
+    _save_convergence_json(outdir, diag, fname=conv_json_name)
+    _plot_convergence(outdir, diag, fname=conv_plot_name)
+
+    sphere = _shell_average_sphere(
+        y_out=y_out, Av_3d=Av_3d, nbins=64,
+    )
+    _save_sphere_profile(outdir, sphere, fname=sphere_csv_name)
+
+    slab = _run_slab_reference(
+        Av_ref=sphere["Av"],
+        nH_cm3=nH_cm3,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
+    )
+    _plot_sphere_vs_slab(outdir, sphere, slab, fname=overlay_name)
+
+    print(f"  Saved: {conv_json_name}, {conv_plot_name}, {sphere_csv_name}, {overlay_name}")
+    return sphere
+
+
 def main() -> None:
-    import healpy  # noqa: F401
 
     root = Path(__file__).resolve().parents[1]
     ref_dir = root / "other_codes" / "pdr" / "out_example_simple"
     ref = _load_reference(ref_dir)
 
-    xe_ref = _xe_from_abundances(ref.abd)
-    T_ref = _temperature_from_energy(E=ref.E, xH2=ref.abd["H2"], xe=xe_ref)
-
-    outdir = root / "outputs" / "gow17_fig2_3dhealpix"
+    outdir = Path(__file__).resolve().parent / "reproduce_gow17_fig2_3dhealpix"
+    outdir.mkdir(parents=True, exist_ok=True)
 
     species = ["CO", "C", "C+", "H3+", "OHx", "CHx", "He+"]
 
     nH_index = 0
     nH_val = float(ref.nH_values[int(nH_index)])
+    chi0 = 1.0
+    xi_cr = 2.0e-16
+    shielding_max_iter = 20
+    shielding_mix = 0.5
+    const_temp = True
+    nr = 128
+    ntheta = 8
+    nphi = 16
+    nside = 4
 
-    _, abd_db, Av_db, info = run_gow17_internal_3d_healpix_sphere(
+    # ----------------------------------------------------------------
+    # Run 1: internal analytic field (no RADMC-3D)
+    # ----------------------------------------------------------------
+    print("=" * 60)
+    print("Run 1: internal analytic (chi_is_incident=True)")
+    print("=" * 60)
+
+    y_out_m1, abd_m1, Av_db_m1, info_m1 = run_gow17_internal_3d_healpix_sphere(
         nH_cm3=nH_val,
-        chi0=1.0,
-        xi_cr=2.0e-16,
-        shielding_max_iter=30,
-        nside=1,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
         self_weight=1.0,
-        nr=128,
-        ntheta=8,
-        nphi=16,
+        nr=nr,
+        ntheta=ntheta,
+        nphi=nphi,
         ref=ref,
         nH_index=int(nH_index),
-        use_radmc3d_chi=True,
-        radmc3d_nphot_thermal=2000000,
-        radmc3d_nphot_mono=5000000,
+        use_radmc3d_chi=False,
         diagnostic_outdir=outdir,
     )
 
-    suffix = (
-        f"sphere_nH_{int(nH_val)}_nr_{int(info['nr'])}_nt_{int(info['ntheta'])}_np_{int(info['nphi'])}_nside_{int(info['nside'])}"
+    suffix_m1 = (
+        f"sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}"
     )
     _plot_compare(
         outdir=outdir,
         Av_ref=ref.Av,
-        Av_db=Av_db,
+        Av_db=Av_db_m1,
         ref=ref,
         nH_index=int(nH_index),
-        abd_db=abd_db,
+        abd_db=abd_m1,
         species=species,
-        suffix=suffix,
+        suffix=suffix_m1,
+    )
+
+    # Reconstruct Av_3d for shell averaging
+    R_cm = float(info_m1["R_cm"])
+    mesh_shape = tuple(info_m1["shape"])
+    r_cent_arr = np.linspace(0.5 * R_cm / nr, R_cm - 0.5 * R_cm / nr, nr)
+    r3 = np.broadcast_to(r_cent_arr[:, None, None], mesh_shape)
+    depth_cm = np.maximum(R_cm - r3, 0.0)
+    NH_depth = nH_val * depth_cm
+    Av_3d_m1 = 2.0 * NH_depth / 1.87e21
+
+    sphere_m1 = _postprocess_run(
+        outdir=outdir,
+        y_out=y_out_m1,
+        info=info_m1,
+        Av_3d=Av_3d_m1,
+        nH_cm3=nH_val,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
+        suffix="",
     )
 
     print(
-        f"nH={nH_val:.3e}: shape={info['shape']}, nr={info['nr']}, ntheta={info['ntheta']}, nphi={info['nphi']}, nside={info['nside']}, R_cm={info['R_cm']:.3e}"
+        f"nH={nH_val:.3e}: shape={info_m1['shape']}, R_cm={info_m1['R_cm']:.3e}"
     )
+
+    # ----------------------------------------------------------------
+    # Run 2: RADMC-3D chi
+    # ----------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Run 2: RADMC-3D chi (chi_is_incident=False)")
+    print("=" * 60)
+
+    y_out_m2, abd_m2, Av_db_m2, info_m2 = run_gow17_internal_3d_healpix_sphere(
+        nH_cm3=nH_val,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
+        self_weight=1.0,
+        nr=nr,
+        ntheta=ntheta,
+        nphi=nphi,
+        ref=ref,
+        nH_index=int(nH_index),
+        use_radmc3d_chi=True,
+        radmc3d_nphot_thermal=200000000,
+        radmc3d_nphot_mono=200000000,
+        diagnostic_outdir=outdir,
+        diagnostic_suffix=f"radmc3d_sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}",
+    )
+
+    suffix_m2 = (
+        f"radmc3d_sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}"
+    )
+    _plot_compare(
+        outdir=outdir,
+        Av_ref=ref.Av,
+        Av_db=Av_db_m2,
+        ref=ref,
+        nH_index=int(nH_index),
+        abd_db=abd_m2,
+        species=species,
+        suffix=suffix_m2,
+    )
+
+    Av_3d_m2 = 2.0 * nH_val * np.maximum(R_cm - r3, 0.0) / 1.87e21
+
+    sphere_m2 = _postprocess_run(
+        outdir=outdir,
+        y_out=y_out_m2,
+        info=info_m2,
+        Av_3d=Av_3d_m2,
+        nH_cm3=nH_val,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
+        suffix="_radmc3d",
+    )
+
+    # ----------------------------------------------------------------
+    # Final comparison: mode1 vs RADMC-3D
+    # ----------------------------------------------------------------
+    _plot_mode_comparison(
+        outdir, sphere_m1, sphere_m2,
+        label1="analytic", label2="RADMC-3D",
+        fname="mode1_vs_radmc3d.png",
+    )
+    print(f"\nSaved: mode1_vs_radmc3d.png")
+    print("Done.")
 
 
 if __name__ == "__main__":

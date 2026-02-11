@@ -175,6 +175,87 @@ def check_photodesorption_diagnostics(
         )
 
 
+def gow17_budget_diagnostics(
+    y: np.ndarray,
+    xCtot: float,
+    rtol: float = 1e-2,
+    logger=None,
+) -> dict:
+    """Warn-only budget diagnostics for the GOW17 chemistry model.
+
+    Computes hydrogen and carbon budget residuals from the solved
+    abundance vector ``y`` (shape ``(..., N_Y)``) and logs warnings
+    if the minimum residual abundance drops below ``-rtol``.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        GOW17 abundance array with species along the last axis.
+        Uses the same index layout as ``diskbridge._gow17``.
+    xCtot : float
+        Total carbon abundance per H nucleus (e.g. Zg * XC_STD).
+    rtol : float
+        Relative tolerance; a warning is issued when a residual
+        abundance is more negative than ``-rtol``.
+    logger : logging.Logger, optional
+        Logger instance. If *None*, warnings are printed to stdout.
+
+    Returns
+    -------
+    dict
+        Keys: ``h_xH_atom_min``, ``h_xH_accounted_max``,
+        ``c_xC_neutral_min``, ``h_budget_closure_maxabs``,
+        ``c_budget_closure_maxabs``.
+    """
+    import diskbridge._gow17 as _g
+
+    xH2 = y[..., _g.I_H2]
+    xHp = y[..., _g.I_HP]
+    xH2p = y[..., _g.I_H2P]
+    xH3p = y[..., _g.I_H3P]
+    xHCOp = y[..., _g.I_HCOP]
+    xCHx = y[..., _g.I_CHX]
+    xOHx = y[..., _g.I_OHX]
+    xCO = y[..., _g.I_CO]
+    xCplus = y[..., _g.I_CP]
+    xCOice = y[..., _g.I_CO_ICE]
+
+    xH_accounted = xOHx + xCHx + xHCOp + 3.0 * xH3p + 2.0 * xH2p + xHp + 2.0 * xH2
+    xH_atom_raw = 1.0 - xH_accounted
+
+    xC_accounted = xHCOp + xCHx + xCO + xCOice + xCplus
+    xC_neutral_raw = xCtot - xC_accounted
+
+    h_xH_atom_min = float(np.min(xH_atom_raw))
+    h_xH_accounted_max = float(np.max(xH_accounted))
+    c_xC_neutral_min = float(np.min(xC_neutral_raw))
+    h_budget_closure_maxabs = float(np.max(np.abs(xH_atom_raw)))
+    c_budget_closure_maxabs = float(np.max(np.abs(xC_neutral_raw)))
+
+    def _warn(msg: str) -> None:
+        if logger is not None:
+            logger.warning(msg)
+        else:
+            print(f"WARNING: {msg}")
+
+    if h_xH_atom_min < -rtol:
+        _warn(
+            f"gow17 H budget: min(xH_atom_raw) = {h_xH_atom_min:.3e} < -{rtol:.1e}"
+        )
+    if c_xC_neutral_min < -rtol:
+        _warn(
+            f"gow17 C budget: min(xC_neutral_raw) = {c_xC_neutral_min:.3e} < -{rtol:.1e}"
+        )
+
+    return {
+        "h_xH_atom_min": h_xH_atom_min,
+        "h_xH_accounted_max": h_xH_accounted_max,
+        "c_xC_neutral_min": c_xC_neutral_min,
+        "h_budget_closure_maxabs": h_budget_closure_maxabs,
+        "c_budget_closure_maxabs": c_budget_closure_maxabs,
+    }
+
+
 def validate_chemistry_state(
     nH: Quantity,
     nH2: Quantity = None,
