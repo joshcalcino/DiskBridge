@@ -173,6 +173,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
     shielding_mix = float(cfg.get("shielding_mix", 1.0))
+    shielding_theta_mix = float(cfg.get("shielding_theta_mix", 1.0))
+    local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
@@ -281,7 +283,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         abstol[I_CO] = 1.0e-15
         abstol[I_CO_ICE] = 1.0e-15
         abstol[I_CP] = 1.0e-15
-        abstol[I_HCOP] = 1.0e-30
+        abstol[I_HCOP] = max(abstol0, 1.0e-20)
         abstol[I_H2] = 1.0e-8
         abstol[I_HP] = 1.0e-15
         abstol[I_H3P] = 1.0e-15
@@ -620,7 +622,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     abstol[I_CO] = 1.0e-15
     abstol[I_CO_ICE] = 1.0e-15
     abstol[I_CP] = 1.0e-15
-    abstol[I_HCOP] = 1.0e-30
+    abstol[I_HCOP] = max(abstol0, 1.0e-20)
     abstol[I_H2] = 1.0e-8
     abstol[I_HP] = 1.0e-15
     abstol[I_H3P] = 1.0e-15
@@ -758,9 +760,20 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 W_rays=W_rays,
             )
 
-        theta_h2_flat = theta_h2_arr.reshape(ncells)
-        theta_co_flat = theta_co_arr.reshape(ncells)
-        theta_c_flat = theta_c_arr.reshape(ncells)
+        theta_h2_new = theta_h2_arr.reshape(ncells)
+        theta_co_new = theta_co_arr.reshape(ncells)
+        theta_c_new = theta_c_arr.reshape(ncells)
+
+        # Optional theta mixing for shielding factor stabilisation.
+        if it > 0 and shielding_theta_mix < 1.0:
+            a = shielding_theta_mix
+            theta_h2_flat = a * theta_h2_new + (1.0 - a) * theta_h2_flat
+            theta_co_flat = a * theta_co_new + (1.0 - a) * theta_co_flat
+            theta_c_flat = a * theta_c_new + (1.0 - a) * theta_c_flat
+        else:
+            theta_h2_flat = theta_h2_new
+            theta_co_flat = theta_co_new
+            theta_c_flat = theta_c_new
 
         Gph = np.empty((ncells, N_PH), dtype=np.float64)
         if chi_is_incident:
@@ -785,12 +798,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             )
         else:
             # chi_dust_flat is the dust-attenuated UV from RADMC-3D (Draine units).
-            # The C solver convention (radfield.cpp) is Gph = (G0/2) * attenuation,
-            # so we must apply the same 0.5 factor here.
-            G0_half = 0.5 * chi_dust_flat
-            Gph[:, :] = G0_half[:, None]
-            GPE = np.ascontiguousarray(G0_half.copy(), dtype=np.float64)
-            GISRF = np.ascontiguousarray(G0_half.copy(), dtype=np.float64)
+            # The C solver convention (radfield.cpp) is Gph = (G0/2) * attenuation.
+            # local_chi_factor controls whether 0.5 (default, one-sided flux) or
+            # 1.0 (local energy-density interpretation) is applied.
+            G0_scaled = local_chi_factor * chi_dust_flat
+            Gph[:, :] = G0_scaled[:, None]
+            GPE = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
+            GISRF = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
 
         Gph[:, IPH_C] *= theta_c_flat
         Gph[:, IPH_CO] *= theta_co_flat
@@ -910,9 +924,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ne = Quantity(xe * nH_cm3, "cm^-3")
     nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
 
-    xCtot_scalar = float(np.mean(xCtot.ravel()))
     budget_diag = gow17_budget_diagnostics(
-        y_out, xCtot=xCtot_scalar, rtol=float(reltol), logger=logger,
+        y_out, xCtot=xCtot, rtol=float(reltol), logger=logger,
     )
 
     if np.any(status != 0):
@@ -952,10 +965,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     fields = {
         "co_ice": nco_ice,
-        "theta_co": Quantity(theta_co_arr.reshape(shape), "dimensionless"),
-        "theta_h2": Quantity(theta_h2_arr.reshape(shape), "dimensionless"),
-        "theta_c": Quantity(theta_c_arr.reshape(shape), "dimensionless"),
-        "chi_eff": Quantity(chi_dust_arr * theta_co_arr.reshape(shape), "dimensionless"),
+        "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
+        "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
+        "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
+        "chi_eff": Quantity(chi_dust_arr * theta_co_flat.reshape(shape), "dimensionless"),
     }
 
     rad.gow17_y = y_out

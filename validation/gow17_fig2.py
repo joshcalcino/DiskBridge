@@ -119,7 +119,7 @@ def _initial_conditions(temp_K: float) -> tuple[np.ndarray, np.ndarray]:
     abstol[_gow17.I_CHX] = 1.0e-15
     abstol[_gow17.I_CO] = 1.0e-15
     abstol[_gow17.I_CP] = 1.0e-15
-    abstol[_gow17.I_HCOP] = 1.0e-30
+    abstol[_gow17.I_HCOP] = max(1.0e-9, 1.0e-20)
     abstol[_gow17.I_H2] = 1.0e-8
     abstol[_gow17.I_HP] = 1.0e-15
     abstol[_gow17.I_H3P] = 1.0e-15

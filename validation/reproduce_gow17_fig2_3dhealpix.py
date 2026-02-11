@@ -939,8 +939,8 @@ def _plot_convergence(
         f"shielding_iter = {diag.get('shielding_iter', '?')}",
         f"h_xH_atom_min = {diag.get('h_xH_atom_min', '?'):.3e}",
         f"c_xC_neutral_min = {diag.get('c_xC_neutral_min', '?'):.3e}",
-        f"h_budget_maxabs = {diag.get('h_budget_closure_maxabs', '?'):.3e}",
-        f"c_budget_maxabs = {diag.get('c_budget_closure_maxabs', '?'):.3e}",
+        f"h_budget_violation = {diag.get('h_budget_violation', '?'):.3e}",
+        f"c_budget_violation = {diag.get('c_budget_violation', '?'):.3e}",
     ]
     ax.text(
         0.98, 0.98, "\n".join(text_lines),

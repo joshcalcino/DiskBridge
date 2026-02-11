@@ -177,26 +177,40 @@ def check_photodesorption_diagnostics(
 
 def gow17_budget_diagnostics(
     y: np.ndarray,
-    xCtot: float,
+    xCtot,
     rtol: float = 1e-2,
     logger=None,
 ) -> dict:
     """Warn-only budget diagnostics for the GOW17 chemistry model.
 
-    Computes hydrogen and carbon budget residuals from the solved
-    abundance vector ``y`` (shape ``(..., N_Y)``) and logs warnings
-    if the minimum residual abundance drops below ``-rtol``.
+    Computes hydrogen and carbon budget-violation magnitudes from the
+    solved abundance vector ``y`` (shape ``(..., N_Y)``) and logs
+    warnings when the violation exceeds ``rtol``.
+
+    The hydrogen budget violation is defined as::
+
+        max(0, -min(xH_atom_raw), max(xH_accounted) - 1)
+
+    where ``xH_atom_raw = 1 - xH_accounted`` is the residual atomic-H
+    fraction.  A positive violation means either the residual went
+    negative (over-accounting) or the accounted fraction exceeded unity.
+
+    The carbon budget violation is defined analogously::
+
+        max(0, -min(xC_neutral_raw), max(xC_accounted) - max(xCtot))
 
     Parameters
     ----------
     y : np.ndarray
         GOW17 abundance array with species along the last axis.
         Uses the same index layout as ``diskbridge._gow17``.
-    xCtot : float
-        Total carbon abundance per H nucleus (e.g. Zg * XC_STD).
+    xCtot : float or np.ndarray
+        Total carbon abundance per H nucleus (e.g. ``Zg * XC_STD``).
+        May be a scalar (applied to all cells) or an array broadcastable
+        to the cell shape ``y.shape[:-1]``.
     rtol : float
-        Relative tolerance; a warning is issued when a residual
-        abundance is more negative than ``-rtol``.
+        Relative tolerance; a warning is issued when the violation
+        exceeds this value.
     logger : logging.Logger, optional
         Logger instance. If *None*, warnings are printed to stdout.
 
@@ -204,8 +218,8 @@ def gow17_budget_diagnostics(
     -------
     dict
         Keys: ``h_xH_atom_min``, ``h_xH_accounted_max``,
-        ``c_xC_neutral_min``, ``h_budget_closure_maxabs``,
-        ``c_budget_closure_maxabs``.
+        ``c_xC_neutral_min``, ``c_xC_accounted_max``,
+        ``h_budget_violation``, ``c_budget_violation``.
     """
     import diskbridge._gow17 as _g
 
@@ -220,6 +234,8 @@ def gow17_budget_diagnostics(
     xCplus = y[..., _g.I_CP]
     xCOice = y[..., _g.I_CO_ICE]
 
+    xCtot = np.asarray(xCtot, dtype=np.float64)
+
     xH_accounted = xOHx + xCHx + xHCOp + 3.0 * xH3p + 2.0 * xH2p + xHp + 2.0 * xH2
     xH_atom_raw = 1.0 - xH_accounted
 
@@ -229,8 +245,19 @@ def gow17_budget_diagnostics(
     h_xH_atom_min = float(np.min(xH_atom_raw))
     h_xH_accounted_max = float(np.max(xH_accounted))
     c_xC_neutral_min = float(np.min(xC_neutral_raw))
-    h_budget_closure_maxabs = float(np.max(np.abs(xH_atom_raw)))
-    c_budget_closure_maxabs = float(np.max(np.abs(xC_neutral_raw)))
+    c_xC_accounted_max = float(np.max(xC_accounted))
+
+    # Budget-violation magnitudes: positive means budget is broken.
+    h_budget_violation = float(max(
+        0.0,
+        -h_xH_atom_min,
+        h_xH_accounted_max - 1.0,
+    ))
+    c_budget_violation = float(max(
+        0.0,
+        -c_xC_neutral_min,
+        c_xC_accounted_max - float(np.max(xCtot)),
+    ))
 
     def _warn(msg: str) -> None:
         if logger is not None:
@@ -238,21 +265,24 @@ def gow17_budget_diagnostics(
         else:
             print(f"WARNING: {msg}")
 
-    if h_xH_atom_min < -rtol:
+    if h_budget_violation > rtol:
         _warn(
-            f"gow17 H budget: min(xH_atom_raw) = {h_xH_atom_min:.3e} < -{rtol:.1e}"
+            f"gow17 H budget violation = {h_budget_violation:.3e} > {rtol:.1e} "
+            f"(min xH_atom={h_xH_atom_min:.3e}, max xH_accounted={h_xH_accounted_max:.3e})"
         )
-    if c_xC_neutral_min < -rtol:
+    if c_budget_violation > rtol:
         _warn(
-            f"gow17 C budget: min(xC_neutral_raw) = {c_xC_neutral_min:.3e} < -{rtol:.1e}"
+            f"gow17 C budget violation = {c_budget_violation:.3e} > {rtol:.1e} "
+            f"(min xC_neutral={c_xC_neutral_min:.3e}, max xC_accounted={c_xC_accounted_max:.3e})"
         )
 
     return {
         "h_xH_atom_min": h_xH_atom_min,
         "h_xH_accounted_max": h_xH_accounted_max,
         "c_xC_neutral_min": c_xC_neutral_min,
-        "h_budget_closure_maxabs": h_budget_closure_maxabs,
-        "c_budget_closure_maxabs": c_budget_closure_maxabs,
+        "c_xC_accounted_max": c_xC_accounted_max,
+        "h_budget_violation": h_budget_violation,
+        "c_budget_violation": c_budget_violation,
     }
 
 
