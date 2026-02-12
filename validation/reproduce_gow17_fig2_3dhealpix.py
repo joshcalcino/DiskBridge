@@ -295,6 +295,7 @@ def _compute_chi_with_radmc3d(
     nphot_thermal: Optional[int],
     scat_mode: Optional[int],
     dust_nbins: int,
+    vacuum_dust: bool = False,
     force: bool,
 ) -> Quantity:
     model_dir = Path(model_dir)
@@ -326,6 +327,9 @@ def _compute_chi_with_radmc3d(
         if isinstance(new_params.dust_to_gas_ratio, list)
         else float(new_params.dust_to_gas_ratio)
     )
+
+    if vacuum_dust:
+        dust_to_gas_ratio = 0.0
 
     radm.model.dust.set_distribution(
         nbin=int(dust_nbins),
@@ -451,6 +455,7 @@ def run_gow17_internal_3d_healpix_sphere(
     radmc3d_nphot_thermal: Optional[int] = None,
     radmc3d_scat_mode: Optional[int] = None,
     radmc3d_dust_nbins: Optional[int] = None,
+    radmc3d_vacuum_dust: bool = False,
     diagnostic_outdir: Optional[str | Path] = None,
     diagnostic_suffix: Optional[str] = None,
     coupling_mode: str = "fixed_point",
@@ -517,6 +522,7 @@ def run_gow17_internal_3d_healpix_sphere(
             nphot_thermal=radmc3d_nphot_thermal,
             scat_mode=radmc3d_scat_mode,
             dust_nbins=int(radmc3d_dust_nbins) if radmc3d_dust_nbins is not None else int(diskbridge.params.nbins),
+            vacuum_dust=bool(radmc3d_vacuum_dust),
             force=bool(radmc3d_force),
         )
         radm.chi = chi_rt
@@ -524,6 +530,9 @@ def run_gow17_internal_3d_healpix_sphere(
         # Incident (unattenuated) field everywhere; dust attenuation
         # is handled inside the chemistry via chi_is_incident=True.
         radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
+
+    chi_label = "radmc3d" if use_radmc3d_chi else "analytic"
+    _print_chi_stats(chi_label, radm.chi, tuple(radm.model.mesh.axis_names()))
 
     y0 = np.zeros(N_Y, dtype=float)
     y0[I_HEP] = 1.450654e-08
@@ -690,6 +699,41 @@ def run_gow17_internal_3d_healpix_sphere(
 def _safe_log10(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     return np.log10(np.maximum(x, 1.0e-99))
+
+
+def _chi_stats(x: np.ndarray) -> Dict[str, float]:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        raise ValueError("No finite values in chi array")
+    p1, p50, p99 = np.percentile(x, [1.0, 50.0, 99.0])
+    return {
+        "min": float(np.min(x)),
+        "max": float(np.max(x)),
+        "p1": float(p1),
+        "p50": float(p50),
+        "p99": float(p99),
+    }
+
+
+def _print_chi_stats(label: str, chi: Quantity, axis_order: Tuple[str, ...]) -> None:
+    chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=float)
+    stats_all = _chi_stats(chi_arr)
+    r_ax = int(axis_order.index("r"))
+    chi_inner = np.take(chi_arr, 0, axis=r_ax)
+    chi_outer = np.take(chi_arr, chi_arr.shape[r_ax] - 1, axis=r_ax)
+    stats_inner = _chi_stats(chi_inner)
+    stats_outer = _chi_stats(chi_outer)
+
+    def _fmt(s: Dict[str, float]) -> str:
+        return (
+            f"min={s['min']:.6g}, max={s['max']:.6g}, "
+            f"p1={s['p1']:.6g}, p50={s['p50']:.6g}, p99={s['p99']:.6g}"
+        )
+
+    print(f"chi stats ({label}) all: {_fmt(stats_all)}")
+    print(f"chi stats ({label}) r_inner: {_fmt(stats_inner)}")
+    print(f"chi stats ({label}) r_outer: {_fmt(stats_outer)}")
 
 
 def _plot_diagnostics(*, outdir: Path, suffix: str, radm: RadModel, y_out: np.ndarray) -> None:
@@ -1582,6 +1626,34 @@ def main() -> None:
         diagnostic_suffix=f"radmc3d_sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}",
         coupling_mode="fixed_point",
     )
+
+    run_vacuum = False
+    if run_vacuum:
+        print("\n" + "=" * 60)
+        print("Run 4: RADMC-3D chi vacuum dust")
+        print("=" * 60)
+        _, _, _, _ = run_gow17_internal_3d_healpix_sphere(
+            nH_cm3=nH_val,
+            chi0=chi0,
+            xi_cr=xi_cr,
+            shielding_max_iter=shielding_max_iter,
+            shielding_mix=shielding_mix,
+            const_temp=const_temp,
+            nside=nside,
+            self_weight=1.0,
+            nr=nr,
+            ntheta=ntheta,
+            nphi=nphi,
+            ref=ref,
+            nH_index=int(nH_index),
+            use_radmc3d_chi=True,
+            radmc3d_model_dir=outdir / "radmc3d_vacuum_dust",
+            radmc3d_force=True,
+            radmc3d_vacuum_dust=True,
+            radmc3d_nphot_thermal=200000000,
+            radmc3d_nphot_mono=200000000,
+            coupling_mode="fixed_point",
+        )
 
     suffix_m2 = (
         f"radmc3d_sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}"
