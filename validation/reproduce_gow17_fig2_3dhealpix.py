@@ -453,6 +453,9 @@ def run_gow17_internal_3d_healpix_sphere(
     radmc3d_dust_nbins: Optional[int] = None,
     diagnostic_outdir: Optional[str | Path] = None,
     diagnostic_suffix: Optional[str] = None,
+    coupling_mode: str = "fixed_point",
+    astrochem_n_updates: int = 5,
+    astrochem_t_end_yr: float = 1.0e6,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray, Dict]:
     if ref is None:
         raise ValueError("ref must be provided")
@@ -593,11 +596,16 @@ def run_gow17_internal_3d_healpix_sphere(
         "fCplusCR": 1.0,
         "shielding_outer_coupling": "pseudotime",
         "shielding_max_iter": int(shielding_max_iter),
-        "shielding_reltol": 1.0e-6,
+        "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
         "shielding_mix": float(shielding_mix),
+        "shielding_theta_mix": 0.3,
+        "local_chi_factor": 0.5,
         "shielding_self_weight": float(self_weight),
         "enable_co_phase": False,
+        "coupling_mode": str(coupling_mode),
+        "astrochem_n_updates": int(astrochem_n_updates),
+        "astrochem_t_end_yr": float(astrochem_t_end_yr),
     }
     if use_radmc3d_chi:
         gow17_cfg["chi_is_incident"] = False
@@ -1142,9 +1150,11 @@ def _run_slab_reference(
         "fSiplusgr": 0.6,
         "fCplusCR": 1.0,
         "shielding_max_iter": int(shielding_max_iter),
-        "shielding_reltol": 1.0e-6,
+        "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
         "shielding_mix": float(shielding_mix),
+        "shielding_theta_mix": 0.3,
+        "local_chi_factor": 0.5,
         "enable_co_phase": False,
         "chi_is_incident": True,
     }
@@ -1296,6 +1306,96 @@ def _postprocess_run(
     return sphere
 
 
+def _plot_compare_fixed_vs_astrochem_species(
+    outdir: Path,
+    fixed: Dict[str, np.ndarray],
+    astro: Dict[str, np.ndarray],
+    fname: str = "compare_fixed_vs_astrochem_species.png",
+) -> Path:
+    """Overlay shell-averaged species profiles from fixed-point and astrochem modes."""
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
+
+    for key, label, color in [
+        ("xH2", "H2", "#1f77b4"),
+        ("xCO", "CO", "#d62728"),
+        ("xCplus", "C+", "#ff7f0e"),
+    ]:
+        ax.plot(
+            fixed["Av"], _safe_log10(fixed[key]),
+            lw=1.4, color=color, label=f"{label} fixed_point",
+        )
+        ax.plot(
+            astro["Av"], _safe_log10(astro[key]),
+            lw=1.4, ls="--", color=color, label=f"{label} astrochem",
+        )
+
+    ax.set_xlabel("A_V")
+    ax.set_ylabel("log10 abundance per H")
+    ax.set_ylim(-14.0, 0.0)
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(loc="best", fontsize=7, ncol=2)
+
+    fig.tight_layout()
+    p = outdir / fname
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
+def _plot_compare_fixed_vs_astrochem_convergence(
+    outdir: Path,
+    diag_fixed: dict,
+    diag_astro: dict,
+    fname: str = "compare_fixed_vs_astrochem_convergence.png",
+) -> Path:
+    """Overlay convergence histories (d_h2, d_co) from both coupling modes."""
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.6), dpi=220)
+
+    # d_h2
+    ax = axes[0]
+    d_h2_f = np.asarray(diag_fixed.get("d_h2_hist", []), dtype=float)
+    d_h2_a = np.asarray(diag_astro.get("d_h2_hist", []), dtype=float)
+    if d_h2_f.size > 0:
+        ax.semilogy(np.arange(1, len(d_h2_f) + 1), d_h2_f, "o-", lw=1.2, ms=4, label="fixed_point")
+    if d_h2_a.size > 0:
+        ax.semilogy(np.arange(1, len(d_h2_a) + 1), d_h2_a, "s--", lw=1.2, ms=4, label="astrochem")
+    ax.set_xlabel("Update index")
+    ax.set_ylabel("Max relative change in xH2")
+    ax.set_title("d_h2 convergence")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, which="both", alpha=0.25)
+
+    # d_co
+    ax = axes[1]
+    d_co_f = np.asarray(diag_fixed.get("d_co_hist", []), dtype=float)
+    d_co_a = np.asarray(diag_astro.get("d_co_hist", []), dtype=float)
+    if d_co_f.size > 0:
+        ax.semilogy(np.arange(1, len(d_co_f) + 1), d_co_f, "o-", lw=1.2, ms=4, label="fixed_point")
+    if d_co_a.size > 0:
+        ax.semilogy(np.arange(1, len(d_co_a) + 1), d_co_a, "s--", lw=1.2, ms=4, label="astrochem")
+    ax.set_xlabel("Update index")
+    ax.set_ylabel("Max relative change in xCO")
+    ax.set_title("d_co convergence")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, which="both", alpha=0.25)
+
+    fig.tight_layout()
+    p = outdir / fname
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
 def main() -> None:
 
     root = Path(__file__).resolve().parents[1]
@@ -1312,21 +1412,15 @@ def main() -> None:
     chi0 = 1.0
     xi_cr = 2.0e-16
     shielding_max_iter = 20
-    shielding_mix = 0.5
+    shielding_mix = 0.2
     const_temp = True
     nr = 128
     ntheta = 8
     nphi = 16
     nside = 4
 
-    # ----------------------------------------------------------------
-    # Run 1: internal analytic field (no RADMC-3D)
-    # ----------------------------------------------------------------
-    print("=" * 60)
-    print("Run 1: internal analytic (chi_is_incident=True)")
-    print("=" * 60)
-
-    y_out_m1, abd_m1, Av_db_m1, info_m1 = run_gow17_internal_3d_healpix_sphere(
+    # Common kwargs for the sphere runner (analytic chi).
+    _common_kw = dict(
         nH_cm3=nH_val,
         chi0=chi0,
         xi_cr=xi_cr,
@@ -1341,37 +1435,52 @@ def main() -> None:
         ref=ref,
         nH_index=int(nH_index),
         use_radmc3d_chi=False,
-        diagnostic_outdir=outdir,
     )
 
-    suffix_m1 = (
+    # ----------------------------------------------------------------
+    # Run 1: fixed-point coupling (baseline)
+    # ----------------------------------------------------------------
+    out_fixed = outdir / "out_fixed_point"
+    out_fixed.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print("Run 1: fixed-point coupling (chi_is_incident=True)")
+    print("=" * 60)
+
+    y_out_fp, abd_fp, Av_db_fp, info_fp = run_gow17_internal_3d_healpix_sphere(
+        **_common_kw,
+        diagnostic_outdir=out_fixed,
+        coupling_mode="fixed_point",
+    )
+
+    suffix_fp = (
         f"sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}"
     )
     _plot_compare(
-        outdir=outdir,
+        outdir=out_fixed,
         Av_ref=ref.Av,
-        Av_db=Av_db_m1,
+        Av_db=Av_db_fp,
         ref=ref,
         nH_index=int(nH_index),
-        abd_db=abd_m1,
+        abd_db=abd_fp,
         species=species,
-        suffix=suffix_m1,
+        suffix=suffix_fp,
     )
 
-    # Reconstruct Av_3d for shell averaging
-    R_cm = float(info_m1["R_cm"])
-    mesh_shape = tuple(info_m1["shape"])
+    # Reconstruct Av_3d for shell averaging.
+    R_cm = float(info_fp["R_cm"])
+    mesh_shape = tuple(info_fp["shape"])
     r_cent_arr = np.linspace(0.5 * R_cm / nr, R_cm - 0.5 * R_cm / nr, nr)
     r3 = np.broadcast_to(r_cent_arr[:, None, None], mesh_shape)
     depth_cm = np.maximum(R_cm - r3, 0.0)
     NH_depth = nH_val * depth_cm
-    Av_3d_m1 = 2.0 * NH_depth / 1.87e21
+    Av_3d = 2.0 * NH_depth / 1.87e21
 
-    sphere_m1 = _postprocess_run(
-        outdir=outdir,
-        y_out=y_out_m1,
-        info=info_m1,
-        Av_3d=Av_3d_m1,
+    sphere_fp = _postprocess_run(
+        outdir=out_fixed,
+        y_out=y_out_fp,
+        info=info_fp,
+        Av_3d=Av_3d,
         nH_cm3=nH_val,
         chi0=chi0,
         xi_cr=xi_cr,
@@ -1382,15 +1491,74 @@ def main() -> None:
         suffix="",
     )
 
+    diag_fp = info_fp.get("gow17_diagnostics", {})
     print(
-        f"nH={nH_val:.3e}: shape={info_m1['shape']}, R_cm={info_m1['R_cm']:.3e}"
+        f"nH={nH_val:.3e}: shape={info_fp['shape']}, R_cm={info_fp['R_cm']:.3e}"
     )
 
     # ----------------------------------------------------------------
-    # Run 2: RADMC-3D chi
+    # Run 2: astrochem coupling
+    # ----------------------------------------------------------------
+    out_astro = outdir / "out_astrochem"
+    out_astro.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 60)
+    print("Run 2: AstroChem-style coupling (chi_is_incident=True)")
+    print("=" * 60)
+
+    y_out_ac, abd_ac, Av_db_ac, info_ac = run_gow17_internal_3d_healpix_sphere(
+        **_common_kw,
+        diagnostic_outdir=out_astro,
+        coupling_mode="astrochem",
+        astrochem_n_updates=5,
+        astrochem_t_end_yr=1.0e6,
+    )
+
+    _plot_compare(
+        outdir=out_astro,
+        Av_ref=ref.Av,
+        Av_db=Av_db_ac,
+        ref=ref,
+        nH_index=int(nH_index),
+        abd_db=abd_ac,
+        species=species,
+        suffix=suffix_fp,
+    )
+
+    sphere_ac = _postprocess_run(
+        outdir=out_astro,
+        y_out=y_out_ac,
+        info=info_ac,
+        Av_3d=Av_3d,
+        nH_cm3=nH_val,
+        chi0=chi0,
+        xi_cr=xi_cr,
+        shielding_max_iter=shielding_max_iter,
+        shielding_mix=shielding_mix,
+        const_temp=const_temp,
+        nside=nside,
+        suffix="",
+    )
+
+    diag_ac = info_ac.get("gow17_diagnostics", {})
+
+    # ----------------------------------------------------------------
+    # Comparison plots: fixed_point vs astrochem
     # ----------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("Run 2: RADMC-3D chi (chi_is_incident=False)")
+    print("Comparison: fixed_point vs astrochem")
+    print("=" * 60)
+
+    _plot_compare_fixed_vs_astrochem_species(outdir, sphere_fp, sphere_ac)
+    _plot_compare_fixed_vs_astrochem_convergence(outdir, diag_fp, diag_ac)
+    print("Saved: compare_fixed_vs_astrochem_species.png")
+    print("Saved: compare_fixed_vs_astrochem_convergence.png")
+
+    # ----------------------------------------------------------------
+    # Run 3: RADMC-3D chi (fixed-point only)
+    # ----------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Run 3: RADMC-3D chi (chi_is_incident=False)")
     print("=" * 60)
 
     y_out_m2, abd_m2, Av_db_m2, info_m2 = run_gow17_internal_3d_healpix_sphere(
@@ -1412,6 +1580,7 @@ def main() -> None:
         radmc3d_nphot_mono=200000000,
         diagnostic_outdir=outdir,
         diagnostic_suffix=f"radmc3d_sphere_nH_{int(nH_val)}_nr_{nr}_nt_{ntheta}_np_{nphi}_nside_{nside}",
+        coupling_mode="fixed_point",
     )
 
     suffix_m2 = (
@@ -1446,10 +1615,10 @@ def main() -> None:
     )
 
     # ----------------------------------------------------------------
-    # Final comparison: mode1 vs RADMC-3D
+    # Final comparison: analytic (fixed_point) vs RADMC-3D
     # ----------------------------------------------------------------
     _plot_mode_comparison(
-        outdir, sphere_m1, sphere_m2,
+        outdir, sphere_fp, sphere_m2,
         label1="analytic", label2="RADMC-3D",
         fname="mode1_vs_radmc3d.png",
     )

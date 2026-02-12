@@ -256,7 +256,7 @@ def gow17_budget_diagnostics(
     c_budget_violation = float(max(
         0.0,
         -c_xC_neutral_min,
-        c_xC_accounted_max - float(np.max(xCtot)),
+        float(np.max(xC_accounted - xCtot)),
     ))
 
     def _warn(msg: str) -> None:

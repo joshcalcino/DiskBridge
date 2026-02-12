@@ -342,6 +342,202 @@ static py::dict solve_batch_equilibrium(
     return out;
 }
 
+/* ---------------------------------------------------------------------------
+ * solve_batch_time -- integrate each cell forward by t_end seconds.
+ *
+ * Same cell setup as solve_batch_equilibrium, but instead of calling
+ * SolveEq() we call Solve(t_end) which integrates the CVODE system to an
+ * absolute time t_end (starting from t=0).
+ *
+ * Returns dict with:
+ *   "y"      : final abundances (Ncells, 15)
+ *   "status" : per-cell status code (0 = ok, -1 = failure)
+ * --------------------------------------------------------------------------- */
+static py::dict solve_batch_time(
+    const py::array_t<double, py::array::c_style | py::array::forcecast> y0,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> nH,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> GISRF,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Gph,
+    const double reltol,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> abstol,
+    const int mxsteps,
+    const int maxord,
+    const double t_end,
+    const bool const_temp,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
+    const bool isDust_cooling,
+    const bool isCoolingCOThin,
+    const double fH2gr,
+    const double fHplusgr,
+    const double fCplusgr,
+    const double fHeplusgr,
+    const double fSplusgr,
+    const double fSiplusgr,
+    const double fCplusCR,
+
+    const double co_sigma_d_per_H_ref,
+    const double co_E_bind_co,
+    const double co_nu0_co,
+    const double co_F_DRAINE,
+    const double co_Y_CO,
+    const double co_N_SURF,
+    const int co_N_LAY,
+    const bool userJac,
+    const bool verbose) {
+
+    if (y0.ndim() != 2 || y0.shape(1) != N_Y) {
+        throw std::invalid_argument("y0 must be 2D with shape (Ncells, 15)");
+    }
+    const py::ssize_t Ncells = y0.shape(0);
+
+    if (nH.ndim() != 1 || nH.size() != Ncells) {
+        throw std::invalid_argument("nH must be 1D with length Ncells");
+    }
+    if (Tgas.ndim() != 1 || Tgas.size() != Ncells) {
+        throw std::invalid_argument("Tgas must be 1D with length Ncells");
+    }
+    if (Tdust.ndim() != 1 || Tdust.size() != Ncells) {
+        throw std::invalid_argument("Tdust must be 1D with length Ncells");
+    }
+    if (Zd.ndim() != 1 || Zd.size() != Ncells) {
+        throw std::invalid_argument("Zd must be 1D with length Ncells");
+    }
+    if (Zg.ndim() != 1 || Zg.size() != Ncells) {
+        throw std::invalid_argument("Zg must be 1D with length Ncells");
+    }
+    if (ion_rate.ndim() != 1 || ion_rate.size() != Ncells) {
+        throw std::invalid_argument("ion_rate must be 1D with length Ncells");
+    }
+    if (GPE.ndim() != 1 || GPE.size() != Ncells) {
+        throw std::invalid_argument("GPE must be 1D with length Ncells");
+    }
+    if (GISRF.ndim() != 1 || GISRF.size() != Ncells) {
+        throw std::invalid_argument("GISRF must be 1D with length Ncells");
+    }
+    if (Gph.ndim() != 2 || Gph.shape(0) != Ncells || Gph.shape(1) != N_PH) {
+        throw std::invalid_argument("Gph must be 2D with shape (Ncells, 7)");
+    }
+    if (abstol.ndim() != 1 || abstol.size() != N_Y) {
+        throw std::invalid_argument("abstol must be 1D with length 15");
+    }
+    if (Leff_CO_max.ndim() != 1 || Leff_CO_max.size() != Ncells) {
+        throw std::invalid_argument("Leff_CO_max must be 1D with length Ncells");
+    }
+    if (gradv.ndim() != 1 || gradv.size() != Ncells) {
+        throw std::invalid_argument("gradv must be 1D with length Ncells");
+    }
+    if (t_end <= 0.0) {
+        throw std::invalid_argument("t_end must be > 0");
+    }
+
+    const double *y0_ptr = y0.data();
+    const double *nH_ptr = nH.data();
+    const double *Tgas_ptr = Tgas.data();
+    const double *Tdust_ptr = Tdust.data();
+    const double *Zd_ptr = Zd.data();
+    const double *Zg_ptr = Zg.data();
+    const double *ion_rate_ptr = ion_rate.data();
+    const double *GPE_ptr = GPE.data();
+    const double *GISRF_ptr = GISRF.data();
+    const double *Gph_ptr = Gph.data();
+    const double *abstol_ptr = abstol.data();
+    const double *Leff_CO_max_ptr = Leff_CO_max.data();
+    const double *gradv_ptr = gradv.data();
+
+    py::array_t<double> y_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(N_Y)});
+    py::array_t<int> status_out(py::array::ShapeContainer{Ncells});
+    double *y_out_ptr = static_cast<double *>(y_out.mutable_data());
+    int *status_out_ptr = static_cast<int *>(status_out.mutable_data());
+
+    std::atomic<int> n_fail{0};
+
+    /* Release the GIL so threads can run in parallel. */
+    py::gil_scoped_release release;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (py::ssize_t i = 0; i < Ncells; ++i) {
+        gow17 ode;
+        CvodeDense solver(ode, reltol, abstol_ptr, userJac);
+
+        ode.SetInit(0.0, y0_ptr + i * N_Y);
+        ode.SetnH(nH_ptr[i]);
+        ode.SetIonRate(ion_rate_ptr[i]);
+        ode.SetZg(Zg_ptr[i]);
+        ode.SetZd(Zd_ptr[i]);
+
+        ode.SetfH2gr(fH2gr);
+        ode.SetfHplusgr(fHplusgr);
+        ode.SetfCplusgr(fCplusgr);
+        ode.SetfHeplusgr(fHeplusgr);
+        ode.SetfSplusgr(fSplusgr);
+        ode.SetfSiplusgr(fSiplusgr);
+        ode.SetfCplusCR(fCplusCR);
+        ode.SetGradv(gradv_ptr[i]);
+        ode.SetTdust(Tdust_ptr[i]);
+
+        ode.SetCOPhaseParams(
+            co_sigma_d_per_H_ref,
+            co_E_bind_co,
+            co_nu0_co,
+            co_F_DRAINE,
+            co_Y_CO,
+            co_N_SURF,
+            co_N_LAY);
+
+        ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+        ode.IsDustCooling(isDust_cooling);
+        ode.SetCoolingCOThin(isCoolingCOThin);
+
+        if (const_temp) {
+            ode.SetConstTemp(Tgas_ptr[i]);
+        }
+
+        double GPE_cell = GPE_ptr[i];
+        double GISRF_cell = GISRF_ptr[i];
+        double Gph_cell[N_PH];
+        for (int j = 0; j < N_PH; ++j) {
+            Gph_cell[j] = Gph_ptr[i * N_PH + j];
+        }
+        ode.SetRadField(&GPE_cell, Gph_cell, &GISRF_cell);
+
+        solver.ReInit();
+        solver.SetMxsteps(mxsteps);
+        solver.SetMaxOrd(maxord);
+
+        try {
+            solver.Solve(t_end);
+            ode.CopyAbd(y_out_ptr + i * N_Y);
+            status_out_ptr[i] = 0;
+        } catch (const std::exception &e) {
+            for (int j = 0; j < N_Y; ++j) {
+                y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
+            }
+            status_out_ptr[i] = -1;
+            n_fail.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    /* Re-acquire the GIL before touching Python objects. */
+    py::gil_scoped_acquire acquire;
+
+    if (n_fail.load() > 0) {
+        printf("solve_batch_time: %d / %lld cells failed with exceptions.\n",
+               n_fail.load(), static_cast<long long>(Ncells));
+    }
+
+    py::dict out;
+    out["y"] = y_out;
+    out["status"] = status_out;
+    return out;
+}
+
 PYBIND11_MODULE(_gow17, m) {
     m.attr("N_Y") = N_Y;
     m.attr("N_PH") = N_PH;
@@ -440,6 +636,46 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("tolfac"),
         py::arg("tmin"),
         py::arg("tmax"),
+        py::arg("const_temp"),
+        py::arg("gradv"),
+        py::arg("Leff_CO_max"),
+        py::arg("isDust_cooling") = false,
+        py::arg("isCoolingCOThin") = false,
+        py::arg("fH2gr"),
+        py::arg("fHplusgr"),
+        py::arg("fCplusgr"),
+        py::arg("fHeplusgr"),
+        py::arg("fSplusgr"),
+        py::arg("fSiplusgr"),
+        py::arg("fCplusCR"),
+        py::arg("co_sigma_d_per_H_ref"),
+        py::arg("co_E_bind_co"),
+        py::arg("co_nu0_co"),
+        py::arg("co_F_DRAINE"),
+        py::arg("co_Y_CO"),
+        py::arg("co_N_SURF"),
+        py::arg("co_N_LAY"),
+        py::arg("userJac"),
+        py::arg("verbose") = false);
+
+    m.def(
+        "solve_batch_time",
+        &solve_batch_time,
+        py::arg("y0"),
+        py::arg("nH"),
+        py::arg("Tgas"),
+        py::arg("Tdust"),
+        py::arg("Zd"),
+        py::arg("Zg"),
+        py::arg("ion_rate"),
+        py::arg("GPE"),
+        py::arg("GISRF"),
+        py::arg("Gph"),
+        py::arg("reltol"),
+        py::arg("abstol"),
+        py::arg("mxsteps"),
+        py::arg("maxord"),
+        py::arg("t_end"),
         py::arg("const_temp"),
         py::arg("gradv"),
         py::arg("Leff_CO_max"),

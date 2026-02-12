@@ -70,6 +70,7 @@ I_OP = _gow17.I_OP
 I_E = _gow17.I_E
 
 KB_CGS = 1.380649e-16
+_YR_TO_S = float(Quantity("1 yr").to("s").magnitude)
 
 _KPH_AVFAC = np.asarray([3.76, 2.12, 3.88, 2.66, 4.18, 3.10, 2.61], dtype=np.float64)
 _SIGMA_PE_CGS = 1.0e-21
@@ -111,6 +112,188 @@ def _maybe_quantity_to_float(val, unit: str) -> float:
     if isinstance(val, str):
         return float(Quantity(val).to(unit).magnitude)
     return float(val)
+
+
+def _compute_shielding_and_gph(
+    *,
+    y_flat: np.ndarray,
+    nH_flat: np.ndarray,
+    chi_dust_flat: np.ndarray,
+    xCtot_flat: np.ndarray,
+    Zd_arr: np.ndarray,
+    Av_flat,
+    shape: tuple,
+    ncells: int,
+    rad: "RadModel",
+    nH_cm3: np.ndarray,
+    chi_dust_arr: np.ndarray,
+    visser,
+    b_kms: float,
+    nside: int,
+    chi_is_incident: bool,
+    local_chi_factor: float,
+    shielding_outer_1d: str,
+    theta_h2_prev: np.ndarray | None = None,
+    theta_co_prev: np.ndarray | None = None,
+    theta_c_prev: np.ndarray | None = None,
+    shielding_theta_mix: float = 1.0,
+    is_first: bool = True,
+) -> tuple:
+    """Compute shielding factors and radiation field arrays from current abundances.
+
+    Returns
+    -------
+    theta_h2_flat, theta_co_flat, theta_c_flat : np.ndarray
+        Shielding factors, shape ``(ncells,)``.
+    Gph, GPE, GISRF : np.ndarray
+        Radiation field arrays ready for the batch solver.
+    """
+    xCO = y_flat[:, I_CO]
+    xCO_ice = y_flat[:, I_CO_ICE]
+    xH2 = y_flat[:, I_H2]
+
+    xC_neutral = xCtot_flat - (
+        y_flat[:, I_HCOP]
+        + y_flat[:, I_CHX]
+        + xCO
+        + xCO_ice
+        + y_flat[:, I_CP]
+    )
+    xC_neutral = np.maximum(xC_neutral, 0.0)
+
+    nCO_cm3 = np.ascontiguousarray(
+        (xCO * nH_flat).reshape(shape), dtype=np.float64
+    )
+    nH2_cm3 = np.ascontiguousarray(
+        (xH2 * nH_flat).reshape(shape), dtype=np.float64
+    )
+    nC_cm3 = np.ascontiguousarray(
+        (xC_neutral * nH_flat).reshape(shape), dtype=np.float64
+    )
+
+    if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+        if chi_is_incident:
+            if Av_flat is None:
+                raise RuntimeError("gow17: internal error (Av_flat missing)")
+
+            NH_over_Zd = Av_flat * (1.87e21)
+            NH_flat_loc = np.divide(
+                NH_over_Zd,
+                Zd_arr,
+                out=np.zeros_like(NH_over_Zd, dtype=np.float64),
+                where=(Zd_arr > 0.0),
+            )
+
+            dNH = np.empty_like(NH_flat_loc, dtype=np.float64)
+            dNH[:-1] = NH_flat_loc[1:] - NH_flat_loc[:-1]
+            dNH[-1] = 0.0
+
+            xH2_use = np.ascontiguousarray(xH2, dtype=np.float64)
+            xCO_use = np.ascontiguousarray(xCO, dtype=np.float64)
+            xC_use = np.ascontiguousarray(xC_neutral, dtype=np.float64)
+
+            N_H2 = np.zeros_like(NH_flat_loc, dtype=np.float64)
+            N_CO = np.zeros_like(NH_flat_loc, dtype=np.float64)
+            N_C = np.zeros_like(NH_flat_loc, dtype=np.float64)
+            if NH_flat_loc.size >= 2:
+                N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
+                N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
+                N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
+
+            from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
+
+            theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
+            theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+
+            AH2 = 1.17e-8
+            tau_H2 = 1.2e-14 * 2.0 * N_H2
+            y_shield = AH2 * tau_H2
+            ry = np.exp(-y_shield) / (1.0 + y_shield)
+            rc = np.exp(-1.6e-17 * N_C)
+            theta_c_flat = rc * ry
+
+            theta_h2_arr = theta_h2_flat.reshape(shape)
+            theta_co_arr = theta_co_flat.reshape(shape)
+            theta_c_arr = theta_c_flat.reshape(shape)
+        else:
+            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
+                mesh=rad.model.mesh,
+                nH=nH_cm3,
+                chi=chi_dust_arr,
+                visser=visser,
+                nCO=nCO_cm3,
+                nC=nC_cm3,
+                nH2=nH2_cm3,
+                b_kms=b_kms,
+                outer=shielding_outer_1d,
+            )
+    else:
+        from diskbridge.chemistry.shielding.healpix_columns import (
+            compute_pdr_shielding_healpix,
+        )
+
+        W_rays = getattr(rad, "W_rays", None)
+        theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
+            mesh=rad.model.mesh,
+            nH=nH_cm3,
+            chi=chi_dust_arr,
+            visser=visser,
+            nCO=nCO_cm3,
+            nC=nC_cm3,
+            nH2=nH2_cm3,
+            nside=nside,
+            b_kms=b_kms,
+            W_rays=W_rays,
+        )
+
+    theta_h2_new = theta_h2_arr.reshape(ncells)
+    theta_co_new = theta_co_arr.reshape(ncells)
+    theta_c_new = theta_c_arr.reshape(ncells)
+
+    # Optional theta mixing for shielding factor stabilisation.
+    if (not is_first) and shielding_theta_mix < 1.0 and theta_h2_prev is not None:
+        a = shielding_theta_mix
+        theta_h2_flat = a * theta_h2_new + (1.0 - a) * theta_h2_prev
+        theta_co_flat = a * theta_co_new + (1.0 - a) * theta_co_prev
+        theta_c_flat = a * theta_c_new + (1.0 - a) * theta_c_prev
+    else:
+        theta_h2_flat = theta_h2_new
+        theta_co_flat = theta_co_new
+        theta_c_flat = theta_c_new
+
+    # -- Assemble radiation field arrays --
+    Gph = np.empty((ncells, N_PH), dtype=np.float64)
+    if chi_is_incident:
+        if Av_flat is None:
+            raise RuntimeError("gow17: internal error (Av_flat missing)")
+        G0_half = 0.5 * chi_dust_flat
+        Gph[:, :] = G0_half[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
+        NH_over_Zd = Av_flat * (1.87e21)
+        NH_flat_loc = np.divide(
+            NH_over_Zd,
+            Zd_arr,
+            out=np.zeros_like(NH_over_Zd, dtype=np.float64),
+            where=(Zd_arr > 0.0),
+        )
+        GPE = np.ascontiguousarray(
+            G0_half * np.exp(-NH_flat_loc * _SIGMA_PE_CGS * Zd_arr),
+            dtype=np.float64,
+        )
+        GISRF = np.ascontiguousarray(
+            G0_half * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr),
+            dtype=np.float64,
+        )
+    else:
+        G0_scaled = local_chi_factor * chi_dust_flat
+        Gph[:, :] = G0_scaled[:, None]
+        GPE = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
+        GISRF = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
+
+    Gph[:, IPH_C] *= theta_c_flat
+    Gph[:, IPH_CO] *= theta_co_flat
+    Gph[:, IPH_H2] *= theta_h2_flat
+
+    return theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF
 
 
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
@@ -176,6 +359,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_theta_mix = float(cfg.get("shielding_theta_mix", 1.0))
     local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
+
+    # -- AstroChem-style coupling config --
+    coupling_mode = str(cfg.get("coupling_mode", "fixed_point"))
+    astrochem_n_updates = int(cfg.get("astrochem_n_updates", 5))
+    astrochem_t_end_yr = float(cfg.get("astrochem_t_end_yr", 1.0e6))
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
     slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
@@ -657,161 +845,239 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     d_h2_hist = []
     d_co_hist = []
+    bad_status_hist = []
 
-    for it in range(shielding_max_iter):
-        xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
-        xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
+    # Common keyword dict for _compute_shielding_and_gph calls.
+    _shielding_kw = dict(
+        nH_flat=nH_flat,
+        chi_dust_flat=chi_dust_flat,
+        xCtot_flat=xCtot_flat,
+        Zd_arr=Zd_arr,
+        Av_flat=Av_flat,
+        shape=shape,
+        ncells=ncells,
+        rad=rad,
+        nH_cm3=nH_cm3,
+        chi_dust_arr=chi_dust_arr,
+        visser=visser,
+        b_kms=b_kms,
+        nside=nside,
+        chi_is_incident=chi_is_incident,
+        local_chi_factor=local_chi_factor,
+        shielding_outer_1d=shielding_outer_1d,
+    )
 
-        xCO = y_guess[:, I_CO]
-        xCO_ice = y_guess[:, I_CO_ICE]
-        xH2 = y_guess[:, I_H2]
+    # Common keyword dict for CO phase parameters passed to batch solvers.
+    _co_phase_kw = dict(
+        co_sigma_d_per_H_ref=(float(sigma_d_per_H_ref) if enable_co_phase else 0.0),
+        co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
+        co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
+        co_F_DRAINE=(float(F_DRAINE) if enable_co_phase else 0.0),
+        co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
+        co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
+        co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
+    )
 
-        xC_neutral = xCtot_flat - (
-            y_guess[:, I_HCOP]
-            + y_guess[:, I_CHX]
-            + xCO
-            + xCO_ice
-            + y_guess[:, I_CP]
-        )
-        xC_neutral = np.maximum(xC_neutral, 0.0)
+    if coupling_mode == "fixed_point":
+        # ====================================================================
+        # Fixed-point equilibrium coupling (baseline)
+        # ====================================================================
+        for it in range(shielding_max_iter):
+            xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
+            xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
 
-        nCO_cm3 = np.ascontiguousarray(
-            (xCO * nH_flat).reshape(shape), dtype=np.float64
-        )
-        nH2_cm3 = np.ascontiguousarray(
-            (xH2 * nH_flat).reshape(shape), dtype=np.float64
-        )
-        nC_cm3 = np.ascontiguousarray(
-            (xC_neutral * nH_flat).reshape(shape), dtype=np.float64
-        )
-
-        if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-            if chi_is_incident:
-                if Av_flat is None:
-                    raise RuntimeError("gow17: internal error (Av_flat missing)")
-
-                NH_over_Zd = Av_flat * (1.87e21)
-                NH_flat = np.divide(
-                    NH_over_Zd,
-                    Zd_arr,
-                    out=np.zeros_like(NH_over_Zd, dtype=np.float64),
-                    where=(Zd_arr > 0.0),
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+                _compute_shielding_and_gph(
+                    y_flat=y_guess,
+                    theta_h2_prev=theta_h2_flat if it > 0 else None,
+                    theta_co_prev=theta_co_flat if it > 0 else None,
+                    theta_c_prev=theta_c_flat if it > 0 else None,
+                    shielding_theta_mix=shielding_theta_mix,
+                    is_first=(it == 0),
+                    **_shielding_kw,
                 )
+            )
 
-                dNH = np.empty_like(NH_flat, dtype=np.float64)
-                dNH[:-1] = NH_flat[1:] - NH_flat[:-1]
-                dNH[-1] = 0.0
+            result = _gow17.solve_batch_equilibrium(
+                y0=np.ascontiguousarray(y_guess, dtype=np.float64),
+                nH=nH_flat,
+                Tgas=T_flat,
+                Tdust=Tdust_flat,
+                Zd=Zd_arr,
+                Zg=Zg_arr,
+                ion_rate=ion_rate_arr,
+                GPE=GPE,
+                GISRF=GISRF,
+                Gph=Gph,
+                reltol=reltol,
+                abstol=abstol,
+                mxsteps=mxsteps,
+                maxord=maxord,
+                tolfac=tolfac,
+                tmin=tmin,
+                tmax=tmax,
+                const_temp=const_temp,
+                gradv=gradv_arr,
+                Leff_CO_max=Leff_CO_max_arr,
+                isDust_cooling=isDust_cooling,
+                isCoolingCOThin=isCoolingCOThin,
+                fH2gr=fH2gr,
+                fHplusgr=fHplusgr,
+                fCplusgr=fCplusgr,
+                fHeplusgr=fHeplusgr,
+                fSplusgr=fSplusgr,
+                fSiplusgr=fSiplusgr,
+                fCplusCR=fCplusCR,
+                **_co_phase_kw,
+                userJac=userJac,
+                verbose=verbose,
+            )
 
-                xH2_use = np.ascontiguousarray(xH2, dtype=np.float64)
-                xCO_use = np.ascontiguousarray(xCO, dtype=np.float64)
-                xC_use = np.ascontiguousarray(xC_neutral, dtype=np.float64)
+            y_new = result["y"]
+            status_step = result["status"]
 
-                N_H2 = np.zeros_like(NH_flat, dtype=np.float64)
-                N_CO = np.zeros_like(NH_flat, dtype=np.float64)
-                N_C = np.zeros_like(NH_flat, dtype=np.float64)
-                if NH_flat.size >= 2:
-                    N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
-                    N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
-                    N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
-
-                from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
-
-                theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
-                theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
-
-                AH2 = 1.17e-8
-                tau_H2 = 1.2e-14 * 2.0 * N_H2
-                y = AH2 * tau_H2
-                ry = np.exp(-y) / (1.0 + y)
-                rc = np.exp(-1.6e-17 * N_C)
-                theta_c_flat = rc * ry
-
-                theta_h2_arr = theta_h2_flat.reshape(shape)
-                theta_co_arr = theta_co_flat.reshape(shape)
-                theta_c_arr = theta_c_flat.reshape(shape)
+            status_acc = np.maximum(status_acc, np.asarray(status_step, dtype=np.int32))
+            if shielding_mix < 1.0:
+                y_guess[:, :] = shielding_mix * y_new + (1.0 - shielding_mix) * y_guess
             else:
-                theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
-                    mesh=rad.model.mesh,
-                    nH=nH_cm3,
-                    chi=chi_dust_arr,
-                    visser=visser,
-                    nCO=nCO_cm3,
-                    nC=nC_cm3,
-                    nH2=nH2_cm3,
-                    b_kms=b_kms,
-                    outer=shielding_outer_1d,
+                y_guess[:, :] = y_new
+
+            xCO_new = y_guess[:, I_CO]
+            xH2_new = y_guess[:, I_H2]
+
+            denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
+            denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
+            d_h2 = np.max(np.abs(xH2_new - xH2_old) / denom_h2)
+            d_co = np.max(np.abs(xCO_new - xCO_old) / denom_co)
+            d_h2_hist.append(float(d_h2))
+            d_co_hist.append(float(d_co))
+            if max(d_h2, d_co) <= shielding_reltol:
+                break
+
+    elif coupling_mode == "astrochem":
+        # ====================================================================
+        # AstroChem-style pseudo-time coupling
+        #
+        # Evolve abundances in pseudo-time while updating shielding a small
+        # number of times, then finish with one equilibrium solve.
+        #
+        # Reference: inspired by AstroChemistry.jl coupling strategy.
+        # ====================================================================
+        N = astrochem_n_updates
+        t_end_s = astrochem_t_end_yr * _YR_TO_S
+
+        # Geometric schedule: small early steps, larger late steps.
+        # t_targets[i] = t_end * (r^(i+1) - 1) / (r^N - 1) for i=0..N-1
+        # so t_targets[0] > 0 and t_targets[N-1] = t_end.
+        if N <= 1:
+            t_targets = np.array([t_end_s], dtype=np.float64)
+        else:
+            r = 10.0 ** (1.0 / (N - 1))
+            k = np.arange(1, N + 1, dtype=np.float64)
+            t_targets = t_end_s * (r**k - 1.0) / (r**N - 1.0)
+            # Ensure last target is exactly t_end_s.
+            t_targets[-1] = t_end_s
+
+        # Per-step durations.
+        dt = np.empty(N, dtype=np.float64)
+        dt[0] = t_targets[0]
+        dt[1:] = np.diff(t_targets)
+
+        y_state = y_guess.copy()
+        theta_h2_flat = np.ones(ncells, dtype=np.float64)
+        theta_co_flat = np.ones(ncells, dtype=np.float64)
+        theta_c_flat = np.ones(ncells, dtype=np.float64)
+
+        for k_step in range(N):
+            xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
+            xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
+
+            # Step 1+2: compute columns and shielding from current y_state.
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+                _compute_shielding_and_gph(
+                    y_flat=y_state,
+                    theta_h2_prev=theta_h2_flat if k_step > 0 else None,
+                    theta_co_prev=theta_co_flat if k_step > 0 else None,
+                    theta_c_prev=theta_c_flat if k_step > 0 else None,
+                    shielding_theta_mix=shielding_theta_mix,
+                    is_first=(k_step == 0),
+                    **_shielding_kw,
                 )
-        else:
-            from diskbridge.chemistry.shielding.healpix_columns import (
-                compute_pdr_shielding_healpix,
             )
 
-            W_rays = getattr(rad, "W_rays", None)
-            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
-                mesh=rad.model.mesh,
-                nH=nH_cm3,
-                chi=chi_dust_arr,
-                visser=visser,
-                nCO=nCO_cm3,
-                nC=nC_cm3,
-                nH2=nH2_cm3,
-                nside=nside,
-                b_kms=b_kms,
-                W_rays=W_rays,
+            # Step 3: integrate chemistry forward by dt[k_step].
+            result = _gow17.solve_batch_time(
+                y0=np.ascontiguousarray(y_state, dtype=np.float64),
+                nH=nH_flat,
+                Tgas=T_flat,
+                Tdust=Tdust_flat,
+                Zd=Zd_arr,
+                Zg=Zg_arr,
+                ion_rate=ion_rate_arr,
+                GPE=GPE,
+                GISRF=GISRF,
+                Gph=Gph,
+                reltol=reltol,
+                abstol=abstol,
+                mxsteps=mxsteps,
+                maxord=maxord,
+                t_end=float(dt[k_step]),
+                const_temp=const_temp,
+                gradv=gradv_arr,
+                Leff_CO_max=Leff_CO_max_arr,
+                isDust_cooling=isDust_cooling,
+                isCoolingCOThin=isCoolingCOThin,
+                fH2gr=fH2gr,
+                fHplusgr=fHplusgr,
+                fCplusgr=fCplusgr,
+                fHeplusgr=fHeplusgr,
+                fSplusgr=fSplusgr,
+                fSiplusgr=fSiplusgr,
+                fCplusCR=fCplusCR,
+                **_co_phase_kw,
+                userJac=userJac,
+                verbose=verbose,
             )
 
-        theta_h2_new = theta_h2_arr.reshape(ncells)
-        theta_co_new = theta_co_arr.reshape(ncells)
-        theta_c_new = theta_c_arr.reshape(ncells)
+            y_state[:, :] = result["y"]
+            status_step = np.asarray(result["status"], dtype=np.int32)
+            status_acc = np.maximum(status_acc, status_step)
 
-        # Optional theta mixing for shielding factor stabilisation.
-        if it > 0 and shielding_theta_mix < 1.0:
-            a = shielding_theta_mix
-            theta_h2_flat = a * theta_h2_new + (1.0 - a) * theta_h2_flat
-            theta_co_flat = a * theta_co_new + (1.0 - a) * theta_co_flat
-            theta_c_flat = a * theta_c_new + (1.0 - a) * theta_c_flat
-        else:
-            theta_h2_flat = theta_h2_new
-            theta_co_flat = theta_co_new
-            theta_c_flat = theta_c_new
+            # Step 4: convergence diagnostics.
+            xCO_new = y_state[:, I_CO]
+            xH2_new = y_state[:, I_H2]
 
-        Gph = np.empty((ncells, N_PH), dtype=np.float64)
-        if chi_is_incident:
-            if Av_flat is None:
-                raise RuntimeError("gow17: internal error (Av_flat missing)")
-            G0_half = 0.5 * chi_dust_flat
-            Gph[:, :] = G0_half[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
-            NH_over_Zd = Av_flat * (1.87e21)
-            NH_flat = np.divide(
-                NH_over_Zd,
-                Zd_arr,
-                out=np.zeros_like(NH_over_Zd, dtype=np.float64),
-                where=(Zd_arr > 0.0),
+            denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
+            denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
+            d_h2 = float(np.max(np.abs(xH2_new - xH2_old) / denom_h2))
+            d_co = float(np.max(np.abs(xCO_new - xCO_old) / denom_co))
+            d_h2_hist.append(d_h2)
+            d_co_hist.append(d_co)
+            bad_status_hist.append(int(np.sum(status_step != 0)))
+
+            logger.info(
+                "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
+                "d_h2=%.3e, d_co=%.3e, bad=%d",
+                k_step + 1, N,
+                float(t_targets[k_step] / _YR_TO_S),
+                float(dt[k_step] / _YR_TO_S),
+                d_h2, d_co,
+                bad_status_hist[-1],
             )
-            GPE = np.ascontiguousarray(
-                G0_half * np.exp(-NH_flat * _SIGMA_PE_CGS * Zd_arr),
-                dtype=np.float64,
-            )
-            GISRF = np.ascontiguousarray(
-                G0_half * np.exp(-NH_flat * _SIGMA_ISRF_CGS * Zd_arr),
-                dtype=np.float64,
-            )
-        else:
-            # chi_dust_flat is the dust-attenuated UV from RADMC-3D (Draine units).
-            # The C solver convention (radfield.cpp) is Gph = (G0/2) * attenuation.
-            # local_chi_factor controls whether 0.5 (default, one-sided flux) or
-            # 1.0 (local energy-density interpretation) is applied.
-            G0_scaled = local_chi_factor * chi_dust_flat
-            Gph[:, :] = G0_scaled[:, None]
-            GPE = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
-            GISRF = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
 
-        Gph[:, IPH_C] *= theta_c_flat
-        Gph[:, IPH_CO] *= theta_co_flat
-        Gph[:, IPH_H2] *= theta_h2_flat
+        # After N macro-updates: recompute columns + shielding from final y_state.
+        theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+            _compute_shielding_and_gph(
+                y_flat=y_state,
+                shielding_theta_mix=1.0,
+                is_first=True,
+                **_shielding_kw,
+            )
+        )
 
+        # Final equilibrium solve with shielding held fixed.
         result = _gow17.solve_batch_equilibrium(
-            y0=np.ascontiguousarray(y_guess, dtype=np.float64),
+            y0=np.ascontiguousarray(y_state, dtype=np.float64),
             nH=nH_flat,
             Tgas=T_flat,
             Tdust=Tdust_flat,
@@ -840,37 +1106,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             fSplusgr=fSplusgr,
             fSiplusgr=fSiplusgr,
             fCplusCR=fCplusCR,
-            co_sigma_d_per_H_ref=(float(sigma_d_per_H_ref) if enable_co_phase else 0.0),
-            co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
-            co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
-            co_F_DRAINE=(float(F_DRAINE) if enable_co_phase else 0.0),
-            co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
-            co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
-            co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
+            **_co_phase_kw,
             userJac=userJac,
             verbose=verbose,
         )
 
-        y_new = result["y"]
-        status_step = result["status"]
+        y_guess[:, :] = result["y"]
+        status_acc = np.maximum(status_acc, np.asarray(result["status"], dtype=np.int32))
 
-        status_acc = np.maximum(status_acc, np.asarray(status_step, dtype=np.int32))
-        if shielding_mix < 1.0:
-            y_guess[:, :] = shielding_mix * y_new + (1.0 - shielding_mix) * y_guess
-        else:
-            y_guess[:, :] = y_new
-
-        xCO_new = y_guess[:, I_CO]
-        xH2_new = y_guess[:, I_H2]
-
-        denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
-        denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
-        d_h2 = np.max(np.abs(xH2_new - xH2_old) / denom_h2)
-        d_co = np.max(np.abs(xCO_new - xCO_old) / denom_co)
-        d_h2_hist.append(float(d_h2))
-        d_co_hist.append(float(d_co))
-        if max(d_h2, d_co) <= shielding_reltol:
-            break
+    else:
+        raise ValueError(
+            f"gow17: unknown coupling_mode={coupling_mode!r}; "
+            "expected 'fixed_point' or 'astrochem'"
+        )
 
     n_shielding_iter = len(d_h2_hist)
 
@@ -957,11 +1205,17 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     }
 
     gow17_diag = {
+        "coupling_mode": coupling_mode,
         "shielding_iter": n_shielding_iter,
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
     }
+    if coupling_mode == "astrochem":
+        gow17_diag["astrochem_t_targets"] = (t_targets / _YR_TO_S).tolist()
+        gow17_diag["bad_status_hist"] = bad_status_hist
     gow17_diag.update(budget_diag)
+
+    rad.gow17_convergence = gow17_diag
 
     fields = {
         "co_ice": nco_ice,
