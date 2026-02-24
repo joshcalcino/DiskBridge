@@ -966,48 +966,20 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         N = astrochem_n_updates
         t_end_s = astrochem_t_end_yr * _YR_TO_S
 
-        # Geometric schedule: small early steps, larger late steps.
-        # t_targets[i] = t_end * (r^(i+1) - 1) / (r^N - 1) for i=0..N-1
-        # so t_targets[0] > 0 and t_targets[N-1] = t_end.
-        if N <= 1:
-            t_targets = np.array([t_end_s], dtype=np.float64)
-        else:
-            r = 10.0 ** (1.0 / (N - 1))
-            k = np.arange(1, N + 1, dtype=np.float64)
-            t_targets = t_end_s * (r**k - 1.0) / (r**N - 1.0)
-            # Ensure last target is exactly t_end_s.
-            t_targets[-1] = t_end_s
-
-        # Per-step durations.
-        dt = np.empty(N, dtype=np.float64)
-        dt[0] = t_targets[0]
-        dt[1:] = np.diff(t_targets)
-
-        y_state = y_guess.copy()
-        theta_h2_flat = np.ones(ncells, dtype=np.float64)
-        theta_co_flat = np.ones(ncells, dtype=np.float64)
-        theta_c_flat = np.ones(ncells, dtype=np.float64)
-
-        for k_step in range(N):
-            xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
-            xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
-
-            # Step 1+2: compute columns and shielding from current y_state.
+        if N <= 0:
+            # N=0: compute shielding once from y_guess, then go straight
+            # to the final equilibrium solve (no pseudo-time integration).
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
-                    y_flat=y_state,
-                    theta_h2_prev=theta_h2_flat if k_step > 0 else None,
-                    theta_co_prev=theta_co_flat if k_step > 0 else None,
-                    theta_c_prev=theta_c_flat if k_step > 0 else None,
-                    shielding_theta_mix=shielding_theta_mix,
-                    is_first=(k_step == 0),
+                    y_flat=y_guess,
+                    shielding_theta_mix=1.0,
+                    is_first=True,
                     **_shielding_kw,
                 )
             )
 
-            # Step 3: integrate chemistry forward by dt[k_step].
-            result = _gow17.solve_batch_time(
-                y0=np.ascontiguousarray(y_state, dtype=np.float64),
+            result = _gow17.solve_batch_equilibrium(
+                y0=np.ascontiguousarray(y_guess, dtype=np.float64),
                 nH=nH_flat,
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
@@ -1021,7 +993,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 abstol=abstol,
                 mxsteps=mxsteps,
                 maxord=maxord,
-                t_end=float(dt[k_step]),
+                tolfac=tolfac,
+                tmin=tmin,
+                tmax=tmax,
                 const_temp=const_temp,
                 gradv=gradv_arr,
                 Leff_CO_max=Leff_CO_max_arr,
@@ -1039,80 +1013,159 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 verbose=verbose,
             )
 
-            y_state[:, :] = result["y"]
-            status_step = np.asarray(result["status"], dtype=np.int32)
-            status_acc = np.maximum(status_acc, status_step)
+            y_guess[:, :] = result["y"]
+            status_acc = np.maximum(status_acc, np.asarray(result["status"], dtype=np.int32))
 
-            # Step 4: convergence diagnostics.
-            xCO_new = y_state[:, I_CO]
-            xH2_new = y_state[:, I_H2]
+        else:
+            # N >= 1: pseudo-time integration with N macro-updates.
 
-            denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
-            denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
-            d_h2 = float(np.max(np.abs(xH2_new - xH2_old) / denom_h2))
-            d_co = float(np.max(np.abs(xCO_new - xCO_old) / denom_co))
-            d_h2_hist.append(d_h2)
-            d_co_hist.append(d_co)
-            bad_status_hist.append(int(np.sum(status_step != 0)))
+            # Geometric schedule: small early steps, larger late steps.
+            # t_targets[i] = t_end * (r^(i+1) - 1) / (r^N - 1) for i=0..N-1
+            # so t_targets[0] > 0 and t_targets[N-1] = t_end.
+            if N <= 1:
+                t_targets = np.array([t_end_s], dtype=np.float64)
+            else:
+                r = 10.0 ** (1.0 / (N - 1))
+                k = np.arange(1, N + 1, dtype=np.float64)
+                t_targets = t_end_s * (r**k - 1.0) / (r**N - 1.0)
+                # Ensure last target is exactly t_end_s.
+                t_targets[-1] = t_end_s
 
-            logger.info(
-                "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
-                "d_h2=%.3e, d_co=%.3e, bad=%d",
-                k_step + 1, N,
-                float(t_targets[k_step] / _YR_TO_S),
-                float(dt[k_step] / _YR_TO_S),
-                d_h2, d_co,
-                bad_status_hist[-1],
+            # Per-step durations.
+            dt = np.empty(N, dtype=np.float64)
+            dt[0] = t_targets[0]
+            dt[1:] = np.diff(t_targets)
+
+            y_state = y_guess.copy()
+            theta_h2_flat = np.ones(ncells, dtype=np.float64)
+            theta_co_flat = np.ones(ncells, dtype=np.float64)
+            theta_c_flat = np.ones(ncells, dtype=np.float64)
+
+            for k_step in range(N):
+                xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
+                xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
+
+                # Step 1+2: compute columns and shielding from current y_state.
+                theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+                    _compute_shielding_and_gph(
+                        y_flat=y_state,
+                        theta_h2_prev=theta_h2_flat if k_step > 0 else None,
+                        theta_co_prev=theta_co_flat if k_step > 0 else None,
+                        theta_c_prev=theta_c_flat if k_step > 0 else None,
+                        shielding_theta_mix=shielding_theta_mix,
+                        is_first=(k_step == 0),
+                        **_shielding_kw,
+                    )
+                )
+
+                # Step 3: integrate chemistry forward by dt[k_step].
+                result = _gow17.solve_batch_time(
+                    y0=np.ascontiguousarray(y_state, dtype=np.float64),
+                    nH=nH_flat,
+                    Tgas=T_flat,
+                    Tdust=Tdust_flat,
+                    Zd=Zd_arr,
+                    Zg=Zg_arr,
+                    ion_rate=ion_rate_arr,
+                    GPE=GPE,
+                    GISRF=GISRF,
+                    Gph=Gph,
+                    reltol=reltol,
+                    abstol=abstol,
+                    mxsteps=mxsteps,
+                    maxord=maxord,
+                    t_end=float(dt[k_step]),
+                    const_temp=const_temp,
+                    gradv=gradv_arr,
+                    Leff_CO_max=Leff_CO_max_arr,
+                    isDust_cooling=isDust_cooling,
+                    isCoolingCOThin=isCoolingCOThin,
+                    fH2gr=fH2gr,
+                    fHplusgr=fHplusgr,
+                    fCplusgr=fCplusgr,
+                    fHeplusgr=fHeplusgr,
+                    fSplusgr=fSplusgr,
+                    fSiplusgr=fSiplusgr,
+                    fCplusCR=fCplusCR,
+                    **_co_phase_kw,
+                    userJac=userJac,
+                    verbose=verbose,
+                )
+
+                y_state[:, :] = result["y"]
+                status_step = np.asarray(result["status"], dtype=np.int32)
+                status_acc = np.maximum(status_acc, status_step)
+
+                # Step 4: convergence diagnostics.
+                xCO_new = y_state[:, I_CO]
+                xH2_new = y_state[:, I_H2]
+
+                denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
+                denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
+                d_h2 = float(np.max(np.abs(xH2_new - xH2_old) / denom_h2))
+                d_co = float(np.max(np.abs(xCO_new - xCO_old) / denom_co))
+                d_h2_hist.append(d_h2)
+                d_co_hist.append(d_co)
+                bad_status_hist.append(int(np.sum(status_step != 0)))
+
+                logger.info(
+                    "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
+                    "d_h2=%.3e, d_co=%.3e, bad=%d",
+                    k_step + 1, N,
+                    float(t_targets[k_step] / _YR_TO_S),
+                    float(dt[k_step] / _YR_TO_S),
+                    d_h2, d_co,
+                    bad_status_hist[-1],
+                )
+
+            # After N macro-updates: recompute columns + shielding from final y_state.
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+                _compute_shielding_and_gph(
+                    y_flat=y_state,
+                    shielding_theta_mix=1.0,
+                    is_first=True,
+                    **_shielding_kw,
+                )
             )
 
-        # After N macro-updates: recompute columns + shielding from final y_state.
-        theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
-            _compute_shielding_and_gph(
-                y_flat=y_state,
-                shielding_theta_mix=1.0,
-                is_first=True,
-                **_shielding_kw,
+            # Final equilibrium solve with shielding held fixed.
+            result = _gow17.solve_batch_equilibrium(
+                y0=np.ascontiguousarray(y_state, dtype=np.float64),
+                nH=nH_flat,
+                Tgas=T_flat,
+                Tdust=Tdust_flat,
+                Zd=Zd_arr,
+                Zg=Zg_arr,
+                ion_rate=ion_rate_arr,
+                GPE=GPE,
+                GISRF=GISRF,
+                Gph=Gph,
+                reltol=reltol,
+                abstol=abstol,
+                mxsteps=mxsteps,
+                maxord=maxord,
+                tolfac=tolfac,
+                tmin=tmin,
+                tmax=tmax,
+                const_temp=const_temp,
+                gradv=gradv_arr,
+                Leff_CO_max=Leff_CO_max_arr,
+                isDust_cooling=isDust_cooling,
+                isCoolingCOThin=isCoolingCOThin,
+                fH2gr=fH2gr,
+                fHplusgr=fHplusgr,
+                fCplusgr=fCplusgr,
+                fHeplusgr=fHeplusgr,
+                fSplusgr=fSplusgr,
+                fSiplusgr=fSiplusgr,
+                fCplusCR=fCplusCR,
+                **_co_phase_kw,
+                userJac=userJac,
+                verbose=verbose,
             )
-        )
 
-        # Final equilibrium solve with shielding held fixed.
-        result = _gow17.solve_batch_equilibrium(
-            y0=np.ascontiguousarray(y_state, dtype=np.float64),
-            nH=nH_flat,
-            Tgas=T_flat,
-            Tdust=Tdust_flat,
-            Zd=Zd_arr,
-            Zg=Zg_arr,
-            ion_rate=ion_rate_arr,
-            GPE=GPE,
-            GISRF=GISRF,
-            Gph=Gph,
-            reltol=reltol,
-            abstol=abstol,
-            mxsteps=mxsteps,
-            maxord=maxord,
-            tolfac=tolfac,
-            tmin=tmin,
-            tmax=tmax,
-            const_temp=const_temp,
-            gradv=gradv_arr,
-            Leff_CO_max=Leff_CO_max_arr,
-            isDust_cooling=isDust_cooling,
-            isCoolingCOThin=isCoolingCOThin,
-            fH2gr=fH2gr,
-            fHplusgr=fHplusgr,
-            fCplusgr=fCplusgr,
-            fHeplusgr=fHeplusgr,
-            fSplusgr=fSplusgr,
-            fSiplusgr=fSiplusgr,
-            fCplusCR=fCplusCR,
-            **_co_phase_kw,
-            userJac=userJac,
-            verbose=verbose,
-        )
-
-        y_guess[:, :] = result["y"]
-        status_acc = np.maximum(status_acc, np.asarray(result["status"], dtype=np.int32))
+            y_guess[:, :] = result["y"]
+            status_acc = np.maximum(status_acc, np.asarray(result["status"], dtype=np.int32))
 
     else:
         raise ValueError(
@@ -1211,7 +1264,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
     }
     if coupling_mode == "astrochem":
-        gow17_diag["astrochem_t_targets"] = (t_targets / _YR_TO_S).tolist()
+        if astrochem_n_updates > 0:
+            gow17_diag["astrochem_t_targets"] = (t_targets / _YR_TO_S).tolist()
+        else:
+            gow17_diag["astrochem_t_targets"] = []
         gow17_diag["bad_status_hist"] = bad_status_hist
     gow17_diag.update(budget_diag)
 
