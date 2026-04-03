@@ -381,14 +381,83 @@ def _plot_compare_fixed_vs_astrochem_convergence(
     return p
 
 
+def _make_sweep_gifs_from_data(
+    sweep_dir: Path,
+    radm_list: List[RadModel],
+    y_out_list: List[np.ndarray],
+    i_values: List[int],
+    duration_ms: int = 800,
+) -> None:
+    """Build per-figure-type GIF animations directly from sweep data.
+
+    No intermediate PNG files are written.  Requires Pillow.
+    """
+    import io
+
+    import matplotlib.pyplot as plt
+    from PIL import Image
+
+    fig_types = [
+        "diag_fields_midplane",
+        "diag_species_midplane",
+        "diag_fields_meridional",
+        "diag_radial_chi_av",
+        "diag_radial_temperatures",
+        "diag_radial_species",
+    ]
+
+    frames: Dict[str, List[Image.Image]] = {ft: [] for ft in fig_types}
+
+    N = len(i_values)
+    for idx, (radm, y_out, i) in enumerate(zip(radm_list, y_out_list, i_values)):
+        figs = _plot_diagnostics(
+            outdir=sweep_dir,
+            suffix=f"astrochem_i_{i}",
+            radm=radm,
+            y_out=y_out,
+            return_figs=True,
+            frame_label=f"{idx + 1}/{N}",
+        )
+        assert figs is not None
+        for ft in fig_types:
+            buf = io.BytesIO()
+            figs[ft].savefig(buf, format="png")
+            plt.close(figs[ft])
+            buf.seek(0)
+            frames[ft].append(Image.open(buf).copy())
+
+    for ft in fig_types:
+        if len(frames[ft]) < 2:
+            continue
+        gif_path = sweep_dir / f"{ft}_sweep.gif"
+        frames[ft][0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[ft][1:],
+            loop=0,
+            duration=duration_ms,
+        )
+        print(f"Saved GIF: {gif_path.name}")
+
+
 def _plot_diagnostics(
     *,
     outdir: Path,
     suffix: str,
     radm: RadModel,
     y_out: np.ndarray,
-) -> None:
-    """Plot 2-D diagnostic slices and radial profiles."""
+    return_figs: bool = False,
+    frame_label: Optional[str] = None,
+) -> Optional[Dict[str, "plt.Figure"]]:
+    """Plot 2-D diagnostic slices and radial profiles.
+
+    When *return_figs* is True the figures are returned in a dict keyed by
+    figure-type name and are *not* saved to disk or closed.  When False
+    (default) they are saved to *outdir* and closed.
+
+    *frame_label* (e.g. ``"3/9"``) is stamped in the bottom-right corner of
+    every figure when provided.
+    """
     import matplotlib.pyplot as plt
 
     mesh = radm.model.mesh
@@ -408,6 +477,11 @@ def _plot_diagnostics(
     def log10_field(arr: np.ndarray) -> np.ndarray:
         return _safe_log10(np.asarray(arr, dtype=float))
 
+    def _stamp_label(fig: "plt.Figure") -> None:
+        if frame_label is not None:
+            fig.text(0.98, 0.02, frame_label, transform=fig.transFigure,
+                     ha="right", va="bottom", fontsize=10, color="0.4")
+
     chi = np.asarray(radm.chi.to("dimensionless").magnitude, dtype=float)
     av = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float)
     tgas = np.asarray(radm.gas_temperature.to("K").magnitude, dtype=float)
@@ -421,7 +495,10 @@ def _plot_diagnostics(
         "HCO+": y_out[..., I_HCOP],
     }
 
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not return_figs:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    figs: Dict[str, "plt.Figure"] = {}
 
     fields_main: Dict[str, Tuple[np.ndarray, str, str]] = {
         "log10_chi": (log10_field(chi), "r-phi @ midplane", "log10 chi"),
@@ -450,8 +527,12 @@ def _plot_diagnostics(
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=cbar_label)
 
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_fields_midplane_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_fields_midplane"] = fig
+    else:
+        fig.savefig(outdir / f"diag_fields_midplane_{suffix}.png")
+        plt.close(fig)
 
     fig, axes = plt.subplots(2, 3, figsize=(12.4, 7.2), dpi=220)
     axes = np.asarray(axes).reshape(-1)
@@ -476,8 +557,12 @@ def _plot_diagnostics(
         ax.axis("off")
 
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_species_midplane_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_species_midplane"] = fig
+    else:
+        fig.savefig(outdir / f"diag_species_midplane_{suffix}.png")
+        plt.close(fig)
 
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0), dpi=220)
     axes = np.asarray(axes)
@@ -499,8 +584,12 @@ def _plot_diagnostics(
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=cbar_label)
 
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_fields_meridional_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_fields_meridional"] = fig
+    else:
+        fig.savefig(outdir / f"diag_fields_meridional_{suffix}.png")
+        plt.close(fig)
 
     r_edges_cm = mesh.edges("r").to("cm").magnitude
     theta_edges = mesh.edges("theta").to("radian").magnitude
@@ -533,8 +622,12 @@ def _plot_diagnostics(
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_radial_chi_av_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_radial_chi_av"] = fig
+    else:
+        fig.savefig(outdir / f"diag_radial_chi_av_{suffix}.png")
+        plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
     ax.plot(r_au, prof["Tgas"], lw=1.2, label="Tgas")
@@ -544,8 +637,12 @@ def _plot_diagnostics(
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_radial_temperatures_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_radial_temperatures"] = fig
+    else:
+        fig.savefig(outdir / f"diag_radial_temperatures_{suffix}.png")
+        plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.6), dpi=220)
     for name in ["H2", "CO", "C+"]:
@@ -556,8 +653,14 @@ def _plot_diagnostics(
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(outdir / f"diag_radial_species_{suffix}.png")
-    plt.close(fig)
+    _stamp_label(fig)
+    if return_figs:
+        figs["diag_radial_species"] = fig
+        return figs
+    else:
+        fig.savefig(outdir / f"diag_radial_species_{suffix}.png")
+        plt.close(fig)
+    return None
 
 
 # ============================================================================
@@ -905,7 +1008,8 @@ def run_gow17_internal_3d_healpix_sphere(
     coupling_mode: str,
     astrochem_n_updates: int,
     astrochem_t_end_yr: float,
-) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray, Dict, np.ndarray]:
+    skip_diagnostics: bool = False,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray, Dict, np.ndarray, RadModel]:
 
     NH_ref = np.asarray(ref.NH, dtype=float)
     NH_max = float(np.max(NH_ref))
@@ -1070,13 +1174,14 @@ def run_gow17_internal_3d_healpix_sphere(
     y_out = np.asarray(radm.gow17_y, dtype=float)
     Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float)
 
-    outdir = Path(diagnostic_outdir)
-    _plot_diagnostics(
-        outdir=outdir,
-        suffix=str(diagnostic_suffix),
-        radm=radm,
-        y_out=y_out,
-    )
+    if not skip_diagnostics:
+        outdir = Path(diagnostic_outdir)
+        _plot_diagnostics(
+            outdir=outdir,
+            suffix=str(diagnostic_suffix),
+            radm=radm,
+            y_out=y_out,
+        )
 
     Av_samp = Av_out.reshape(-1)
     abd: Dict[str, np.ndarray] = {}
@@ -1132,7 +1237,7 @@ def run_gow17_internal_3d_healpix_sphere(
         "gow17_diagnostics": gow17_diag,
     }
 
-    return np.asarray(y_out, dtype=float), abd, np.asarray(ref.Av, dtype=float), info, Av_out
+    return np.asarray(y_out, dtype=float), abd, np.asarray(ref.Av, dtype=float), info, Av_out, radm
 
 
 def _save_convergence_json(
@@ -1244,16 +1349,15 @@ def _run_slab_reference(
     nH_cm3: float,
     chi0: float,
     xi_cr: float,
-    shielding_max_iter: int,
-    shielding_mix: float,
     const_temp: bool,
     nside: int,
 ) -> Dict[str, np.ndarray]:
     """Run 1-D slab reference with Gong+17 Appendix factors.
 
-    Uses the same parameters as the sphere run: ``chi_is_incident=True``
-    and ``Av = 2 * Av_perp`` (the doubling is already baked into
-    *Av_ref* from the sphere run).
+    Uses ``chi_is_incident=True`` and ``Av = 2 * Av_perp`` (the doubling
+    is already baked into *Av_ref* from the sphere run).  Shielding
+    iteration settings are chosen for 1-D convergence and are independent
+    of the 3-D sphere run parameters.
 
     Parameters
     ----------
@@ -1265,27 +1369,35 @@ def _run_slab_reference(
         Draine-field chi_0 parameter.
     xi_cr : float
         Cosmic-ray ionisation rate [1/s].
-    shielding_max_iter : int
-        Max shielding iterations.
 
     Returns
     -------
     dict
         Keys: ``Av``, ``xH2``, ``xCO``, ``xCplus``.
     """
+    shielding_max_iter = 200
+    shielding_mix = 0.5
     units = diskbridge.units
     m_H = units("m_H")
     chi0_incident = 2.0 * float(chi0)
 
-    ncells = int(Av_ref.size)
-    NH_flat = Av_ref * 1.87e21
+    # Build a dense log-spaced Av grid for the internal calculation.
+    # The sphere's 64 shell-average bins are too coarse and linearly spaced,
+    # giving almost no resolution near the surface where PDR transitions occur.
+    # After running, results are interpolated back to Av_ref for plotting.
+    N_slab = 500
+    Av_max = float(np.max(Av_ref))
+    Av_lo = max(float(np.min(Av_ref)), Av_max / N_slab)
+    Av_dense = np.logspace(np.log10(Av_lo), np.log10(Av_max), N_slab)
 
-    dr = np.empty(ncells, dtype=float)
+    NH_flat = Av_dense * 1.87e21
+
+    dr = np.empty(N_slab, dtype=float)
     dr[0] = NH_flat[0] / float(nH_cm3) if nH_cm3 > 0 else 1.0
     dr[1:] = np.diff(NH_flat) / float(nH_cm3)
     dr = np.maximum(dr, 1.0)
 
-    r_edges = np.zeros(ncells + 1, dtype=float)
+    r_edges = np.zeros(N_slab + 1, dtype=float)
     r_edges[1:] = np.cumsum(dr)
 
     r_axis = Axis(edges=Quantity(r_edges, "cm"))
@@ -1314,7 +1426,7 @@ def _run_slab_reference(
     radm = RadModel(model, model_dir=".")
 
     radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
-    radm.Av = Quantity(Av_ref.reshape(shape), "dimensionless")
+    radm.Av = Quantity(Av_dense.reshape(shape), "dimensionless")
     radm.gas_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
     radm.dust_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
 
@@ -1366,11 +1478,13 @@ def _run_slab_reference(
     y_slab = np.asarray(radm.gow17_y, dtype=float)
     Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float).ravel()
 
+    # Interpolate dense-grid results back onto the sphere's Av bins for plotting.
+    Av_ref_arr = np.asarray(Av_ref, dtype=float)
     return {
-        "Av": Av_out,
-        "xH2": y_slab[..., I_H2].ravel(),
-        "xCO": y_slab[..., I_CO].ravel(),
-        "xCplus": y_slab[..., I_CP].ravel(),
+        "Av": Av_ref_arr,
+        "xH2": np.interp(Av_ref_arr, Av_out, y_slab[..., I_H2].ravel()),
+        "xCO": np.interp(Av_ref_arr, Av_out, y_slab[..., I_CO].ravel()),
+        "xCplus": np.interp(Av_ref_arr, Av_out, y_slab[..., I_CP].ravel()),
     }
 
 
@@ -1383,8 +1497,6 @@ def _postprocess_run(
     nH_cm3: float,
     chi0: float,
     xi_cr: float,
-    shielding_max_iter: int,
-    shielding_mix: float,
     const_temp: bool,
     nside: int,
     suffix: str,
@@ -1398,7 +1510,7 @@ def _postprocess_run(
     conv_json_name = f"gow17_convergence{suffix}.json"
     conv_plot_name = f"gow17_convergence{suffix}.png"
     sphere_csv_name = f"sphere_profile{suffix}.csv"
-    overlay_name = f"sphere_vs_slab{suffix}.png"
+    overlay_name = f"3d_sphere{suffix}_vs_1d_slab_species_profiles.png"
 
     _save_convergence_json(outdir, diag, fname=conv_json_name)
     _plot_convergence(outdir=outdir, diag=diag, fname=conv_plot_name)
@@ -1415,8 +1527,6 @@ def _postprocess_run(
         nH_cm3=nH_cm3,
         chi0=chi0,
         xi_cr=xi_cr,
-        shielding_max_iter=shielding_max_iter,
-        shielding_mix=shielding_mix,
         const_temp=const_temp,
         nside=nside,
     )
@@ -1449,7 +1559,7 @@ def main() -> None:
     shielding_max_iter = 20
     shielding_mix = 0.2
     const_temp = True
-    nr = 128
+    nr = 256
     ntheta = 16
     nphi = 16
     nside = 4
@@ -1516,7 +1626,7 @@ def main() -> None:
     print("Run 1: fixed-point coupling (chi_is_incident=True)")
     print("=" * 60)
 
-    y_out_fp, abd_fp, Av_db_fp, info_fp, Av3d_fp = run_gow17_internal_3d_healpix_sphere(
+    y_out_fp, abd_fp, Av_db_fp, info_fp, Av3d_fp, _ = run_gow17_internal_3d_healpix_sphere(
         **{**_common_kw, "diagnostic_outdir": str(out_fixed), "diagnostic_suffix": diag_suffix_base, "coupling_mode": "fixed_point"},
     )
 
@@ -1542,8 +1652,6 @@ def main() -> None:
         nH_cm3=nH_val,
         chi0=chi0,
         xi_cr=xi_cr,
-        shielding_max_iter=shielding_max_iter,
-        shielding_mix=shielding_mix,
         const_temp=const_temp,
         nside=nside,
         suffix="",
@@ -1564,7 +1672,7 @@ def main() -> None:
     print("Run 2: AstroChem-style coupling (chi_is_incident=True)")
     print("=" * 60)
 
-    y_out_ac, abd_ac, Av_db_ac, info_ac, Av3d_ac = run_gow17_internal_3d_healpix_sphere(
+    y_out_ac, abd_ac, Av_db_ac, info_ac, Av3d_ac, _ = run_gow17_internal_3d_healpix_sphere(
         **{**_common_kw, "diagnostic_outdir": str(out_astro), "diagnostic_suffix": diag_suffix_base, "coupling_mode": "astrochem", "astrochem_n_updates": 5, "astrochem_t_end_yr": 1.0e6},
     )
 
@@ -1587,8 +1695,6 @@ def main() -> None:
         nH_cm3=nH_val,
         chi0=chi0,
         xi_cr=xi_cr,
-        shielding_max_iter=shielding_max_iter,
-        shielding_mix=shielding_mix,
         const_temp=const_temp,
         nside=nside,
         suffix="",
@@ -1620,7 +1726,7 @@ def main() -> None:
         f"radmc3d_sphere_nH_{int(float(nH_val))}_nr_{int(nr)}_nt_{int(ntheta)}_np_{int(nphi)}"
     )
     diag_suffix_rt = f"radmc3d_{diag_suffix_base}"
-    y_out_m2, abd_m2, Av_db_m2, info_m2, Av3d_m2 = run_gow17_internal_3d_healpix_sphere(
+    y_out_m2, abd_m2, Av_db_m2, info_m2, Av3d_m2, _ = run_gow17_internal_3d_healpix_sphere(
         **{
             **_common_kw,
             "use_radmc3d_chi": True,
@@ -1678,8 +1784,6 @@ def main() -> None:
         nH_cm3=nH_val,
         chi0=chi0,
         xi_cr=xi_cr,
-        shielding_max_iter=shielding_max_iter,
-        shielding_mix=shielding_mix,
         const_temp=const_temp,
         nside=nside,
         suffix="_radmc3d",
@@ -1698,9 +1802,9 @@ def main() -> None:
     N_max = 8
     i_values: List[int] = list(range(N_max + 1))
 
-    # Reference (i=N_max)
-    y_refN, _abdN, _AvdbN, info_refN, Av3d_refN = run_gow17_internal_3d_healpix_sphere(
-        **{**_common_kw, "diagnostic_outdir": str(sweep_dir), "diagnostic_suffix": f"astrochem_i_{N_max}", "coupling_mode": "astrochem", "astrochem_n_updates": int(N_max), "astrochem_t_end_yr": 1.0e6},
+    # Reference (i=N_max) — diagnostics suppressed; radm collected for GIF
+    y_refN, _abdN, _AvdbN, info_refN, Av3d_refN, _ = run_gow17_internal_3d_healpix_sphere(
+        **{**_common_kw, "diagnostic_outdir": str(sweep_dir), "diagnostic_suffix": f"astrochem_i_{N_max}", "coupling_mode": "astrochem", "astrochem_n_updates": int(N_max), "astrochem_t_end_yr": 1.0e6, "skip_diagnostics": True},
     )
     prof_refN = _shell_average_sphere(y_out=y_refN, Av_3d=Av3d_refN, nbins=64)
 
@@ -1713,6 +1817,9 @@ def main() -> None:
     rel_err_Cplus_vs_fp: List[float] = []
     rel_err_max_vs_fp: List[float] = []
 
+    sweep_radms: List[RadModel] = []
+    sweep_y_outs: List[np.ndarray] = []
+
     eps = float(EPS_CHI)
 
     def _rel_err(a: np.ndarray, b: np.ndarray) -> float:
@@ -1722,9 +1829,11 @@ def main() -> None:
         return float(np.max(np.abs(a - b) / denom))
 
     for i in i_values:
-        y_i, _abdi, _Avdbi, info_i, Av3d_i = run_gow17_internal_3d_healpix_sphere(
-            **{**_common_kw, "diagnostic_outdir": str(sweep_dir), "diagnostic_suffix": f"astrochem_i_{i}", "coupling_mode": "astrochem", "astrochem_n_updates": int(i), "astrochem_t_end_yr": 1.0e6},
+        y_i, _abdi, _Avdbi, info_i, Av3d_i, radm_i = run_gow17_internal_3d_healpix_sphere(
+            **{**_common_kw, "diagnostic_outdir": str(sweep_dir), "diagnostic_suffix": f"astrochem_i_{i}", "coupling_mode": "astrochem", "astrochem_n_updates": int(i), "astrochem_t_end_yr": 1.0e6, "skip_diagnostics": True},
         )
+        sweep_radms.append(radm_i)
+        sweep_y_outs.append(y_i)
         prof_i = _shell_average_sphere(y_out=y_i, Av_3d=Av3d_i, nbins=64)
 
         eH2 = _rel_err(prof_i["xH2"], prof_refN["xH2"])
@@ -1757,6 +1866,7 @@ def main() -> None:
         "reference": _to_jsonable(info_refN.get("gow17_diagnostics", {})),
     }
     (sweep_dir / "astrochem_sweep.json").write_text(json.dumps(sweep_json, indent=2) + "\n")
+    _make_sweep_gifs_from_data(sweep_dir, sweep_radms, sweep_y_outs, i_values)
     _plot_compare_fixed_vs_astrochem_convergence(
         outdir=sweep_dir,
         fname="compare_fixed_vs_astrochem_convergence.png",
@@ -1780,9 +1890,9 @@ def main() -> None:
         sphere2=sphere_m2,
         label1="analytic",
         label2="RADMC-3D",
-        fname="mode1_vs_radmc3d.png",
+        fname="analytic_vs_radmc3d_species_profiles.png",
     )
-    print(f"\nSaved: mode1_vs_radmc3d.png")
+    print(f"\nSaved: analytic_vs_radmc3d_species_profiles.png")
     print("Done.")
 
 
