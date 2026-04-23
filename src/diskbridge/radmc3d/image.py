@@ -1192,6 +1192,35 @@ class RadImage:
         sanitized = sanitized.strip('_')
         
         return sanitized
+
+    def _ensure_repo_moldata_file(self, molecule: str) -> Path:
+        """Ensure the shared LAMDA file exists under the repo data directory."""
+        moldata_dir = REPO_ROOT / "data" / "moldata"
+        moldata_dir.mkdir(parents=True, exist_ok=True)
+
+        local_dat = moldata_dir / f"{molecule}.dat"
+        if local_dat.exists():
+            return local_dat
+
+        logger.info(
+            "Molecule data not found in repo cache, downloading %s to %s...",
+            molecule,
+            local_dat,
+        )
+
+        import urllib.request
+
+        try:
+            url = f'https://home.strw.leidenuniv.nl/~moldata/datafiles/{molecule}.dat'
+            urllib.request.urlretrieve(url, local_dat)
+            logger.info("Downloaded shared moldata file %s", local_dat)
+        except Exception as e:
+            logger.error(f"Failed to download molecule data: {e}")
+            raise RuntimeError(
+                f"data/moldata/{molecule}.dat not found and download failed"
+            ) from e
+
+        return local_dat
     
     def _ensure_molecule_file(self, molecule: str) -> None:
         """Ensure molecule data file exists, download if necessary.
@@ -1207,25 +1236,10 @@ class RadImage:
         mol_file = self.inputs_dir / f'molecule_{molecule}.inp'
         if mol_file.exists():
             return
-        
-        local_moldata_dir = REPO_ROOT / "data" / "moldata"
-        local_dat = local_moldata_dir / f"{molecule}.dat"
-        if local_dat.exists():
-            shutil.copyfile(local_dat, mol_file)
-            logger.info(f"Copied local moldata file {local_dat} to {mol_file}")
-            return
 
-        logger.info(f"Molecule file not found, attempting to download {molecule}...")
-        
-        # Try to download from LAMDA
-        import urllib.request
-        try:
-            url = f'https://home.strw.leidenuniv.nl/~moldata/datafiles/{molecule}.dat'
-            urllib.request.urlretrieve(url, mol_file)
-            logger.info(f"Downloaded molecule_{molecule}.inp from LAMDA to {mol_file}")
-        except Exception as e:
-            logger.error(f"Failed to download molecule data: {e}")
-            raise RuntimeError(f"molecule_{molecule}.inp not found and download failed")
+        local_dat = self._ensure_repo_moldata_file(molecule)
+        shutil.copyfile(local_dat, mol_file)
+        logger.info(f"Copied local moldata file {local_dat} to {mol_file}")
     
     def _ensure_gas_velocity(self) -> None:
         """Ensure gas velocity file exists, create if necessary."""
