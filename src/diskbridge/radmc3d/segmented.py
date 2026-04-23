@@ -13,7 +13,10 @@ from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
 
-from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile
+from diskbridge.model.profiles import (
+    compute_volume_weighted_mean_radial_profile,
+    find_r_split,
+)
 from .wavelengths import build_mcmono_wavelengths
 
 
@@ -308,7 +311,8 @@ class SegmentedRadRunner:
                     r_edges_au=r_edges_au,
                     chi_profile=chi_profile,
                     T_profile=T_profile,
-                    tol=tol,
+                    tol_chi=tol,
+                    tol_T=tol,
                     window_fraction=window_fraction,
                     r_clip_min_au=float(r_clip_min_au),
                 )
@@ -441,116 +445,3 @@ class SegmentedRadRunner:
             'temperature': merged_T,
             'chi': merged_chi,
         }
-
-
-
-def find_r_split(
-    r_au: np.ndarray,
-    r_edges_au: np.ndarray,
-    chi_profile: np.ndarray,
-    T_profile: np.ndarray,
-    tol: float = 0.01,  
-    window_fraction: float = 0.1,
-    r_clip_min_au: float = 1.0,
-) -> Tuple[float, dict]:
-    nr = len(r_au)
-    r_max = r_au[-1]
-    r_min = r_au[0]
-
-    logger.info(
-        "find_r_split: nr=%d r_min_au=%.6g r_max_au=%.6g tol=%.6g window_fraction=%.6g r_clip_min_au=%.6g"
-        % (int(nr), float(r_min), float(r_max), float(tol), float(window_fraction), float(r_clip_min_au))
-    )
-
-    window_r_min = r_max - window_fraction * (r_max - r_min)
-    window_mask = r_au >= window_r_min
-
-    if not np.any(window_mask):
-        logger.warning(
-            "find_r_split: asymptote window empty (window_r_min=%.6g AU)" % float(window_r_min)
-        )
-        raise ValueError(
-            f"Asymptote window is empty (window_r_min={window_r_min:.2f} AU)"
-        )
-
-    logger.info(
-        "find_r_split: asymptote window_r_min=%.6g AU n_window=%d" % (float(window_r_min), int(np.sum(window_mask)))
-    )
-
-    chi_asymptote = float(np.mean(chi_profile[window_mask]))
-    T_asymptote = float(np.mean(T_profile[window_mask]))
-
-    logger.info(
-        "find_r_split: chi_asymptote=%.6g T_asymptote=%.6g" % (float(chi_asymptote), float(T_asymptote))
-    )
-
-    if chi_asymptote <= 0:
-        logger.warning("find_r_split: invalid chi_asymptote=%.6g" % float(chi_asymptote))
-        raise ValueError(f"Invalid chi_asymptote={chi_asymptote}")
-    if T_asymptote <= 0:
-        logger.warning("find_r_split: invalid T_asymptote=%.6g" % float(T_asymptote))
-        raise ValueError(f"Invalid T_asymptote={T_asymptote}")
-
-    chi_dev = np.abs(chi_profile - chi_asymptote) / chi_asymptote
-    T_dev = np.abs(T_profile - T_asymptote) / T_asymptote
-
-    within_tol = (chi_dev <= tol) & (T_dev <= tol)
-
-    n_within = int(np.sum(within_tol))
-    n_outer_ok = 0
-    for j in range(nr - 1, -1, -1):
-        if within_tol[j]:
-            n_outer_ok += 1
-        else:
-            break
-    outer_ok_start_idx = int(nr - n_outer_ok) if n_outer_ok > 0 else -1
-    logger.info(
-        "find_r_split: within_tol_count=%d outer_contiguous_within_tol=%d outer_ok_start_idx=%d"
-        % (int(n_within), int(n_outer_ok), int(outer_ok_start_idx))
-    )
-
-    r_split_idx = None
-    for i in range(nr - 2, -1, -1):
-        if within_tol[i]:
-            r_split_idx = i
-        else:
-            break
-
-    if r_split_idx is None:
-        for i in range(nr - 1, -1, -1):
-            if not within_tol[i]:
-                r_split_idx = i + 1
-                break
-        if r_split_idx is None or r_split_idx >= nr:
-            logger.warning(
-                "find_r_split: profiles never reach asymptote within tol=%.6g (window_fraction=%.6g)"
-                % (float(tol), float(window_fraction))
-            )
-            raise ValueError("Could not find valid R_split: profiles never reach asymptote")
-
-    r_split_au = float(r_edges_au[r_split_idx])
-
-    logger.info(
-        "find_r_split: r_split_idx=%d r_split_au=%.6g chi_dev_at_split=%.6g T_dev_at_split=%.6g"
-        % (int(r_split_idx), float(r_split_au), float(chi_dev[r_split_idx]), float(T_dev[r_split_idx]))
-    )
-
-    if r_split_au < r_clip_min_au:
-        logger.warning(
-            "find_r_split: r_split_au=%.6g < r_clip_min_au=%.6g" % (float(r_split_au), float(r_clip_min_au))
-        )
-        raise ValueError(
-            f"R_split={r_split_au:.2f} AU < r_clip_min={r_clip_min_au:.2f} AU. "
-            "The stellar radiation dominates too far out for segmented RT."
-        )
-
-    info = {
-        'chi_asymptote': float(chi_asymptote),
-        'T_asymptote': float(T_asymptote),
-        'r_split_cell_idx': int(r_split_idx),
-        'window_r_min': float(window_r_min),
-        'chi_dev_at_split': float(chi_dev[r_split_idx]) if r_split_idx < nr else np.nan,
-        'T_dev_at_split': float(T_dev[r_split_idx]) if r_split_idx < nr else np.nan,
-    }
-
-    return r_split_au, info

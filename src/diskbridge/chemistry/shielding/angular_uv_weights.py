@@ -1,24 +1,27 @@
 """
 Directional UV weighting for HEALPix-based shielding averages.
 
-For each cell, builds a HEALPix map C_k representing the relative UV
-contribution from direction k:
+For each cell, builds a HEALPix map ``uv_total_contrib_k`` representing the
+relative UV contribution from direction ``k``:
 
 .. math::
 
-    C_k = C^{\\rm ext}_k + C^{\\star}_k + C^{\\rm iso}
+    uv\\_total\\_contrib_k =
+    uv\\_ext\\_contrib_k + uv\\_star\\_contrib_k + uv\\_iso\\_contrib_k
 
 Components
 ----------
-- **External direct**: :math:`C^{\\rm ext}_k = \\chi_{\\rm ext,0} \\exp(-\\tau^{\\rm ext}_k)`
+- **External direct**:
+  :math:`uv\\_ext\\_contrib_k = \\chi_{\\rm ext,0} \\exp(-\\tau^{\\rm ext}_k)`
   where :math:`\\tau^{\\rm ext}_k` is the dust UV optical depth along ray k
   to the domain boundary.
 
 - **Stellar direct** (point source):
-  :math:`C^{\\star}_{k} = N_{\\rm pix} \\chi^{\\star}_{\\rm dir} e^{-\\tau^\\star}`
-  in the single pixel k_star containing the star direction; zero elsewhere.
-  The :math:`N_{\\rm pix}` factor ensures the pixel-mean equals the correct
-  scalar stellar contribution independent of NSIDE.
+  :math:`uv\\_star\\_contrib_{k} = N_{\\rm pix} \\chi^{\\star}_{\\rm dir}
+  e^{-\\tau^\\star}` in the single pixel ``k_star`` containing the star
+  direction; zero elsewhere. The :math:`N_{\\rm pix}` factor ensures the
+  pixel-mean equals the correct scalar stellar contribution independent of
+  NSIDE.
 
 - **Isotropic** (RADMC residual):
   :math:`\\chi_{\\rm iso} = \\max(\\chi_{\\rm RADMC} - \\chi_{\\rm ext,dir}
@@ -29,7 +32,7 @@ Weights are then:
 
 .. math::
 
-    W_k = \\frac{C_k}{\\sum_j C_j}
+    W_k = \\frac{uv\\_total\\_contrib_k}{\\sum_j uv\\_total\\_contrib_j}
 
 Any per-ray shielding factor :math:`f_k` is averaged as
 :math:`\\langle f \\rangle = \\sum_k W_k f_k`.
@@ -233,8 +236,8 @@ def compute_uv_direction_weights_healpix(
         Cartesian cell center positions (cm).
     debug : dict
         Diagnostic arrays: chi_ext_dir, chi_star_dir_att, chi_iso,
-        chi_radmc_cand, tau_ext_rays, C_ext, C_star, C_iso, and
-        optionally tau_star, chi_star_unatt.
+        chi_radmc_cand, tau_ext_rays, uv_ext_contrib, uv_star_contrib,
+        uv_iso_contrib, and optionally tau_star, chi_star_unatt.
 
     Raises
     ------
@@ -290,12 +293,12 @@ def compute_uv_direction_weights_healpix(
     tau_ext_rays = compute_tau_uv_from_dust_columns(dust_cols, kext_uv, nbin=nbin)
 
     # -- 4. External direct component -----------------------------------------
-    C_ext = float(chi_ext0) * np.exp(-tau_ext_rays)  # (n_candidates, npix)
-    chi_ext_dir = C_ext.mean(axis=1)  # scalar per cell
+    uv_ext_contrib = float(chi_ext0) * np.exp(-tau_ext_rays)  # (n_candidates, npix)
+    chi_ext_dir = uv_ext_contrib.mean(axis=1)  # scalar per cell
 
     # -- 5. Stellar direct component ------------------------------------------
     chi_star_dir_att = np.zeros(n_candidates, dtype=np.float64)
-    C_star = np.zeros((n_candidates, npix), dtype=np.float64)
+    uv_star_contrib = np.zeros((n_candidates, npix), dtype=np.float64)
 
     debug: dict = {}
 
@@ -337,9 +340,10 @@ def compute_uv_direction_weights_healpix(
         star_dir_z = -cell_centers[:, 2] / r_cell
         k_star = hp.vec2pix(int(nside), star_dir_x, star_dir_y, star_dir_z)
 
-        # Vectorised injection: C_star[i, k_star[i]] = npix * chi_star_dir_att[i]
+        # Vectorised injection:
+        # uv_star_contrib[i, k_star[i]] = npix * chi_star_dir_att[i]
         idx_cells = np.arange(n_candidates)
-        C_star[idx_cells, k_star] = npix * chi_star_dir_att
+        uv_star_contrib[idx_cells, k_star] = npix * chi_star_dir_att
 
         debug["tau_star"] = tau_star
         debug["chi_star_unatt"] = chi_star_unatt
@@ -356,16 +360,18 @@ def compute_uv_direction_weights_healpix(
         candidate_idx[:, 0], candidate_idx[:, 1], candidate_idx[:, 2]
     ]
     chi_iso = np.maximum(chi_cand - chi_ext_dir - chi_star_dir_att, 0.0)
-    C_iso = np.broadcast_to(chi_iso[:, None], (n_candidates, npix)).copy()
+    uv_iso_contrib = np.broadcast_to(chi_iso[:, None], (n_candidates, npix)).copy()
 
     # -- 7. Build total and normalise to weights ------------------------------
-    C_total = C_ext + C_star + C_iso
-    sumC = C_total.sum(axis=1)  # (n_candidates,)
+    uv_total_contrib = uv_ext_contrib + uv_star_contrib + uv_iso_contrib
+    sum_uv_contrib = uv_total_contrib.sum(axis=1)  # (n_candidates,)
 
     uniform = 1.0 / float(npix)
-    mask_nonzero = sumC > 0.0
+    mask_nonzero = sum_uv_contrib > 0.0
     W_rays = np.full((n_candidates, npix), uniform, dtype=np.float64)
-    W_rays[mask_nonzero] = C_total[mask_nonzero] / sumC[mask_nonzero, None]
+    W_rays[mask_nonzero] = (
+        uv_total_contrib[mask_nonzero] / sum_uv_contrib[mask_nonzero, None]
+    )
 
     # -- 8. Diagnostics -------------------------------------------------------
     debug.update({
@@ -374,9 +380,10 @@ def compute_uv_direction_weights_healpix(
         "chi_iso": chi_iso,
         "chi_radmc_cand": chi_cand,
         "tau_ext_rays": tau_ext_rays,
-        "C_ext": C_ext,
-        "C_star": C_star,
-        "C_iso": C_iso,
+        "uv_ext_contrib": uv_ext_contrib,
+        "uv_star_contrib": uv_star_contrib,
+        "uv_iso_contrib": uv_iso_contrib,
+        "uv_total_contrib": uv_total_contrib,
     })
 
     logger.info(
