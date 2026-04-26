@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, get_type_hints
 from dataclasses import fields
 import os
-import shlex
 import shutil
 import subprocess
 import numpy as np
@@ -102,7 +101,6 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
     if not cmd:
         raise ValueError("RADMC-3D command list is empty")
 
-    use_shell = False
     if cmd[0] == 'radmc3d':
         exe_override = os.environ.get('RADMC3D_EXECUTABLE')
         if exe_override:
@@ -112,16 +110,14 @@ def run_radmc3d_command(cmd: list[str], model_dir: Path) -> tuple[int, str, str]
             if resolved is not None:
                 cmd = [resolved] + cmd[1:]
             else:
-                use_shell = True
-
-    popen_cmd: list[str] | str
-    if use_shell:
-        popen_cmd = ['bash', '-lc', shlex.join(cmd)]
-    else:
-        popen_cmd = cmd
+                raise FileNotFoundError(
+                    "Could not find the RADMC-3D executable. Either add `radmc3d` "
+                    "to PATH for Python subprocesses, or set RADMC3D_EXECUTABLE "
+                    "to the full executable path."
+                )
 
     process = subprocess.Popen(
-        popen_cmd,
+        cmd,
         cwd=str(model_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

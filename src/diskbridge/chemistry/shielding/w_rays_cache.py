@@ -32,6 +32,7 @@ import numpy as np
 
 import diskbridge
 from diskbridge._logging import logger
+from diskbridge._units import units
 from diskbridge.chemistry.shielding.angular_uv_weights import (
     compute_star_uv_luminosity,
     compute_uv_direction_weights_healpix,
@@ -51,6 +52,8 @@ def _build_cache_key(
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
     self_weight: float,
+    isotropic_outside_r_au: float | None,
+    outer_weight_mode: str | None,
 ) -> tuple:
     """Build a lightweight hashable key for W_rays invalidation.
 
@@ -77,8 +80,105 @@ def _build_cache_key(
     ``rad.W_rays`` explicitly when dust or chi_radmc changes (e.g. after a
     RADMC-3D rerun).
     """
-    return (int(nside), float(chi_ext0), float(star_uv_luminosity_erg_s),
-            float(self_weight))
+    return (
+        int(nside),
+        float(chi_ext0),
+        float(star_uv_luminosity_erg_s),
+        float(self_weight),
+        None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
+        None if outer_weight_mode is None else str(outer_weight_mode),
+    )
+
+
+def _apply_uniform_weights_outside_radius(
+    W_rays: np.ndarray,
+    cell_centers: np.ndarray,
+    *,
+    isotropic_outside_r_cm: float,
+) -> np.ndarray:
+    """Force uniform HEALPix weights outside a spherical radius."""
+    if W_rays.ndim != 2:
+        raise ValueError(f"W_rays must be 2-D, got shape {W_rays.shape}")
+    if cell_centers.shape != (W_rays.shape[0], 3):
+        raise ValueError(
+            f"cell_centers must have shape ({W_rays.shape[0]}, 3), got {cell_centers.shape}"
+        )
+
+    radii_cm = np.sqrt(np.sum(np.asarray(cell_centers, dtype=float) ** 2, axis=1))
+    outer_mask = radii_cm >= float(isotropic_outside_r_cm)
+    if not np.any(outer_mask):
+        return W_rays
+
+    W_out = np.asarray(W_rays, dtype=float).copy()
+    W_out[outer_mask, :] = 1.0 / float(W_out.shape[1])
+    return W_out
+
+
+def _apply_tau_weights_outside_radius(
+    W_rays: np.ndarray,
+    tau_ext_rays: np.ndarray,
+    cell_centers: np.ndarray,
+    *,
+    isotropic_outside_r_cm: float,
+) -> np.ndarray:
+    """Force boundary-tau directional weights outside a spherical radius."""
+    if W_rays.ndim != 2:
+        raise ValueError(f"W_rays must be 2-D, got shape {W_rays.shape}")
+    if tau_ext_rays.shape != W_rays.shape:
+        raise ValueError(
+            f"tau_ext_rays must match W_rays shape {W_rays.shape}, got {tau_ext_rays.shape}"
+        )
+    if cell_centers.shape != (W_rays.shape[0], 3):
+        raise ValueError(
+            f"cell_centers must have shape ({W_rays.shape[0]}, 3), got {cell_centers.shape}"
+        )
+
+    radii_cm = np.sqrt(np.sum(np.asarray(cell_centers, dtype=float) ** 2, axis=1))
+    outer_mask = radii_cm >= float(isotropic_outside_r_cm)
+    if not np.any(outer_mask):
+        return W_rays
+
+    W_out = np.asarray(W_rays, dtype=float).copy()
+    outer_idx = np.where(outer_mask)[0]
+    tau_outer = np.asarray(tau_ext_rays[outer_mask], dtype=float)
+    tau_outer = np.clip(tau_outer, 0.0, 700.0)
+    raw = np.exp(-tau_outer)
+    sums = np.sum(raw, axis=1, keepdims=True)
+    valid = sums[:, 0] > 0.0
+    if np.any(valid):
+        W_out[outer_idx[valid], :] = raw[valid, :] / sums[valid, :]
+    if np.any(~valid):
+        W_out[outer_idx[~valid], :] = 1.0 / float(W_out.shape[1])
+    return W_out
+
+
+def _apply_outer_background_weights(
+    W_rays: np.ndarray,
+    *,
+    tau_ext_rays: np.ndarray,
+    cell_centers: np.ndarray,
+    isotropic_outside_r_cm: float,
+    mode: str,
+) -> np.ndarray:
+    """Apply the configured background-dominated outer weighting mode."""
+    mode = str(mode).strip().lower()
+    if mode == "uniform":
+        return _apply_uniform_weights_outside_radius(
+            W_rays,
+            cell_centers,
+            isotropic_outside_r_cm=isotropic_outside_r_cm,
+        )
+    if mode == "tau":
+        return _apply_tau_weights_outside_radius(
+            W_rays,
+            tau_ext_rays,
+            cell_centers,
+            isotropic_outside_r_cm=isotropic_outside_r_cm,
+        )
+    raise ValueError(
+        "segmented_outer_weight_mode must be 'tau' or 'uniform', "
+        f"got {mode!r}"
+    )
 
 
 def ensure_W_rays(
@@ -91,6 +191,8 @@ def ensure_W_rays(
     star_uv_luminosity_erg_s: float,
     self_weight: float = 1.0,
     cache_dir: str | None = None,
+    isotropic_outside_r_au: float | None = None,
+    outer_weight_mode: str | None = None,
 ) -> np.ndarray:
     """Compute and cache ``rad.W_rays``; return existing cache on repeat calls.
 
@@ -124,8 +226,14 @@ def ensure_W_rays(
     W_rays : ndarray, shape (n_cells, npix)
         Normalised directional UV weights per cell.
     """
-    key = _build_cache_key(nside, chi_ext0, star_uv_luminosity_erg_s,
-                           self_weight)
+    key = _build_cache_key(
+        nside,
+        chi_ext0,
+        star_uv_luminosity_erg_s,
+        self_weight,
+        isotropic_outside_r_au,
+        outer_weight_mode,
+    )
 
     existing = getattr(rad, "W_rays", None)
     existing_key = getattr(rad, "W_rays_key", None)
@@ -160,6 +268,15 @@ def ensure_W_rays(
             cache_dir=cache_dir,
         )
     )
+
+    if isotropic_outside_r_au is not None:
+        W_rays = _apply_outer_background_weights(
+            W_rays,
+            tau_ext_rays=np.asarray(_debug["tau_ext_rays"], dtype=float),
+            cell_centers=_cell_centers,
+            isotropic_outside_r_cm=float(isotropic_outside_r_au) * units("au").to("cm").magnitude,
+            mode="tau" if outer_weight_mode is None else str(outer_weight_mode),
+        )
 
     # Discard debug dict to save memory; keep only W_rays.
     del _debug, _candidate_idx, _dirs, _cell_centers
@@ -259,6 +376,15 @@ def maybe_ensure_W_rays(
     uv_max_cm = uv_max_um * 1.0e-4
     star_uv_lum = compute_star_uv_luminosity(params, uv_min_cm, uv_max_cm)
 
+    isotropic_outside_r_au = getattr(
+        rad,
+        "isotropic_weight_outside_r_au",
+        getattr(rad.model, "segmented_isotropic_weight_outside_r_au", None),
+    )
+    outer_weight_mode = str(
+        getattr(params, "segmented_outer_weight_mode", "tau")
+    ).strip().lower()
+
     # 6. Delegate to ensure_W_rays (handles caching + memory check)
     return ensure_W_rays(
         rad,
@@ -267,4 +393,7 @@ def maybe_ensure_W_rays(
         kext_uv=kext_uv,
         chi_ext0=chi_ext0,
         star_uv_luminosity_erg_s=star_uv_lum,
+        self_weight=float(getattr(params, "healpix_self_weight", 1.0)),
+        isotropic_outside_r_au=isotropic_outside_r_au,
+        outer_weight_mode=outer_weight_mode,
     )

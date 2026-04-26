@@ -127,16 +127,75 @@ class SegmentedRadRunner:
         merged_mag[tuple(slicer)] = child_mag
         return Quantity(merged_mag, merged.units)
 
+    def _merge_segment_fields(
+        self,
+        *,
+        merged_T: Optional[Quantity],
+        merged_chi: Optional[Quantity],
+        rad: 'RadModel',
+        indexer: Optional[ClipIndexer],
+        axis_order: Tuple[str, ...],
+    ) -> tuple[Quantity, Quantity]:
+        if merged_T is None or merged_chi is None:
+            return rad.dust_temperature, rad.chi
+
+        if indexer is None:
+            return rad.dust_temperature, rad.chi
+
+        return (
+            self._merge_field(
+                merged=merged_T,
+                child=rad.dust_temperature,
+                indexer=indexer,
+                axis_order=axis_order,
+            ),
+            self._merge_field(
+                merged=merged_chi,
+                child=rad.chi,
+                indexer=indexer,
+                axis_order=axis_order,
+            ),
+        )
+
+    def _run_final_segment_rt(
+        self,
+        *,
+        rad: 'RadModel',
+        indexer: Optional[ClipIndexer],
+        axis_order: Tuple[str, ...],
+        merged_T: Optional[Quantity],
+        merged_chi: Optional[Quantity],
+        nphot_therm_final: int,
+        nphot_mono_final: int,
+        mcmono_wav_um: np.ndarray,
+        force: bool,
+    ) -> tuple[Quantity, Quantity]:
+        self._run_segment_rt(
+            rad,
+            nphot_therm_final,
+            nphot_mono_final,
+            mcmono_wav_um,
+            force,
+        )
+        return self._merge_segment_fields(
+            merged_T=merged_T,
+            merged_chi=merged_chi,
+            rad=rad,
+            indexer=indexer,
+            axis_order=axis_order,
+        )
+
     def run_segmented_rt(
         self,
         nphot_therm: Optional[int] = None,
         nphot_mono: Optional[int] = None,
         mcmono_n_wavelengths: Optional[int] = None,
         mcmono_uv_n_wavelengths: Optional[int] = None,
-        mcmono_wavelength_source: str = 'external',
         mcmono_wavelength_spacing: str = 'log',
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
+        segmented_external_source_mode: Optional[str] = None,
+        segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
         from diskbridge.radmc3d.model import RadModel
@@ -149,19 +208,53 @@ class SegmentedRadRunner:
         window_fraction = params.segmented_window_fraction
         shell_ncells = params.segmented_shell_ncells
         r_clip_min_au = params.segmented_r_clip_min.to('au').magnitude
+        external_source_mode = (
+            getattr(params, "segmented_external_source_mode", "shell")
+            if segmented_external_source_mode is None
+            else segmented_external_source_mode
+        )
+        external_source_mode = str(external_source_mode).strip().lower()
+        if external_source_mode not in {"shell", "initial"}:
+            raise ValueError(
+                "segmented_external_source_mode must be 'shell' or 'initial', "
+                f"got {external_source_mode!r}"
+            )
+
+        wavelength_source_use = "uv" if external_source_mode == "initial" else "external"
         stop_factor = float(params.segmented_stop_factor)
         if stop_factor <= 0.0 or stop_factor >= 1.0:
             raise ValueError("segmented_stop_factor must be in (0, 1)")
 
-        nphot_therm_final = int(params.nphot_thermal) if nphot_therm is None else int(nphot_therm)
-        nphot_mono_final = int(params.nphot_mono) if nphot_mono is None else int(nphot_mono)
+        nphot_therm_nominal = int(params.nphot_thermal) if nphot_therm is None else int(nphot_therm)
+        nphot_mono_nominal = int(params.nphot_mono) if nphot_mono is None else int(nphot_mono)
+
+        final_nphot_multiplier = float(
+            getattr(params, "segmented_final_nphot_multiplier", 1.0)
+            if segmented_final_nphot_multiplier is None
+            else segmented_final_nphot_multiplier
+        )
+        if final_nphot_multiplier < 1.0:
+            raise ValueError("segmented_final_nphot_multiplier must be >= 1")
+
+        nphot_therm_final = int(final_nphot_multiplier * nphot_therm_nominal)
+        nphot_mono_final = int(final_nphot_multiplier * nphot_mono_nominal)
+        if nphot_therm_final < 1:
+            raise ValueError(
+                f"segmented_final_nphot_multiplier={final_nphot_multiplier} yields "
+                f"nphot_therm_final={nphot_therm_final}. Increase the multiplier or nphot_thermal."
+            )
+        if nphot_mono_final < 1:
+            raise ValueError(
+                f"segmented_final_nphot_multiplier={final_nphot_multiplier} yields "
+                f"nphot_mono_final={nphot_mono_final}. Increase the multiplier or nphot_mono."
+            )
 
         nphot_ratio = float(params.segmented_nphot_ratio)
         if nphot_ratio <= 0.0:
             raise ValueError("segmented_nphot_ratio must be > 0")
 
-        nphot_therm_intermediate = int(nphot_ratio * nphot_therm_final)
-        nphot_mono_intermediate = int(nphot_ratio * nphot_mono_final)
+        nphot_therm_intermediate = int(nphot_ratio * nphot_therm_nominal)
+        nphot_mono_intermediate = int(nphot_ratio * nphot_mono_nominal)
         if nphot_therm_intermediate < 1:
             raise ValueError(
                 f"segmented_nphot_ratio={nphot_ratio} yields nphot_therm_intermediate={nphot_therm_intermediate}. "
@@ -174,12 +267,16 @@ class SegmentedRadRunner:
             )
 
         logger.info(
-            "Segmented RT photons: ratio=%.6g, mctherm=%d/%d, mcmono=%d/%d"
+            "Segmented RT photons: ratio=%.6g, final_multiplier=%.6g, "
+            "mctherm=%d/%d/%d, mcmono=%d/%d/%d"
             % (
                 float(nphot_ratio),
+                float(final_nphot_multiplier),
                 int(nphot_therm_intermediate),
+                int(nphot_therm_nominal),
                 int(nphot_therm_final),
                 int(nphot_mono_intermediate),
+                int(nphot_mono_nominal),
                 int(nphot_mono_final),
             )
         )
@@ -196,6 +293,7 @@ class SegmentedRadRunner:
         axis_order = mesh.axis_names()
 
         segments: list[dict[str, Any]] = []
+        scout_runs: list[dict[str, Any]] = []
         split_radii_au: list[float] = []
         r_edges_base_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
         current_outer_rmax_au = float(np.max(r_edges_base_au))
@@ -240,70 +338,86 @@ class SegmentedRadRunner:
 
             if mcmono_wav_um_use is None:
                 n_uv = params.uv_n_wavelengths if mcmono_uv_n_wavelengths is None else int(mcmono_uv_n_wavelengths)
+                n_wavelengths_use = mcmono_n_wavelengths
+                if wavelength_source_use == "uv" and n_wavelengths_use is None:
+                    n_wavelengths_use = n_uv
+                n_uv_enforce_use = 0 if wavelength_source_use == "uv" else n_uv
                 mcmono_wav_um_use = build_mcmono_wavelengths(
-                    wavelength_source=mcmono_wavelength_source,
+                    wavelength_source=wavelength_source_use,
                     wavelength_file=rad.inputs_dir / 'wavelength_micron.inp',
                     uv_min_um=params.uv_min.to('micron').magnitude,
                     uv_max_um=params.uv_max.to('micron').magnitude,
-                    n_wavelengths=mcmono_n_wavelengths,
-                    n_uv_enforce=n_uv,
+                    n_wavelengths=n_wavelengths_use,
+                    n_uv_enforce=n_uv_enforce_use,
                     spacing=mcmono_wavelength_spacing,
                     provided_wavelengths=mcmono_wavelengths_um,
                 )
 
-            if level > 0 and outer_rad is not None:
+            if external_source_mode == "shell" and level > 0 and outer_rad is not None:
                 self._inherit_external_source(outer_rad, rad, current_outer_rmax_au, shell_ncells)
 
             self._run_segment_rt(rad, nphot_therm_intermediate, nphot_mono_intermediate, mcmono_wav_um_use, force)
 
-            if merged_T is None or merged_chi is None:
-                merged_T = rad.dust_temperature
-                merged_chi = rad.chi
-            else:
-                if seg_indexer is None:
-                    raise ValueError("Internal error: missing indexer for inner segment")
-                merged_T = self._merge_field(
-                    merged=merged_T,
-                    child=rad.dust_temperature,
-                    indexer=seg_indexer,
-                    axis_order=axis_order,
-                )
-                merged_chi = self._merge_field(
-                    merged=merged_chi,
-                    child=rad.chi,
-                    indexer=seg_indexer,
-                    axis_order=axis_order,
-                )
+            merged_T, merged_chi = self._merge_segment_fields(
+                merged_T=merged_T,
+                merged_chi=merged_chi,
+                rad=rad,
+                indexer=seg_indexer,
+                axis_order=axis_order,
+            )
 
             segments.append(
                 {
                     'level': int(level),
                     'work_dir': str(segment.work_dir),
                     'r_max_au': float(current_outer_rmax_au),
+                    'nphot_thermal': int(nphot_therm_intermediate),
+                    'nphot_mono': int(nphot_mono_intermediate),
+                    'has_temperature': True,
+                    'has_mcmono': True,
+                    'is_final': False,
                 }
             )
 
             if level >= max_splits:
+                if (
+                    nphot_therm_intermediate != nphot_therm_final
+                    or nphot_mono_intermediate != nphot_mono_final
+                ):
+                    scout_runs.append(dict(segments[-1]))
+                    merged_T, merged_chi = self._run_final_segment_rt(
+                        rad=rad,
+                        indexer=seg_indexer,
+                        axis_order=axis_order,
+                        merged_T=merged_T,
+                        merged_chi=merged_chi,
+                        nphot_therm_final=nphot_therm_final,
+                        nphot_mono_final=nphot_mono_final,
+                        mcmono_wav_um=mcmono_wav_um_use,
+                        force=force,
+                    )
+                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
+                segments[-1]['nphot_mono'] = int(nphot_mono_final)
+                segments[-1]['is_final'] = True
                 outer_rad = rad
                 break
 
             if merged_T is None or merged_chi is None:
                 raise ValueError("Internal error: missing merged fields")
 
-            self.base_model.gas_register(
+            rad.model.gas_register(
                 'temperature',
-                Field(quantity='temperature', data=merged_T, axis_order=axis_order),
+                Field(quantity='temperature', data=rad.dust_temperature, axis_order=rad.model.mesh.axis_names()),
             )
-            self.base_model.gas_register(
+            rad.model.gas_register(
                 'chi',
-                Field(quantity='chi', data=merged_chi, axis_order=axis_order),
+                Field(quantity='chi', data=rad.chi, axis_order=rad.model.mesh.axis_names()),
             )
+            rad.model.validate_canonical_axis_orders(include_dust=False)
 
-            self.base_model.validate_canonical_axis_orders(include_dust=False)
-
-            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'chi')
-            _, T_profile = compute_volume_weighted_mean_radial_profile(self.base_model, 'temperature')
-            r_edges_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
+            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(rad.model, 'chi')
+            _, T_profile = compute_volume_weighted_mean_radial_profile(rad.model, 'temperature')
+            r_edges_au = rad.model.mesh.edges('r').to('au').magnitude
 
             try:
                 r_split_au, r_split_info = find_r_split(
@@ -333,14 +447,61 @@ class SegmentedRadRunner:
                     )
                 )
             except ValueError:
+                if (
+                    nphot_therm_intermediate != nphot_therm_final
+                    or nphot_mono_intermediate != nphot_mono_final
+                ):
+                    scout_runs.append(dict(segments[-1]))
+                    merged_T, merged_chi = self._run_final_segment_rt(
+                        rad=rad,
+                        indexer=seg_indexer,
+                        axis_order=axis_order,
+                        merged_T=merged_T,
+                        merged_chi=merged_chi,
+                        nphot_therm_final=nphot_therm_final,
+                        nphot_mono_final=nphot_mono_final,
+                        mcmono_wav_um=mcmono_wav_um_use,
+                        force=force,
+                    )
+                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
+                segments[-1]['nphot_mono'] = int(nphot_mono_final)
+                segments[-1]['is_final'] = True
                 outer_rad = rad
                 break
 
             if float(r_split_au) >= float(current_outer_rmax_au):
+                if (
+                    nphot_therm_intermediate != nphot_therm_final
+                    or nphot_mono_intermediate != nphot_mono_final
+                ):
+                    scout_runs.append(dict(segments[-1]))
+                    merged_T, merged_chi = self._run_final_segment_rt(
+                        rad=rad,
+                        indexer=seg_indexer,
+                        axis_order=axis_order,
+                        merged_T=merged_T,
+                        merged_chi=merged_chi,
+                        nphot_therm_final=nphot_therm_final,
+                        nphot_mono_final=nphot_mono_final,
+                        mcmono_wav_um=mcmono_wav_um_use,
+                        force=force,
+                    )
+                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
+                segments[-1]['nphot_mono'] = int(nphot_mono_final)
+                segments[-1]['is_final'] = True
                 outer_rad = rad
                 break
 
             if float(r_split_au) >= stop_factor * float(current_outer_rmax_au):
+                if (
+                    nphot_therm_intermediate == nphot_therm_final
+                    and nphot_mono_intermediate == nphot_mono_final
+                ):
+                    segments[-1]['is_final'] = True
+                    outer_rad = rad
+                    break
+
+                scout_runs.append(dict(segments.pop()))
                 final_work_dir = self.base_model_dir / 'segments' / f'segment_{level + 1:02d}_rmax_{current_outer_rmax_au:.6g}au_final'
                 final_seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
                 final_segment = SegmentDefinition(
@@ -352,7 +513,7 @@ class SegmentedRadRunner:
                 
                 final_rad = self._setup_segment(final_model, final_work_dir, base_opacity_dir)
                 
-                if outer_rad is not None:
+                if external_source_mode == "shell" and outer_rad is not None:
                     self._inherit_external_source(outer_rad, final_rad, current_outer_rmax_au, shell_ncells)
                 
                 self._run_segment_rt(final_rad, nphot_therm_final, nphot_mono_final, mcmono_wav_um_use, force)
@@ -374,6 +535,11 @@ class SegmentedRadRunner:
                         'level': int(level + 1),
                         'work_dir': str(final_segment.work_dir),
                         'r_max_au': float(current_outer_rmax_au),
+                        'nphot_thermal': int(nphot_therm_final),
+                        'nphot_mono': int(nphot_mono_final),
+                        'has_temperature': True,
+                        'has_mcmono': True,
+                        'is_final': True,
                     }
                 )
 
@@ -440,8 +606,17 @@ class SegmentedRadRunner:
         )
 
         return {
+            'mode': external_source_mode,
+            'segmented_external_source_mode': external_source_mode,
+            'mcmono_wavelength_source': wavelength_source_use,
+            'segmented_final_nphot_multiplier': float(final_nphot_multiplier),
+            'nphot_thermal_nominal': int(nphot_therm_nominal),
+            'nphot_mono_nominal': int(nphot_mono_nominal),
+            'nphot_thermal_final': int(nphot_therm_final),
+            'nphot_mono_final': int(nphot_mono_final),
             'split_radii_au': split_radii_au,
             'segments': segments,
+            'scout_runs': scout_runs,
             'temperature': merged_T,
             'chi': merged_chi,
         }

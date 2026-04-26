@@ -67,6 +67,9 @@ segmented_r_clip_min       = 1.0   # minimum allowed R_split in au
 segmented_max_splits        = 1
 segmented_stop_factor       = 0.9
 segmented_nphot_ratio       = 1.0
+segmented_final_nphot_multiplier = 1.0 # multiplier for the terminal segment only
+segmented_external_source_mode = shell # shell|initial; shell inherits split-shell spectrum, initial reuses original external field
+segmented_outer_weight_mode = tau   # outer segmented W_rays: tau|uniform
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii

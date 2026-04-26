@@ -1052,10 +1052,11 @@ class RadModel:
         nphot_mono: Optional[int] = None,
         mcmono_n_wavelengths: Optional[int] = None,
         mcmono_uv_n_wavelengths: Optional[int] = None,
-        mcmono_wavelength_source: str = 'external',
         mcmono_wavelength_spacing: str = 'log',
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
+        segmented_external_source_mode: Optional[str] = None,
+        segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
     ) -> dict:
         from diskbridge.radmc3d.segmented import SegmentedRadRunner
@@ -1066,15 +1067,21 @@ class RadModel:
             nphot_mono=nphot_mono,
             mcmono_n_wavelengths=mcmono_n_wavelengths,
             mcmono_uv_n_wavelengths=mcmono_uv_n_wavelengths,
-            mcmono_wavelength_source=mcmono_wavelength_source,
             mcmono_wavelength_spacing=mcmono_wavelength_spacing,
             mcmono_wavelengths_um=mcmono_wavelengths_um,
             max_splits=max_splits,
+            segmented_external_source_mode=segmented_external_source_mode,
+            segmented_final_nphot_multiplier=segmented_final_nphot_multiplier,
             force=force,
         )
 
         self.dust_temperature = out.get('temperature')
         self.chi = out.get('chi')
+        split_radii = list(out.get('split_radii_au', []))
+        isotropic_outside = float(split_radii[-1]) if split_radii else None
+        self.isotropic_weight_outside_r_au = isotropic_outside
+        self.model.segmented_isotropic_weight_outside_r_au = isotropic_outside
+        out['isotropic_weight_outside_r_au'] = isotropic_outside
         return out
     
     def ensure_dust_temperature(self, force: bool = False) -> Quantity:

@@ -85,6 +85,9 @@ class Params:
     segmented_max_splits: int
     segmented_stop_factor: float
     segmented_nphot_ratio: float
+    segmented_final_nphot_multiplier: float
+    segmented_external_source_mode: str
+    segmented_outer_weight_mode: str
 
     # star
     rstar: Quantity
