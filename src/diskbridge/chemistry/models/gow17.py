@@ -97,6 +97,70 @@ def _electron_abundance(y: np.ndarray) -> np.ndarray:
     )
 
 
+def _apply_astrochem_aitken_acceleration(
+    *,
+    y_state: np.ndarray,
+    prev2: dict[int, np.ndarray],
+    prev1: dict[int, np.ndarray],
+    xCtot_flat: np.ndarray,
+    enable_co_phase: bool,
+    max_jump: float,
+    floor: float,
+) -> tuple[int, int]:
+    """Apply guarded scalar Aitken acceleration to shielding-driving species."""
+    species = [I_H2, I_CO]
+    if enable_co_phase:
+        species.append(I_CO_ICE)
+
+    any_applied = np.zeros(y_state.shape[0], dtype=bool)
+    applied_entries = 0
+    min_den = max(float(floor), np.finfo(np.float64).tiny)
+    max_jump = max(float(max_jump), 0.0)
+
+    for species_idx in species:
+        x0 = prev2[species_idx]
+        x1 = prev1[species_idx]
+        x2 = y_state[:, species_idx]
+
+        denom = x2 - 2.0 * x1 + x0
+        delta = x2 - x1
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            x_acc = x2 - (delta * delta) / denom
+
+        upper = 0.5 if species_idx == I_H2 else xCtot_flat
+        step_scale = np.maximum(np.abs(delta), min_den)
+        valid = (
+            np.isfinite(x_acc)
+            & (np.abs(denom) > min_den)
+            & (x_acc >= 0.0)
+            & (x_acc <= upper)
+            & (np.abs(x_acc - x2) <= max_jump * step_scale)
+        )
+        if not np.any(valid):
+            continue
+
+        x2[valid] = x_acc[valid]
+        applied_entries += int(np.sum(valid))
+        any_applied |= valid
+
+    if enable_co_phase:
+        co_total = y_state[:, I_CO] + y_state[:, I_CO_ICE]
+        over = co_total > xCtot_flat
+        if np.any(over):
+            scale = np.divide(
+                xCtot_flat[over],
+                co_total[over],
+                out=np.ones_like(co_total[over]),
+                where=co_total[over] > 0.0,
+            )
+            y_state[over, I_CO] *= scale
+            y_state[over, I_CO_ICE] *= scale
+    else:
+        y_state[:, I_CO_ICE] = 0.0
+
+    return int(np.sum(any_applied)), int(applied_entries)
+
+
 def _as_cgs_f64(q: Quantity, unit: str) -> np.ndarray:
     return np.ascontiguousarray(q.to(unit).magnitude, dtype=np.float64)
 
@@ -359,11 +423,20 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_theta_mix = float(cfg.get("shielding_theta_mix", 1.0))
     local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
+    tgas_convergence_reltol = float(cfg.get("tgas_convergence_reltol", shielding_reltol))
 
     # -- AstroChem-style coupling config --
     coupling_mode = str(cfg.get("coupling_mode", "fixed_point"))
     astrochem_n_updates = int(cfg.get("astrochem_n_updates", 5))
     astrochem_t_end_yr = float(cfg.get("astrochem_t_end_yr", 1.0e6))
+    astrochem_acceleration = str(cfg.get("astrochem_acceleration", "none")).lower()
+    astrochem_acceleration_start = int(cfg.get("astrochem_acceleration_start", 3))
+    astrochem_acceleration_max_jump = float(cfg.get("astrochem_acceleration_max_jump", 2.0))
+    if astrochem_acceleration not in ("none", "aitken"):
+        raise ValueError(
+            "astrochem_acceleration must be 'none' or 'aitken', "
+            f"got {astrochem_acceleration!r}"
+        )
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
     slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
@@ -845,7 +918,22 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     d_h2_hist = []
     d_co_hist = []
+    d_tgas_hist = []
+    d_h2_median_hist = []
+    d_co_median_hist = []
+    d_tgas_median_hist = []
+    well_converged_cells_hist = []
+    well_converged_fraction_hist = []
     bad_status_hist = []
+    astrochem_acceleration_cells_hist = []
+    astrochem_acceleration_entries_hist = []
+
+    def _state_temperature(y: np.ndarray) -> np.ndarray:
+        xe = _electron_abundance(y)
+        Cv = _cv_cold(y[:, I_H2], xe)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            T_state = y[:, I_E] / Cv
+        return np.clip(T_state, 2.7, 1e6)
 
     # Common keyword dict for _compute_shielding_and_gph calls.
     _shielding_kw = dict(
@@ -885,6 +973,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         for it in range(shielding_max_iter):
             xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
             xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
+            Tgas_old = _state_temperature(y_guess) if not const_temp else None
 
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
@@ -947,11 +1036,31 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
             denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
             denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
-            d_h2 = np.max(np.abs(xH2_new - xH2_old) / denom_h2)
-            d_co = np.max(np.abs(xCO_new - xCO_old) / denom_co)
+            rel_h2 = np.abs(xH2_new - xH2_old) / denom_h2
+            rel_co = np.abs(xCO_new - xCO_old) / denom_co
+            rel_tgas = None
+            if Tgas_old is not None:
+                Tgas_new = _state_temperature(y_guess)
+                denom_tgas = np.maximum(np.abs(Tgas_new), 1.0)
+                rel_tgas = np.abs(Tgas_new - Tgas_old) / denom_tgas
+            d_h2 = np.max(rel_h2)
+            d_co = np.max(rel_co)
             d_h2_hist.append(float(d_h2))
             d_co_hist.append(float(d_co))
-            if max(d_h2, d_co) <= shielding_reltol:
+            d_h2_median_hist.append(float(np.median(rel_h2)))
+            d_co_median_hist.append(float(np.median(rel_co)))
+            if rel_tgas is not None:
+                d_tgas_hist.append(float(np.max(rel_tgas)))
+                d_tgas_median_hist.append(float(np.median(rel_tgas)))
+            well_converged = np.maximum(rel_h2, rel_co) <= shielding_reltol
+            if rel_tgas is not None:
+                well_converged &= rel_tgas <= tgas_convergence_reltol
+            well_converged_cells_hist.append(int(np.sum(well_converged)))
+            well_converged_fraction_hist.append(float(np.mean(well_converged)))
+            converged = max(d_h2, d_co) <= shielding_reltol
+            if rel_tgas is not None:
+                converged = converged and d_tgas_hist[-1] <= tgas_convergence_reltol
+            if converged:
                 break
 
     elif coupling_mode == "astrochem":
@@ -1040,10 +1149,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat = np.ones(ncells, dtype=np.float64)
             theta_co_flat = np.ones(ncells, dtype=np.float64)
             theta_c_flat = np.ones(ncells, dtype=np.float64)
+            accel_species = [I_H2, I_CO] + ([I_CO_ICE] if enable_co_phase else [])
+            accel_prev2: dict[int, np.ndarray] | None = None
+            accel_prev1: dict[int, np.ndarray] | None = (
+                {idx: y_state[:, idx].copy() for idx in accel_species}
+                if astrochem_acceleration == "aitken"
+                else None
+            )
 
             for k_step in range(N):
                 xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
                 xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
+                Tgas_old = _state_temperature(y_state) if not const_temp else None
 
                 # Step 1+2: compute columns and shielding from current y_state.
                 theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
@@ -1093,6 +1210,28 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 )
 
                 y_state[:, :] = result["y"]
+                acceleration_cells = 0
+                acceleration_entries = 0
+                if (
+                    astrochem_acceleration == "aitken"
+                    and accel_prev2 is not None
+                    and accel_prev1 is not None
+                    and (k_step + 1) >= astrochem_acceleration_start
+                ):
+                    acceleration_cells, acceleration_entries = (
+                        _apply_astrochem_aitken_acceleration(
+                            y_state=y_state,
+                            prev2=accel_prev2,
+                            prev1=accel_prev1,
+                            xCtot_flat=xCtot_flat,
+                            enable_co_phase=enable_co_phase,
+                            max_jump=astrochem_acceleration_max_jump,
+                            floor=shielding_abstol,
+                        )
+                    )
+                if astrochem_acceleration == "aitken" and accel_prev1 is not None:
+                    accel_prev2 = accel_prev1
+                    accel_prev1 = {idx: y_state[:, idx].copy() for idx in accel_species}
                 status_step = np.asarray(result["status"], dtype=np.int32)
                 status_acc = np.maximum(status_acc, status_step)
 
@@ -1102,21 +1241,53 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
                 denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
                 denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
-                d_h2 = float(np.max(np.abs(xH2_new - xH2_old) / denom_h2))
-                d_co = float(np.max(np.abs(xCO_new - xCO_old) / denom_co))
+                rel_h2 = np.abs(xH2_new - xH2_old) / denom_h2
+                rel_co = np.abs(xCO_new - xCO_old) / denom_co
+                rel_tgas = None
+                if Tgas_old is not None:
+                    Tgas_new = _state_temperature(y_state)
+                    denom_tgas = np.maximum(np.abs(Tgas_new), 1.0)
+                    rel_tgas = np.abs(Tgas_new - Tgas_old) / denom_tgas
+                d_h2 = float(np.max(rel_h2))
+                d_co = float(np.max(rel_co))
                 d_h2_hist.append(d_h2)
                 d_co_hist.append(d_co)
+                d_h2_median_hist.append(float(np.median(rel_h2)))
+                d_co_median_hist.append(float(np.median(rel_co)))
+                if rel_tgas is not None:
+                    d_tgas_hist.append(float(np.max(rel_tgas)))
+                    d_tgas_median_hist.append(float(np.median(rel_tgas)))
+                well_converged = np.maximum(rel_h2, rel_co) <= shielding_reltol
+                if rel_tgas is not None:
+                    well_converged &= rel_tgas <= tgas_convergence_reltol
+                well_converged_cells_hist.append(int(np.sum(well_converged)))
+                well_converged_fraction_hist.append(float(np.mean(well_converged)))
                 bad_status_hist.append(int(np.sum(status_step != 0)))
+                astrochem_acceleration_cells_hist.append(int(acceleration_cells))
+                astrochem_acceleration_entries_hist.append(int(acceleration_entries))
 
-                logger.info(
-                    "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
-                    "d_h2=%.3e, d_co=%.3e, bad=%d",
-                    k_step + 1, N,
-                    float(t_targets[k_step] / _YR_TO_S),
-                    float(dt[k_step] / _YR_TO_S),
-                    d_h2, d_co,
-                    bad_status_hist[-1],
-                )
+                if rel_tgas is not None:
+                    logger.info(
+                        "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
+                        "d_h2=%.3e, d_co=%.3e, d_tgas=%.3e, bad=%d, accel_cells=%d",
+                        k_step + 1, N,
+                        float(t_targets[k_step] / _YR_TO_S),
+                        float(dt[k_step] / _YR_TO_S),
+                        d_h2, d_co, d_tgas_hist[-1],
+                        bad_status_hist[-1],
+                        acceleration_cells,
+                    )
+                else:
+                    logger.info(
+                        "astrochem step %d/%d: t_target=%.3e yr, dt=%.3e yr, "
+                        "d_h2=%.3e, d_co=%.3e, bad=%d, accel_cells=%d",
+                        k_step + 1, N,
+                        float(t_targets[k_step] / _YR_TO_S),
+                        float(dt[k_step] / _YR_TO_S),
+                        d_h2, d_co,
+                        bad_status_hist[-1],
+                        acceleration_cells,
+                    )
 
             # After N macro-updates: recompute columns + shielding from final y_state.
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
@@ -1262,6 +1433,27 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "shielding_iter": n_shielding_iter,
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
+        "d_tgas_hist": np.asarray(d_tgas_hist, dtype=np.float64),
+        "d_h2_median_hist": np.asarray(d_h2_median_hist, dtype=np.float64),
+        "d_co_median_hist": np.asarray(d_co_median_hist, dtype=np.float64),
+        "d_tgas_median_hist": np.asarray(d_tgas_median_hist, dtype=np.float64),
+        "well_converged_cells_hist": np.asarray(well_converged_cells_hist, dtype=np.int64),
+        "well_converged_fraction_hist": np.asarray(well_converged_fraction_hist, dtype=np.float64),
+        "well_converged_reltol": float(shielding_reltol),
+        "tgas_convergence_reltol": float(tgas_convergence_reltol),
+        "well_converged_includes_tgas": bool(not const_temp),
+        "well_converged_ncells": int(ncells),
+        "astrochem_acceleration": astrochem_acceleration,
+        "astrochem_acceleration_start": int(astrochem_acceleration_start),
+        "astrochem_acceleration_max_jump": float(astrochem_acceleration_max_jump),
+        "astrochem_acceleration_cells_hist": np.asarray(
+            astrochem_acceleration_cells_hist,
+            dtype=np.int64,
+        ),
+        "astrochem_acceleration_entries_hist": np.asarray(
+            astrochem_acceleration_entries_hist,
+            dtype=np.int64,
+        ),
     }
     if coupling_mode == "astrochem":
         if astrochem_n_updates > 0:

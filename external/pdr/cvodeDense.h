@@ -50,6 +50,9 @@ class CvodeDense {
     void WriteFirstLastStep(FILE *pf) const;
     /*get the total number of steps from solver*/
     int GetNstep() const;
+		long long GetNegativeCorrectionCount() const;
+		bool ReachedTevolMax() const;
+		double GetTevolMaxResidual() const;
 		/* get the last actual timestep taken*/
 		double GethLast() const;
 		/* Get the runtime the last time call Solve*/
@@ -74,6 +77,9 @@ class CvodeDense {
      * to evolve to equalibrium.*/
     double t_solve_eq_;
     long int nst_eq_;
+		long long negative_correction_count_;
+		bool reached_tevol_max_;
+		double tevol_max_residual_;
 };
 
 #endif /*CVODEDENSE_H_*/

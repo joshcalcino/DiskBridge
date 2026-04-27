@@ -1,5 +1,7 @@
 #include "sundial.h"
 
+#include <string>
+
 void CheckFlag(const void *flagvalue, const char *funcname, 
                const int opt) {
    int *errflag;
@@ -35,9 +37,9 @@ void CheckFlag(const void *flagvalue, const char *funcname,
    else if (opt == 3) {
      errflag = (int *) flagvalue;
      if (*errflag != CV_SUCCESS) {
-       fprintf(stderr, "\nCV_SUCCESS error: %s() failed with flag = %d\n\n",
-           funcname, *errflag);
-       throw std::runtime_error("SUNDIALS:CV_SUCCESS error");
+       throw std::runtime_error(
+           std::string("SUNDIALS:") + funcname +
+           " failed with flag = " + std::to_string(*errflag));
        return; 
      }
    }

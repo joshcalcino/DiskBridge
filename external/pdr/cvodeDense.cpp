@@ -1,5 +1,51 @@
 #include "cvodeDense.h"
 
+#include <sundials/sundials_context.h>
+
+#include <mutex>
+#include <vector>
+
+namespace {
+
+struct NegativeAbundanceCorrection {
+  int species;
+  double value;
+};
+
+std::mutex g_negative_abundance_mutex;
+long long g_negative_abundance_detail_cells = 0;
+
+void SilentSundialsErrorHandler(
+    int line, const char* func, const char* file, const char* msg,
+    SUNErrCode err_code, void* err_user_data, SUNContext sunctx) {
+  (void)line;
+  (void)func;
+  (void)file;
+  (void)msg;
+  (void)err_code;
+  (void)err_user_data;
+  (void)sunctx;
+}
+
+void ReportNegativeAbundanceCorrections(
+    const std::vector<NegativeAbundanceCorrection>& corrections) {
+  if (corrections.empty()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(g_negative_abundance_mutex);
+
+  if (g_negative_abundance_detail_cells < 5) {
+    for (const auto& c : corrections) {
+      printf("Warning: correcting negative abundance of species ");
+      printf("%d from %0.4e to zero.\n", c.species, c.value);
+    }
+    g_negative_abundance_detail_cells += 1;
+  }
+}
+
+}  // namespace
+
 CvodeDense::CvodeDense(Ode &ode,
                        const double reltol, const double *abstol,
 											 const bool userJac)
@@ -14,11 +60,18 @@ CvodeDense::CvodeDense(Ode &ode,
      t_solve_(0.),
      t_solve_eq_(0.),
      nst_last_(0),
-     nst_eq_(0) {
+     nst_eq_(0),
+     negative_correction_count_(0),
+     reached_tevol_max_(false),
+     tevol_max_residual_(0.) {
   int flag;
   // Create the SUNDIALS context
   flag = SUNContext_Create(SUN_COMM_NULL, &sunctx_);
   CheckFlag(&flag, "SUNContext_Create", 1);
+  flag = SUNContext_ClearErrHandlers(sunctx_);
+  CheckFlag(&flag, "SUNContext_ClearErrHandlers", 1);
+  flag = SUNContext_PushErrHandler(sunctx_, SilentSundialsErrorHandler, NULL);
+  CheckFlag(&flag, "SUNContext_PushErrHandler", 1);
   //create vector y
   ode_.y_ = N_VNew_Serial(kDimen, sunctx_);
   CheckFlag(static_cast<void *>(ode_.y_), "N_VNew_Serial", 0);
@@ -131,17 +184,16 @@ void CvodeDense::Solve(const double tfinal) {
   nst_last_ = GetNstep() - nst;
   /*floor small negative abundances to avoid numerical problems*/
   /*TODO: adjust species abundances to conserve the elements*/
+  std::vector<NegativeAbundanceCorrection> negative_corrections;
   for (int i=0; i<kDimen; i++) {
     if ( NV_Ith_S(ode_.y_, i) < 0. ) {
-      printf("Warning: correcting negative aboundances of species ");
-      //printf("%d from %0.4e to abstol_[i] = %0.4e.\n", i,
-      //       NV_Ith_S(ode_.y_, i), NV_Ith_S(abstol_, i));
-      printf("%d from %0.4e to zero.\n", i,
-             NV_Ith_S(ode_.y_, i));
+      negative_corrections.push_back({i, NV_Ith_S(ode_.y_, i)});
+      negative_correction_count_ += 1;
       //NV_Ith_S(ode_.y_, i) = NV_Ith_S(abstol_, i);
       NV_Ith_S(ode_.y_, i) = 0.;
     }
   }
+  ReportNegativeAbundanceCorrections(negative_corrections);
   return;
 }
 void CvodeDense::SolveEq(const double tolfac, const double tmax,
@@ -246,9 +298,8 @@ void CvodeDense::SolveEq(const double tolfac, const double tmax,
       t = clock() - t;
       t_solve_eq_ = ((float)t)/CLOCKS_PER_SEC; /*record the run time*/
       nst_eq_ = GetNstep() - nst;
-      printf(
-			 "Warning: not reaching equalibrium in tevol_max, residual=%0.4e.\n",
-			 maxerr);
+      reached_tevol_max_ = true;
+      tevol_max_residual_ = maxerr;
       return;
     }
     tevol *= 2.;
@@ -320,9 +371,24 @@ int CvodeDense::GetNstep() const {
 }
 
 void CvodeDense::ReInit() {
-	int flag;
-	flag = CVodeReInit(cvode_mem_, ode_.t_, ode_.y_);
-	CheckFlag(&flag, "CVodeReInit", 1);
+		int flag;
+		negative_correction_count_ = 0;
+		reached_tevol_max_ = false;
+		tevol_max_residual_ = 0.;
+		flag = CVodeReInit(cvode_mem_, ode_.t_, ode_.y_);
+		CheckFlag(&flag, "CVodeReInit", 1);
+}
+
+long long CvodeDense::GetNegativeCorrectionCount() const {
+		return negative_correction_count_;
+}
+
+bool CvodeDense::ReachedTevolMax() const {
+		return reached_tevol_max_;
+}
+
+double CvodeDense::GetTevolMaxResidual() const {
+		return tevol_max_residual_;
 }
 
 double CvodeDense::GethLast() const {

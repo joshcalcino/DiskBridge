@@ -47,6 +47,9 @@ def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) 
         tgas = rad.ensure_gas_temperature()
     if tgas is None:
         tgas = getattr(rad, 'gas_temperature', None)
+    tgas_gow17 = getattr(rad, 'Tgas_gow17', None)
+    if tgas_gow17 is not None:
+        tgas = tgas_gow17
 
     if tgas is not None:
         model.gas_register(

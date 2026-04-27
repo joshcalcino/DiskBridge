@@ -29,6 +29,10 @@ static constexpr int IPH_H2 = 4;
 static constexpr int IPH_S = 5;
 static constexpr int IPH_SI = 6;
 
+static bool is_cvode_integration_failure(const std::exception &e) {
+    return std::string(e.what()).find("SUNDIALS:CVode failed with flag") != std::string::npos;
+}
+
 static py::dict solve_slab_1d_equilibrium(
     const double nH,
     const double G0,
@@ -261,6 +265,12 @@ static py::dict solve_batch_equilibrium(
     int *status_out_ptr = static_cast<int *>(status_out.mutable_data());
 
     std::atomic<int> n_fail{0};
+    std::atomic<long long> n_cvode_fail{0};
+    std::atomic<long long> n_other_exception_fail{0};
+    std::atomic<long long> n_negative_abundance_cells{0};
+    std::atomic<long long> n_negative_abundance_corrections{0};
+    std::atomic<long long> n_tevol_max_cells{0};
+    double tevol_max_residual_max = 0.0;
 
     /* Release the GIL so threads can run in parallel. */
     py::gil_scoped_release release;
@@ -317,6 +327,22 @@ static py::dict solve_batch_equilibrium(
 
         try {
             solver.SolveEq(tolfac, tmax, verbose, tmin);
+            const long long n_negative = solver.GetNegativeCorrectionCount();
+            if (n_negative > 0) {
+                n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
+                n_negative_abundance_corrections.fetch_add(
+                    n_negative, std::memory_order_relaxed);
+            }
+            if (solver.ReachedTevolMax()) {
+                n_tevol_max_cells.fetch_add(1, std::memory_order_relaxed);
+                const double residual = solver.GetTevolMaxResidual();
+                #pragma omp critical(gow17_tevol_max_residual)
+                {
+                    if (residual > tevol_max_residual_max) {
+                        tevol_max_residual_max = residual;
+                    }
+                }
+            }
             ode.CopyAbd(y_out_ptr + i * N_Y);
             status_out_ptr[i] = 0;
         } catch (const std::exception &e) {
@@ -325,20 +351,50 @@ static py::dict solve_batch_equilibrium(
             }
             status_out_ptr[i] = -1;
             n_fail.fetch_add(1, std::memory_order_relaxed);
+            if (is_cvode_integration_failure(e)) {
+                n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
     /* Re-acquire the GIL before touching Python objects. */
     py::gil_scoped_acquire acquire;
 
-    if (n_fail.load() > 0) {
-        printf("solve_batch_equilibrium: %d / %lld cells failed with exceptions.\n",
-               n_fail.load(), static_cast<long long>(Ncells));
+    if (n_cvode_fail.load() > 0) {
+        printf("solve_batch_equilibrium: CVODE failed in %lld / %lld cells "
+               "(per-cell SUNDIALS messages suppressed).\n",
+               n_cvode_fail.load(), static_cast<long long>(Ncells));
+    }
+    if (n_other_exception_fail.load() > 0) {
+        printf("solve_batch_equilibrium: %lld / %lld cells failed with non-CVODE exceptions.\n",
+               n_other_exception_fail.load(), static_cast<long long>(Ncells));
+    }
+    if (n_negative_abundance_cells.load() > 0) {
+        printf("solve_batch_equilibrium: corrected %lld / %lld cells with negative abundances "
+               "(%lld species corrections total).\n",
+               n_negative_abundance_cells.load(),
+               static_cast<long long>(Ncells),
+               n_negative_abundance_corrections.load());
+    }
+    if (n_tevol_max_cells.load() > 0) {
+        printf("solve_batch_equilibrium: %lld / %lld cells did not reach equilibrium "
+               "before tevol_max (max residual=%0.4e).\n",
+               n_tevol_max_cells.load(),
+               static_cast<long long>(Ncells),
+               tevol_max_residual_max);
     }
 
     py::dict out;
     out["y"] = y_out;
     out["status"] = status_out;
+    out["cvode_failure_cells"] = n_cvode_fail.load();
+    out["exception_failure_cells"] = n_other_exception_fail.load();
+    out["negative_abundance_cells"] = n_negative_abundance_cells.load();
+    out["negative_abundance_corrections"] = n_negative_abundance_corrections.load();
+    out["tevol_max_cells"] = n_tevol_max_cells.load();
+    out["tevol_max_residual_max"] = tevol_max_residual_max;
     return out;
 }
 
@@ -457,6 +513,10 @@ static py::dict solve_batch_time(
     int *status_out_ptr = static_cast<int *>(status_out.mutable_data());
 
     std::atomic<int> n_fail{0};
+    std::atomic<long long> n_cvode_fail{0};
+    std::atomic<long long> n_other_exception_fail{0};
+    std::atomic<long long> n_negative_abundance_cells{0};
+    std::atomic<long long> n_negative_abundance_corrections{0};
 
     /* Release the GIL so threads can run in parallel. */
     py::gil_scoped_release release;
@@ -513,6 +573,12 @@ static py::dict solve_batch_time(
 
         try {
             solver.Solve(t_end);
+            const long long n_negative = solver.GetNegativeCorrectionCount();
+            if (n_negative > 0) {
+                n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
+                n_negative_abundance_corrections.fetch_add(
+                    n_negative, std::memory_order_relaxed);
+            }
             ode.CopyAbd(y_out_ptr + i * N_Y);
             status_out_ptr[i] = 0;
         } catch (const std::exception &e) {
@@ -521,20 +587,41 @@ static py::dict solve_batch_time(
             }
             status_out_ptr[i] = -1;
             n_fail.fetch_add(1, std::memory_order_relaxed);
+            if (is_cvode_integration_failure(e)) {
+                n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
     /* Re-acquire the GIL before touching Python objects. */
     py::gil_scoped_acquire acquire;
 
-    if (n_fail.load() > 0) {
-        printf("solve_batch_time: %d / %lld cells failed with exceptions.\n",
-               n_fail.load(), static_cast<long long>(Ncells));
+    if (n_cvode_fail.load() > 0) {
+        printf("solve_batch_time: CVODE failed in %lld / %lld cells "
+               "(per-cell SUNDIALS messages suppressed).\n",
+               n_cvode_fail.load(), static_cast<long long>(Ncells));
+    }
+    if (n_other_exception_fail.load() > 0) {
+        printf("solve_batch_time: %lld / %lld cells failed with non-CVODE exceptions.\n",
+               n_other_exception_fail.load(), static_cast<long long>(Ncells));
+    }
+    if (n_negative_abundance_cells.load() > 0) {
+        printf("solve_batch_time: corrected %lld / %lld cells with negative abundances "
+               "(%lld species corrections total).\n",
+               n_negative_abundance_cells.load(),
+               static_cast<long long>(Ncells),
+               n_negative_abundance_corrections.load());
     }
 
     py::dict out;
     out["y"] = y_out;
     out["status"] = status_out;
+    out["cvode_failure_cells"] = n_cvode_fail.load();
+    out["exception_failure_cells"] = n_other_exception_fail.load();
+    out["negative_abundance_cells"] = n_negative_abundance_cells.load();
+    out["negative_abundance_corrections"] = n_negative_abundance_corrections.load();
     return out;
 }
 
