@@ -57,16 +57,16 @@ class Params:
     species: Union[str, List[str]]
     opacity_dir: str
 
-    # gas_rt
-    gasspecies: str
-    iline: int
-    abundance: float
-    width: Quantity
-    nline: int
-    turbvel: Quantity
-    photodissociation: bool
-    freezeout: bool
-    photodesorption: bool
+    # gas_rt (can be scalar or list for multi-species line transfer)
+    gasspecies: Union[str, List[str]]
+    iline: Union[int, List[int]]
+    abundance: Union[float, List[float]]
+    width: Union[Quantity, List[Quantity]]
+    nline: Union[int, List[int]]
+    turbvel: Union[Quantity, List[Quantity]]
+    photodissociation: Union[bool, List[bool]]
+    freezeout: Union[bool, List[bool]]
+    photodesorption: Union[bool, List[bool]]
     uv_min: Quantity
     uv_max: Quantity
     uv_n_wavelengths: int
@@ -351,6 +351,58 @@ def canonicalize_dust_params(params_obj: Params) -> dict:
                 f"imply {ncomp} components. Each parameter must have length 1 or {ncomp}."
             )
     
+    return canonical
+
+
+def canonicalize_line_params(params_obj: Params) -> dict:
+    """Canonicalize gas line parameters to per-species lists.
+
+    Scalar values are broadcast to every species. List-valued parameters must
+    either have length one or the number of requested gas species.
+
+    Parameters
+    ----------
+    params_obj : Params
+        Parsed parameter object.
+
+    Returns
+    -------
+    dict
+        Canonical gas line parameters with ``nlines`` and one list per line
+        parameter.
+    """
+    line_param_names = [
+        "gasspecies",
+        "iline",
+        "abundance",
+        "width",
+        "nline",
+        "turbvel",
+        "photodissociation",
+        "freezeout",
+        "photodesorption",
+    ]
+
+    def to_list(x):
+        return x if isinstance(x, list) else [x]
+
+    lists = {k: to_list(getattr(params_obj, k)) for k in line_param_names}
+    nlines = max(len(v) for v in lists.values())
+
+    canonical = {"nlines": nlines}
+    for k, v in lists.items():
+        if len(v) == 1 and nlines > 1:
+            canonical[k] = v * nlines
+        elif len(v) == nlines:
+            canonical[k] = v
+        else:
+            raise ValueError(
+                f"Line parameter '{k}' has length {len(v)}, but other parameters "
+                f"imply {nlines} line species. Each parameter must have length 1 "
+                f"or {nlines}."
+            )
+
+    canonical["gasspecies"] = [str(sp).lower() for sp in canonical["gasspecies"]]
     return canonical
 
 

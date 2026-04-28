@@ -8,7 +8,7 @@ from ._logging import logger_init as _logger_init
 from .model import Model
 from .model import downsample_model, load_model, puff_up_model
 from . import _params as _params_module
-from ._params import read_params
+from ._params import canonicalize_line_params, read_params
 
 
 __version__ = '0.1.0'
@@ -68,6 +68,7 @@ __all__ = [
     "array_quantities",
     "generate_array_code_units",
     "read_params",
+    "canonicalize_line_params",
     "params",
     "Model",
     "downsample_model",
