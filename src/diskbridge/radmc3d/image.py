@@ -133,6 +133,7 @@ class RadImage:
             'stars.inp', 'dustopac.inp',
             'dust_density.binp',
             'gas_velocity.binp',
+            'gas_temperature.*',
             'numberdens_*.binp',
             'radmc3d.inp', 'lines.inp', 'molecule_*.inp',
             'external_source.inp'
@@ -1272,9 +1273,6 @@ class RadImage:
         from .writer import RadWriter
         writer = RadWriter(self.model)
         writer.write_gas_velocity(
-            self.model.gas['vr'].data,
-            self.model.gas['vtheta'].data,
-            self.model.gas['vphi'].data,
             binary=True,
             output_dir=str(self.model_dir)
         )

@@ -4,6 +4,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Union, List, Optional, Dict, get_origin, get_args, get_type_hints
 import re
+import sys
 
 from ._units import Quantity, units
 
@@ -231,9 +232,42 @@ def _parse_value(raw: str, target_type, param_name: str = ''):
 params: Params  # global
 
 
-def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
-    """Load defaults from DEFAULT_PARAMS_FILE, overlay user overrides, and build Params."""
+def _set_global_params(params_obj: Params) -> Params:
+    """Set and publish the active DiskBridge parameters.
+
+    Parameters
+    ----------
+    params_obj : Params
+        Parameter object to make active.
+
+    Returns
+    -------
+    Params
+        The active parameter object.
+    """
     global params
+
+    params = params_obj
+    package = sys.modules.get("diskbridge")
+    if package is not None:
+        package.__dict__["params"] = params_obj
+    return params_obj
+
+
+def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
+    """Load and activate DiskBridge parameters.
+
+    Parameters
+    ----------
+    filename : str or pathlib.Path, optional
+        User parameter file containing overrides. If not provided, only the
+        package defaults are loaded.
+
+    Returns
+    -------
+    Params
+        The active parameter object after applying defaults and overrides.
+    """
 
     # 1. Read defaults (the *real* default source)
     values = _parse_param_file(DEFAULT_PARAMS_FILE)
@@ -260,11 +294,11 @@ def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
         parsed = _parse_value(raw, field_type, param_name=key)
         kwargs[key] = parsed
 
-    params = Params(**kwargs)
-    opacity_path = Path(params.opacity_dir)
+    params_obj = Params(**kwargs)
+    opacity_path = Path(params_obj.opacity_dir)
     if not opacity_path.is_absolute():
-        params.opacity_dir = str((REPO_ROOT / opacity_path).resolve())
-    return params
+        params_obj.opacity_dir = str((REPO_ROOT / opacity_path).resolve())
+    return _set_global_params(params_obj)
 
 
 def canonicalize_dust_params(params_obj: Params) -> dict:

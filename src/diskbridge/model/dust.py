@@ -6,14 +6,14 @@ memory-efficient storage for gas-proportional dust, and integration with radmc3d
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional, Callable, List, Literal
+from typing import TYPE_CHECKING, Dict, Optional, Callable, List, Literal, Union
 import numpy as np
 
 from diskbridge._units import Quantity, units
 from diskbridge._logging import logger
 from diskbridge.model.field import Field
 from diskbridge.model.disk import scale_height, keplerian_frequency
-from diskbridge._params import params, canonicalize_dust_params
+from diskbridge._params import canonicalize_dust_params
 
 if TYPE_CHECKING:
     from .core import Model
@@ -24,6 +24,12 @@ from .core import SubModel
 k_B = units('k_B')  # Boltzmann constant
 m_H = units('m_H')  # Hydrogen mass
 G = units('G')      # Gravitational constant
+
+
+def _current_params():
+    import diskbridge
+
+    return diskbridge.params
 
 
 def stokes_number(
@@ -381,22 +387,24 @@ class Dust(SubModel):
                 "have been configured. Use region.dust.set_distribution() instead."
             )
 
+        current_params = _current_params()
+
         # Pull defaults from params if not provided
         if amin is None:
             # params.amin is already a Quantity in microns
-            amin = params.amin
+            amin = current_params.amin
         if amax is None:
             # params.amax is already a Quantity in microns
-            amax = params.amax
+            amax = current_params.amax
         if nbin is None:
-            nbin = params.nbins
+            nbin = current_params.nbins
         if power_index is None:
-            power_index = params.pindex
+            power_index = current_params.pindex
         if grain_density is None:
             # params.grain_density is already a Quantity in g/cm^3
-            grain_density = params.grain_density
+            grain_density = current_params.grain_density
         if dust_to_gas_ratio is None:
-            dust_to_gas_ratio = params.dust_to_gas_ratio
+            dust_to_gas_ratio = current_params.dust_to_gas_ratio
         
         distribution = DustDistribution(
             amin=amin,
@@ -420,7 +428,11 @@ class Dust(SubModel):
             logger.info(f"Settling mode: alpha={alpha}, delta={delta}")
         
         # Get species base name from params
-        species_base = params.species if isinstance(params.species, str) else params.species[0]
+        species_base = (
+            current_params.species
+            if isinstance(current_params.species, str)
+            else current_params.species[0]
+        )
         
         # Create a single component (for backward compatibility)
         component = DustComponent(
@@ -472,10 +484,46 @@ class Dust(SubModel):
             f"dust/gas={dust_to_gas_ratio:.3e}, power_index={power_index}, mode={mode}"
         )
     
+    def _resolve_mask_field(
+        self,
+        mask: Union[Field, str],
+        *,
+        complement: bool = False,
+    ) -> Field:
+        if isinstance(mask, str):
+            if self.parent.gas is None or mask not in self.parent.gas:
+                raise KeyError(f"Gas mask/weight field {mask!r} not found")
+            source = self.parent.gas[mask]
+            source_name = mask
+        else:
+            source = mask
+            source_name = None
+
+        from .utils import validate_field_against_mesh, field_data_as_order
+
+        validate_field_against_mesh(source, self.parent.mesh)  # type: ignore[arg-type]
+        target = self.parent.mesh.axis_names()  # type: ignore[union-attr]
+        data = field_data_as_order(source, target).to("dimensionless")
+        values = np.clip(np.asarray(data.magnitude, dtype=float), 0.0, 1.0)
+        attrs = dict(source.attrs)
+
+        if complement:
+            values = 1.0 - values
+            if source_name is not None:
+                attrs["complement_of"] = source_name
+
+        return Field(
+            data=Quantity(values, "dimensionless"),
+            quantity=source.quantity,
+            axis_order=target,
+            attrs=attrs,
+        )
+
     def add_component_from_mask(
         self,
-        mask: Field,
+        mask: Union[Field, str],
         mode: Literal['proportional', 'settling'] = 'proportional',
+        complement: bool = False,
         amin: Optional[Quantity] = None,
         amax: Optional[Quantity] = None,
         nbin: Optional[int] = None,
@@ -491,8 +539,9 @@ class Dust(SubModel):
         This allows multiple dust distributions in different spatial regions.
         
         Args:
-            mask: Field defining where this component exists
+            mask: Field or gas field name defining where this component exists.
             mode: 'proportional' or 'settling'
+            complement: If True, use 1 - mask after clipping mask values to [0, 1].
             amin: Minimum grain size (default: from canonicalized params)
             amax: Maximum grain size (default: from canonicalized params)
             nbin: Number of size bins (default: from canonicalized params)
@@ -503,12 +552,14 @@ class Dust(SubModel):
             delta: Turbulent diffusion parameter (default: = alpha)
             mean_molecular_weight: Mean molecular weight (default: 2.3)
         """
+        mask = self._resolve_mask_field(mask, complement=complement)
+
         # Determine this component's index
         self._has_region_components = True
         component_index = len(self._components)
 
         # Pull canonical dust parameters from global params
-        canon = canonicalize_dust_params(params)
+        canon = canonicalize_dust_params(_current_params())
         ncomp = canon['ncomp']
         if component_index >= ncomp:
             raise ValueError(

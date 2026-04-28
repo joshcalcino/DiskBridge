@@ -163,6 +163,7 @@ class RadModel:
             'stars.inp', 'dustopac.inp',
             'dust_density.binp',
             'gas_velocity.binp',
+            'gas_temperature.*',
             'radmc3d.inp', 'external_source.inp',
             'numberdens_*.binp',
         ]

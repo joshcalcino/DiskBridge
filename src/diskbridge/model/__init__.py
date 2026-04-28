@@ -5,6 +5,7 @@ from .mesh import Mesh
 from .field import Field
 from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
+from .downsample import downsample_model
 from .masking import set_mask_from_joos_disk
 
 def load_model(
@@ -54,6 +55,7 @@ __all__ = [
     "Model",
     "ClipIndexer",
     "compute_clip_indexer",
+    "downsample_model",
     "load_model",
     "puff_up_model",
     "set_mask_from_joos_disk",

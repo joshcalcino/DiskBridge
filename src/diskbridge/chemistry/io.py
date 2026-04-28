@@ -52,3 +52,44 @@ def write_many(
     """
     for species, ndens in number_densities.items():
         write_numberdens(rad, species, ndens, output_dir)
+
+
+def get_gas_temperature(rad: 'RadModel') -> Optional[Quantity]:
+    """Return the best available gas temperature field on a RadModel."""
+    tgas = getattr(rad, 'Tgas_gow17', None)
+    if tgas is not None:
+        return tgas
+
+    tgas = getattr(rad, 'gas_temperature', None)
+    if tgas is not None:
+        return tgas
+
+    if hasattr(rad, 'ensure_gas_temperature'):
+        return rad.ensure_gas_temperature()
+
+    return None
+
+
+def write_gas_temperature(
+    rad: 'RadModel',
+    output_dir: Optional[Path] = None,
+    *,
+    binary: bool = True,
+) -> Path:
+    """Write the current gas temperature field to RADMC-3D format."""
+    if output_dir is None:
+        output_dir = rad.model_dir
+
+    tgas = get_gas_temperature(rad)
+    if tgas is None:
+        raise RuntimeError("No gas temperature field is available to write")
+
+    base_dir = Path(output_dir)
+    if getattr(rad.writer, 'organize_files', False):
+        output_path = base_dir / getattr(rad.writer, 'inputs_dir', 'radmc3d_inputs')
+    else:
+        output_path = base_dir
+
+    rad.writer.write_gas_temperature(tgas, output_dir=output_path, binary=binary)
+    suffix = "binp" if binary else "inp"
+    return output_path / f"gas_temperature.{suffix}"

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
-from diskbridge.chemistry.io import write_many
+from diskbridge.chemistry.io import write_gas_temperature, write_many
 from diskbridge.model.field import Field
 
 
@@ -163,6 +163,9 @@ def run_chemistry(
     
     if write and result.number_densities:
         write_many(rad, result.number_densities, output_dir)
+
+    if write and getattr(rad, 'Tgas_gow17', None) is not None:
+        write_gas_temperature(rad, output_dir=output_dir, binary=True)
     
     return result
 

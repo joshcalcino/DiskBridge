@@ -867,8 +867,13 @@ class RadWriter:
                 f.write(f"{val:13.6e}\n")
         self.written_files['external_source.inp'] = filepath
         logger.info(f"Wrote external_source.inp file: {filepath}")
-    def write_gas_temperature(self, temperature: Quantity, output_dir: str | Path = '.') -> None:
-        """Write gas temperature to gas_temperature.inp.
+    def write_gas_temperature(
+        self,
+        temperature: Quantity,
+        output_dir: str | Path = '.',
+        binary: bool = False,
+    ) -> None:
+        """Write gas temperature to gas_temperature.inp or gas_temperature.binp.
         
         Parameters
         ----------
@@ -876,10 +881,12 @@ class RadWriter:
             Gas temperature field in K, shape (nx, ny, nz)
         output_dir : str or Path, optional
             Directory to write file (default: '.')
+        binary : bool, optional
+            Write RADMC-3D binary format (default: False)
             
         Notes
         -----
-        Writes ASCII format gas_temperature.inp file for RADMC-3D LTE line transfer.
+        Writes gas_temperature for RADMC-3D line transfer.
         Temperature should be in Kelvin.
         
         RADMC-3D expects cells in the same order as the grid.
@@ -889,7 +896,7 @@ class RadWriter:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        fpath = output_dir / 'gas_temperature.inp'
+        fpath = output_dir / ('gas_temperature.binp' if binary else 'gas_temperature.inp')
         
         temp = temperature.to('K').magnitude
 
@@ -909,15 +916,24 @@ class RadWriter:
         temp_flat = np.asarray(temp).flatten()
         ncells = temp_flat.size
         
-        logger.info(f"Writing gas temperature to {fpath}: {ncells} cells, "
-                   f"T_range=[{temp.min():.1f}, {temp.max():.1f}] K")
-        
-        with open(fpath, 'w') as f:
-            f.write('1\n')  # Format number
-            f.write(f'{ncells}\n')
-            for T in temp_flat:
-                f.write(f'{T:.6e}\n')
+        logger.info(
+            f"Writing gas temperature to {fpath}: {ncells} cells, "
+            f"T_range=[{temp.min():.1f}, {temp.max():.1f}] K"
+        )
+
+        if binary:
+            with open(fpath, 'wb') as f:
+                header = np.array([1, 8, ncells], dtype=np.int64)
+                header.tofile(f)
+                temp_flat.astype(np.float64).tofile(f)
+        else:
+            with open(fpath, 'w') as f:
+                f.write('1\n')  # Format number
+                f.write(f'{ncells}\n')
+                for T in temp_flat:
+                    f.write(f'{T:.6e}\n')
                 
+        self.written_files[fpath.name] = fpath
         logger.info(f"Wrote {fpath}")
 
     def write_dust_temperature(
@@ -1103,23 +1119,27 @@ class RadWriter:
         logger.info(f'Wrote {fpath}')
         
     def write_gas_velocity(
-        self, 
-        vr: Quantity, 
-        vtheta: Quantity, 
-        vphi: Quantity, 
+        self,
+        vr: Optional[Quantity | str | Path] = None,
+        vtheta: Optional[Quantity] = None,
+        vphi: Optional[Quantity] = None,
         output_dir: str | Path = '.',
-        binary: bool = True
+        binary: bool = True,
     ) -> None:
         """Write gas velocity to gas_velocity.binp or gas_velocity.inp.
         
         Parameters
         ----------
-        vr : Quantity
-            Radial velocity component, shape (nx, ny, nz)
-        vtheta : Quantity
-            Theta velocity component, shape (nx, ny, nz)
-        vphi : Quantity
-            Phi velocity component, shape (nx, ny, nz)
+        vr : Quantity or str or Path, optional
+            Radial velocity component, shape (nx, ny, nz). If omitted, this is
+            read from ``self.model.gas['vr']``. For convenience,
+            ``write_gas_velocity(output_dir)`` is also accepted.
+        vtheta : Quantity, optional
+            Theta velocity component, shape (nx, ny, nz). If omitted, this is
+            read from ``self.model.gas['vtheta']``.
+        vphi : Quantity, optional
+            Phi velocity component, shape (nx, ny, nz). If omitted, this is
+            read from ``self.model.gas['vphi']``.
         output_dir : str or Path, optional
             Directory to write file (default: '.')
         binary : bool, optional
@@ -1137,6 +1157,39 @@ class RadWriter:
         DiskBridge stores fields in the canonical mesh.axis_names() order.
         We reorder explicitly before writing.
         """
+        if (
+            isinstance(vr, (str, Path))
+            and vtheta is None
+            and vphi is None
+            and output_dir == '.'
+        ):
+            output_dir = vr
+            vr = None
+
+        if vr is None and vtheta is None and vphi is None:
+            if self.model.gas is None:
+                raise ValueError(
+                    "Model has no gas submodel; cannot infer gas velocity fields"
+                )
+            missing = [
+                name
+                for name in ("vr", "vtheta", "vphi")
+                if name not in self.model.gas
+            ]
+            if missing:
+                raise KeyError(
+                    "Cannot infer gas velocity fields from model.gas; missing "
+                    + ", ".join(repr(name) for name in missing)
+                )
+            vr = self.model.gas["vr"].data
+            vtheta = self.model.gas["vtheta"].data
+            vphi = self.model.gas["vphi"].data
+        elif vr is None or vtheta is None or vphi is None:
+            raise ValueError(
+                "Provide all three velocity components (vr, vtheta, vphi), "
+                "or omit all of them to use model.gas fields"
+            )
+
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'gas')
         

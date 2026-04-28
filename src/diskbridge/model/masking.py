@@ -468,7 +468,8 @@ def set_mask_from_joos_disk(
        - rotational support dominates over thermal pressure
        - density exceeds rho_disk_min
     4) Enforces per-radius connectivity (a contiguous band around the midplane).
-    5) Returns a SubModel with a boolean mask.
+    5) Registers the boolean mask as model.gas["disk_mask"].
+    6) Returns a SubModel with the same boolean mask.
 
     Optionally, it can also compute a continuous weight field w in [0, 1] and register it
     into model.gas[weight_name]. This is intended for soft transitions (e.g., dust mixing)
@@ -672,7 +673,9 @@ def set_mask_from_joos_disk(
     if r_max is not None:
         mask &= (r_grid <= r_max)
 
-    return model.set_mask_from_array(mask, is_a_disk=True)
+    disk_region = model.set_mask_from_array(mask, is_a_disk=True)
+    model.gas_register("disk_mask", disk_region.mask)
+    return disk_region
 
 
 def set_mask_from_geometry(
