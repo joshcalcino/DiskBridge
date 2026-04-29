@@ -93,7 +93,7 @@ def run_thermal(
     ):
         raise RuntimeError(
             "thermal_balance requires chemistry outputs (nCplus, nC, ne, nH2, nH_atom). "
-            "Run carbon_reduced first, then iterate in run_thermochemistry."
+            "Run a chemistry model that produces these (e.g. gow17) first."
         )
     
     logger.info("Building thermal state...")

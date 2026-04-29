@@ -138,8 +138,8 @@ def run_chemistry(
     --------
     >>> res = run_chemistry(
     ...     rad,
-    ...     model="carbon_reduced",
-    ...     config=dict(Xco_tot=1e-4, nside=8, b_kms=0.3),
+    ...     model="gow17",
+    ...     config=dict(enable_co_phase=True, b_kms=0.3),
     ...     write=True,
     ... )
     >>> nco = res.number_densities["co"]
@@ -220,25 +220,19 @@ def run_thermochemistry(
     >>> 
     >>> chem, therm = run_thermochemistry(
     ...     rad,
-    ...     chemistry_model="carbon_reduced",
-    ...     chemistry_config={"Xco_tot": 1e-4, "nside": 4},
+    ...     chemistry_model="gow17",
+    ...     chemistry_config={"enable_co_phase": True},
     ...     thermal_model="thermal_balance",
     ...     thermal_config={"pah_scale": 0.5},
     ...     n_iter=3,
     ... )
     """
     from diskbridge.chemistry.thermal import run_thermal
-    
+
     if chemistry_config is None:
         chemistry_config = {}
     if thermal_config is None:
         thermal_config = {}
-    
-    if str(chemistry_model).lower() != "carbon_reduced":
-        raise ValueError(
-            "run_thermochemistry requires chemistry_model='carbon_reduced' to enforce an explicit "
-            "chemistry-first thermal contract."
-        )
 
     logger.info("=" * 60)
     logger.info("Running coupled thermochemistry")

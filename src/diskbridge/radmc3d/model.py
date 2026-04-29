@@ -155,6 +155,25 @@ class RadModel:
         self.outputs_dir = self.model_dir / 'radmc3d_outputs'
         
         self._active_symlinks: list[Path] = []
+        self._inherit_canonical_rt_fields()
+
+    def _inherit_canonical_rt_fields(self) -> None:
+        """Initialize cached RT fields from canonical model fields.
+
+        Returns
+        -------
+        None
+            Updates ``dust_temperature`` and ``chi`` in place when the wrapped
+            model already contains canonical gas fields with those names.
+        """
+        gas = getattr(self.model, "gas", None)
+        if gas is None:
+            return
+
+        if self.dust_temperature is None and "dust_temperature" in gas:
+            self.dust_temperature = gas["dust_temperature"].data
+        if self.chi is None and "chi" in gas:
+            self.chi = gas["chi"].data
     
     def _get_input_files(self) -> list[str]:
         """Get list of input files to symlink."""

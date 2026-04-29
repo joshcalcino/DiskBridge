@@ -1282,20 +1282,19 @@ class RadImage:
         """Ensure radmc3d.inp is properly configured for line transfer."""
         # Use radmc3d_inputs/radmc3d.inp
         inp_file = self.inputs_dir / 'radmc3d.inp'
+        line_params = diskbridge.canonicalize_line_params(self.params)
+        line_modes = {int(mode) for mode in line_params["line_mode"]}
+        if len(line_modes) != 1:
+            raise ValueError(
+                "RADMC-3D uses one global lines_mode per run; got "
+                f"{sorted(line_modes)} from params."
+            )
+        line_mode = next(iter(line_modes))
         
         # Read existing file
         if inp_file.exists():
             with open(inp_file, 'r') as f:
                 content = f.read()
-            
-            # Check if already configured
-            has_lines = 'incl_lines' in content and '= 1' in content
-            has_tgas = 'tgas_eq_tdust' in content
-            has_itemp = 'itempdecoup' in content
-            has_rto = 'rto_style' in content
-            
-            if has_lines and has_tgas and has_itemp and has_rto:
-                return  # Already configured
         else:
             content = ""
         
@@ -1321,17 +1320,79 @@ class RadImage:
                 if inp_file.exists():
                     with open(inp_file, 'r') as f:
                         content = f.read()
-        
-        # Append additional settings
-        with open(inp_file, 'a') as f:
-            if 'tgas_eq_tdust' not in content:
-                f.write('tgas_eq_tdust = 1\n')
-            if 'itempdecoup' not in content:
-                f.write('itempdecoup = 1\n')
-            if 'rto_style' not in content:
-                f.write('rto_style = 3\n')
+
+        settings = {
+            "incl_lines": "1",
+            "lines_mode": str(line_mode),
+            "tgas_eq_tdust": "1",
+            "itempdecoup": "1",
+            "rto_style": "3",
+        }
+        lines = content.splitlines()
+        seen = set()
+        updated = []
+        for line in lines:
+            stripped = line.strip()
+            if "=" not in stripped or stripped.startswith("#"):
+                updated.append(line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in settings:
+                updated.append(f"{key} = {settings[key]}")
+                seen.add(key)
+            else:
+                updated.append(line)
+
+        for key, value in settings.items():
+            if key not in seen:
+                updated.append(f"{key} = {value}")
+
+        inp_file.write_text("\n".join(updated) + "\n")
         
         logger.info(f"Updated radmc3d.inp at {inp_file}")
+
+    def _line_setup_for_molecule(self, molecule: str) -> dict:
+        """Return line-transfer settings for a molecule.
+
+        Parameters
+        ----------
+        molecule : str
+            Molecule or atom name from ``gasspecies``.
+
+        Returns
+        -------
+        dict
+            Settings containing ``line_mode`` and ``colliders``.
+
+        Raises
+        ------
+        ValueError
+            If the molecule is not configured in the parameter file.
+        """
+        line_params = diskbridge.canonicalize_line_params(self.params)
+        mol_lower = str(molecule).lower()
+        species = line_params["gasspecies"]
+        if mol_lower not in species:
+            raise ValueError(
+                f"Line species {molecule!r} is not configured in gasspecies={species!r}"
+            )
+
+        index = species.index(mol_lower)
+        collider = str(line_params["line_colliders"][index]).lower()
+        colliders = []
+        if collider not in {"", "none", "off", "0"}:
+            colliders = [collider]
+
+        line_mode = int(line_params["line_mode"][index])
+        if abs(line_mode) in {3, 4} and not colliders:
+            raise ValueError(
+                f"line_mode={line_mode} for {molecule} requires line_colliders."
+            )
+
+        return {
+            "line_mode": line_mode,
+            "colliders": colliders,
+        }
     
     def _ensure_lines_inp(self, molecule: str) -> None:
         """Ensure lines.inp file exists for specified molecule.
@@ -1343,22 +1404,25 @@ class RadImage:
         """
         # Create inputs_dir if it doesn't exist
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        setup = self._line_setup_for_molecule(molecule)
+        colliders = setup["colliders"] if abs(setup["line_mode"]) in {3, 4} else []
+        expected_lines = [
+            "2",
+            "1",
+            f"{molecule}    leiden    0    0    {len(colliders)}",
+        ]
+        expected_lines.extend(colliders)
+        expected_content = "\n".join(expected_lines) + "\n"
+
         lines_file = self.inputs_dir / 'lines.inp'
-        
-        # Check if file exists and already has this molecule
+
         if lines_file.exists():
-            with open(lines_file, 'r') as f:
-                content = f.read()
-            if molecule in content:
-                return  # Already configured
-        
+            content = lines_file.read_text()
+            if content == expected_content:
+                return
+
         logger.info(f"Creating lines.inp for {molecule}...")
-        
-        # Write lines.inp
-        with open(lines_file, 'w') as f:
-            f.write('2\n')  # Format number
-            f.write('1\n')  # Number of molecules
-            f.write(f'{molecule}    leiden    0    0    0\n')
+        lines_file.write_text(expected_content)
         
         logger.info(f"Created lines.inp to {lines_file}")

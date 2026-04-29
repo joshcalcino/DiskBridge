@@ -119,6 +119,12 @@ X_O_tot = 3.2e-4               # Total oxygen abundance
 E_bind_co = "855.0 K"          # CO binding energy to grain surface
 nu0_co = "1.0e12 Hz"           # Thermal desorption attempt frequency
 
+# CO surface / photodesorption parameters (used by gow17 enable_co_phase)
+F_DRAINE = "2.0e8 1/(cm^2 s)"  # Draine UV photon flux for chi=1
+N_LAY = 2                      # Number of active ice layers
+n_surf = "1.5e15 1/cm^2"       # Surface site density
+Y_CO = 1.0e-3                  # CO photodesorption yield (molecules/photon)
+
 # =============================================================================
 # PINTE SWITCHES MODEL
 # Simple threshold-based abundance switches (Pinte et al. style)
@@ -141,36 +147,6 @@ CD_threshold_pdes = "1.272e21 1/cm^2"      # 0.8 * 1.59e21
 CD_threshold_pdiss = "8.268e20 1/cm^2"    # 0.8 * 1.59e21 * 0.65
 
 # =============================================================================
-# CO REDUCED CARBON MODEL
-# Time-dependent gas-ice partitioning with formation/destruction rates
-# =============================================================================
-
-[chemistry.carbon_reduced]
-# Per-molecule self-shielding toggles (default: all enabled)
-h2_self_shielding = true          # H2 self-shielding in H2 partition
-co_self_shielding = true          # CO self-shielding (Visser+09)
-c_self_shielding = true           # C photoionization shielding in carbon closure
-c_shielding_iter = 1              # Number of C shielding refinement iterations
-
-formation_model = "tau"
-tau_co_form = "1.0e5 yr"       # CO formation timescale
-k0_co = "2.0e-10 s^-1"         # Unshielded CO photodissociation rate
-F_DRAINE = "2.0e8 1/(cm^2 s)"  # Draine UV photon flux for chi=1
-N_LAY = 2                      # Number of active ice layers
-n_surf = "1.5e15 1/cm^2"       # Surface site density
-Y_CO = 1.0e-3                  # CO photodesorption yield (molecules/photon)
-
-k0_nl97 = "5.0e-16 cm^3/s"
-k1_nl97 = "5.0e-10 cm^3/s"
-gamma_chx0 = "5.0e-10 s^-1"
-
-# Density-capped tau_form model param eters
-tau_form_n0 = "1.0e4 cm^-3"    # Reference density for density-capped model
-tau_form_tau0 = "1.0e5 yr"     # tau_form at reference density
-tau_form_tau_min = "1.0e3 yr"  # Minimum tau_form in dense gas
-tau_form_alpha = 1.0           # Density scaling exponent
-
-# =============================================================================
 # H2 PARTITION (HEALPix-based)
 # =============================================================================
 
@@ -189,8 +165,6 @@ k0_diss = "4.2e-11 s^-1"
 gamma_cii = "2.3e-3 cm^3/s"    # C+ fine-structure excitation rate coefficient
 E_cii = "91.2 K"               # C+ 158um line excitation energy
 n_crit_cii = "3.0e3 cm^-3"     # Critical density for C+ cooling
-alpha_rec_c0 = "4.67e-12 cm^3/s"  # C+ recombination rate at 300K
-T_rec_exp = -0.6               # Temperature exponent for recombination
 
 # C I cooling (609 um and 370 um lines)
 gamma_ci10 = "2.8e-10 cm^3/s"  # C I (1-0) 609um excitation rate coefficient
@@ -232,9 +206,6 @@ heating_per_cr = "3.204e-11 erg"  # Heating per CR ionization (20 eV)
 # Photoelectric heating
 pe_heating_rate_0 = "1.3e-24 erg/s"  # PE heating rate coefficient
 pah_scale = 1.0                # PAH abundance scaling factor
-
-# Carbon photoionization
-Gamma_C0 = "3.0e-10 s^-1"      # C photoionization rate at chi=1
 
 # Accretion heating
 alpha_acc = 0.3                # Accretion heating efficiency

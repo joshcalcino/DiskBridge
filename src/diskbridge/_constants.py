@@ -8,7 +8,7 @@ Constants are organized into sections:
 - Physical constants (from Pint registry)
 - Astronomical constants (from config)
 - Common chemistry parameters (shared across models)
-- Model-specific parameters (pinte_switches, carbon_reduced, thermal_balance_v1)
+- Model-specific parameters (pinte_switches, layered_column_switches, thermal_balance)
 
 Users can override defaults by calling diskbridge.load_config(path) before
 importing this module.
@@ -69,6 +69,12 @@ X_O_TOT = float(_chem_common['X_O_tot'])
 E_BIND_CO = Quantity(_chem_common['E_bind_co']).to_base_units().magnitude    # K
 NU0_CO = Quantity(_chem_common['nu0_co']).to_base_units().magnitude          # Hz (s^-1)
 
+# CO surface / photodesorption (used by gow17 enable_co_phase)
+F_DRAINE = Quantity(_chem_common['F_DRAINE']).to_base_units().magnitude      # 1/(cm^2 s)
+N_LAY = int(_chem_common['N_LAY'])                                           # dimensionless
+N_SURF = Quantity(_chem_common['n_surf']).to_base_units().magnitude          # 1/cm^2
+Y_CO = float(_chem_common['Y_CO'])                                           # molecules/photon
+
 # =============================================================================
 # PINTE SWITCHES MODEL
 # =============================================================================
@@ -91,30 +97,6 @@ CD_THRESHOLD_PDES = Quantity(_ab_switch['CD_threshold_pdes']).to_base_units().ma
 CD_THRESHOLD_PDISS = Quantity(_ab_switch['CD_threshold_pdiss']).to_base_units().magnitude  # cm^-2
 
 # =============================================================================
-# CO TWO-PHASE MODEL
-# =============================================================================
-
-_co2p = _cfg['chemistry']['carbon_reduced']
-
-TAU_CO_FORM = Quantity(_co2p['tau_co_form']).to_base_units().magnitude  # s
-K0_CO = Quantity(_co2p['k0_co']).to_base_units().magnitude              # s^-1
-F_DRAINE = Quantity(_co2p['F_DRAINE']).to_base_units().magnitude         # 1/(cm^2 s)
-N_LAY = int(_co2p['N_LAY'])                                             # dimensionless
-N_SURF = Quantity(_co2p['n_surf']).to_base_units().magnitude            # 1/cm^2
-Y_CO = float(_co2p['Y_CO'])                                             # molecules/photon
-
-K0_NL97 = Quantity(_co2p['k0_nl97']).to_base_units().magnitude           # cm^3/s
-K1_NL97 = Quantity(_co2p['k1_nl97']).to_base_units().magnitude           # cm^3/s
-GAMMA_CHX0 = Quantity(_co2p['gamma_chx0']).to_base_units().magnitude     # s^-1
-X_O_NL97 = float(_co2p.get('xO', X_O_TOT))                               # dimensionless
-
-# Density-capped tau_form model
-TAU_FORM_N0 = Quantity(_co2p['tau_form_n0']).to_base_units().magnitude      # cm^-3
-TAU_FORM_TAU0 = Quantity(_co2p['tau_form_tau0']).to_base_units().magnitude  # s
-TAU_FORM_TAU_MIN = Quantity(_co2p['tau_form_tau_min']).to_base_units().magnitude  # s
-TAU_FORM_ALPHA = float(_co2p['tau_form_alpha'])                         # dimensionless
-
-# =============================================================================
 # H2 PARTITION (HEALPix-based)
 # =============================================================================
 
@@ -134,8 +116,6 @@ _therm_common = _cfg['thermal']['common']
 GAMMA_CII = Quantity(_therm_common['gamma_cii']).to_base_units().magnitude  # cm^3/s
 E_CII = Quantity(_therm_common['E_cii']).to_base_units().magnitude          # K
 N_CRIT_CII = Quantity(_therm_common['n_crit_cii']).to_base_units().magnitude  # cm^-3
-ALPHA_REC_C0 = Quantity(_therm_common['alpha_rec_c0']).to_base_units().magnitude  # cm^3/s
-T_REC_EXP = float(_therm_common['T_rec_exp'])                               # dimensionless
 
 # Dust properties
 SIGMA_DUST = Quantity(_therm_common['sigma_dust']).to_base_units().magnitude  # cm^2
@@ -154,9 +134,6 @@ HEATING_PER_CR = Quantity(_thermal['heating_per_cr']).to_base_units().magnitude 
 # Photoelectric heating
 PE_HEATING_RATE_0 = Quantity(_thermal['pe_heating_rate_0']).to_base_units().magnitude  # erg/s
 PAH_SCALE = float(_thermal['pah_scale'])                                 # dimensionless
-
-# Carbon photoionization
-GAMMA_C0 = Quantity(_thermal['Gamma_C0']).to_base_units().magnitude      # s^-1
 
 # Accretion heating
 ALPHA_ACC = float(_thermal['alpha_acc'])                                 # dimensionless

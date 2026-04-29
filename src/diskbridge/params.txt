@@ -47,6 +47,8 @@ abundance        = 1e-4            # abundance of the gasspecies
 width            = 2.0             # width around los_v = 0 to compute the channel maps (km/s) 
 nline            = 40              # number of lines 
 turbvel          = 0.0             # turbulent velocity in m/s 
+line_mode        = 1               # RADMC-3D line mode: 1=LTE, 3=LVG non-LTE
+line_colliders   = h2              # collision partner number-density field(s)
 photodissociation = F              # turn on photodissocaiton 
 freezeout        = F              # turn on freeze-out 
 photodesorption  = F               # Turn on photodesorption 
@@ -57,8 +59,6 @@ external_uv      = F               # include external uv photons
 external_uv_chi  = 1.0             # uv field strength in Draine units 
  nside            = 4
  
-co_tau_form_model = off            # CO formation timescale model: off|density_capped
-
 # Segmented RT (two-run outer/inner workflow)
 segmented_tol              = 0.01  # fractional tolerance for T and chi asymptote (R_split criterion)
 segmented_window_fraction  = 0.1   # fraction of radial domain for asymptote window

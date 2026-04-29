@@ -298,10 +298,19 @@ class RadWriter:
             scattering_mode_max = self.params.scat_mode
         if setthreads is None:
             setthreads = self.params.nbcores
+        line_params = diskbridge.canonicalize_line_params(self.params)
+        line_modes = {int(mode) for mode in line_params["line_mode"]}
+        if len(line_modes) != 1:
+            raise ValueError(
+                "RADMC-3D uses one global lines_mode per run; got "
+                f"{sorted(line_modes)} from params."
+            )
+        line_mode = next(iter(line_modes))
         
         with open(filepath, 'w') as f:
             f.write(f'incl_dust = {incl_dust}\n')
             f.write(f'incl_lines = {incl_lines}\n')
+            f.write(f'lines_mode = {line_mode}\n')
             f.write(f'nphot = {nphot}\n')
             f.write(f'nphot_scat = {nphot_scat}\n')
             f.write(f'nphot_mono = {nphot_mono}\n')

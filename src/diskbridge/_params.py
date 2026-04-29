@@ -64,6 +64,8 @@ class Params:
     width: Union[Quantity, List[Quantity]]
     nline: Union[int, List[int]]
     turbvel: Union[Quantity, List[Quantity]]
+    line_mode: Union[int, List[int]]
+    line_colliders: Union[str, List[str]]
     photodissociation: Union[bool, List[bool]]
     freezeout: Union[bool, List[bool]]
     photodesorption: Union[bool, List[bool]]
@@ -73,8 +75,6 @@ class Params:
 
     external_uv: bool
     external_uv_chi: float
-
-    co_tau_form_model: str
 
     nside: int
 
@@ -378,6 +378,8 @@ def canonicalize_line_params(params_obj: Params) -> dict:
         "width",
         "nline",
         "turbvel",
+        "line_mode",
+        "line_colliders",
         "photodissociation",
         "freezeout",
         "photodesorption",
@@ -403,6 +405,9 @@ def canonicalize_line_params(params_obj: Params) -> dict:
             )
 
     canonical["gasspecies"] = [str(sp).lower() for sp in canonical["gasspecies"]]
+    canonical["line_colliders"] = [
+        str(sp).lower() for sp in canonical["line_colliders"]
+    ]
     return canonical
 
 
