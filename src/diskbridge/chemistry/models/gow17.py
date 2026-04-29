@@ -197,11 +197,6 @@ def _compute_shielding_and_gph(
     chi_is_incident: bool,
     local_chi_factor: float,
     shielding_outer_1d: str,
-    theta_h2_prev: np.ndarray | None = None,
-    theta_co_prev: np.ndarray | None = None,
-    theta_c_prev: np.ndarray | None = None,
-    shielding_theta_mix: float = 1.0,
-    is_first: bool = True,
 ) -> tuple:
     """Compute shielding factors and radiation field arrays from current abundances.
 
@@ -310,20 +305,9 @@ def _compute_shielding_and_gph(
             W_rays=W_rays,
         )
 
-    theta_h2_new = theta_h2_arr.reshape(ncells)
-    theta_co_new = theta_co_arr.reshape(ncells)
-    theta_c_new = theta_c_arr.reshape(ncells)
-
-    # Optional theta mixing for shielding factor stabilisation.
-    if (not is_first) and shielding_theta_mix < 1.0 and theta_h2_prev is not None:
-        a = shielding_theta_mix
-        theta_h2_flat = a * theta_h2_new + (1.0 - a) * theta_h2_prev
-        theta_co_flat = a * theta_co_new + (1.0 - a) * theta_co_prev
-        theta_c_flat = a * theta_c_new + (1.0 - a) * theta_c_prev
-    else:
-        theta_h2_flat = theta_h2_new
-        theta_co_flat = theta_co_new
-        theta_c_flat = theta_c_new
+    theta_h2_flat = theta_h2_arr.reshape(ncells)
+    theta_co_flat = theta_co_arr.reshape(ncells)
+    theta_c_flat = theta_c_arr.reshape(ncells)
 
     # -- Assemble radiation field arrays --
     Gph = np.empty((ncells, N_PH), dtype=np.float64)
@@ -419,8 +403,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_max_iter = int(shielding_max_iter_cfg)
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
-    shielding_mix = float(cfg.get("shielding_mix", 1.0))
-    shielding_theta_mix = float(cfg.get("shielding_theta_mix", 1.0))
     local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
     shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
     tgas_convergence_reltol = float(cfg.get("tgas_convergence_reltol", shielding_reltol))
@@ -978,11 +960,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
-                    theta_h2_prev=theta_h2_flat if it > 0 else None,
-                    theta_co_prev=theta_co_flat if it > 0 else None,
-                    theta_c_prev=theta_c_flat if it > 0 else None,
-                    shielding_theta_mix=shielding_theta_mix,
-                    is_first=(it == 0),
                     **_shielding_kw,
                 )
             )
@@ -1026,10 +1003,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             status_step = result["status"]
 
             status_acc = np.maximum(status_acc, np.asarray(status_step, dtype=np.int32))
-            if shielding_mix < 1.0:
-                y_guess[:, :] = shielding_mix * y_new + (1.0 - shielding_mix) * y_guess
-            else:
-                y_guess[:, :] = y_new
+            y_guess[:, :] = y_new
 
             xCO_new = y_guess[:, I_CO]
             xH2_new = y_guess[:, I_H2]
@@ -1081,8 +1055,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
-                    shielding_theta_mix=1.0,
-                    is_first=True,
                     **_shielding_kw,
                 )
             )
@@ -1166,11 +1138,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                     _compute_shielding_and_gph(
                         y_flat=y_state,
-                        theta_h2_prev=theta_h2_flat if k_step > 0 else None,
-                        theta_co_prev=theta_co_flat if k_step > 0 else None,
-                        theta_c_prev=theta_c_flat if k_step > 0 else None,
-                        shielding_theta_mix=shielding_theta_mix,
-                        is_first=(k_step == 0),
                         **_shielding_kw,
                     )
                 )
@@ -1293,8 +1260,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_state,
-                    shielding_theta_mix=1.0,
-                    is_first=True,
                     **_shielding_kw,
                 )
             )

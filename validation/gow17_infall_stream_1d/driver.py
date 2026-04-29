@@ -96,7 +96,6 @@ class InfallStream1DConfig:
     verbose: bool = False
 
     shielding_outer_1d: str = "min"
-    shielding_theta_mix: float = 1.0
 
 
 def _setup_matplotlib():
@@ -522,7 +521,6 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     gow_cfg = {
         "chi_is_incident": True,
         "shielding_outer_1d": str(cfg.shielding_outer_1d),
-        "shielding_theta_mix": float(cfg.shielding_theta_mix),
         "b_kms": float(cfg.b_kms),
         "ion_rate": str(cfg.ion_rate),
         "Zg": float(cfg.Zg),

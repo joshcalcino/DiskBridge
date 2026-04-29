@@ -4,7 +4,7 @@ Dust UV optical depth computation for HEALPix directional shielding.
 This module provides:
 
 - **resolve_uv_tau_mode**: decide whether to use dustkappa-based extinction
-  or the simple ``SIGMA_DUST * N_H`` fallback.
+  or fall back to isotropic averaging (``"sigma_dust"`` sentinel).
 - **compute_tau_uv_from_dust_columns**: compute per-ray UV optical depth
   from dust mass columns and band-averaged extinction opacities.
 - **prepare_dust_density_fields**: extract per-bin dust density arrays from
@@ -56,7 +56,7 @@ def resolve_uv_tau_mode(
     uv_min_um: float,
     uv_max_um: float,
 ) -> Tuple[str, Optional[np.ndarray]]:
-    """Determine whether to use dustkappa-based or SIGMA_DUST UV extinction.
+    """Determine whether dustkappa-based UV extinction is available.
 
     Uses dustkappa mode only if **all** of the following are true:
 
@@ -65,8 +65,9 @@ def resolve_uv_tau_mode(
     2. ``model.dust`` is not None with ``nbin > 0`` and densities available.
     3. The dustkappa file set matches the bin naming convention DiskBridge writes.
 
-    If any condition fails, falls back to the ``"sigma_dust"`` mode which uses
-    ``tau = SIGMA_DUST * N_H``.
+    If any condition fails, returns the sentinel mode ``"sigma_dust"``; the
+    caller (``maybe_ensure_W_rays``) treats this as "no W_rays available" and
+    falls back to isotropic shielding averaging.
 
     Parameters
     ----------

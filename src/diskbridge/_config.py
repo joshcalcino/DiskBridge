@@ -86,7 +86,7 @@ def resolve_model_config(
     Parameters
     ----------
     config_path : tuple of str
-        Path to the configuration section (e.g., ('thermal', 'thermal_balance_v1'))
+        Path to the configuration section (e.g., ('chemistry', 'gow17'))
     overrides : dict, optional
         User-provided overrides to merge with defaults
     config_file : str or Path, optional
@@ -99,7 +99,7 @@ def resolve_model_config(
         
     Examples
     --------
-    >>> cfg = resolve_model_config(("thermal", "thermal_balance_v1"), overrides={"zeta_cr": "1e-16 1/s"})
+    >>> cfg = resolve_model_config(("chemistry", "gow17"), overrides={"b_kms": 0.5})
     """
     if config_file is None:
         config = get_config()

@@ -980,7 +980,6 @@ def run_gow17_internal_3d_healpix_sphere(
     chi0: float,
     xi_cr: float,
     shielding_max_iter: int,
-    shielding_mix: float,
     const_temp: bool,
     nside: int,
     self_weight: float,
@@ -1155,8 +1154,6 @@ def run_gow17_internal_3d_healpix_sphere(
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
-        "shielding_mix": float(shielding_mix),
-        "shielding_theta_mix": 0.3,
         "local_chi_factor": 0.5,
         "shielding_self_weight": float(self_weight),
         "enable_co_phase": False,
@@ -1376,7 +1373,6 @@ def _run_slab_reference(
         Keys: ``Av``, ``xH2``, ``xCO``, ``xCplus``.
     """
     shielding_max_iter = 200
-    shielding_mix = 0.5
     units = diskbridge.units
     m_H = units("m_H")
     chi0_incident = 2.0 * float(chi0)
@@ -1466,8 +1462,6 @@ def _run_slab_reference(
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
-        "shielding_mix": float(shielding_mix),
-        "shielding_theta_mix": 0.3,
         "local_chi_factor": 0.5,
         "enable_co_phase": False,
         "chi_is_incident": True,
@@ -1557,7 +1551,6 @@ def main() -> None:
     chi0 = 1.0
     xi_cr = 2.0e-16
     shielding_max_iter = 20
-    shielding_mix = 0.2
     const_temp = True
     nr = 256
     ntheta = 16
@@ -1586,7 +1579,6 @@ def main() -> None:
         chi0=chi0,
         xi_cr=xi_cr,
         shielding_max_iter=shielding_max_iter,
-        shielding_mix=shielding_mix,
         const_temp=const_temp,
         nside=nside,
         self_weight=1.0,

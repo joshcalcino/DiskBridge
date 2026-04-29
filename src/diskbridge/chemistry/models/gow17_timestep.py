@@ -118,7 +118,6 @@ class Gow17TimeStepper:
 
         self.local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
         self.shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
-        self.shielding_theta_mix = float(cfg.get("shielding_theta_mix", 1.0))
 
         self.rad = rad
         self.nside = int(diskbridge.params.nside)
@@ -204,10 +203,6 @@ class Gow17TimeStepper:
             Cv0 = _cv_cold(self.y_state[:, I_H2], xe0)
             self.y_state[:, I_E] = Cv0 * T_flat
 
-        self._theta_h2_prev = np.ones(self.ncells, dtype=np.float64)
-        self._theta_co_prev = np.ones(self.ncells, dtype=np.float64)
-        self._theta_c_prev = np.ones(self.ncells, dtype=np.float64)
-
         self.eq_tmin_s = _maybe_quantity_to_float(cfg.get("tmin", 3.16e10), "s")
         tmax_val = cfg.get("tmax", None)
         if tmax_val is None:
@@ -223,20 +218,10 @@ class Gow17TimeStepper:
         self,
         *,
         y_state: np.ndarray | None = None,
-        theta_h2_prev: np.ndarray | None = None,
-        theta_co_prev: np.ndarray | None = None,
-        theta_c_prev: np.ndarray | None = None,
-        is_first: bool = False,
     ):
         rad = self.rad
         if y_state is None:
             y_state = self.y_state
-        if theta_h2_prev is None:
-            theta_h2_prev = self._theta_h2_prev
-        if theta_co_prev is None:
-            theta_co_prev = self._theta_co_prev
-        if theta_c_prev is None:
-            theta_c_prev = self._theta_c_prev
 
         chi_dust_arr = _as_cgs_f64(rad.ensure_chi(), "dimensionless")
         chi_dust_flat = chi_dust_arr.reshape(self.ncells)
@@ -266,11 +251,6 @@ class Gow17TimeStepper:
             chi_is_incident=self.chi_is_incident,
             local_chi_factor=self.local_chi_factor,
             shielding_outer_1d=self.shielding_outer_1d,
-            theta_h2_prev=theta_h2_prev,
-            theta_co_prev=theta_co_prev,
-            theta_c_prev=theta_c_prev,
-            shielding_theta_mix=self.shielding_theta_mix,
-            is_first=is_first,
         )
         return chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF
 
@@ -288,10 +268,6 @@ class Gow17TimeStepper:
 
         self.y_state[:, :] = np.asarray(y_new, dtype=np.float64)
         status = np.asarray(status, dtype=np.int32)
-
-        self._theta_h2_prev = np.asarray(theta_h2, dtype=np.float64)
-        self._theta_co_prev = np.asarray(theta_co, dtype=np.float64)
-        self._theta_c_prev = np.asarray(theta_c, dtype=np.float64)
 
         y_out = self.y_state.reshape(self.shape + (N_Y,))
         xCO = y_out[..., I_CO]
@@ -457,9 +433,6 @@ class Gow17TimeStepper:
             raise ValueError("Gow17TimeStepper.solve_equilibrium: shielding_max_iter must be >= astrochem_n_updates")
 
         y_state = np.ascontiguousarray(self.y_state.copy(), dtype=np.float64)
-        theta_h2_prev = np.asarray(self._theta_h2_prev, dtype=np.float64).copy()
-        theta_co_prev = np.asarray(self._theta_co_prev, dtype=np.float64).copy()
-        theta_c_prev = np.asarray(self._theta_c_prev, dtype=np.float64).copy()
 
         if N == 1:
             t_targets = np.array([self.astrochem_t_end_s], dtype=np.float64)
@@ -484,19 +457,11 @@ class Gow17TimeStepper:
         dt[0] = t_schedule[0]
         dt[1:] = np.diff(t_schedule)
 
-        theta_h2 = np.asarray(theta_h2_prev, dtype=np.float64)
-        theta_co = np.asarray(theta_co_prev, dtype=np.float64)
-        theta_c = np.asarray(theta_c_prev, dtype=np.float64)
-
         for k_step in range(max_iter):
             xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
             xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
             _, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment(
                 y_state=y_state,
-                theta_h2_prev=theta_h2_prev,
-                theta_co_prev=theta_co_prev,
-                theta_c_prev=theta_c_prev,
-                is_first=(k_step == 0),
             )
             result_time = _gow17.solve_batch_time(
                 y0=np.ascontiguousarray(y_state, dtype=np.float64),
@@ -531,9 +496,6 @@ class Gow17TimeStepper:
                 verbose=self.verbose,
             )
             y_state[:, :] = self._repair_failed_cells(result_time["y"], result_time["status"])
-            theta_h2_prev = np.asarray(theta_h2, dtype=np.float64)
-            theta_co_prev = np.asarray(theta_co, dtype=np.float64)
-            theta_c_prev = np.asarray(theta_c, dtype=np.float64)
 
             xCO_new = y_state[:, I_CO]
             xH2_new = y_state[:, I_H2]
@@ -546,10 +508,6 @@ class Gow17TimeStepper:
 
         chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment(
             y_state=y_state,
-            theta_h2_prev=theta_h2_prev,
-            theta_co_prev=theta_co_prev,
-            theta_c_prev=theta_c_prev,
-            is_first=True,
         )
         result = _gow17.solve_batch_equilibrium(
             y0=np.ascontiguousarray(y_state, dtype=np.float64),

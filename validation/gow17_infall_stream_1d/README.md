@@ -259,7 +259,6 @@ The model can be run in two modes:
 The default chemistry options passed into `Gow17TimeStepper` include:
 
 - `shielding_outer_1d = "min"`
-- `shielding_theta_mix = 1.0`
 - `b_kms = 0.3`
 - `ion_rate = "2e-16 s^-1"`
 - `Zg = 1.0`
