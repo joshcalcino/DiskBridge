@@ -1078,7 +1078,44 @@ class RadModel:
         segmented_external_source_mode: Optional[str] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
+        diagnostic_plots: bool = False,
+        plots_dir: Optional[str | Path] = None,
     ) -> dict:
+        """Run segmented dust-temperature and UV-field RADMC-3D calculations.
+
+        Parameters
+        ----------
+        nphot_therm : int, optional
+            Photon count for thermal Monte Carlo runs.
+        nphot_mono : int, optional
+            Photon count for monochromatic Monte Carlo runs.
+        mcmono_n_wavelengths : int, optional
+            Number of wavelengths to use for monochromatic transfer.
+        mcmono_uv_n_wavelengths : int, optional
+            Number of UV wavelengths to enforce.
+        mcmono_wavelength_spacing : str, optional
+            Wavelength spacing mode.
+        mcmono_wavelengths_um : ndarray, optional
+            Explicit monochromatic wavelengths in micron.
+        max_splits : int, optional
+            Maximum number of radial split updates.
+        segmented_external_source_mode : str, optional
+            External source mode for inner segments.
+        segmented_final_nphot_multiplier : float, optional
+            Multiplier for the terminal segment photon count.
+        force : bool, optional
+            Recompute outputs even when cached outputs are available.
+        diagnostic_plots : bool, optional
+            Whether to write diagnostic plots after the merged fields are built.
+        plots_dir : str or pathlib.Path, optional
+            Diagnostic plot directory. Defaults to
+            ``model_dir / "plots" / "segmented_rt"``.
+
+        Returns
+        -------
+        dict
+            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+        """
         from diskbridge.radmc3d.segmented import SegmentedRadRunner
 
         runner = SegmentedRadRunner(self.model, self.model_dir)
@@ -1093,6 +1130,8 @@ class RadModel:
             segmented_external_source_mode=segmented_external_source_mode,
             segmented_final_nphot_multiplier=segmented_final_nphot_multiplier,
             force=force,
+            diagnostic_plots=diagnostic_plots,
+            plots_dir=plots_dir,
         )
 
         self.dust_temperature = out.get('temperature')
@@ -1103,7 +1142,45 @@ class RadModel:
         self.model.segmented_isotropic_weight_outside_r_au = isotropic_outside
         out['isotropic_weight_outside_r_au'] = isotropic_outside
         return out
-    
+
+    def load_segmented_rt_outputs(
+        self,
+        *,
+        diagnostic_plots: bool = False,
+        plots_dir: Optional[str | Path] = None,
+    ) -> dict:
+        """Load existing segmented RT outputs without running RADMC-3D.
+
+        Parameters
+        ----------
+        diagnostic_plots : bool, optional
+            Whether to write diagnostic plots after the merged fields are built.
+        plots_dir : str or pathlib.Path, optional
+            Diagnostic plot directory. Defaults to
+            ``model_dir / "plots" / "segmented_rt"``.
+
+        Returns
+        -------
+        dict
+            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+        """
+        from diskbridge.radmc3d.segmented import SegmentedRadRunner
+
+        runner = SegmentedRadRunner(self.model, self.model_dir)
+        out = runner.load_segmented_rt_outputs(
+            diagnostic_plots=diagnostic_plots,
+            plots_dir=plots_dir,
+        )
+
+        self.dust_temperature = out.get("temperature")
+        self.chi = out.get("chi")
+        split_radii = list(out.get("split_radii_au", []))
+        isotropic_outside = float(split_radii[-1]) if split_radii else None
+        self.isotropic_weight_outside_r_au = isotropic_outside
+        self.model.segmented_isotropic_weight_outside_r_au = isotropic_outside
+        out["isotropic_weight_outside_r_au"] = isotropic_outside
+        return out
+
     def ensure_dust_temperature(self, force: bool = False) -> Quantity:
         """Ensure dust temperature field exists, reading or computing as needed.
         

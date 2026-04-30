@@ -72,6 +72,10 @@ from .profiles import (
     plot_small_dust_rz_slice,
     ProfilePlotter,
 )
+from .diagnostics import (
+    make_chemistry_diagnostic_plots,
+    make_segmented_rt_diagnostic_plots,
+)
 
 # Unit conversion utilities
 from .units import (
@@ -102,6 +106,8 @@ __all__ = [
     'plot_phi_avg_rz_slice',
     'plot_small_dust_rz_slice',
     'ProfilePlotter',
+    'make_chemistry_diagnostic_plots',
+    'make_segmented_rt_diagnostic_plots',
     # Quick functions
     'quick_slice',
     'quick_projection',

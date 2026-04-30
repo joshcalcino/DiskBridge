@@ -633,6 +633,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
         number_densities = {
             "co": nco_gas,
+            "co_ice": nco_ice,
             "c+": nCplus,
             "catom": nC,
             "e": ne,
@@ -1386,6 +1387,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     number_densities = {
         "co": nco_gas,
+        "co_ice": nco_ice,
         "c+": nCplus,
         "catom": nC,
         "e": ne,

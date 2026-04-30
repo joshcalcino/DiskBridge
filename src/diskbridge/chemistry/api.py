@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 from pathlib import Path
+import json
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
@@ -11,6 +12,71 @@ from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
 from diskbridge.chemistry.io import write_gas_temperature, write_many
 from diskbridge.model.field import Field
+from diskbridge.serialization import jsonable
+
+
+def load_chemistry_outputs(
+    rad: 'RadModel',
+    output_dir: Path,
+) -> ChemistryResult:
+    """Load saved chemistry products from RADMC-3D input files.
+
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D model wrapper used to read fields onto the active mesh.
+    output_dir : pathlib.Path
+        Directory containing saved chemistry outputs. Files may live directly
+        in this directory or under its ``radmc3d_inputs`` subdirectory.
+
+    Returns
+    -------
+    ChemistryResult
+        Chemistry result reconstructed from saved number-density files and
+        optional gas-temperature output.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no ``numberdens_*.binp`` files exist in the output directory.
+    """
+    output_dir = Path(output_dir)
+    inputs_dir = output_dir / "radmc3d_inputs"
+    data_dir = inputs_dir if inputs_dir.exists() else output_dir
+
+    number_densities = {}
+    for path in sorted(data_dir.glob("numberdens_*.binp")):
+        species = path.stem.removeprefix("numberdens_")
+        number_densities[species] = rad.data.readGasDens(fname=path, ispec=species)
+
+    if not number_densities:
+        raise FileNotFoundError(f"No numberdens_*.binp files found in {data_dir}")
+
+    gas_temp_path = data_dir / "gas_temperature.binp"
+    if gas_temp_path.exists():
+        rad.gas_temperature = rad.data.readGasTemp(fname=gas_temp_path)
+
+    meta = {
+        "source": "saved_outputs",
+        "output_dir": str(output_dir),
+        "data_dir": str(data_dir),
+        "loaded_species": sorted(number_densities),
+    }
+    for meta_path in (
+        output_dir / "chemistry_meta.json",
+        output_dir / "gow17_meta.json",
+    ):
+        if meta_path.exists():
+            with meta_path.open("r") as f:
+                saved_meta = json.load(f)
+            if isinstance(saved_meta, dict):
+                meta.update(saved_meta)
+            break
+
+    return ChemistryResult(
+        number_densities=number_densities,
+        meta=meta,
+    )
 
 
 def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) -> None:
@@ -99,6 +165,9 @@ def run_chemistry(
     config: Optional[dict] = None,
     write: bool = False,
     output_dir: Optional[Path] = None,
+    diagnostic_plots: bool = False,
+    plots_dir: Optional[Path] = None,
+    load_existing: bool = False,
 ) -> ChemistryResult:
     """Run chemistry computation with the specified model.
     
@@ -120,6 +189,13 @@ def run_chemistry(
         Whether to write number density outputs (default: False)
     output_dir : Path, optional
         Output directory for writing (default: rad.model_dir)
+    diagnostic_plots : bool, optional
+        Whether to make diagnostic plots after chemistry completes.
+    plots_dir : Path, optional
+        Directory for diagnostic plots. Defaults to ``output_dir / "plots"``.
+    load_existing : bool, optional
+        Load saved chemistry outputs from ``output_dir`` instead of running the
+        chemistry model.
         
     Returns
     -------
@@ -146,23 +222,41 @@ def run_chemistry(
     
     model_lower = model.lower()
 
-    try:
-        model_fn = get_model_callable(model_lower)
-    except ValueError:
-        available = ", ".join(available_models())
-        raise ValueError(
-            f"Unknown chemistry model: {model!r}. "
-            f"Available models: {available}"
-        )
-    result = model_fn(rad, config)
+    if load_existing:
+        if output_dir is None:
+            raise ValueError("load_existing=True requires output_dir")
+        result = load_chemistry_outputs(rad, Path(output_dir))
+    else:
+        try:
+            model_fn = get_model_callable(model_lower)
+        except ValueError:
+            available = ", ".join(available_models())
+            raise ValueError(
+                f"Unknown chemistry model: {model!r}. "
+                f"Available models: {available}"
+            )
+        result = model_fn(rad, config)
 
     _attach_chemistry_result_to_model(rad, result)
     
-    if write and result.number_densities:
+    if write and result.number_densities and not load_existing:
         write_many(rad, result.number_densities, output_dir)
 
-    if write and getattr(rad, 'Tgas_gow17', None) is not None:
+    if write and getattr(rad, 'Tgas_gow17', None) is not None and not load_existing:
         write_gas_temperature(rad, output_dir=output_dir, binary=True)
+
+    if diagnostic_plots:
+        from diskbridge.visualization.diagnostics import make_chemistry_diagnostic_plots
+
+        base_dir = Path(output_dir) if output_dir is not None else Path(rad.model_dir)
+        plot_output_dir = Path(plots_dir) if plots_dir is not None else base_dir / "plots"
+        made = make_chemistry_diagnostic_plots(rad, result, plot_output_dir)
+        result.meta["diagnostic_plots"] = [str(path) for path in made]
+
+    if write and output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "chemistry_meta.json").write_text(
+            json.dumps(jsonable(result.meta), indent=2, sort_keys=True) + "\n"
+        )
     
     return result
-

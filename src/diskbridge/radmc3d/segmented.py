@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+import json
+import re
 
 import numpy as np
 import shutil
@@ -31,6 +33,211 @@ class SegmentedRadRunner:
     def __init__(self, base_model: Model, base_model_dir: Path):
         self.base_model = base_model
         self.base_model_dir = Path(base_model_dir)
+
+    def _parse_segment_dir(self, segment_dir: Path) -> tuple[int, float | None, bool]:
+        """Parse a segmented-run directory name.
+
+        Parameters
+        ----------
+        segment_dir : pathlib.Path
+            Segment working directory.
+
+        Returns
+        -------
+        tuple
+            Segment level, outer radius in au if present, and whether this is
+            a final full-photon segment.
+
+        Raises
+        ------
+        ValueError
+            If the directory name is not a segmented-run directory.
+        """
+        name = segment_dir.name
+        full_match = re.fullmatch(r"segment_(\d+)_full", name)
+        if full_match:
+            return int(full_match.group(1)), None, False
+
+        rmax_match = re.fullmatch(
+            r"segment_(\d+)_rmax_([0-9.eE+-]+)au(_final)?",
+            name,
+        )
+        if rmax_match:
+            return (
+                int(rmax_match.group(1)),
+                float(rmax_match.group(2)),
+                bool(rmax_match.group(3)),
+            )
+
+        raise ValueError(f"Not a segmented-run directory: {segment_dir}")
+
+    def _read_segment_cache_int(self, segment_dir: Path, subdir: str, key: str) -> int | None:
+        """Read an integer value from a segment cache-context file.
+
+        Parameters
+        ----------
+        segment_dir : pathlib.Path
+            Segment working directory.
+        subdir : str
+            RADMC-3D output subdirectory name.
+        key : str
+            Cache-context key to read.
+
+        Returns
+        -------
+        int or None
+            Cached integer value if present.
+        """
+        path = segment_dir / "radmc3d_outputs" / subdir / "cache_context.json"
+        if not path.exists():
+            return None
+        with path.open("r") as f:
+            cache = json.load(f)
+        value = cache.get(key)
+        if value is None:
+            return None
+        return int(value)
+
+    def load_segmented_rt_outputs(
+        self,
+        *,
+        diagnostic_plots: bool = False,
+        plots_dir: Optional[str | Path] = None,
+    ) -> Dict[str, Any]:
+        """Load existing segmented RT outputs without running RADMC-3D.
+
+        Parameters
+        ----------
+        diagnostic_plots : bool, optional
+            Whether to write diagnostic plots after merged fields are built.
+        plots_dir : str or pathlib.Path, optional
+            Diagnostic plot directory. Defaults to
+            ``base_model_dir / "plots" / "segmented_rt"``.
+
+        Returns
+        -------
+        dict
+            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+
+        Raises
+        ------
+        FileNotFoundError
+            If required saved segment outputs are missing.
+        """
+        from diskbridge.radmc3d.model import RadModel
+
+        segments_root = self.base_model_dir / "segments"
+        if not segments_root.exists():
+            raise FileNotFoundError(f"No segmented RT directory found: {segments_root}")
+
+        parsed_segments: list[tuple[int, float | None, bool, Path]] = []
+        for segment_dir in segments_root.iterdir():
+            if not segment_dir.is_dir():
+                continue
+            try:
+                level, rmax_au, is_final = self._parse_segment_dir(segment_dir)
+            except ValueError:
+                continue
+            parsed_segments.append((level, rmax_au, is_final, segment_dir))
+
+        parsed_segments.sort(key=lambda item: (item[0], item[2]))
+        if not parsed_segments:
+            raise FileNotFoundError(f"No segmented RT outputs found in {segments_root}")
+
+        mesh = self.base_model.mesh
+        if mesh is None:
+            raise ValueError("Base model has no mesh")
+        axis_order = mesh.axis_names()
+
+        merged_T: Optional[Quantity] = None
+        merged_chi: Optional[Quantity] = None
+        segments: list[dict[str, Any]] = []
+        split_radii_au: list[float] = []
+
+        for level, rmax_au, is_final, segment_dir in parsed_segments:
+            temp_path = segment_dir / "radmc3d_outputs" / "temperature" / "dust_temperature.bdat"
+            mean_path = segment_dir / "radmc3d_outputs" / "mcmono" / "mean_intensity.bout"
+            if not temp_path.exists():
+                raise FileNotFoundError(f"Missing saved segment dust temperature: {temp_path}")
+            if not mean_path.exists():
+                raise FileNotFoundError(f"Missing saved segment mean intensity: {mean_path}")
+
+            if level == 0 and rmax_au is None:
+                seg_model = self.base_model
+                seg_indexer = None
+            else:
+                if rmax_au is None:
+                    raise ValueError(f"Segment {segment_dir} is missing an outer radius")
+                segment = SegmentDefinition(
+                    name=f"segment_{level:02d}",
+                    bounds={"r": (None, rmax_au * units("au"))},
+                    work_dir=segment_dir,
+                )
+                seg_model, seg_indexer = self._build_segment_model_and_indexer(segment)
+                split_radii_au.append(float(rmax_au))
+
+            rad = RadModel(seg_model, model_dir=segment_dir)
+            rad.read_dust_temperature(fname=temp_path)
+            rad._postprocess_chi(mean_path, rad.params.uv_min, rad.params.uv_max)
+
+            merged_T, merged_chi = self._merge_segment_fields(
+                merged_T=merged_T,
+                merged_chi=merged_chi,
+                rad=rad,
+                indexer=seg_indexer,
+                axis_order=axis_order,
+            )
+
+            segments.append(
+                {
+                    "level": int(level),
+                    "work_dir": str(segment_dir),
+                    "r_max_au": None if rmax_au is None else float(rmax_au),
+                    "nphot_thermal": self._read_segment_cache_int(segment_dir, "temperature", "nphot"),
+                    "nphot_mono": self._read_segment_cache_int(segment_dir, "mcmono", "nphot"),
+                    "has_temperature": True,
+                    "has_mcmono": True,
+                    "is_final": bool(is_final),
+                    "loaded_existing": True,
+                }
+            )
+
+        if merged_T is None or merged_chi is None:
+            raise ValueError("Segmented RT saved outputs produced no merged fields")
+
+        self.base_model.gas_register(
+            "dust_temperature",
+            Field(quantity="dust_temperature", data=merged_T, axis_order=axis_order),
+        )
+        self.base_model.gas_register(
+            "chi",
+            Field(quantity="chi", data=merged_chi, axis_order=axis_order),
+        )
+        self.base_model.validate_canonical_axis_orders(include_dust=False)
+
+        base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
+        base_rad.dust_temperature = merged_T
+        base_rad.chi = merged_chi
+
+        out = {
+            "loaded_existing": True,
+            "split_radii_au": split_radii_au,
+            "segments": segments,
+            "scout_runs": [],
+            "temperature": merged_T,
+            "chi": merged_chi,
+        }
+        if diagnostic_plots:
+            from diskbridge.visualization.diagnostics import make_segmented_rt_diagnostic_plots
+
+            plot_output_dir = (
+                Path(plots_dir)
+                if plots_dir is not None
+                else self.base_model_dir / "plots" / "segmented_rt"
+            )
+            made = make_segmented_rt_diagnostic_plots(base_rad, out, plot_output_dir)
+            out["diagnostic_plots"] = [str(path) for path in made]
+        return out
 
     def _build_segment_model_and_indexer(
         self,
@@ -197,7 +404,44 @@ class SegmentedRadRunner:
         segmented_external_source_mode: Optional[str] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
+        diagnostic_plots: bool = False,
+        plots_dir: Optional[str | Path] = None,
     ) -> Dict[str, Any]:
+        """Run segmented RADMC-3D and optionally make diagnostics.
+
+        Parameters
+        ----------
+        nphot_therm : int, optional
+            Photon count for thermal Monte Carlo runs.
+        nphot_mono : int, optional
+            Photon count for monochromatic Monte Carlo runs.
+        mcmono_n_wavelengths : int, optional
+            Number of wavelengths to use for monochromatic transfer.
+        mcmono_uv_n_wavelengths : int, optional
+            Number of UV wavelengths to enforce.
+        mcmono_wavelength_spacing : str, optional
+            Wavelength spacing mode.
+        mcmono_wavelengths_um : ndarray, optional
+            Explicit monochromatic wavelengths in micron.
+        max_splits : int, optional
+            Maximum number of radial split updates.
+        segmented_external_source_mode : str, optional
+            External source mode for inner segments.
+        segmented_final_nphot_multiplier : float, optional
+            Multiplier for the terminal segment photon count.
+        force : bool, optional
+            Recompute outputs even when cached outputs are available.
+        diagnostic_plots : bool, optional
+            Whether to write diagnostic plots after merged fields are built.
+        plots_dir : str or pathlib.Path, optional
+            Diagnostic plot directory. Defaults to
+            ``base_model_dir / "plots" / "segmented_rt"``.
+
+        Returns
+        -------
+        dict
+            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+        """
         from diskbridge.radmc3d.model import RadModel
         from diskbridge.radmc3d.writer import RadWriter
         
@@ -605,7 +849,7 @@ class SegmentedRadRunner:
             f"Segmented RT complete. splits={len(split_radii_au)} max_splits={max_splits}"
         )
 
-        return {
+        out = {
             'mode': external_source_mode,
             'segmented_external_source_mode': external_source_mode,
             'mcmono_wavelength_source': wavelength_source_use,
@@ -620,3 +864,14 @@ class SegmentedRadRunner:
             'temperature': merged_T,
             'chi': merged_chi,
         }
+        if diagnostic_plots:
+            from diskbridge.visualization.diagnostics import make_segmented_rt_diagnostic_plots
+
+            plot_output_dir = (
+                Path(plots_dir)
+                if plots_dir is not None
+                else self.base_model_dir / "plots" / "segmented_rt"
+            )
+            made = make_segmented_rt_diagnostic_plots(base_rad, out, plot_output_dir)
+            out["diagnostic_plots"] = [str(path) for path in made]
+        return out

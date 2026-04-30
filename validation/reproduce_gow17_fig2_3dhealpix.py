@@ -31,6 +31,7 @@ from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.model import RadModel
 from diskbridge.radmc3d.utils import link_dustkappa_opacities
+from diskbridge.serialization import jsonable
 
 I_CHX = gow17_native.I_CHX
 I_CO = gow17_native.I_CO
@@ -1256,18 +1257,6 @@ def _save_convergence_json(
     return p
 
 
-def _to_jsonable(x):
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    if isinstance(x, (np.floating, np.integer)):
-        return x.item()
-    if isinstance(x, dict):
-        return {str(k): _to_jsonable(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_to_jsonable(v) for v in x]
-    return x
-
-
 def _shell_average_sphere(
     *,
     y_out: np.ndarray,
@@ -1855,7 +1844,7 @@ def main() -> None:
         "rel_err_CO_vs_fp": rel_err_CO_vs_fp,
         "rel_err_Cplus_vs_fp": rel_err_Cplus_vs_fp,
         "rel_err_max_vs_fp": rel_err_max_vs_fp,
-        "reference": _to_jsonable(info_refN.get("gow17_diagnostics", {})),
+        "reference": jsonable(info_refN.get("gow17_diagnostics", {})),
     }
     (sweep_dir / "astrochem_sweep.json").write_text(json.dumps(sweep_json, indent=2) + "\n")
     _make_sweep_gifs_from_data(sweep_dir, sweep_radms, sweep_y_outs, i_values)
