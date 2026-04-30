@@ -5,6 +5,8 @@ from typing import Tuple
 import numpy as np
 from numba import njit, prange
 
+from diskbridge._constants import HEALPIX_SELF_WEIGHT
+
 
 def _as_f64(name: str, x) -> np.ndarray:
     a = np.asarray(x, dtype=np.float64)
@@ -24,7 +26,6 @@ def integrate_ray_cartesian_dda_3d(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
-    self_weight: float = 1.0,
 ) -> Tuple[float, float]:
     """DDA-style ray integration returning both column and path length."""
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
@@ -143,7 +144,7 @@ def integrate_ray_cartesian_dda_3d(
             break
 
         if is_first:
-            col += self_weight * density[ix, iy, iz] * ds_loc
+            col += HEALPIX_SELF_WEIGHT * density[ix, iy, iz] * ds_loc
             is_first = False
         else:
             col += density[ix, iy, iz] * ds_loc
@@ -268,7 +269,6 @@ def integrate_ray_spherical_dda_3d(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
-    self_weight: float = 1.0,
 ) -> Tuple[float, float]:
     """Spherical DDA ray integration returning both column and path length."""
     norm = np.sqrt(vx * vx + vy * vy + vz * vz)
@@ -375,7 +375,7 @@ def integrate_ray_spherical_dda_3d(
 
         ds = t_min
         if is_first:
-            col += self_weight * density[ir, it, ip] * ds
+            col += HEALPIX_SELF_WEIGHT * density[ir, it, ip] * ds
             is_first = False
         else:
             col += density[ir, it, ip] * ds
@@ -417,7 +417,6 @@ def _integrate_all_rays_spherical_dda_multi(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
-    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -538,7 +537,7 @@ def _integrate_all_rays_spherical_dda_multi(
                 ds = t_min
                 if is_first:
                     for k in range(n_fields):
-                        N_all[i, j, k] += self_weight * fields_stack[k, ir, it, ip] * ds
+                        N_all[i, j, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ir, it, ip] * ds
                     is_first = False
                 else:
                     for k in range(n_fields):
@@ -580,7 +579,6 @@ def _integrate_all_rays_cartesian_dda_multi(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
-    self_weight: float = 1.0,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -718,7 +716,7 @@ def _integrate_all_rays_cartesian_dda_multi(
 
                 if is_first:
                     for k in range(n_fields):
-                        N_all[i, j, k] += self_weight * fields_stack[k, ix, iy, iz] * ds_loc
+                        N_all[i, j, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ix, iy, iz] * ds_loc
                     is_first = False
                 else:
                     for k in range(n_fields):
@@ -773,7 +771,6 @@ def integrate_rays(
     directions: np.ndarray,
     n_field: np.ndarray,
     max_steps: int = 10000,
-    self_weight: float = 1.0,
 ) -> np.ndarray:
     """
     Unified ray integration dispatcher.
@@ -811,7 +808,6 @@ def integrate_rays(
         directions,
         fields_stack,
         max_steps=max_steps,
-        self_weight=self_weight,
     )  # (n_cells, n_dirs, 1)
     return N_all[:, :, 0]
 
@@ -822,7 +818,6 @@ def integrate_rays_multi(
     directions: np.ndarray,
     fields_stack: np.ndarray,
     max_steps: int = 10000,
-    self_weight: float = 1.0,
 ) -> np.ndarray:
     kind = _tracer_kind(tracer)
     cell_centers = _as_f64("cell_centers", cell_centers)
@@ -832,10 +827,10 @@ def integrate_rays_multi(
 
     if kind == "cartesian":
         return _integrate_all_rays_cartesian_dda_multi(
-            cell_centers, directions, fields_stack, *edges, max_steps, float(self_weight)
+            cell_centers, directions, fields_stack, *edges, max_steps
         )
     return _integrate_all_rays_spherical_dda_multi(
-        cell_centers, directions, fields_stack, *edges, max_steps, float(self_weight)
+        cell_centers, directions, fields_stack, *edges, max_steps
     )
 
 
@@ -845,7 +840,6 @@ def integrate_rays_with_pathlength(
     directions: np.ndarray,
     n_field: np.ndarray,
     max_steps: int = 10000,
-    self_weight: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     cell_centers = _as_f64("cell_centers", cell_centers)
     directions = _as_f64("directions", directions)
@@ -860,7 +854,6 @@ def integrate_rays_with_pathlength(
         directions,
         fields_stack,
         max_steps=max_steps,
-        self_weight=self_weight,
     )
     return N_all[:, :, 0], N_all[:, :, 1]
 
@@ -876,7 +869,6 @@ def _integrate_starward_radial_spherical(
     r_edges: np.ndarray,
     r_centers: np.ndarray,
     candidate_idx: np.ndarray,
-    self_weight: float,
 ) -> np.ndarray:
     """Integrate fields radially inward (toward origin) for spherical meshes.
 
@@ -894,9 +886,6 @@ def _integrate_starward_radial_spherical(
         Radial cell centers in cm.
     candidate_idx : ndarray, shape (n_cand, 3)
         Integer indices (ir, itheta, iphi) per candidate cell.
-    self_weight : float
-        Weight applied to the starting cell contribution.
-
     Returns
     -------
     cols : ndarray, shape (n_cand, n_fields)
@@ -916,7 +905,7 @@ def _integrate_starward_radial_spherical(
         ds_self = r_centers[ir_cell] - r_edges[ir_cell]
         if ds_self > 0.0:
             for k in range(n_fields):
-                cols[i, k] += self_weight * fields_stack[k, ir_cell, it, ip] * ds_self
+                cols[i, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ir_cell, it, ip] * ds_self
 
         # Inner cells: full radial extent of each cell
         for j in range(ir_cell - 1, -1, -1):
@@ -935,7 +924,6 @@ def _integrate_starward_cartesian_dda_multi(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int,
-    self_weight: float,
 ) -> np.ndarray:
     """Integrate fields along rays toward origin for cartesian meshes.
 
@@ -952,9 +940,6 @@ def _integrate_starward_cartesian_dda_multi(
         Cell edge arrays in cm.
     max_steps : int
         Maximum DDA steps per ray.
-    self_weight : float
-        Weight for the starting cell.
-
     Returns
     -------
     cols : ndarray, shape (n_cells, n_fields)
@@ -1081,7 +1066,7 @@ def _integrate_starward_cartesian_dda_multi(
 
             if is_first:
                 for k in range(n_fields):
-                    cols[i, k] += self_weight * fields_stack[k, ix, iy, iz] * ds_loc
+                    cols[i, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ix, iy, iz] * ds_loc
                 is_first = False
             else:
                 for k in range(n_fields):
@@ -1109,7 +1094,6 @@ def integrate_starward_rays_multi(
     tracer,
     cell_centers: np.ndarray,
     fields_stack: np.ndarray,
-    self_weight: float = 1.0,
     candidate_idx: np.ndarray = None,
 ) -> np.ndarray:
     """Integrate fields along rays from each cell toward the origin (star).
@@ -1125,8 +1109,6 @@ def integrate_starward_rays_multi(
         Cell center positions in Cartesian (x, y, z) coordinates, cm.
     fields_stack : ndarray, shape (n_fields, dim0, dim1, dim2)
         Density fields to integrate (e.g. dust bin densities in g/cm^3).
-    self_weight : float, optional
-        Weight for the starting cell's contribution. Default 1.0.
     candidate_idx : ndarray, shape (n_cells, 3), optional
         Grid indices per cell. Required for spherical meshes (ir, itheta, iphi).
         If None and spherical, raises ValueError.
@@ -1149,10 +1131,10 @@ def integrate_starward_rays_multi(
         edges = _tracer_edges_float64(tracer, kind)
         r_centers = np.asarray(tracer.r_centers, dtype=np.float64)
         return _integrate_starward_radial_spherical(
-            fields_stack, edges[0], r_centers, candidate_idx, float(self_weight),
+            fields_stack, edges[0], r_centers, candidate_idx,
         )
     else:
         edges = _tracer_edges_float64(tracer, kind)
         return _integrate_starward_cartesian_dda_multi(
-            cell_centers, fields_stack, *edges, 100000, float(self_weight),
+            cell_centers, fields_stack, *edges, 100000,
         )

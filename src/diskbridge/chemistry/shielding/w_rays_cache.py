@@ -51,7 +51,6 @@ def _build_cache_key(
     nside: int,
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
-    self_weight: float,
     isotropic_outside_r_au: float | None,
     outer_weight_mode: str | None,
 ) -> tuple:
@@ -65,9 +64,6 @@ def _build_cache_key(
         External UV field strength (Draine units).
     star_uv_luminosity_erg_s : float
         Stellar UV luminosity (erg/s).
-    self_weight : float
-        Starting-cell weight in ray integration.
-
     Returns
     -------
     tuple
@@ -84,7 +80,6 @@ def _build_cache_key(
         int(nside),
         float(chi_ext0),
         float(star_uv_luminosity_erg_s),
-        float(self_weight),
         None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
         None if outer_weight_mode is None else str(outer_weight_mode),
     )
@@ -189,7 +184,6 @@ def ensure_W_rays(
     kext_uv: np.ndarray,
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
-    self_weight: float = 1.0,
     cache_dir: str | None = None,
     isotropic_outside_r_au: float | None = None,
     outer_weight_mode: str | None = None,
@@ -215,8 +209,6 @@ def ensure_W_rays(
         External UV field strength in Draine units.
     star_uv_luminosity_erg_s : float
         Total stellar UV luminosity in erg/s.
-    self_weight : float, optional
-        Starting-cell weight in ray integration. Default 1.0.
     cache_dir : str or None, optional
         Directory for HEALPix geometry / column caching (passed through to
         ``compute_uv_direction_weights_healpix``).
@@ -230,7 +222,6 @@ def ensure_W_rays(
         nside,
         chi_ext0,
         star_uv_luminosity_erg_s,
-        self_weight,
         isotropic_outside_r_au,
         outer_weight_mode,
     )
@@ -264,7 +255,6 @@ def ensure_W_rays(
             kext_uv=kext_uv,
             chi_ext0=float(chi_ext0),
             star_uv_luminosity_erg_s=float(star_uv_luminosity_erg_s),
-            self_weight=float(self_weight),
             cache_dir=cache_dir,
         )
     )
@@ -393,7 +383,6 @@ def maybe_ensure_W_rays(
         kext_uv=kext_uv,
         chi_ext0=chi_ext0,
         star_uv_luminosity_erg_s=star_uv_lum,
-        self_weight=float(getattr(params, "healpix_self_weight", 1.0)),
         isotropic_outside_r_au=isotropic_outside_r_au,
         outer_weight_mode=outer_weight_mode,
     )

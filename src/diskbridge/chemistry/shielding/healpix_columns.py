@@ -668,7 +668,6 @@ def compute_column_rays_healpix(
     candidate_mask: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
-    self_weight: float = 1.0,
     tracer: Optional[object] = None,
     dirs: Optional[np.ndarray] = None,
     candidate_idx: Optional[np.ndarray] = None,
@@ -747,7 +746,6 @@ def compute_column_rays_healpix(
                 cell_centers,
                 dirs,
                 fields_stack,
-                self_weight=float(self_weight),
             )
         else:
             n_chunks = int(progress_chunks)
@@ -768,7 +766,6 @@ def compute_column_rays_healpix(
                     cell_centers[start:end],
                     dirs,
                     fields_stack,
-                    self_weight=float(self_weight),
                 )
 
         for j, name in enumerate(missing_names):
@@ -804,7 +801,6 @@ def compute_co_shielding_healpix(
     b_kms: Optional[float] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
-    self_weight: float = 1.0,
     W_rays: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute CO self-shielding factors and effective UV field via HEALPix rays.
@@ -848,8 +844,6 @@ def compute_co_shielding_healpix(
         If set, ray integration is split into this many chunks with logging.
     cache_dir : Path or str or None, optional
         Directory for caching ray geometry and column results.
-    self_weight : float, optional
-        Weight of the starting cell's contribution to the column. Default 1.0.
     W_rays : ndarray of shape (n_candidates, npix) or None, optional
         Per-direction UV weights. If None, uniform (isotropic) averaging.
 
@@ -879,7 +873,6 @@ def compute_co_shielding_healpix(
         candidate_mask=candidate_mask_arr,
         progress_chunks=progress_chunks,
         cache_dir=cache_dir,
-        self_weight=float(self_weight),
     )
 
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
@@ -912,7 +905,6 @@ def compute_pdr_shielding_healpix(
     b_kms: float = 0.3,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
-    self_weight: float = 1.0,
     W_rays: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute PDR shielding factors (H2, CO, C) and effective UV via HEALPix rays.
@@ -962,8 +954,6 @@ def compute_pdr_shielding_healpix(
         If set, split ray integration into chunks with logging.
     cache_dir : Path or str or None, optional
         Directory for caching ray geometry and column results.
-    self_weight : float, optional
-        Weight of starting cell contribution to column. Default 1.0.
     W_rays : ndarray of shape (n_candidates, npix) or None, optional
         Per-direction UV weights. If None, uniform (isotropic) averaging.
 
@@ -1001,7 +991,6 @@ def compute_pdr_shielding_healpix(
         candidate_mask=candidate_mask_arr,
         progress_chunks=progress_chunks,
         cache_dir=cache_dir,
-        self_weight=float(self_weight),
     )
 
     theta_h2 = np.ones_like(nH_cgs, dtype=np.float64)

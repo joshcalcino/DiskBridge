@@ -94,7 +94,6 @@ def compute_vertical_cd_cm2(mesh, nH_cm3: np.ndarray) -> np.ndarray:
         cell_centers,
         dirs,
         fields_stack,
-        self_weight=1.0,
     )
 
     CD = N_all[:, 0, 0].reshape(shape)

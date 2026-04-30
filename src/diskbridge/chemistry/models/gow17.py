@@ -815,7 +815,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 dirs=dirs,
                 candidate_idx=candidate_idx,
                 cell_centers=cell_centers,
-                self_weight=1.0,
             )
             NH_rays = cols["nh"]
             gradv_cand = compute_gradv_nh_weighted(

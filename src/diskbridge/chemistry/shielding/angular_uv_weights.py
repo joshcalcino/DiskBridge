@@ -188,7 +188,6 @@ def compute_uv_direction_weights_healpix(
     kext_uv: np.ndarray,
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
-    self_weight: float = 1.0,
     progress_chunks: int | None = None,
     cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -217,8 +216,6 @@ def compute_uv_direction_weights_healpix(
     star_uv_luminosity_erg_s : float
         Total stellar UV band luminosity in erg/s.
         Set to 0.0 if no central star.
-    self_weight : float, optional
-        Weight of starting cell in ray integration. Default 1.0.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
     cache_dir : Path or str or None, optional
@@ -282,7 +279,6 @@ def compute_uv_direction_weights_healpix(
         candidate_mask=candidate_mask,
         progress_chunks=progress_chunks,
         cache_dir=cache_dir,
-        self_weight=float(self_weight),
         tracer=tracer,
         dirs=dirs,
         candidate_idx=candidate_idx,
@@ -316,7 +312,6 @@ def compute_uv_direction_weights_healpix(
             tracer,
             cell_centers,
             dust_fields_stack,
-            self_weight=float(self_weight),
             candidate_idx=candidate_idx,
         )  # (n_candidates, nbin)
 
