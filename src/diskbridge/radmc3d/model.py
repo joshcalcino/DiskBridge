@@ -31,6 +31,14 @@ from .data import RadData
 from .cache import should_use_cache, find_cached_output
 from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperature_symlink
 from .wavelengths import build_wavelength_grid, write_wavelength_file, validate_wavelength_array, check_wavelength_range
+from .uv_products import (
+    UV_PRODUCT_MERGED_FIELD_NAMES,
+    compute_uv_products,
+    default_isrf_path,
+    file_sha256,
+    uv_product_schema,
+    uv_product_schema_hash,
+)
 from .writer import RadWriter
 import diskbridge 
 
@@ -133,6 +141,7 @@ class RadModel:
         self.dust_temperature: Optional[Quantity] = None
         self.gas_temperature: Optional[Quantity] = None
         self.chi: Optional[Quantity] = None
+        self.uv_products: dict[str, Quantity] = {}
         self.nH: Optional[Quantity] = None
         self.theta_co: Optional[Quantity] = None
         self.chi_eff: Optional[Quantity] = None
@@ -174,6 +183,9 @@ class RadModel:
             self.dust_temperature = gas["dust_temperature"].data
         if self.chi is None and "chi" in gas:
             self.chi = gas["chi"].data
+        for name in UV_PRODUCT_MERGED_FIELD_NAMES:
+            if name in gas:
+                self.uv_products[name] = gas[name].data
     
     def _get_input_files(self) -> list[str]:
         """Get list of input files to symlink."""
@@ -786,31 +798,101 @@ class RadModel:
         mean_intensity_file: Path,
         uv_min: Quantity,
         uv_max: Quantity,
+        compute_products: bool = False,
     ) -> Quantity:
-        """Load mean intensity, compute chi, register as field.
-        
-        This unifies postprocessing for both cache-hit and recompute paths.
+        """Load mean intensity and register UV radiation fields.
+
+        Parameters
+        ----------
+        mean_intensity_file : pathlib.Path
+            RADMC-3D mean-intensity output file.
+        uv_min : Quantity
+            Lower wavelength bound for legacy broad ``chi``.
+        uv_max : Quantity
+            Upper wavelength bound for legacy broad ``chi``.
+        compute_products : bool, optional
+            Compute and register process-specific UV products. When enabled,
+            ``chi`` is set to ``chi_broad``.
+
+        Returns
+        -------
+        Quantity
+            Broad UV field in Draine units.
         """
         freq_hz, Jnu_flat = self.data.read_mean_intensity_file(mean_intensity_file)
         self.mean_intensity = Jnu_flat
         nx, ny, nz = self.data._getMeshShape()
+        mesh_shape = (nx, ny, nz)
+        axis_order = self.model.mesh.axis_names()
+
+        if compute_products:
+            products = compute_uv_products(
+                freq_hz=freq_hz,
+                Jnu_flat=Jnu_flat,
+                mesh_shape=mesh_shape,
+                isrf_path=default_isrf_path(),
+            )
+            self.uv_products = products
+            self.chi = products["chi_broad"]
+
+            self.model.gas_register(
+                'chi',
+                Field(
+                    quantity='chi',
+                    data=self.chi,
+                    axis_order=axis_order,
+                ),
+            )
+            for name, arr in products.items():
+                self.model.gas_register(
+                    name,
+                    Field(
+                        quantity=name,
+                        data=arr,
+                        axis_order=axis_order,
+                    ),
+                )
+
+            logger.info(
+                "Computed UV products from mean_intensity: "
+                "chi_broad min=%.2e max=%.2e, G_CO_diss min=%.2e max=%.2e",
+                float(np.nanmin(products["chi_broad"].magnitude)),
+                float(np.nanmax(products["chi_broad"].magnitude)),
+                float(np.nanmin(products["G_CO_diss"].magnitude)),
+                float(np.nanmax(products["G_CO_diss"].magnitude)),
+            )
+
+            try:
+                self.summarize_chi_over_nH()
+            except Exception as e:
+                logger.warning(f"summarize_chi_over_nH failed: {e}")
+
+            return self.chi
         
         chi_3d, n_uv = self._compute_chi_from_mean_intensity(
             j_lambda=Jnu_flat,
             freq_hz=freq_hz,
             uv_min=uv_min,
             uv_max=uv_max,
-            mesh_shape=(nx, ny, nz),
+            mesh_shape=mesh_shape,
             u_draine=U_DRAINE,
             source="mean_intensity file",
         )
         self.chi = chi_3d
+        self.uv_products = {"chi_broad": self.chi}
         
-        axis_order = self.model.mesh.axis_names()
         self.model.gas_register(
             'chi',
             Field(
                 quantity='chi',
+                data=self.chi,
+                axis_order=axis_order,
+            ),
+        )
+        self.model.gas_register(
+            'chi_broad',
+            Field(
+                quantity='chi_broad',
                 data=self.chi,
                 axis_order=axis_order,
             ),
@@ -976,6 +1058,7 @@ class RadModel:
         uv_max: Quantity = None,
         n_wavelengths: int = None,
         setthreads: Optional[int] = None,
+        compute_uv_products: bool = False,
     ) -> Quantity:
         """Run RADMC-3D monochromatic Monte Carlo for UV field.
         
@@ -993,6 +1076,8 @@ class RadModel:
             UV range bounds
         n_wavelengths : int, optional
             Number of wavelengths
+        compute_uv_products : bool, optional
+            Compute process-specific UV products from this mcmono spectrum.
             
         Returns
         -------
@@ -1009,6 +1094,26 @@ class RadModel:
             'uv_max_um': float(uv_max.to('micron').magnitude),
             'n_wavelengths': int(n_wavelengths),
         }
+
+        if compute_uv_products:
+            isrf_path = default_isrf_path()
+            schema = uv_product_schema()
+            cache_context.update(
+                {
+                    'uv_products_enabled': True,
+                    'uv_product_mode': 'disc_segment_only',
+                    'uv_product_schema_sha256': uv_product_schema_hash(),
+                    'uv_product_partition_edges_nm': schema["partition_edges_nm"],
+                    'uv_product_band_edges_nm': [
+                        [p["lam_min_nm"], p["lam_max_nm"]]
+                        for p in schema["products"]
+                    ],
+                    'uv_product_weight_types': [
+                        p["weight"] for p in schema["products"]
+                    ],
+                    'uv_product_reference_isrf_hash': file_sha256(isrf_path),
+                }
+            )
 
         if wavelengths_um is not None:
             wav = np.asarray(wavelengths_um, dtype=np.float64)
@@ -1036,7 +1141,12 @@ class RadModel:
         )
         
         if use_cache and cached_file:
-            return self._postprocess_chi(cached_file, uv_min, uv_max)
+            return self._postprocess_chi(
+                cached_file,
+                uv_min,
+                uv_max,
+                compute_products=compute_uv_products,
+            )
         
         output_dir.mkdir(parents=True, exist_ok=True)
         countwrite = max(1, min(int(nphot // 100), int(np.iinfo(np.int32).max)))
@@ -1064,7 +1174,12 @@ class RadModel:
         if not mean_intensity_file:
             raise FileNotFoundError(f"Mean intensity file not found in {output_dir}")
         
-        return self._postprocess_chi(mean_intensity_file, uv_min, uv_max)
+        return self._postprocess_chi(
+            mean_intensity_file,
+            uv_min,
+            uv_max,
+            compute_products=compute_uv_products,
+        )
 
     def compute_segmented_rt(
         self,
@@ -1325,6 +1440,67 @@ class RadModel:
             raise RuntimeError('chi not available after ensure_chi')
         
         return self.chi
+
+    def has_uv_product(self, name: str) -> bool:
+        """Return whether a UV product is available.
+
+        Parameters
+        ----------
+        name : str
+            UV product field name.
+
+        Returns
+        -------
+        bool
+            ``True`` when the product is cached on this wrapper or registered
+            on the gas model.
+        """
+        if name in self.uv_products:
+            return True
+        gas = getattr(self.model, "gas", None)
+        return bool(gas is not None and name in gas)
+
+    def ensure_uv_product(
+        self,
+        name: str,
+        fallback_to_chi: bool = True,
+    ) -> Quantity:
+        """Return a UV product, optionally falling back to ``chi``.
+
+        Parameters
+        ----------
+        name : str
+            UV product field name.
+        fallback_to_chi : bool, optional
+            Return ``chi`` when the requested product is unavailable.
+
+        Returns
+        -------
+        Quantity
+            UV product field.
+
+        Raises
+        ------
+        KeyError
+            If the product is unavailable and fallback is disabled.
+        """
+        if name in self.uv_products:
+            return self.uv_products[name]
+
+        gas = getattr(self.model, "gas", None)
+        if gas is not None and name in gas:
+            product = gas[name].data
+            self.uv_products[name] = product
+            return product
+
+        if name == "chi_broad" and self.chi is not None:
+            self.uv_products[name] = self.chi
+            return self.chi
+
+        if fallback_to_chi:
+            return self.ensure_chi()
+
+        raise KeyError(name)
     
     def _organize_output(
         self,

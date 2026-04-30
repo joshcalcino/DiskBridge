@@ -53,6 +53,7 @@ def _build_cache_key(
     star_uv_luminosity_erg_s: float,
     isotropic_outside_r_au: float | None,
     outer_weight_mode: str | None,
+    uv_product: str = "chi",
 ) -> tuple:
     """Build a lightweight hashable key for W_rays invalidation.
 
@@ -82,6 +83,7 @@ def _build_cache_key(
         float(star_uv_luminosity_erg_s),
         None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
         None if outer_weight_mode is None else str(outer_weight_mode),
+        str(uv_product),
     )
 
 
@@ -187,6 +189,7 @@ def ensure_W_rays(
     cache_dir: str | None = None,
     isotropic_outside_r_au: float | None = None,
     outer_weight_mode: str | None = None,
+    uv_product: str = "chi",
 ) -> np.ndarray:
     """Compute and cache ``rad.W_rays``; return existing cache on repeat calls.
 
@@ -224,6 +227,7 @@ def ensure_W_rays(
         star_uv_luminosity_erg_s,
         isotropic_outside_r_au,
         outer_weight_mode,
+        uv_product,
     )
 
     existing = getattr(rad, "W_rays", None)
@@ -285,6 +289,7 @@ def maybe_ensure_W_rays(
     rad: "RadModel",
     *,
     nside: int,
+    uv_product: str = "G_CO_diss",
 ) -> Optional[np.ndarray]:
     """Resolve W_rays prerequisites from ``rad`` / ``diskbridge.params`` and cache.
 
@@ -309,6 +314,8 @@ def maybe_ensure_W_rays(
         ``rad.ensure_chi()`` available.
     nside : int
         HEALPix Nside (npix = 12 * nside**2).
+    uv_product : str, optional
+        UV product used for directional shielding weights.
 
     Returns
     -------
@@ -320,7 +327,7 @@ def maybe_ensure_W_rays(
     params = diskbridge.params
 
     # 1. Skip for 1-D meshes (HEALPix not used)
-    chi = rad.ensure_chi()
+    chi = rad.ensure_uv_product(uv_product, fallback_to_chi=True)
     chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=np.float64)
     if is_effectively_1d(rad.model.mesh, chi_arr.shape):
         logger.debug("W_rays: skipping for effectively 1-D mesh")
@@ -331,8 +338,15 @@ def maybe_ensure_W_rays(
     if isinstance(species_base, list):
         species_base = species_base[0]
 
-    uv_min_um = float(params.uv_min.to("um").magnitude)
-    uv_max_um = float(params.uv_max.to("um").magnitude)
+    if uv_product == "G_C_ion":
+        uv_min_um = 0.0912
+        uv_max_um = 0.1101
+    elif uv_product in {"G_CO_diss", "G_H2_diss"}:
+        uv_min_um = 0.0912
+        uv_max_um = 0.1118
+    else:
+        uv_min_um = float(params.uv_min.to("um").magnitude)
+        uv_max_um = float(params.uv_max.to("um").magnitude)
 
     mode, kext_uv = resolve_uv_tau_mode(
         rad.model,
@@ -385,4 +399,5 @@ def maybe_ensure_W_rays(
         star_uv_luminosity_erg_s=star_uv_lum,
         isotropic_outside_r_au=isotropic_outside_r_au,
         outer_weight_mode=outer_weight_mode,
+        uv_product=uv_product,
     )

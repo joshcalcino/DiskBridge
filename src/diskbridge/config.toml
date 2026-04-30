@@ -125,6 +125,24 @@ N_LAY = 2                      # Number of active ice layers
 n_surf = "1.5e15 1/cm^2"       # Surface site density
 Y_CO = 1.0e-3                  # CO photodesorption yield (molecules/photon)
 
+[radmc3d.uv_products]
+enabled = true
+mode = "disc_segment_only"
+fallback_outside_disc_segment = "chi_broad"
+register_measured_mask = true
+
+[radmc3d.uv_products.bands]
+broad_nm = [91.2, 206.7]
+hard_nm = [91.2, 111.8]
+c_ion_nm = [91.2, 110.1]
+co_pdes_nm = [91.2, 205.0]
+
+[radmc3d.uv_products.weights]
+broad = "energy"
+hard = "photon"
+c_ion = "photon"
+co_pdes = "photon"
+
 # =============================================================================
 # PINTE SWITCHES MODEL
 # Simple threshold-based abundance switches (Pinte et al. style)
@@ -145,4 +163,3 @@ eps_chi = 1.0e-99              # Numerical floor for chi/nH ratio
 [chemistry.layered_column_switches]
 CD_threshold_pdes = "1.272e21 1/cm^2"      # 0.8 * 1.59e21
 CD_threshold_pdiss = "8.268e20 1/cm^2"    # 0.8 * 1.59e21 * 0.65
-

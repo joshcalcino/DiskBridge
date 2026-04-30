@@ -223,8 +223,32 @@ class Gow17TimeStepper:
         if y_state is None:
             y_state = self.y_state
 
-        chi_dust_arr = _as_cgs_f64(rad.ensure_chi(), "dimensionless")
+        chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
+        G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=True)
+        G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=True)
+        G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=True)
+        G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=True)
+        try:
+            F_CO_pdes_photon = rad.ensure_uv_product(
+                "F_CO_pdes_photon",
+                fallback_to_chi=False,
+            )
+        except KeyError:
+            F_CO_pdes_photon = None
+
+        chi_dust_arr = _as_cgs_f64(chi_broad, "dimensionless")
         chi_dust_flat = chi_dust_arr.reshape(self.ncells)
+        G_CO_diss_flat = _as_cgs_f64(G_CO_diss, "dimensionless").reshape(self.ncells)
+        G_H2_diss_flat = _as_cgs_f64(G_H2_diss, "dimensionless").reshape(self.ncells)
+        G_C_ion_flat = _as_cgs_f64(G_C_ion, "dimensionless").reshape(self.ncells)
+        G_CO_pdes_flat = _as_cgs_f64(G_CO_pdes, "dimensionless").reshape(self.ncells)
+        if F_CO_pdes_photon is None:
+            F_CO_pdes_photon_flat = None
+        else:
+            F_CO_pdes_photon_flat = _as_cgs_f64(
+                F_CO_pdes_photon,
+                "1/(cm^2 s)",
+            ).reshape(self.ncells)
 
         Tdust_flat = _as_cgs_f64(rad.ensure_dust_temperature(), "K").reshape(self.ncells)
 
@@ -237,6 +261,11 @@ class Gow17TimeStepper:
             y_flat=y_state,
             nH_flat=self.nH_flat,
             chi_dust_flat=chi_dust_flat,
+            G_CO_diss_flat=G_CO_diss_flat,
+            G_H2_diss_flat=G_H2_diss_flat,
+            G_C_ion_flat=G_C_ion_flat,
+            G_CO_pdes_flat=G_CO_pdes_flat,
+            F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
             xCtot_flat=self.xCtot_flat,
             Zd_arr=self.Zd_arr,
             Av_flat=self.Av_flat,

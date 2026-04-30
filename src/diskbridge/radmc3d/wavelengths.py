@@ -228,6 +228,7 @@ def build_mcmono_wavelengths(
     n_uv_enforce: int,
     spacing: str = 'log',
     provided_wavelengths: Optional[np.ndarray] = None,
+    extra_enforced_wavelengths_um: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Build mcmono wavelength grid with optional UV enforcement.
     
@@ -249,6 +250,8 @@ def build_mcmono_wavelengths(
         'linear' or 'log' (default: 'log')
     provided_wavelengths : ndarray or None
         Pre-provided wavelength array (overrides all other options)
+    extra_enforced_wavelengths_um : ndarray or None, optional
+        Additional wavelengths in microns to include exactly.
         
     Returns
     -------
@@ -263,6 +266,10 @@ def build_mcmono_wavelengths(
     if provided_wavelengths is not None:
         wavelengths = np.asarray(provided_wavelengths, dtype=float)
         validate_wavelength_array(wavelengths, "provided wavelengths")
+        if extra_enforced_wavelengths_um is not None:
+            extra = np.asarray(extra_enforced_wavelengths_um, dtype=float).reshape(-1)
+            wavelengths = np.unique(np.concatenate([wavelengths, extra]))
+            validate_wavelength_array(wavelengths, "provided wavelengths")
         return wavelengths
     
     if wavelength_source == 'uv':
@@ -309,6 +316,11 @@ def build_mcmono_wavelengths(
             raise ValueError("n_uv_enforce must be >= 2 or 0 (to disable)")
         uv_grid = np.linspace(uv_min_um, uv_max_um, n_uv_enforce)
         wavelengths = np.unique(np.concatenate([wavelengths, uv_grid]))
+
+    if extra_enforced_wavelengths_um is not None:
+        extra = np.asarray(extra_enforced_wavelengths_um, dtype=float).reshape(-1)
+        if extra.size > 0:
+            wavelengths = np.unique(np.concatenate([wavelengths, extra]))
     
     validate_wavelength_array(wavelengths, "mcmono wavelength grid")
     return wavelengths

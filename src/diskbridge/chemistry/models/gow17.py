@@ -183,6 +183,11 @@ def _compute_shielding_and_gph(
     y_flat: np.ndarray,
     nH_flat: np.ndarray,
     chi_dust_flat: np.ndarray,
+    G_CO_diss_flat: np.ndarray,
+    G_H2_diss_flat: np.ndarray,
+    G_C_ion_flat: np.ndarray,
+    G_CO_pdes_flat: np.ndarray,
+    F_CO_pdes_photon_flat: np.ndarray | None,
     xCtot_flat: np.ndarray,
     Zd_arr: np.ndarray,
     Av_flat,
@@ -332,10 +337,22 @@ def _compute_shielding_and_gph(
             dtype=np.float64,
         )
     else:
-        G0_scaled = local_chi_factor * chi_dust_flat
-        Gph[:, :] = G0_scaled[:, None]
-        GPE = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
-        GISRF = np.ascontiguousarray(G0_scaled.copy(), dtype=np.float64)
+        G_broad = local_chi_factor * chi_dust_flat
+        Gph[:, :] = G_broad[:, None]
+        Gph[:, IPH_CO] = local_chi_factor * G_CO_diss_flat
+        Gph[:, IPH_H2] = local_chi_factor * G_H2_diss_flat
+        Gph[:, IPH_C] = local_chi_factor * G_C_ion_flat
+        GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
+        if F_CO_pdes_photon_flat is None:
+            GISRF = np.ascontiguousarray(
+                local_chi_factor * G_CO_pdes_flat,
+                dtype=np.float64,
+            )
+        else:
+            GISRF = np.ascontiguousarray(
+                local_chi_factor * F_CO_pdes_photon_flat,
+                dtype=np.float64,
+            )
 
     Gph[:, IPH_C] *= theta_c_flat
     Gph[:, IPH_CO] *= theta_co_flat
@@ -429,7 +446,33 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tgas = rad.ensure_dust_temperature()
     Tdust = rad.ensure_dust_temperature()
 
-    chi = rad.ensure_chi()
+    explicit_uv_products = rad.has_uv_product("G_CO_diss")
+    if chi_is_incident and not explicit_uv_products:
+        chi = rad.ensure_chi()
+        G_CO_diss = chi
+        G_H2_diss = chi
+        G_C_ion = chi
+        G_CO_pdes = chi
+        F_CO_pdes_photon = Quantity(
+            chi.to("dimensionless").magnitude * float(F_DRAINE),
+            "1/(cm^2 s)",
+        )
+    else:
+        chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
+        G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=True)
+        G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=True)
+        G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=True)
+        G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=True)
+        try:
+            F_CO_pdes_photon = rad.ensure_uv_product(
+                "F_CO_pdes_photon",
+                fallback_to_chi=False,
+            )
+        except KeyError:
+            F_CO_pdes_photon = Quantity(
+                G_CO_pdes.to("dimensionless").magnitude * float(F_DRAINE),
+                "1/(cm^2 s)",
+            )
 
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
@@ -439,6 +482,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     T_K = _as_cgs_f64(Tgas, "K")
     chi_dust_arr = _as_cgs_f64(chi, "dimensionless")
+    G_CO_diss_arr = _as_cgs_f64(G_CO_diss, "dimensionless")
+    G_H2_diss_arr = _as_cgs_f64(G_H2_diss, "dimensionless")
+    G_C_ion_arr = _as_cgs_f64(G_C_ion, "dimensionless")
+    G_CO_pdes_arr = _as_cgs_f64(G_CO_pdes, "dimensionless")
+    F_CO_pdes_photon_arr = _as_cgs_f64(F_CO_pdes_photon, "1/(cm^2 s)")
 
     shape = nH_cm3.shape
     ncells = nH_cm3.size
@@ -449,6 +497,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     T_flat = T_K.reshape(ncells)
     Tdust_flat = Tdust_K.reshape(ncells)
     chi_dust_flat = chi_dust_arr.reshape(ncells)
+    G_CO_diss_flat = G_CO_diss_arr.reshape(ncells)
+    G_H2_diss_flat = G_H2_diss_arr.reshape(ncells)
+    G_C_ion_flat = G_C_ion_arr.reshape(ncells)
+    G_CO_pdes_flat = G_CO_pdes_arr.reshape(ncells)
+    F_CO_pdes_photon_flat = F_CO_pdes_photon_arr.reshape(ncells)
 
     Av_flat = None
     if chi_is_incident:
@@ -643,10 +696,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
         fields = {
             "co_ice": nco_ice,
+            "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
+            "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
+            "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
+            "G_C_ion": Quantity(G_C_ion_arr, "dimensionless"),
+            "G_CO_pdes": Quantity(G_CO_pdes_arr, "dimensionless"),
+            "F_CO_pdes_photon": Quantity(F_CO_pdes_photon_arr, "1/(cm^2 s)"),
             "theta_co": Quantity(theta_co_arr, "dimensionless"),
             "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
             "theta_c": Quantity(theta_c_arr, "dimensionless"),
-            "chi_eff": Quantity(chi_dust_arr * theta_co_arr, "dimensionless"),
+            "chi_eff": Quantity(G_CO_diss_arr * theta_co_arr, "dimensionless"),
         }
 
         rad.gow17_y = y_out
@@ -921,6 +980,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     _shielding_kw = dict(
         nH_flat=nH_flat,
         chi_dust_flat=chi_dust_flat,
+        G_CO_diss_flat=G_CO_diss_flat,
+        G_H2_diss_flat=G_H2_diss_flat,
+        G_C_ion_flat=G_C_ion_flat,
+        G_CO_pdes_flat=G_CO_pdes_flat,
+        F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
         xCtot_flat=xCtot_flat,
         Zd_arr=Zd_arr,
         Av_flat=Av_flat,
@@ -942,7 +1006,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         co_sigma_d_per_H_ref=(float(sigma_d_per_H_ref) if enable_co_phase else 0.0),
         co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
         co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
-        co_F_DRAINE=(float(F_DRAINE) if enable_co_phase else 0.0),
+        co_F_DRAINE=((float(F_DRAINE) if chi_is_incident else 1.0) if enable_co_phase else 0.0),
         co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
         co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
         co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
@@ -1433,10 +1497,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     fields = {
         "co_ice": nco_ice,
+        "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
+        "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
+        "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
+        "G_C_ion": Quantity(G_C_ion_arr, "dimensionless"),
+        "G_CO_pdes": Quantity(G_CO_pdes_arr, "dimensionless"),
+        "F_CO_pdes_photon": Quantity(F_CO_pdes_photon_arr, "1/(cm^2 s)"),
         "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
         "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
-        "chi_eff": Quantity(chi_dust_arr * theta_co_flat.reshape(shape), "dimensionless"),
+        "chi_eff": Quantity(G_CO_diss_arr * theta_co_flat.reshape(shape), "dimensionless"),
     }
 
     rad.gow17_y = y_out
