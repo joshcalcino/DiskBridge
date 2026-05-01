@@ -127,6 +127,47 @@ def planck_band_luminosity(
     return 4.0 * np.pi**2 * R_cm**2 * integral
 
 
+def planck_band_photon_luminosity(
+    R_cm: float,
+    T_K: float,
+    lam_min_cm: float,
+    lam_max_cm: float,
+    n_points: int = 500,
+) -> float:
+    """Compute blackbody photon luminosity in a wavelength band.
+
+    Parameters
+    ----------
+    R_cm : float
+        Radius of the emitting sphere in cm.
+    T_K : float
+        Temperature in Kelvin.
+    lam_min_cm : float
+        Minimum wavelength in cm.
+    lam_max_cm : float
+        Maximum wavelength in cm.
+    n_points : int, optional
+        Number of integration points.
+
+    Returns
+    -------
+    float
+        Photon luminosity in photons s^-1.
+    """
+    if T_K <= 0.0 or R_cm <= 0.0:
+        return 0.0
+
+    lam = np.linspace(lam_min_cm, lam_max_cm, n_points)
+    lam = np.clip(lam, 1.0e-12, None)
+    x = H_PLANCK * C_LIGHT / (lam * K_B * T_K)
+    x = np.clip(x, 1.0e-10, 700.0)
+    B_lam = 2.0 * H_PLANCK * C_LIGHT**2 / lam**5 / np.expm1(x)
+    photon_B_lam = B_lam * lam / (H_PLANCK * C_LIGHT)
+
+    integral = float(np.trapezoid(photon_B_lam, lam))
+    return 4.0 * np.pi**2 * R_cm**2 * integral
+
+
 def compute_star_uv_luminosity(
     params,
     lam_min_cm: float,
@@ -179,6 +220,62 @@ def compute_star_uv_luminosity(
     return L_uv
 
 
+def compute_star_uv_source_strength(
+    params,
+    lam_min_cm: float,
+    lam_max_cm: float,
+    *,
+    weighting: str,
+) -> float:
+    """Compute stellar UV source strength for an energy or photon product.
+
+    Parameters
+    ----------
+    params : diskbridge._params.Params
+        DiskBridge params object with star/accretion fields.
+    lam_min_cm : float
+        Minimum UV wavelength in cm.
+    lam_max_cm : float
+        Maximum UV wavelength in cm.
+    weighting : {"energy", "photon"}
+        Source weighting to compute.
+
+    Returns
+    -------
+    float
+        Energy luminosity in erg/s or photon luminosity in photons/s.
+    """
+    weighting = str(weighting).lower()
+    if weighting == "energy":
+        return compute_star_uv_luminosity(params, lam_min_cm, lam_max_cm)
+    if weighting != "photon":
+        raise ValueError("weighting must be 'energy' or 'photon'")
+
+    rstar_cm = float(params.rstar.to("cm").magnitude)
+    teff_K = float(params.teff.to("K").magnitude)
+    L_uv = planck_band_photon_luminosity(rstar_cm, teff_K, lam_min_cm, lam_max_cm)
+
+    mdot_msun_per_yr = float(getattr(params, "mdot", 0.0))
+    if mdot_msun_per_yr > 0.0:
+        f_fill = float(getattr(params, "accretion_fill_factor", 0.01))
+        f_fill = max(min(f_fill, 1.0), 1e-6)
+        mstar_g = float(params.mstar.to("g").magnitude)
+        mdot_cgs = mdot_msun_per_yr * SOLAR_MASS / (365.25 * 24.0 * 3600.0)
+        Lacc_cgs = G_GRAV * mstar_g * mdot_cgs / rstar_cm
+        r_acc_cm = (f_fill**0.5) * rstar_cm
+        Tacc_K = (Lacc_cgs / (4.0 * np.pi * SIGMA_SB * r_acc_cm**2)) ** 0.25
+        if Tacc_K > 0.0:
+            L_uv += planck_band_photon_luminosity(r_acc_cm, Tacc_K, lam_min_cm, lam_max_cm)
+
+    logger.info(
+        "Star UV photon luminosity (%.4g-%.4g cm): %.3e photons/s",
+        lam_min_cm,
+        lam_max_cm,
+        L_uv,
+    )
+    return L_uv
+
+
 def compute_uv_direction_weights_healpix(
     mesh,
     *,
@@ -189,6 +286,7 @@ def compute_uv_direction_weights_healpix(
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
     star_uv_reference_energy_density: float = U_DRAINE,
+    star_uv_weighting: str = "energy",
     progress_chunks: int | None = None,
     cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -218,8 +316,10 @@ def compute_uv_direction_weights_healpix(
         Total stellar UV band luminosity in erg/s.
         Set to 0.0 if no central star.
     star_uv_reference_energy_density : float, optional
-        Draine reference energy density for the same stellar UV band in
-        erg cm^-3.
+        Draine reference energy density or photon flux for the same stellar
+        UV band.
+    star_uv_weighting : {"energy", "photon"}, optional
+        Weighting for the stellar source strength.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
     cache_dir : Path or str or None, optional
@@ -327,8 +427,11 @@ def compute_uv_direction_weights_healpix(
         r_cell = np.sqrt(np.sum(cell_centers**2, axis=1))  # cm
         r_cell = np.maximum(r_cell, 1e-30)
         F_uv = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
-        u_ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
-        chi_star_unatt = F_uv / (C_LIGHT * u_ref)
+        ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
+        if str(star_uv_weighting).lower() == "photon":
+            chi_star_unatt = F_uv / ref
+        else:
+            chi_star_unatt = F_uv / (C_LIGHT * ref)
 
         # 5.3 Attenuate
         chi_star_dir_att = chi_star_unatt * np.exp(-tau_star)

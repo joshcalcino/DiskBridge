@@ -9,7 +9,7 @@ import numpy as np
 
 import diskbridge
 from diskbridge._units import Quantity
-from diskbridge._config import resolve_model_config
+from diskbridge._config import get_config, resolve_model_config
 from diskbridge._logging import logger
 from diskbridge._constants import (
     E_BIND_CO,
@@ -45,6 +45,11 @@ from diskbridge.chemistry.validation import (
     validate_chemistry_state,
     gow17_budget_diagnostics,
     project_gow17_state_to_budgets,
+)
+from diskbridge.radmc3d.uv_products import (
+    draine_reference_for_product,
+    uv_product_specs_from_config,
+    validate_uv_chemistry_config,
 )
 
 import diskbridge._gow17 as _gow17
@@ -205,6 +210,26 @@ def _nested_cfg(cfg: dict, key: str) -> dict:
     """
     val = cfg.get(key, {})
     return val if isinstance(val, dict) else {}
+
+
+def _full_config_with_gow17_cfg(gow17_cfg: dict) -> dict:
+    """Return current global config with the resolved GOW17 section injected."""
+    full_cfg = dict(get_config())
+    chemistry_cfg = dict(full_cfg.get("chemistry", {}))
+    chemistry_cfg["gow17"] = dict(gow17_cfg)
+    full_cfg["chemistry"] = chemistry_cfg
+    return full_cfg
+
+
+def _co_pdes_draine_flux() -> float:
+    """Return configured Draine CO photodesorption photon flux."""
+    uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
+    specs = uv_product_specs_from_config(uv_cfg)
+    return float(
+        draine_reference_for_product("F_CO_pdes_photon", specs)
+        .to("1/(cm^2 s)")
+        .magnitude
+    )
 
 
 def _resolve_co_dust_scalings(
@@ -619,8 +644,9 @@ def _compute_shielding_and_gph(
         Gph[:, IPH_C] = local_chi_factor * G_C_ion_flat
         GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
         if F_CO_pdes_photon_flat is None:
+            f_co_pdes_ref = _co_pdes_draine_flux()
             GISRF = np.ascontiguousarray(
-                local_chi_factor * G_CO_pdes_flat * float(F_DRAINE),
+                local_chi_factor * G_CO_pdes_flat * f_co_pdes_ref,
                 dtype=np.float64,
             )
         else:
@@ -714,6 +740,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
     slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
+    runtime_mode = None
+    if not chi_is_incident:
+        runtime_mode = validate_uv_chemistry_config(_full_config_with_gow17_cfg(cfg))
+    elif rad.has_uv_product("G_CO_diss"):
+        raise ValueError(
+            "gow17: chi_is_incident=True is incompatible with registered UV product fields"
+        )
 
     nH = rad.ensure_nH()
     Tgas = rad.ensure_gas_temperature()
@@ -722,6 +755,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Tdust = rad.ensure_dust_temperature()
 
     explicit_uv_products = rad.has_uv_product("G_CO_diss")
+    f_co_pdes_ref = _co_pdes_draine_flux()
     if chi_is_incident and not explicit_uv_products:
         chi = rad.ensure_chi()
         G_CO_diss = chi
@@ -729,7 +763,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         G_C_ion = chi
         G_CO_pdes = chi
         F_CO_pdes_photon = Quantity(
-            chi.to("dimensionless").magnitude * float(F_DRAINE),
+            chi.to("dimensionless").magnitude * f_co_pdes_ref,
             "1/(cm^2 s)",
         )
     else:
@@ -745,14 +779,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             )
         except KeyError:
             F_CO_pdes_photon = Quantity(
-                G_CO_pdes.to("dimensionless").magnitude * float(F_DRAINE),
+                G_CO_pdes.to("dimensionless").magnitude * f_co_pdes_ref,
                 "1/(cm^2 s)",
             )
 
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
     # files are unavailable (shielding then falls back to isotropic averaging).
-    maybe_ensure_W_rays(rad, nside=nside)
+    directional_uv_product = (
+        "G_CO_diss"
+        if runtime_mode is None or runtime_mode.use_hard_directional_weights
+        else "chi_broad"
+    )
+    maybe_ensure_W_rays(rad, nside=nside, uv_product=directional_uv_product)
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     T_K = _as_cgs_f64(Tgas, "K")
@@ -780,6 +819,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     Av_flat = None
     if chi_is_incident:
+        if not is_effectively_1d(rad.model.mesh, nH_cm3.shape):
+            raise ValueError("gow17: chi_is_incident=True requires an effectively-1D mesh")
         Av_q = getattr(rad, "Av", None)
         if Av_q is None:
             raise ValueError("gow17: chi_is_incident=True requires rad.Av to be set")

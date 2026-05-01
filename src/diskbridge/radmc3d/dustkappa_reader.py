@@ -41,12 +41,13 @@ from typing import Optional, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
+from diskbridge.radmc3d.uv_products import C_CGS, H_CGS, default_isrf_path, load_draine_reference
 
 
 # ---------------------------------------------------------------------------
-# In-memory cache keyed by (file path, mtime, uv_min_um, uv_max_um)
+# In-memory cache keyed by file, band, and weighting settings.
 # ---------------------------------------------------------------------------
-_KEXT_CACHE: dict[Tuple[str, float, float, float], float] = {}
+_KEXT_CACHE: dict[Tuple[str, float, float, float, str, str], float] = {}
 
 
 def read_dustkappa(
@@ -155,6 +156,9 @@ def band_average_kext(
     dustkappa_path: str | Path,
     uv_min_um: float,
     uv_max_um: float,
+    *,
+    weighting: str = "log",
+    reference_spectrum: str | None = None,
 ) -> float:
     """Compute band-averaged extinction opacity over a UV wavelength range.
 
@@ -180,6 +184,12 @@ def band_average_kext(
         Minimum UV wavelength in microns (e.g. 0.0912 for Lyman limit).
     uv_max_um : float
         Maximum UV wavelength in microns (e.g. 0.2 for FUV band).
+    weighting : {"log", "energy", "photon"}, optional
+        Averaging weight. ``"log"`` preserves the historical flat-in-log
+        wavelength average. ``"energy"`` and ``"photon"`` require
+        ``reference_spectrum="draine"``.
+    reference_spectrum : {"draine", None}, optional
+        Reference spectrum used for energy/photon weighting.
 
     Returns
     -------
@@ -193,8 +203,17 @@ def band_average_kext(
     """
     dustkappa_path = Path(dustkappa_path)
     mtime = os.path.getmtime(dustkappa_path)
+    weighting = str(weighting).lower()
+    reference_key = "none" if reference_spectrum is None else str(reference_spectrum).lower()
 
-    cache_key = (str(dustkappa_path), mtime, float(uv_min_um), float(uv_max_um))
+    cache_key = (
+        str(dustkappa_path),
+        mtime,
+        float(uv_min_um),
+        float(uv_max_um),
+        weighting,
+        reference_key,
+    )
     if cache_key in _KEXT_CACHE:
         return _KEXT_CACHE[cache_key]
 
@@ -213,21 +232,43 @@ def band_average_kext(
     lam_lo = max(uv_min_um, lam_um[0])
     lam_hi = min(uv_max_um, lam_um[-1])
 
-    # Integrate kext(ln lambda) d(ln lambda) via trapezoidal rule
-    # Build a fine grid in log-lambda, interpolate kext
-    ln_lo = np.log(lam_lo)
-    ln_hi = np.log(lam_hi)
-
-    # Use at least 200 points for accuracy; more if the table is coarser
-    n_interp = max(200, 2 * len(lam_um))
-    ln_lam_grid = np.linspace(ln_lo, ln_hi, n_interp)
-    lam_grid = np.exp(ln_lam_grid)
-
-    # Interpolate kext linearly in log(lambda)
-    kext_interp = np.interp(np.log(lam_grid), np.log(lam_um), kext)
-
-    # Trapezoidal integration in ln(lambda)
-    kext_avg = float(np.trapezoid(kext_interp, ln_lam_grid) / (ln_hi - ln_lo))
+    if weighting == "log":
+        # Integrate kext(ln lambda) d(ln lambda) via trapezoidal rule.
+        ln_lo = np.log(lam_lo)
+        ln_hi = np.log(lam_hi)
+        n_interp = max(200, 2 * len(lam_um))
+        ln_lam_grid = np.linspace(ln_lo, ln_hi, n_interp)
+        lam_grid = np.exp(ln_lam_grid)
+        kext_interp = np.interp(np.log(lam_grid), np.log(lam_um), kext)
+        kext_avg = float(np.trapezoid(kext_interp, ln_lam_grid) / (ln_hi - ln_lo))
+    elif weighting in {"energy", "photon"} and reference_key == "draine":
+        lam_ref_nm, photon_ref_nm = load_draine_reference(default_isrf_path())
+        lo_nm = lam_lo * 1.0e3
+        hi_nm = lam_hi * 1.0e3
+        in_ref = lam_ref_nm[(lam_ref_nm > lo_nm) & (lam_ref_nm < hi_nm)]
+        in_kappa = (lam_um * 1.0e3)[(lam_um > lam_lo) & (lam_um < lam_hi)]
+        lam_grid_nm = np.unique(
+            np.concatenate(([lo_nm], in_ref, in_kappa, [hi_nm])).astype(np.float64)
+        )
+        kext_interp = np.interp(
+            np.log(lam_grid_nm * 1.0e-3),
+            np.log(lam_um),
+            kext,
+        )
+        photon = np.interp(lam_grid_nm, lam_ref_nm, photon_ref_nm)
+        if weighting == "energy":
+            weights = photon * H_CGS * C_CGS / (lam_grid_nm * 1.0e-7)
+        else:
+            weights = photon
+        denom = float(np.trapezoid(weights, lam_grid_nm))
+        if denom <= 0.0:
+            raise ValueError("Draine reference has non-positive weight over UV band")
+        kext_avg = float(np.trapezoid(kext_interp * weights, lam_grid_nm) / denom)
+    else:
+        raise ValueError(
+            "weighting must be 'log', or 'energy'/'photon' with "
+            "reference_spectrum='draine'"
+        )
 
     _KEXT_CACHE[cache_key] = kext_avg
 
@@ -244,6 +285,9 @@ def load_kext_uv_for_bins(
     nbin: int,
     uv_min_um: float,
     uv_max_um: float,
+    *,
+    weighting: str = "log",
+    reference_spectrum: str | None = None,
 ) -> Optional[np.ndarray]:
     """Load band-averaged UV extinction opacity for each dust bin.
 
@@ -263,6 +307,10 @@ def load_kext_uv_for_bins(
         Minimum UV wavelength in microns.
     uv_max_um : float
         Maximum UV wavelength in microns.
+    weighting : {"log", "energy", "photon"}, optional
+        Band-average weighting passed to :func:`band_average_kext`.
+    reference_spectrum : {"draine", None}, optional
+        Reference spectrum used for weighted averages.
 
     Returns
     -------
@@ -282,7 +330,13 @@ def load_kext_uv_for_bins(
                 ibin, fpath,
             )
             return None
-        kext_uv[ibin] = band_average_kext(fpath, uv_min_um, uv_max_um)
+        kext_uv[ibin] = band_average_kext(
+            fpath,
+            uv_min_um,
+            uv_max_um,
+            weighting=weighting,
+            reference_spectrum=reference_spectrum,
+        )
 
     logger.info(
         "Loaded kext_uv for %d bins from %s: %s cm^2/g",

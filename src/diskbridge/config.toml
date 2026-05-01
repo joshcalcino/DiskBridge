@@ -130,6 +130,7 @@ enabled = true
 mode = "disc_segment_only"
 fallback_outside_disc_segment = "chi_broad"
 register_measured_mask = true
+stellar_fraction_threshold = 0.01
 
 [radmc3d.uv_products.bands]
 broad_nm = [91.2, 206.7]
@@ -147,6 +148,7 @@ co_pdes = "photon"
 use_uv_products = true
 hard_uv_for_directional_shielding = true
 use_physical_co_pdes_photon_flux = true
+chi_is_incident = false
 
 [chemistry.gow17.dust]
 sigma_d_CO_per_H_source = "radmc"

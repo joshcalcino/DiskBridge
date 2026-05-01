@@ -55,6 +55,9 @@ def resolve_uv_tau_mode(
     species_base: str,
     uv_min_um: float,
     uv_max_um: float,
+    *,
+    weighting: str = "log",
+    reference_spectrum: str | None = None,
 ) -> Tuple[str, Optional[np.ndarray]]:
     """Determine whether dustkappa-based UV extinction is available.
 
@@ -82,6 +85,10 @@ def resolve_uv_tau_mode(
         Minimum UV wavelength in microns.
     uv_max_um : float
         Maximum UV wavelength in microns.
+    weighting : {"log", "energy", "photon"}, optional
+        Dust opacity averaging weight.
+    reference_spectrum : {"draine", None}, optional
+        Reference spectrum used for energy/photon weighted averages.
 
     Returns
     -------
@@ -116,7 +123,13 @@ def resolve_uv_tau_mode(
 
     # Condition 3: all dustkappa files must exist and be readable
     kext_uv = load_kext_uv_for_bins(
-        radmc_inputs_dir, species_base, nbin, uv_min_um, uv_max_um,
+        radmc_inputs_dir,
+        species_base,
+        nbin,
+        uv_min_um,
+        uv_max_um,
+        weighting=weighting,
+        reference_spectrum=reference_spectrum,
     )
     if kext_uv is None:
         logger.info(

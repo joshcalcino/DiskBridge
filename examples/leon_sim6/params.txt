@@ -74,7 +74,7 @@ photodissociation = T                 # CO photochemistry switch (T/F)
 freezeout       = T                   # freeze-out below Tfrz (T/F)
 photodesorption = T                   # photodesorption (T/F)
 uv_min       = 91.2                # UV range lower bound (nm)
-uv_max       = 205.0               # UV range upper bound (nm)
+uv_max       = 206.7               # UV range upper bound (nm)
 uv_n_wavelengths = 50                 # Number of wavelengths for integration
 
 

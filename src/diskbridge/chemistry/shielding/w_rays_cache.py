@@ -32,9 +32,10 @@ import numpy as np
 
 import diskbridge
 from diskbridge._logging import logger
+from diskbridge._config import get_config
 from diskbridge._units import units
 from diskbridge.chemistry.shielding.angular_uv_weights import (
-    compute_star_uv_luminosity,
+    compute_star_uv_source_strength,
     compute_uv_direction_weights_healpix,
 )
 from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
@@ -43,12 +44,9 @@ from diskbridge.chemistry.shielding.dust_uv_tau import (
     resolve_uv_tau_mode,
 )
 from diskbridge.radmc3d.uv_products import (
-    C_CGS,
-    H_CGS,
-    default_isrf_path,
-    load_draine_reference,
+    draine_reference_for_product,
+    uv_product_specs_from_config,
 )
-from diskbridge._constants import U_DRAINE
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
@@ -61,6 +59,7 @@ def _build_cache_key(
     isotropic_outside_r_au: float | None,
     outer_weight_mode: str | None,
     uv_product: str = "chi",
+    uv_product_fingerprint: tuple | None = None,
 ) -> tuple:
     """Build a lightweight hashable key for W_rays invalidation.
 
@@ -91,34 +90,8 @@ def _build_cache_key(
         None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
         None if outer_weight_mode is None else str(outer_weight_mode),
         str(uv_product),
+        uv_product_fingerprint,
     )
-
-
-def _draine_band_energy_density(uv_min_um: float, uv_max_um: float) -> float:
-    """Compute Draine reference energy density over a wavelength band.
-
-    Parameters
-    ----------
-    uv_min_um, uv_max_um : float
-        Band limits in micron.
-
-    Returns
-    -------
-    float
-        Band energy density in erg cm^-3.
-    """
-    lam_nm, photon_flux_nm = load_draine_reference(default_isrf_path())
-    lo_nm = float(uv_min_um) * 1.0e3
-    hi_nm = float(uv_max_um) * 1.0e3
-    if hi_nm <= lo_nm:
-        raise ValueError("uv_max_um must be greater than uv_min_um")
-
-    mask = (lam_nm > lo_nm) & (lam_nm < hi_nm)
-    lam = np.concatenate(([lo_nm], lam_nm[mask], [hi_nm])).astype(np.float64)
-    photon = np.interp(lam, lam_nm, photon_flux_nm).astype(np.float64)
-    energy_flux_nm = photon * H_CGS * C_CGS / (lam * 1.0e-7)
-    u_band = float(np.trapezoid(energy_flux_nm, lam) / C_CGS)
-    return u_band if u_band > 0.0 else float(U_DRAINE)
 
 
 def _uv_product_band_um(uv_product: str) -> tuple[float, float]:
@@ -134,16 +107,54 @@ def _uv_product_band_um(uv_product: str) -> tuple[float, float]:
     tuple of float
         Lower and upper wavelength limits in micron.
     """
-    if uv_product == "G_C_ion":
-        return 0.0912, 0.1101
-    if uv_product in {"G_CO_diss", "G_H2_diss"}:
-        return 0.0912, 0.1118
-    if uv_product == "G_CO_pdes":
-        return 0.0912, 0.2050
+    specs = uv_product_specs_from_config(get_config().get("radmc3d", {}).get("uv_products", {}))
+    for spec in specs:
+        if spec.field_name == uv_product:
+            return float(spec.band.lam_min_nm) * 1.0e-3, float(spec.band.lam_max_nm) * 1.0e-3
     return (
         float(diskbridge.params.uv_min.to("um").magnitude),
         float(diskbridge.params.uv_max.to("um").magnitude),
     )
+
+
+def _uv_product_weighting(uv_product: str) -> str:
+    """Return weighting for a UV product.
+
+    Parameters
+    ----------
+    uv_product : str
+        UV product name.
+
+    Returns
+    -------
+    str
+        ``"energy"`` or ``"photon"``.
+    """
+    specs = uv_product_specs_from_config(get_config().get("radmc3d", {}).get("uv_products", {}))
+    for spec in specs:
+        if spec.field_name == uv_product:
+            return spec.band.weight
+    return "energy"
+
+
+def _uv_product_draine_reference(uv_product: str, weighting: str) -> float:
+    """Return the Draine reference for a directional UV product.
+
+    Parameters
+    ----------
+    uv_product : str
+        UV product name.
+    weighting : {"energy", "photon"}
+        Product weighting.
+
+    Returns
+    -------
+    float
+        Energy density in erg cm^-3 or photon flux in cm^-2 s^-1.
+    """
+    specs = uv_product_specs_from_config(get_config().get("radmc3d", {}).get("uv_products", {}))
+    unit = "1/(cm^2 s)" if str(weighting).lower() == "photon" else "erg/cm^3"
+    return float(draine_reference_for_product(uv_product, specs).to(unit).magnitude)
 
 
 def _apply_uniform_weights_outside_radius(
@@ -280,6 +291,15 @@ def ensure_W_rays(
     W_rays : ndarray, shape (n_cells, npix)
         Normalised directional UV weights per cell.
     """
+    uv_weighting = _uv_product_weighting(uv_product)
+    uv_band_um = _uv_product_band_um(uv_product)
+    uv_reference = _uv_product_draine_reference(uv_product, uv_weighting)
+    uv_product_fingerprint = (
+        float(uv_band_um[0]),
+        float(uv_band_um[1]),
+        str(uv_weighting),
+        float(uv_reference),
+    )
     key = _build_cache_key(
         nside,
         chi_ext0,
@@ -287,6 +307,7 @@ def ensure_W_rays(
         isotropic_outside_r_au,
         outer_weight_mode,
         uv_product,
+        uv_product_fingerprint,
     )
 
     existing = getattr(rad, "W_rays", None)
@@ -318,9 +339,8 @@ def ensure_W_rays(
             kext_uv=kext_uv,
             chi_ext0=float(chi_ext0),
             star_uv_luminosity_erg_s=float(star_uv_luminosity_erg_s),
-            star_uv_reference_energy_density=_draine_band_energy_density(
-                *_uv_product_band_um(uv_product)
-            ),
+            star_uv_reference_energy_density=uv_reference,
+            star_uv_weighting=uv_weighting,
             cache_dir=cache_dir,
         )
     )
@@ -401,6 +421,7 @@ def maybe_ensure_W_rays(
         species_base = species_base[0]
 
     uv_min_um, uv_max_um = _uv_product_band_um(uv_product)
+    uv_weighting = _uv_product_weighting(uv_product)
 
     mode, kext_uv = resolve_uv_tau_mode(
         rad.model,
@@ -408,6 +429,8 @@ def maybe_ensure_W_rays(
         species_base=species_base,
         uv_min_um=uv_min_um,
         uv_max_um=uv_max_um,
+        weighting=uv_weighting,
+        reference_spectrum="draine",
     )
     if mode != "dustkappa" or kext_uv is None:
         logger.info(
@@ -432,7 +455,12 @@ def maybe_ensure_W_rays(
     # 5. Stellar UV luminosity
     uv_min_cm = uv_min_um * 1.0e-4  # um -> cm
     uv_max_cm = uv_max_um * 1.0e-4
-    star_uv_lum = compute_star_uv_luminosity(params, uv_min_cm, uv_max_cm)
+    star_uv_lum = compute_star_uv_source_strength(
+        params,
+        uv_min_cm,
+        uv_max_cm,
+        weighting=uv_weighting,
+    )
 
     isotropic_outside_r_au = getattr(
         rad,

@@ -20,10 +20,13 @@ from diskbridge.model.profiles import (
     compute_volume_weighted_mean_radial_profile,
     find_r_split,
 )
-from diskbridge._constants import F_DRAINE
+from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
 from diskbridge.radmc3d.uv_products import (
-    UV_PRODUCT_EDGES_NM,
     UV_PRODUCT_MERGED_FIELD_NAMES,
+    draine_reference_for_product,
+    uv_product_edges_from_specs,
+    uv_product_specs_from_config,
+    validate_uv_chemistry_config,
 )
 from .wavelengths import build_mcmono_wavelengths
 
@@ -49,8 +52,60 @@ class SegmentedRadRunner:
             ``True`` when ``[radmc3d.uv_products].enabled`` is enabled.
         """
         cfg = get_config()
-        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
-        return bool(uv_cfg.get("enabled", True))
+        return validate_uv_chemistry_config(cfg, segmented=True).products_enabled
+
+    def _stellar_product_threshold_radius_au(
+        self,
+        product_specs,
+        threshold: float,
+    ) -> Optional[float]:
+        """Return radius where stellar UV reaches the configured product fraction."""
+        params = self.base_model.params
+        threshold = float(threshold)
+        if threshold <= 0.0:
+            return None
+
+        chi_ext0 = 0.0
+        if getattr(params, "external_uv", False):
+            chi_ext0 = float(getattr(params, "external_uv_chi", 0.0))
+        chi_ext0 = max(chi_ext0, np.finfo(np.float64).tiny)
+
+        c_cgs = float(units("c").to("cm/s").magnitude)
+        radii_cm: list[float] = []
+        for spec in product_specs:
+            lam_min_cm = float(spec.band.lam_min_nm) * 1.0e-7
+            lam_max_cm = float(spec.band.lam_max_nm) * 1.0e-7
+            source_strength = compute_star_uv_source_strength(
+                params,
+                lam_min_cm,
+                lam_max_cm,
+                weighting=spec.band.weight,
+            )
+            if source_strength <= 0.0:
+                continue
+
+            if spec.band.weight == "photon":
+                ref_flux = float(
+                    draine_reference_for_product(spec.field_name, product_specs)
+                    .to("1/(cm^2 s)")
+                    .magnitude
+                )
+            else:
+                ref_flux = c_cgs * float(
+                    draine_reference_for_product(spec.field_name, product_specs)
+                    .to("erg/cm^3")
+                    .magnitude
+                )
+            if ref_flux <= 0.0:
+                continue
+
+            radii_cm.append(
+                float(np.sqrt(source_strength / (4.0 * np.pi * ref_flux * chi_ext0 * threshold)))
+            )
+
+        if not radii_cm:
+            return None
+        return max(radii_cm) * units("cm").to("au").magnitude
 
     def _parse_segment_dir(self, segment_dir: Path) -> tuple[int, float | None, bool]:
         """Parse a segmented-run directory name.
@@ -172,7 +227,14 @@ class SegmentedRadRunner:
         merged_uv_products: Optional[dict[str, Quantity]] = None
         uv_product_measured_mask: Optional[np.ndarray] = None
         segment_id: Optional[np.ndarray] = None
-        uv_products_enabled = self._uv_products_enabled()
+        cfg = get_config()
+        runtime_mode = validate_uv_chemistry_config(cfg, segmented=True)
+        uv_products_enabled = runtime_mode.products_enabled
+        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
+        active_specs = uv_product_specs_from_config(uv_cfg)
+        broad_spec = next(spec for spec in active_specs if spec.field_name == "chi_broad")
+        disc_uv_min = Quantity(float(broad_spec.band.lam_min_nm), "nm")
+        disc_uv_max = Quantity(float(broad_spec.band.lam_max_nm), "nm")
         segments: list[dict[str, Any]] = []
         split_radii_au: list[float] = []
 
@@ -203,8 +265,8 @@ class SegmentedRadRunner:
             try:
                 rad._postprocess_chi(
                     mean_path,
-                    Quantity(91.2, "nm") if is_final else rad.params.uv_min,
-                    Quantity(206.7, "nm") if is_final else rad.params.uv_max,
+                    disc_uv_min if is_final else rad.params.uv_min,
+                    disc_uv_max if is_final else rad.params.uv_max,
                     compute_products=bool(uv_products_enabled and is_final),
                 )
             except ValueError:
@@ -460,12 +522,13 @@ class SegmentedRadRunner:
         """
         fallback = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
         products: dict[str, Quantity] = {}
+        f_pdes_ref = draine_reference_for_product("F_CO_pdes_photon").to("1/(cm^2 s)").magnitude
         for name in UV_PRODUCT_MERGED_FIELD_NAMES:
             if rad.has_uv_product(name):
                 products[name] = rad.ensure_uv_product(name, fallback_to_chi=False)
             elif name == "F_CO_pdes_photon":
                 products[name] = Quantity(
-                    np.asarray(fallback.to("dimensionless").magnitude) * float(F_DRAINE),
+                    np.asarray(fallback.to("dimensionless").magnitude) * float(f_pdes_ref),
                     "1/(cm^2 s)",
                 )
             else:
@@ -765,9 +828,30 @@ class SegmentedRadRunner:
         segment_id: Optional[np.ndarray] = None
         mcmono_wav_um_use: Optional[np.ndarray] = None
         mcmono_wav_um_disc: Optional[np.ndarray] = None
-        uv_products_enabled = self._uv_products_enabled()
-        disc_uv_min = Quantity(91.2, "nm")
-        disc_uv_max = Quantity(206.7, "nm")
+        cfg = get_config()
+        runtime_mode = validate_uv_chemistry_config(cfg, segmented=True)
+        uv_products_enabled = runtime_mode.products_enabled
+        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
+        active_specs = uv_product_specs_from_config(uv_cfg)
+        active_edges_nm = uv_product_edges_from_specs(active_specs)
+        broad_spec = next(spec for spec in active_specs if spec.field_name == "chi_broad")
+        disc_uv_min = Quantity(float(broad_spec.band.lam_min_nm), "nm")
+        disc_uv_max = Quantity(float(broad_spec.band.lam_max_nm), "nm")
+        product_threshold_r_au = (
+            self._stellar_product_threshold_radius_au(
+                active_specs,
+                runtime_mode.stellar_fraction_threshold,
+            )
+            if uv_products_enabled
+            else None
+        )
+        if product_threshold_r_au is not None:
+            logger.info(
+                "UV product stellar-fraction threshold radius: %.6g au "
+                "(threshold=%.3g)",
+                float(product_threshold_r_au),
+                float(runtime_mode.stellar_fraction_threshold),
+            )
 
         base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
@@ -828,7 +912,7 @@ class SegmentedRadRunner:
                     n_uv_enforce=n_uv_enforce_use,
                     spacing=mcmono_wavelength_spacing,
                     provided_wavelengths=mcmono_wavelengths_um,
-                    extra_enforced_wavelengths_um=UV_PRODUCT_EDGES_NM * 1.0e-3,
+                    extra_enforced_wavelengths_um=active_edges_nm * 1.0e-3,
                 )
 
             if external_source_mode == "shell" and level > 0 and outer_rad is not None:
@@ -870,7 +954,21 @@ class SegmentedRadRunner:
                 }
             )
 
-            if level >= max_splits:
+            force_product_final = (
+                product_threshold_r_au is not None
+                and float(current_outer_rmax_au) <= float(product_threshold_r_au)
+            )
+            if force_product_final:
+                logger.info(
+                    "UV product threshold reached at level=%d "
+                    "(segment r_max=%.6g au <= threshold radius %.6g au); "
+                    "rerunning as product-measured final segment",
+                    int(level),
+                    float(current_outer_rmax_au),
+                    float(product_threshold_r_au),
+                )
+
+            if level >= max_splits or force_product_final:
                 if (
                     nphot_therm_intermediate != nphot_therm_final
                     or nphot_mono_intermediate != nphot_mono_final
@@ -942,6 +1040,15 @@ class SegmentedRadRunner:
                     window_fraction=window_fraction,
                     r_clip_min_au=float(r_clip_min_au),
                 )
+                if product_threshold_r_au is not None and r_split_au > product_threshold_r_au:
+                    logger.info(
+                        "UV product threshold caps r_split from %.6g au to %.6g au",
+                        float(r_split_au),
+                        float(product_threshold_r_au),
+                    )
+                    r_split_au = max(float(product_threshold_r_au), float(r_clip_min_au))
+                    r_split_info = dict(r_split_info)
+                    r_split_info["uv_product_threshold_r_au"] = float(product_threshold_r_au)
                 logger.info(
                     "find_r_split: level=%d current_outer_rmax_au=%.6g r_split_au=%.6g "
                     "r_split_cell_idx=%s window_r_min=%.6g chi_asymptote=%.6g T_asymptote=%.6g "

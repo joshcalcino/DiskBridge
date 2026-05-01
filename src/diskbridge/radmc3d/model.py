@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge.model.field import Field
+from diskbridge._config import get_config
 from diskbridge.model.utils import field_data_as_order
 from .data import RadData
 from .cache import should_use_cache, find_cached_output
@@ -33,11 +34,13 @@ from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperatu
 from .wavelengths import build_wavelength_grid, write_wavelength_file, validate_wavelength_array, check_wavelength_range
 from .uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
+    compute_chi_broad,
     compute_uv_products,
     default_isrf_path,
     file_sha256,
     uv_product_schema,
     uv_product_schema_hash,
+    uv_product_specs_from_config,
 )
 from .writer import RadWriter
 import diskbridge 
@@ -824,12 +827,15 @@ class RadModel:
         nx, ny, nz = self.data._getMeshShape()
         mesh_shape = (nx, ny, nz)
         axis_order = self.model.mesh.axis_names()
+        uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
+        uv_specs = uv_product_specs_from_config(uv_cfg)
 
         if compute_products:
             products = compute_uv_products(
                 freq_hz=freq_hz,
                 Jnu_flat=Jnu_flat,
                 mesh_shape=mesh_shape,
+                specs=uv_specs,
                 isrf_path=default_isrf_path(),
             )
             self.uv_products = products
@@ -869,16 +875,13 @@ class RadModel:
 
             return self.chi
         
-        chi_3d, n_uv = self._compute_chi_from_mean_intensity(
-            j_lambda=Jnu_flat,
+        self.chi = compute_chi_broad(
             freq_hz=freq_hz,
-            uv_min=uv_min,
-            uv_max=uv_max,
+            Jnu_flat=Jnu_flat,
             mesh_shape=mesh_shape,
-            u_draine=U_DRAINE,
-            source="mean_intensity file",
+            specs=uv_specs,
+            isrf_path=default_isrf_path(),
         )
-        self.chi = chi_3d
         self.uv_products = {"chi_broad": self.chi}
         
         self.model.gas_register(
@@ -899,8 +902,8 @@ class RadModel:
         )
         
         logger.info(
-            f"Computed chi from {n_uv} UV wavelengths ({uv_min:~P}-{uv_max:~P}): "
-            f"min={np.min(chi_3d):.2e}, max={np.max(chi_3d):.2e}"
+            "Computed canonical chi_broad from mean_intensity "
+            f"(91.2-206.7 nm): min={np.min(self.chi):.2e}, max={np.max(self.chi):.2e}"
         )
         
         try:
@@ -1097,12 +1100,14 @@ class RadModel:
 
         if compute_uv_products:
             isrf_path = default_isrf_path()
-            schema = uv_product_schema()
+            uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
+            uv_specs = uv_product_specs_from_config(uv_cfg)
+            schema = uv_product_schema(uv_specs)
             cache_context.update(
                 {
                     'uv_products_enabled': True,
                     'uv_product_mode': 'disc_segment_only',
-                    'uv_product_schema_sha256': uv_product_schema_hash(),
+                    'uv_product_schema_sha256': uv_product_schema_hash(uv_specs),
                     'uv_product_partition_edges_nm': schema["partition_edges_nm"],
                     'uv_product_band_edges_nm': [
                         [p["lam_min_nm"], p["lam_max_nm"]]
