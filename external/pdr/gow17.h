@@ -70,11 +70,13 @@ class gow17 : public Ode {
     void SetZg(const double Zg);
     void SetTdust(const double Tdust);
 
-    void SetCOPhaseParams(const double sigma_d_per_H_ref, const double E_bind_co,
-                          const double nu0_co, const double F_DRAINE,
-                          const double Y_CO, const double N_SURF, const int N_LAY);
+    void SetCOPhaseParams(const double sigma_d_CO_per_H, const double E_bind_co,
+                          const double nu0_co, const double Y_CO,
+                          const double N_SURF, const int N_LAY,
+                          const double S_CO, const double F_CRUV_CO_pdes,
+                          const double k_crdes_CO);
     void SetIonRate(const double ion_rate);
-    void SetRadField(double *GPE, double *Gph, double *GISRF);
+    void SetRadField(double *GPE, double *Gph, double *FCO_pdes_photon);
     /* Set total C and O abundance */
     void SetxCtot(const double xC);
     void SetxOtot(const double xO);
@@ -195,13 +197,15 @@ class gow17 : public Ode {
 		const int iSiplus_;
     const int iE_; /* internal energy index */
 
-    double co_sigma_d_per_H_ref_;
+    double co_sigma_d_CO_per_H_;
     double co_E_bind_;
     double co_nu0_;
-    double co_F_DRAINE_;
     double co_Y_CO_;
     double co_N_SURF_;
     int co_N_LAY_;
+    double co_S_CO_;
+    double co_F_CRUV_CO_pdes_;
+    double co_k_crdes_CO_;
 
 		/*initialize chemistry reations.
      *Arguments:
@@ -321,7 +325,7 @@ class gow17 : public Ode {
     double GHIion_;
     /* radiation field pointer*/
     double *GPE_;
-    double *GISRF_;
+    double *FCO_pdes_photon_;
     double *Gph_;
     /* scale formation rate on grains.*/
     double fH2gr_;

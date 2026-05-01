@@ -12,8 +12,8 @@ inline double v_th_co(const double Tgas, const double kB, const double mCO) {
 }
 
 inline double co_freezeout_rate(const double nH, const double Tgas, const double sigma_d_per_H,
-                               const double kB, const double mCO) {
-    return (sigma_d_per_H * nH) * v_th_co(Tgas, kB, mCO);
+                               const double sticking, const double kB, const double mCO) {
+    return sticking * (sigma_d_per_H * nH) * v_th_co(Tgas, kB, mCO);
 }
 
 inline double co_thermal_desorption_rate(const double Tdust, const double nu0, const double Ebind) {
@@ -24,6 +24,16 @@ inline double co_thermal_desorption_rate(const double Tdust, const double nu0, c
 inline double co_photodesorption_surface_rate(const double chi, const double F_DRAINE, const double Y_CO,
                                              const double N_SURF, const int N_LAY) {
     return (chi * F_DRAINE) * (Y_CO / (4.0 * N_SURF * static_cast<double>(N_LAY)));
+}
+
+inline double co_photodesorption_surface_rate_from_flux(const double F_photon_cm2_s,
+                                                        const double Y_CO,
+                                                        const double N_SURF,
+                                                        const int N_LAY) {
+    if (F_photon_cm2_s <= 0.0 || Y_CO <= 0.0 || N_SURF <= 0.0 || N_LAY <= 0) {
+        return 0.0;
+    }
+    return F_photon_cm2_s * (Y_CO / (4.0 * N_SURF * static_cast<double>(N_LAY)));
 }
 
 inline double co_active_ice_max(const double nH, const double sigma_d_per_H, const double N_SURF,

@@ -110,10 +110,12 @@ static py::dict solve_slab_1d_equilibrium(
         co_sigma_d_per_H_ref,
         co_E_bind_co,
         co_nu0_co,
-        co_F_DRAINE,
         co_Y_CO,
         co_N_SURF,
-        co_N_LAY);
+        co_N_LAY,
+        1.0,
+        0.0,
+        0.0);
 
     ode.SetGradv(gradv);
     ode.SetNCOeffGlobal(NCOeff_global);
@@ -171,8 +173,9 @@ static py::dict solve_batch_equilibrium(
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
     const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
-    const py::array_t<double, py::array::c_style | py::array::forcecast> GISRF,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> F_CO_pdes_photon,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Gph,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> sigma_d_CO_per_H,
     const double reltol,
     const py::array_t<double, py::array::c_style | py::array::forcecast> abstol,
     const int mxsteps,
@@ -193,13 +196,14 @@ static py::dict solve_batch_equilibrium(
     const double fSiplusgr,
     const double fCplusCR,
 
-    const double co_sigma_d_per_H_ref,
     const double co_E_bind_co,
     const double co_nu0_co,
-    const double co_F_DRAINE,
     const double co_Y_CO,
     const double co_N_SURF,
     const int co_N_LAY,
+    const double co_S_CO,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_F_CRUV_CO_pdes,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_k_crdes_CO,
     const bool userJac,
     const bool verbose) {
 
@@ -229,8 +233,8 @@ static py::dict solve_batch_equilibrium(
     if (GPE.ndim() != 1 || GPE.size() != Ncells) {
         throw std::invalid_argument("GPE must be 1D with length Ncells");
     }
-    if (GISRF.ndim() != 1 || GISRF.size() != Ncells) {
-        throw std::invalid_argument("GISRF must be 1D with length Ncells");
+    if (F_CO_pdes_photon.ndim() != 1 || F_CO_pdes_photon.size() != Ncells) {
+        throw std::invalid_argument("F_CO_pdes_photon must be 1D with length Ncells");
     }
     if (Gph.ndim() != 2 || Gph.shape(0) != Ncells || Gph.shape(1) != N_PH) {
         throw std::invalid_argument("Gph must be 2D with shape (Ncells, 7)");
@@ -244,6 +248,15 @@ static py::dict solve_batch_equilibrium(
     if (gradv.ndim() != 1 || gradv.size() != Ncells) {
         throw std::invalid_argument("gradv must be 1D with length Ncells");
     }
+    if (sigma_d_CO_per_H.ndim() != 1 || sigma_d_CO_per_H.size() != Ncells) {
+        throw std::invalid_argument("sigma_d_CO_per_H must be 1D with length Ncells");
+    }
+    if (co_F_CRUV_CO_pdes.ndim() != 1 || co_F_CRUV_CO_pdes.size() != Ncells) {
+        throw std::invalid_argument("co_F_CRUV_CO_pdes must be 1D with length Ncells");
+    }
+    if (co_k_crdes_CO.ndim() != 1 || co_k_crdes_CO.size() != Ncells) {
+        throw std::invalid_argument("co_k_crdes_CO must be 1D with length Ncells");
+    }
 
     const double *y0_ptr = y0.data();
     const double *nH_ptr = nH.data();
@@ -253,11 +266,14 @@ static py::dict solve_batch_equilibrium(
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
     const double *GPE_ptr = GPE.data();
-    const double *GISRF_ptr = GISRF.data();
+    const double *F_CO_pdes_photon_ptr = F_CO_pdes_photon.data();
     const double *Gph_ptr = Gph.data();
     const double *abstol_ptr = abstol.data();
     const double *Leff_CO_max_ptr = Leff_CO_max.data();
     const double *gradv_ptr = gradv.data();
+    const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
+    const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
+    const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
 
     py::array_t<double> y_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(N_Y)});
     py::array_t<int> status_out(py::array::ShapeContainer{Ncells});
@@ -297,13 +313,15 @@ static py::dict solve_batch_equilibrium(
         ode.SetTdust(Tdust_ptr[i]);
 
         ode.SetCOPhaseParams(
-            co_sigma_d_per_H_ref,
+            sigma_d_CO_per_H_ptr[i],
             co_E_bind_co,
             co_nu0_co,
-            co_F_DRAINE,
             co_Y_CO,
             co_N_SURF,
-            co_N_LAY);
+            co_N_LAY,
+            co_S_CO,
+            co_F_CRUV_CO_pdes_ptr[i],
+            co_k_crdes_CO_ptr[i]);
 
         ode.Leff_CO_max(Leff_CO_max_ptr[i]);
         ode.IsDustCooling(isDust_cooling);
@@ -314,12 +332,12 @@ static py::dict solve_batch_equilibrium(
         }
 
         double GPE_cell = GPE_ptr[i];
-        double GISRF_cell = GISRF_ptr[i];
+        double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
         double Gph_cell[N_PH];
         for (int j = 0; j < N_PH; ++j) {
             Gph_cell[j] = Gph_ptr[i * N_PH + j];
         }
-        ode.SetRadField(&GPE_cell, Gph_cell, &GISRF_cell);
+        ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
 
         solver.ReInit();
         solver.SetMxsteps(mxsteps);
@@ -418,8 +436,9 @@ static py::dict solve_batch_time(
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
     const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
-    const py::array_t<double, py::array::c_style | py::array::forcecast> GISRF,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> F_CO_pdes_photon,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Gph,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> sigma_d_CO_per_H,
     const double reltol,
     const py::array_t<double, py::array::c_style | py::array::forcecast> abstol,
     const int mxsteps,
@@ -438,13 +457,14 @@ static py::dict solve_batch_time(
     const double fSiplusgr,
     const double fCplusCR,
 
-    const double co_sigma_d_per_H_ref,
     const double co_E_bind_co,
     const double co_nu0_co,
-    const double co_F_DRAINE,
     const double co_Y_CO,
     const double co_N_SURF,
     const int co_N_LAY,
+    const double co_S_CO,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_F_CRUV_CO_pdes,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_k_crdes_CO,
     const bool userJac,
     const bool verbose) {
 
@@ -474,8 +494,8 @@ static py::dict solve_batch_time(
     if (GPE.ndim() != 1 || GPE.size() != Ncells) {
         throw std::invalid_argument("GPE must be 1D with length Ncells");
     }
-    if (GISRF.ndim() != 1 || GISRF.size() != Ncells) {
-        throw std::invalid_argument("GISRF must be 1D with length Ncells");
+    if (F_CO_pdes_photon.ndim() != 1 || F_CO_pdes_photon.size() != Ncells) {
+        throw std::invalid_argument("F_CO_pdes_photon must be 1D with length Ncells");
     }
     if (Gph.ndim() != 2 || Gph.shape(0) != Ncells || Gph.shape(1) != N_PH) {
         throw std::invalid_argument("Gph must be 2D with shape (Ncells, 7)");
@@ -489,6 +509,15 @@ static py::dict solve_batch_time(
     if (gradv.ndim() != 1 || gradv.size() != Ncells) {
         throw std::invalid_argument("gradv must be 1D with length Ncells");
     }
+    if (sigma_d_CO_per_H.ndim() != 1 || sigma_d_CO_per_H.size() != Ncells) {
+        throw std::invalid_argument("sigma_d_CO_per_H must be 1D with length Ncells");
+    }
+    if (co_F_CRUV_CO_pdes.ndim() != 1 || co_F_CRUV_CO_pdes.size() != Ncells) {
+        throw std::invalid_argument("co_F_CRUV_CO_pdes must be 1D with length Ncells");
+    }
+    if (co_k_crdes_CO.ndim() != 1 || co_k_crdes_CO.size() != Ncells) {
+        throw std::invalid_argument("co_k_crdes_CO must be 1D with length Ncells");
+    }
     if (t_end <= 0.0) {
         throw std::invalid_argument("t_end must be > 0");
     }
@@ -501,11 +530,14 @@ static py::dict solve_batch_time(
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
     const double *GPE_ptr = GPE.data();
-    const double *GISRF_ptr = GISRF.data();
+    const double *F_CO_pdes_photon_ptr = F_CO_pdes_photon.data();
     const double *Gph_ptr = Gph.data();
     const double *abstol_ptr = abstol.data();
     const double *Leff_CO_max_ptr = Leff_CO_max.data();
     const double *gradv_ptr = gradv.data();
+    const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
+    const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
+    const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
 
     py::array_t<double> y_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(N_Y)});
     py::array_t<int> status_out(py::array::ShapeContainer{Ncells});
@@ -543,13 +575,15 @@ static py::dict solve_batch_time(
         ode.SetTdust(Tdust_ptr[i]);
 
         ode.SetCOPhaseParams(
-            co_sigma_d_per_H_ref,
+            sigma_d_CO_per_H_ptr[i],
             co_E_bind_co,
             co_nu0_co,
-            co_F_DRAINE,
             co_Y_CO,
             co_N_SURF,
-            co_N_LAY);
+            co_N_LAY,
+            co_S_CO,
+            co_F_CRUV_CO_pdes_ptr[i],
+            co_k_crdes_CO_ptr[i]);
 
         ode.Leff_CO_max(Leff_CO_max_ptr[i]);
         ode.IsDustCooling(isDust_cooling);
@@ -560,12 +594,12 @@ static py::dict solve_batch_time(
         }
 
         double GPE_cell = GPE_ptr[i];
-        double GISRF_cell = GISRF_ptr[i];
+        double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
         double Gph_cell[N_PH];
         for (int j = 0; j < N_PH; ++j) {
             Gph_cell[j] = Gph_ptr[i * N_PH + j];
         }
-        ode.SetRadField(&GPE_cell, Gph_cell, &GISRF_cell);
+        ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
 
         solver.ReInit();
         solver.SetMxsteps(mxsteps);
@@ -714,8 +748,9 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("Zg"),
         py::arg("ion_rate"),
         py::arg("GPE"),
-        py::arg("GISRF"),
+        py::arg("F_CO_pdes_photon"),
         py::arg("Gph"),
+        py::arg("sigma_d_CO_per_H"),
         py::arg("reltol"),
         py::arg("abstol"),
         py::arg("mxsteps"),
@@ -735,13 +770,14 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("fSplusgr"),
         py::arg("fSiplusgr"),
         py::arg("fCplusCR"),
-        py::arg("co_sigma_d_per_H_ref"),
         py::arg("co_E_bind_co"),
         py::arg("co_nu0_co"),
-        py::arg("co_F_DRAINE"),
         py::arg("co_Y_CO"),
         py::arg("co_N_SURF"),
         py::arg("co_N_LAY"),
+        py::arg("co_S_CO"),
+        py::arg("co_F_CRUV_CO_pdes"),
+        py::arg("co_k_crdes_CO"),
         py::arg("userJac"),
         py::arg("verbose") = false);
 
@@ -756,8 +792,9 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("Zg"),
         py::arg("ion_rate"),
         py::arg("GPE"),
-        py::arg("GISRF"),
+        py::arg("F_CO_pdes_photon"),
         py::arg("Gph"),
+        py::arg("sigma_d_CO_per_H"),
         py::arg("reltol"),
         py::arg("abstol"),
         py::arg("mxsteps"),
@@ -775,26 +812,28 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("fSplusgr"),
         py::arg("fSiplusgr"),
         py::arg("fCplusCR"),
-        py::arg("co_sigma_d_per_H_ref"),
         py::arg("co_E_bind_co"),
         py::arg("co_nu0_co"),
-        py::arg("co_F_DRAINE"),
         py::arg("co_Y_CO"),
         py::arg("co_N_SURF"),
         py::arg("co_N_LAY"),
+        py::arg("co_S_CO"),
+        py::arg("co_F_CRUV_CO_pdes"),
+        py::arg("co_k_crdes_CO"),
         py::arg("userJac"),
         py::arg("verbose") = false);
 
     m.def(
         "co_freezeout_rate_cgs",
         [](const double nH_cm3, const double Tgas_K, const double sigma_d_per_H_cm2,
-           const double kB, const double mCO) {
+           const double sticking, const double kB, const double mCO) {
             return co_phase::co_freezeout_rate(
-                nH_cm3, Tgas_K, sigma_d_per_H_cm2, kB, mCO);
+                nH_cm3, Tgas_K, sigma_d_per_H_cm2, sticking, kB, mCO);
         },
         py::arg("nH_cm3"),
         py::arg("Tgas_K"),
         py::arg("sigma_d_per_H_cm2"),
+        py::arg("sticking"),
         py::arg("kB"),
         py::arg("mCO"));
 
@@ -816,6 +855,18 @@ PYBIND11_MODULE(_gow17, m) {
         },
         py::arg("chi"),
         py::arg("F_DRAINE"),
+        py::arg("Y_CO"),
+        py::arg("N_SURF"),
+        py::arg("N_LAY"));
+
+    m.def(
+        "co_photodesorption_surface_rate_from_flux_cgs",
+        [](const double F_photon_cm2_s, const double Y_CO, const double N_SURF,
+           const int N_LAY) {
+            return co_phase::co_photodesorption_surface_rate_from_flux(
+                F_photon_cm2_s, Y_CO, N_SURF, N_LAY);
+        },
+        py::arg("F_photon_cm2_s"),
         py::arg("Y_CO"),
         py::arg("N_SURF"),
         py::arg("N_LAY"));

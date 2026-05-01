@@ -284,7 +284,7 @@ gow17::gow17()
    GH2diss_(0.),
   	 GHIion_(0.),
 	 GPE_(NULL),
-	 GISRF_(NULL),
+	 FCO_pdes_photon_(NULL),
 	 Gph_(NULL),
 	 fH2gr_(1.),
 	 fHplusgr_(1.),
@@ -299,13 +299,15 @@ gow17::gow17()
   Zd_ = 1.;
   Tdust_ = 10.;
 
-  co_sigma_d_per_H_ref_ = 0.0;
+  co_sigma_d_CO_per_H_ = 0.0;
   co_E_bind_ = 0.0;
   co_nu0_ = 0.0;
-  co_F_DRAINE_ = 0.0;
   co_Y_CO_ = 0.0;
   co_N_SURF_ = 0.0;
   co_N_LAY_ = 0;
+  co_S_CO_ = 1.0;
+  co_F_CRUV_CO_pdes_ = 0.0;
+  co_k_crdes_CO_ = 0.0;
 
   xC_ = Zg_ * xC_std_;
   xO_ = Zg_ * xO_std_;
@@ -369,7 +371,7 @@ int gow17::RHS(const sunrealtype t, const N_Vector y, N_Vector ydot)
 	}
 
 
-  if (co_sigma_d_per_H_ref_ > 0.0 && co_N_LAY_ > 0) {
+  if (co_sigma_d_CO_per_H_ > 0.0 && co_N_LAY_ > 0) {
     double Tgas;
     if (const_temp_) {
       Tgas = temp_;
@@ -377,12 +379,12 @@ int gow17::RHS(const sunrealtype t, const N_Vector y, N_Vector ydot)
       Tgas = yprev[iE_] / Thermo::CvCold(yprev[iH2_], xHe_, yprev[ie_]);
     }
 
-    const double sigma_d_per_H = Zd_ * co_sigma_d_per_H_ref_;
-    const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, Thermo::kb_, mCO_);
+    const double sigma_d_per_H = co_sigma_d_CO_per_H_;
+    const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, co_S_CO_, Thermo::kb_, mCO_);
     const double k_td = co_phase::co_thermal_desorption_rate(Tdust_, co_nu0_, co_E_bind_);
-    const double chi_pd = (GISRF_ != NULL) ? (*GISRF_) : 0.0;
-    const double k_pd_surf = co_phase::co_photodesorption_surface_rate(
-        chi_pd, co_F_DRAINE_, co_Y_CO_, co_N_SURF_, co_N_LAY_);
+    const double F_pd = ((FCO_pdes_photon_ != NULL) ? (*FCO_pdes_photon_) : 0.0) + co_F_CRUV_CO_pdes_;
+    const double k_pd_surf = co_phase::co_photodesorption_surface_rate_from_flux(
+        F_pd, co_Y_CO_, co_N_SURF_, co_N_LAY_);
 
     const double nco_ice_cm3 = yprev[iCOice_] * nH_;
     double n_ice_act_max = 0.0;
@@ -392,8 +394,10 @@ int gow17::RHS(const sunrealtype t, const N_Vector y, N_Vector ydot)
     const double R_pd_cm3s = co_phase::co_photodesorption_R(k_pd_surf, n_ice_act);
     const double r_pd_per_H = (nH_ > 0.0) ? (R_pd_cm3s / nH_) : 0.0;
 
-    ydot_[iCO_] += (-k_fo * yprev[iCO_] + k_td * yprev[iCOice_] + r_pd_per_H);
-    ydot_[iCOice_] += (k_fo * yprev[iCO_] - k_td * yprev[iCOice_] - r_pd_per_H);
+    ydot_[iCO_] += (-k_fo * yprev[iCO_] + k_td * yprev[iCOice_] + r_pd_per_H
+                    + co_k_crdes_CO_ * yprev[iCOice_]);
+    ydot_[iCOice_] += (k_fo * yprev[iCO_] - k_td * yprev[iCOice_] - r_pd_per_H
+                       - co_k_crdes_CO_ * yprev[iCOice_]);
   }
 
   /*energy equation*/
@@ -481,7 +485,7 @@ int gow17::Jac(const sunrealtype t,
 		J_[ic][ia] += rate_pa;
 	}
 
-	if (co_sigma_d_per_H_ref_ > 0.0 && co_N_LAY_ > 0) {
+	if (co_sigma_d_CO_per_H_ > 0.0 && co_N_LAY_ > 0) {
 		double Tgas;
 		if (const_temp_) {
 			Tgas = temp_;
@@ -489,12 +493,12 @@ int gow17::Jac(const sunrealtype t,
 			Tgas = yprev[iE_] / Thermo::CvCold(yprev[iH2_], xHe_, yprev[ie_]);
 		}
 
-		const double sigma_d_per_H = Zd_ * co_sigma_d_per_H_ref_;
-		const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, Thermo::kb_, mCO_);
+		const double sigma_d_per_H = co_sigma_d_CO_per_H_;
+		const double k_fo = co_phase::co_freezeout_rate(nH_, Tgas, sigma_d_per_H, co_S_CO_, Thermo::kb_, mCO_);
 		const double k_td = co_phase::co_thermal_desorption_rate(Tdust_, co_nu0_, co_E_bind_);
-		const double chi_pd = (GISRF_ != NULL) ? (*GISRF_) : 0.0;
-		const double k_pd_surf = co_phase::co_photodesorption_surface_rate(
-				chi_pd, co_F_DRAINE_, co_Y_CO_, co_N_SURF_, co_N_LAY_);
+		const double F_pd = ((FCO_pdes_photon_ != NULL) ? (*FCO_pdes_photon_) : 0.0) + co_F_CRUV_CO_pdes_;
+		const double k_pd_surf = co_phase::co_photodesorption_surface_rate_from_flux(
+				F_pd, co_Y_CO_, co_N_SURF_, co_N_LAY_);
 
 		const double nco_ice_cm3 = yprev[iCOice_] * nH_;
 		double n_ice_act_max = 0.0;
@@ -508,9 +512,9 @@ int gow17::Jac(const sunrealtype t,
 		}
 
 		J_[iCO_][iCO_] += -k_fo;
-		J_[iCO_][iCOice_] += k_td + drpd;
+		J_[iCO_][iCOice_] += k_td + drpd + co_k_crdes_CO_;
 		J_[iCOice_][iCO_] += k_fo;
-		J_[iCOice_][iCOice_] += -k_td - drpd;
+		J_[iCOice_][iCOice_] += -k_td - drpd - co_k_crdes_CO_;
 	}
 
 	/*copy J to return*/
@@ -696,41 +700,56 @@ void gow17::ChemInit_(const double *y) {
    *   (4) S+ + *e + gr -> *S + gr
    *   (5) Si+ + *e + gr -> *Si + gr
    *   , rate dependent on e aboundance. */
-	psi_gr_fac_ = 1.7 * (*GPE_) * sqrt(T) / nH_;
+  const double GPE_val = (GPE_ != NULL) ? (*GPE_) : 0.0;
+  const bool grain_inputs_ok = std::isfinite(T) && T > 0.0
+      && std::isfinite(y[ie_]) && y[ie_] > 0.0
+      && std::isfinite(GPE_val) && GPE_val >= 0.0
+      && std::isfinite(nH_) && nH_ > 0.0;
+  const double T_rate = grain_inputs_ok ? T : 2.7;
+  const double log_T_rate = log(T_rate);
+  if (grain_inputs_ok) {
+	psi_gr_fac_ = 1.7 * GPE_val * sqrt(T_rate) / nH_;
 	psi = psi_gr_fac_ / y[ie_];
+  } else {
+	psi_gr_fac_ = 0.0;
+	psi = 1.0e-12;
+  }
+  if (!std::isfinite(psi) || psi <= 0.0) {
+	psi = 1.0e-12;
+  }
 	kgr_[1] = 1.0e-14 * cHp_[0] /
 		           (
 			           1.0 + cHp_[1]*pow(psi, cHp_[2]) *
-								   (1.0 + cHp_[3] * pow(T, cHp_[4])
-										             *pow( psi, -cHp_[5]-cHp_[6]*log(T) )
+								   (1.0 + cHp_[3] * pow(T_rate, cHp_[4])
+										             *pow( psi, -cHp_[5]-cHp_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fHplusgr_;
 	kgr_[2] = 1.0e-14 * cCp_[0] /
 		           (
 			           1.0 + cCp_[1]*pow(psi, cCp_[2]) *
-								   (1.0 + cCp_[3] * pow(T, cCp_[4])
-										             *pow( psi, -cCp_[5]-cCp_[6]*log(T) )
+								   (1.0 + cCp_[3] * pow(T_rate, cCp_[4])
+										             *pow( psi, -cCp_[5]-cCp_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fCplusgr_;
 	kgr_[3] = 1.0e-14 * cHep_[0] /
 		           (
 			           1.0 + cHep_[1]*pow(psi, cHep_[2]) *
-								   (1.0 + cHep_[3] * pow(T, cHep_[4])
-										             *pow( psi, -cHep_[5]-cHep_[6]*log(T) )
+								   (1.0 + cHep_[3] * pow(T_rate, cHep_[4])
+										             *pow( psi, -cHep_[5]-cHep_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fHeplusgr_;
 	kgr_[4] = 1.0e-14 * cSp_[0] /
 		           (
 			           1.0 + cSp_[1]*pow(psi, cSp_[2]) *
-								   (1.0 + cSp_[3] * pow(T, cSp_[4])
-										             *pow( psi, -cSp_[5]-cSp_[6]*log(T) )
+								   (1.0 + cSp_[3] * pow(T_rate, cSp_[4])
+										             *pow( psi, -cSp_[5]-cSp_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fSplusgr_;
 	kgr_[5] = 1.0e-14 * cSip_[0] /
 		           (
 			           1.0 + cSip_[1]*pow(psi, cSip_[2]) *
-								   (1.0 + cSip_[3] * pow(T, cSip_[4])
-										             *pow( psi, -cSip_[5]-cSip_[6]*log(T) )
+								   (1.0 + cSip_[3] * pow(T_rate, cSip_[4])
+										             *pow( psi, -cSip_[5]-cSip_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fSiplusgr_;
 	return;
@@ -788,16 +807,20 @@ void gow17::SetTdust(const double Tdust) {
 }
 
 
-void gow17::SetCOPhaseParams(const double sigma_d_per_H_ref, const double E_bind_co,
-                             const double nu0_co, const double F_DRAINE,
-                             const double Y_CO, const double N_SURF, const int N_LAY) {
-  co_sigma_d_per_H_ref_ = sigma_d_per_H_ref;
+void gow17::SetCOPhaseParams(const double sigma_d_CO_per_H, const double E_bind_co,
+                             const double nu0_co, const double Y_CO,
+                             const double N_SURF, const int N_LAY,
+                             const double S_CO, const double F_CRUV_CO_pdes,
+                             const double k_crdes_CO) {
+  co_sigma_d_CO_per_H_ = sigma_d_CO_per_H;
   co_E_bind_ = E_bind_co;
   co_nu0_ = nu0_co;
-  co_F_DRAINE_ = F_DRAINE;
   co_Y_CO_ = Y_CO;
   co_N_SURF_ = N_SURF;
   co_N_LAY_ = N_LAY;
+  co_S_CO_ = S_CO;
+  co_F_CRUV_CO_pdes_ = F_CRUV_CO_pdes;
+  co_k_crdes_CO_ = k_crdes_CO;
   return;
 }
 
@@ -1128,9 +1151,9 @@ void gow17::SetxOtot(const double xO) {
   return;
 }
 
-void gow17::SetRadField(double *GPE, double *Gph, double *GISRF){
+void gow17::SetRadField(double *GPE, double *Gph, double *FCO_pdes_photon){
   GPE_ = GPE;
-  GISRF_ = GISRF;
+  FCO_pdes_photon_ = FCO_pdes_photon;
   Gph_ = Gph;
   return;
 }

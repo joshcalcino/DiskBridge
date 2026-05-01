@@ -18,6 +18,11 @@ from diskbridge._constants import (
     N_LAY,
     N_SURF,
     Y_CO,
+    SIGMA_D_ISM_REF,
+    F_CRUV_CO_PDES_REF,
+    ZETA_CRUV_REF,
+    K_CRDES_CO,
+    M_H,
 )
 from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.chemistry.types import ChemistryResult
@@ -36,7 +41,11 @@ from diskbridge.chemistry.shielding.healpix_utils import (
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
-from diskbridge.chemistry.validation import validate_chemistry_state, gow17_budget_diagnostics
+from diskbridge.chemistry.validation import (
+    validate_chemistry_state,
+    gow17_budget_diagnostics,
+    project_gow17_state_to_budgets,
+)
 
 import diskbridge._gow17 as _gow17
 
@@ -51,6 +60,7 @@ IPH_S = _gow17.IPH_S
 IPH_SI = _gow17.IPH_SI
 
 XC_STD = _gow17.XC_STD
+XO_STD = _gow17.XO_STD
 XHE = _gow17.XHE
 
 I_HEP = _gow17.I_HEP
@@ -176,6 +186,271 @@ def _maybe_quantity_to_float(val, unit: str) -> float:
     if isinstance(val, str):
         return float(Quantity(val).to(unit).magnitude)
     return float(val)
+
+
+def _nested_cfg(cfg: dict, key: str) -> dict:
+    """Return a nested configuration dictionary.
+
+    Parameters
+    ----------
+    cfg : dict
+        Model configuration.
+    key : str
+        Nested key to extract.
+
+    Returns
+    -------
+    dict
+        Nested dictionary, or an empty dictionary when absent.
+    """
+    val = cfg.get(key, {})
+    return val if isinstance(val, dict) else {}
+
+
+def _resolve_co_dust_scalings(
+    *,
+    cfg: dict,
+    sigma_d_cm2: np.ndarray,
+    ncells: int,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Resolve CO surface area and GOW17 grain abundance scalings.
+
+    Parameters
+    ----------
+    cfg : dict
+        GOW17 configuration dictionary.
+    sigma_d_cm2 : ndarray
+        Actual projected dust area per H in cm^2.
+    ncells : int
+        Number of cells.
+
+    Returns
+    -------
+    sigma_d_CO_per_H, Zd_gow17_grain, sigma_d_ISM_ref : ndarray, ndarray, float
+        Per-cell CO freeze-out surface area, per-cell GOW17 dust scaling, and
+        reference ISM surface area.
+    """
+    dust_cfg = _nested_cfg(cfg, "dust")
+    sigma_ref = _maybe_quantity_to_float(
+        dust_cfg.get("sigma_d_ISM_ref", f"{SIGMA_D_ISM_REF:.16e} cm^2"),
+        "cm^2",
+    )
+    if sigma_ref <= 0.0:
+        raise ValueError("gow17 dust sigma_d_ISM_ref must be positive")
+
+    sigma_source = str(dust_cfg.get("sigma_d_CO_per_H_source", "radmc")).lower()
+    if sigma_source == "radmc":
+        sigma_d_CO = np.ascontiguousarray(sigma_d_cm2, dtype=np.float64)
+    elif sigma_source == "constant":
+        sigma_const = _maybe_quantity_to_float(
+            dust_cfg.get("sigma_d_CO_per_H_constant", f"{SIGMA_D_ISM_REF:.16e} cm^2"),
+            "cm^2",
+        )
+        sigma_d_CO = np.full(ncells, float(sigma_const), dtype=np.float64)
+    else:
+        raise ValueError(
+            "sigma_d_CO_per_H_source must be 'radmc' or 'constant', "
+            f"got {sigma_source!r}"
+        )
+
+    if not np.all(np.isfinite(sigma_d_CO)):
+        raise ValueError("sigma_d_CO_per_H contains non-finite values")
+    sigma_d_CO = np.maximum(sigma_d_CO, 0.0)
+
+    zd_source = str(dust_cfg.get("Zd_gow17_grain_source", "gas_dust_ratio")).lower()
+    if zd_source == "constant":
+        zd = np.full(
+            ncells,
+            float(dust_cfg.get("Zd_gow17_grain_constant", 1.0)),
+            dtype=np.float64,
+        )
+    elif zd_source == "surface_area_relative":
+        zd = np.divide(
+            sigma_d_CO,
+            sigma_ref,
+            out=np.ones(ncells, dtype=np.float64),
+            where=(sigma_ref > 0.0),
+        )
+    elif zd_source == "gas_dust_ratio":
+        zd = np.full(
+            ncells,
+            float(dust_cfg.get("Zd_gow17_grain_constant", 1.0)),
+            dtype=np.float64,
+        )
+    else:
+        raise ValueError(
+            "Zd_gow17_grain_source must be 'gas_dust_ratio', 'constant', "
+            f"or 'surface_area_relative', got {zd_source!r}"
+        )
+
+    if not np.all(np.isfinite(zd)):
+        raise ValueError("Zd_gow17_grain contains non-finite values")
+    return sigma_d_CO, np.maximum(zd, 0.0), float(sigma_ref)
+
+
+def _resolve_co_phase_controls(
+    *,
+    cfg: dict,
+    ion_rate_arr: np.ndarray,
+    ncells: int,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Resolve CO sticking, CRUV photodesorption, and CR desorption controls.
+
+    Parameters
+    ----------
+    cfg : dict
+        GOW17 configuration dictionary.
+    ion_rate_arr : ndarray
+        Cosmic-ray ionization rate per cell in s^-1.
+    ncells : int
+        Number of cells.
+
+    Returns
+    -------
+    S_CO, F_CRUV_CO_pdes, k_crdes_CO : float, ndarray, ndarray
+        Sticking coefficient, CRUV photon flux, and direct CR desorption rate.
+    """
+    co_cfg = _nested_cfg(cfg, "co_phase")
+    s_mode = str(co_cfg.get("S_CO_mode", "constant")).lower()
+    if s_mode != "constant":
+        raise ValueError(f"Unsupported S_CO_mode={s_mode!r}")
+    S_CO = float(co_cfg.get("S_CO", 1.0))
+    if S_CO < 0.0:
+        raise ValueError("S_CO must be non-negative")
+
+    enable_cruv = bool(co_cfg.get("enable_cruv_pdes", True))
+    if enable_cruv:
+        F_ref = _maybe_quantity_to_float(
+            co_cfg.get("F_CRUV_CO_pdes_ref", f"{F_CRUV_CO_PDES_REF:.16e} 1/(cm^2 s)"),
+            "1/(cm^2 s)",
+        )
+        if bool(co_cfg.get("cruv_scales_with_zeta", True)):
+            zeta_ref = _maybe_quantity_to_float(
+                co_cfg.get("zeta_ref", f"{ZETA_CRUV_REF:.16e} 1/s"),
+                "1/s",
+            )
+            scale = np.divide(
+                ion_rate_arr,
+                zeta_ref,
+                out=np.zeros(ncells, dtype=np.float64),
+                where=(zeta_ref > 0.0),
+            )
+            F_cruv = F_ref * scale
+        else:
+            F_cruv = np.full(ncells, F_ref, dtype=np.float64)
+    else:
+        F_cruv = np.zeros(ncells, dtype=np.float64)
+
+    if bool(co_cfg.get("enable_crdes_CO", False)):
+        k_crdes = _maybe_quantity_to_float(
+            co_cfg.get("k_crdes_CO", f"{K_CRDES_CO:.16e} 1/s"),
+            "1/s",
+        )
+        k_crdes_arr = np.full(ncells, k_crdes, dtype=np.float64)
+    else:
+        k_crdes_arr = np.zeros(ncells, dtype=np.float64)
+
+    return float(S_CO), np.maximum(F_cruv, 0.0), np.maximum(k_crdes_arr, 0.0)
+
+
+def _compute_co_phase_diagnostics(
+    *,
+    y_out: np.ndarray,
+    nH_cm3: np.ndarray,
+    Tgas_K: np.ndarray,
+    Tdust_K: np.ndarray,
+    sigma_d_CO_per_H: np.ndarray,
+    S_CO: float,
+    F_CO_pdes_photon: np.ndarray,
+    F_CRUV_CO_pdes: np.ndarray,
+    k_crdes_CO: np.ndarray,
+    G_CO_diss: np.ndarray,
+    theta_co: np.ndarray,
+    enable_co_phase: bool,
+) -> dict:
+    """Compute CO gas/ice phase-rate diagnostics from the final state."""
+    shape = y_out.shape[:-1]
+    ncells = int(np.prod(shape))
+
+    xCO = np.asarray(y_out[..., I_CO], dtype=np.float64).reshape(ncells)
+    xCO_ice = np.asarray(y_out[..., I_CO_ICE], dtype=np.float64).reshape(ncells)
+    xHeplus = np.asarray(y_out[..., I_HEP], dtype=np.float64).reshape(ncells)
+    nH_flat = np.asarray(nH_cm3, dtype=np.float64).reshape(ncells)
+    Tgas_flat = np.asarray(Tgas_K, dtype=np.float64).reshape(ncells)
+    Tdust_flat = np.asarray(Tdust_K, dtype=np.float64).reshape(ncells)
+    sigma_flat = np.asarray(sigma_d_CO_per_H, dtype=np.float64).reshape(ncells)
+    F_star = np.asarray(F_CO_pdes_photon, dtype=np.float64).reshape(ncells)
+    F_cruv = np.asarray(F_CRUV_CO_pdes, dtype=np.float64).reshape(ncells)
+    k_crdes = np.asarray(k_crdes_CO, dtype=np.float64).reshape(ncells)
+    Gco = np.asarray(G_CO_diss, dtype=np.float64).reshape(ncells)
+    theta = np.asarray(theta_co, dtype=np.float64).reshape(ncells)
+
+    if not enable_co_phase:
+        sigma_flat = np.zeros(ncells, dtype=np.float64)
+        F_cruv = np.zeros(ncells, dtype=np.float64)
+        k_crdes = np.zeros(ncells, dtype=np.float64)
+
+    mCO = 28.0 * float(M_H)
+    vth = np.sqrt(8.0 * KB_CGS * np.maximum(Tgas_flat, 0.0) / (np.pi * mCO))
+    k_freeze = np.maximum(S_CO, 0.0) * sigma_flat * nH_flat * vth
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        k_thermal = float(NU0_CO) * np.exp(-float(E_BIND_CO) / np.maximum(Tdust_flat, 1.0e-30))
+
+    n_ice = xCO_ice * nH_flat
+    n_ice_act_max = 4.0 * sigma_flat * nH_flat * float(N_SURF) * float(N_LAY)
+    n_ice_act = np.minimum(np.maximum(n_ice, 0.0), np.maximum(n_ice_act_max, 0.0))
+    f_active = np.divide(
+        n_ice_act,
+        n_ice,
+        out=np.zeros(ncells, dtype=np.float64),
+        where=(n_ice > 0.0),
+    )
+    F_total = np.maximum(F_star, 0.0) + np.maximum(F_cruv, 0.0)
+    if int(N_LAY) > 0 and float(N_SURF) > 0.0:
+        k_pd_surface = F_total * float(Y_CO) / (4.0 * float(N_SURF) * float(N_LAY))
+    else:
+        k_pd_surface = np.zeros(ncells, dtype=np.float64)
+
+    R_freeze_per_H = k_freeze * xCO
+    R_pd_per_H = np.divide(
+        k_pd_surface * n_ice_act,
+        nH_flat,
+        out=np.zeros(ncells, dtype=np.float64),
+        where=(nH_flat > 0.0),
+    )
+    R_thermal_per_H = k_thermal * xCO_ice
+    R_crdes_per_H = k_crdes * xCO_ice
+    R_photodiss_per_H = 2.43e-10 * Gco * theta * xCO
+    R_heplus_per_H = 1.6e-9 * nH_flat * xHeplus * xCO
+    total_co = xCO + xCO_ice
+    co_gas_fraction = np.divide(
+        xCO,
+        total_co,
+        out=np.zeros(ncells, dtype=np.float64),
+        where=(total_co > 0.0),
+    )
+
+    return {
+        "sigma_d_CO_per_H": Quantity(sigma_flat.reshape(shape), "cm^2"),
+        "CO_sticking": Quantity(np.full(shape, float(S_CO), dtype=np.float64), "dimensionless"),
+        "F_CRUV_CO_pdes": Quantity(F_cruv.reshape(shape), "1/(cm^2 s)"),
+        "F_CO_pdes_photon_total": Quantity(F_total.reshape(shape), "1/(cm^2 s)"),
+        "k_CO_freezeout": Quantity(k_freeze.reshape(shape), "1/s"),
+        "k_CO_thermal_desorption": Quantity(k_thermal.reshape(shape), "1/s"),
+        "k_CO_pdes_surface": Quantity(k_pd_surface.reshape(shape), "1/s"),
+        "k_CO_crdes": Quantity(k_crdes.reshape(shape), "1/s"),
+        "n_CO_ice_active_max": Quantity(n_ice_act_max.reshape(shape), "cm^-3"),
+        "n_CO_ice_active": Quantity(n_ice_act.reshape(shape), "cm^-3"),
+        "CO_ice_active_fraction": Quantity(f_active.reshape(shape), "dimensionless"),
+        "CO_loss_freezeout_per_H": Quantity(R_freeze_per_H.reshape(shape), "1/s"),
+        "CO_loss_photodiss_per_H": Quantity(R_photodiss_per_H.reshape(shape), "1/s"),
+        "CO_loss_Heplus_per_H": Quantity(R_heplus_per_H.reshape(shape), "1/s"),
+        "CO_gain_photodesorption_per_H": Quantity(R_pd_per_H.reshape(shape), "1/s"),
+        "CO_gain_thermal_desorption_per_H": Quantity(R_thermal_per_H.reshape(shape), "1/s"),
+        "CO_gain_crdes_per_H": Quantity(R_crdes_per_H.reshape(shape), "1/s"),
+        "CO_gas_fraction": Quantity(co_gas_fraction.reshape(shape), "dimensionless"),
+    }
 
 
 def _compute_shielding_and_gph(
@@ -333,7 +608,7 @@ def _compute_shielding_and_gph(
             dtype=np.float64,
         )
         GISRF = np.ascontiguousarray(
-            G0_half * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr),
+            G0_half * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr) * float(F_DRAINE),
             dtype=np.float64,
         )
     else:
@@ -345,7 +620,7 @@ def _compute_shielding_and_gph(
         GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
         if F_CO_pdes_photon_flat is None:
             GISRF = np.ascontiguousarray(
-                local_chi_factor * G_CO_pdes_flat,
+                local_chi_factor * G_CO_pdes_flat * float(F_DRAINE),
                 dtype=np.float64,
             )
         else:
@@ -753,26 +1028,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     sigma_d = rad.ensure_sigma_d_per_H()
     sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
-
-    sigma_d_per_H_ref_cfg = cfg.get("sigma_d_per_H_ref", None)
-    if sigma_d_per_H_ref_cfg is None:
-        valid = np.isfinite(sigma_d_cm2) & (sigma_d_cm2 > 0.0)
-        if not np.any(valid):
-            raise ValueError(
-                "gow17: cannot infer sigma_d_per_H_ref because sigma_d_per_H has no positive finite values"
-            )
-        sigma_d_per_H_ref = float(np.nanmedian(sigma_d_cm2[valid]))
-    else:
-        if isinstance(sigma_d_per_H_ref_cfg, str):
-            sigma_d_per_H_ref = float(Quantity(sigma_d_per_H_ref_cfg).to("cm^2").magnitude)
-        else:
-            sigma_d_per_H_ref = float(sigma_d_per_H_ref_cfg)
-
-    Zd_arr = np.divide(
-        sigma_d_cm2,
-        sigma_d_per_H_ref,
-        out=np.ones(ncells, dtype=np.float64),
-        where=(sigma_d_per_H_ref > 0.0),
+    sigma_d_CO_per_H, Zd_arr, sigma_d_ISM_ref = _resolve_co_dust_scalings(
+        cfg=cfg,
+        sigma_d_cm2=sigma_d_cm2,
+        ncells=ncells,
+    )
+    S_CO, F_CRUV_CO_pdes_arr, k_crdes_CO_arr = _resolve_co_phase_controls(
+        cfg=cfg,
+        ion_rate_arr=ion_rate_arr,
+        ncells=ncells,
     )
 
 
@@ -1002,14 +1266,24 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     )
 
     # Common keyword dict for CO phase parameters passed to batch solvers.
+    _zero_cell = np.zeros(ncells, dtype=np.float64)
     _co_phase_kw = dict(
-        co_sigma_d_per_H_ref=(float(sigma_d_per_H_ref) if enable_co_phase else 0.0),
         co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
         co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
-        co_F_DRAINE=((float(F_DRAINE) if chi_is_incident else 1.0) if enable_co_phase else 0.0),
         co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
         co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
         co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
+        co_S_CO=(float(S_CO) if enable_co_phase else 0.0),
+        co_F_CRUV_CO_pdes=(
+            np.ascontiguousarray(F_CRUV_CO_pdes_arr, dtype=np.float64)
+            if enable_co_phase
+            else _zero_cell
+        ),
+        co_k_crdes_CO=(
+            np.ascontiguousarray(k_crdes_CO_arr, dtype=np.float64)
+            if enable_co_phase
+            else _zero_cell
+        ),
     )
 
     if coupling_mode == "fixed_point":
@@ -1037,8 +1311,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
-                GISRF=GISRF,
+                F_CO_pdes_photon=GISRF,
                 Gph=Gph,
+                sigma_d_CO_per_H=(
+                    sigma_d_CO_per_H if enable_co_phase else _zero_cell
+                ),
                 reltol=reltol,
                 abstol=abstol,
                 mxsteps=mxsteps,
@@ -1132,8 +1409,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
-                GISRF=GISRF,
+                F_CO_pdes_photon=GISRF,
                 Gph=Gph,
+                sigma_d_CO_per_H=(
+                    sigma_d_CO_per_H if enable_co_phase else _zero_cell
+                ),
                 reltol=reltol,
                 abstol=abstol,
                 mxsteps=mxsteps,
@@ -1216,8 +1496,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     Zg=Zg_arr,
                     ion_rate=ion_rate_arr,
                     GPE=GPE,
-                    GISRF=GISRF,
+                    F_CO_pdes_photon=GISRF,
                     Gph=Gph,
+                    sigma_d_CO_per_H=(
+                        sigma_d_CO_per_H if enable_co_phase else _zero_cell
+                    ),
                     reltol=reltol,
                     abstol=abstol,
                     mxsteps=mxsteps,
@@ -1338,8 +1621,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
-                GISRF=GISRF,
+                F_CO_pdes_photon=GISRF,
                 Gph=Gph,
+                sigma_d_CO_per_H=(
+                    sigma_d_CO_per_H if enable_co_phase else _zero_cell
+                ),
                 reltol=reltol,
                 abstol=abstol,
                 mxsteps=mxsteps,
@@ -1380,6 +1666,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     if not enable_co_phase:
         y_out[..., I_CO_ICE] = 0.0
+    else:
+        y_out = project_gow17_state_to_budgets(
+            y_out,
+            xCtot=xCtot_flat.reshape(shape),
+            xOtot=(Zg_arr * float(XO_STD)).reshape(shape),
+        )
 
     xCO = y_out[..., I_CO]
     xCO_ice = y_out[..., I_CO_ICE]
@@ -1508,6 +1800,34 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
         "chi_eff": Quantity(G_CO_diss_arr * theta_co_flat.reshape(shape), "dimensionless"),
     }
+    fields.update(
+        _compute_co_phase_diagnostics(
+            y_out=y_out,
+            nH_cm3=nH_cm3,
+            Tgas_K=T_flat.reshape(shape),
+            Tdust_K=Tdust_flat.reshape(shape),
+            sigma_d_CO_per_H=(
+                sigma_d_CO_per_H.reshape(shape)
+                if enable_co_phase
+                else np.zeros(shape, dtype=np.float64)
+            ),
+            S_CO=(float(S_CO) if enable_co_phase else 0.0),
+            F_CO_pdes_photon=GISRF.reshape(shape),
+            F_CRUV_CO_pdes=(
+                F_CRUV_CO_pdes_arr.reshape(shape)
+                if enable_co_phase
+                else np.zeros(shape, dtype=np.float64)
+            ),
+            k_crdes_CO=(
+                k_crdes_CO_arr.reshape(shape)
+                if enable_co_phase
+                else np.zeros(shape, dtype=np.float64)
+            ),
+            G_CO_diss=G_CO_diss_arr,
+            theta_co=theta_co_flat.reshape(shape),
+            enable_co_phase=enable_co_phase,
+        )
+    )
 
     rad.gow17_y = y_out
     rad.nco_gas = nco_gas
@@ -1547,6 +1867,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "ion_rate_s": float(ion_rate_s),
         "Zg": float(Zg),
         "Zd": float(Zd),
+        "sigma_d_ISM_ref": float(sigma_d_ISM_ref),
+        "S_CO": float(S_CO),
+        "co_phase_cruv_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_cruv_pdes", True)),
+        "co_phase_crdes_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_crdes_CO", False)),
         "reltol": float(reltol),
         "abstol0": float(abstol0),
         "shielding_max_iter": int(shielding_max_iter),

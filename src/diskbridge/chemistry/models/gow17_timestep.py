@@ -10,7 +10,6 @@ from diskbridge._units import Quantity
 from diskbridge._constants import (
     E_BIND_CO,
     NU0_CO,
-    F_DRAINE,
     N_LAY,
     N_SURF,
     Y_CO,
@@ -45,8 +44,10 @@ from diskbridge.chemistry.models.gow17 import (
     _electron_abundance,
     _as_cgs_f64,
     _broadcast_scalar_or_array,
-    _maybe_quantity_to_float,
     _compute_shielding_and_gph,
+    _maybe_quantity_to_float,
+    _resolve_co_dust_scalings,
+    _resolve_co_phase_controls,
 )
 
 KB_CGS = 1.380649e-16
@@ -140,27 +141,18 @@ class Gow17TimeStepper:
         sigma_d = rad.ensure_sigma_d_per_H()
         sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(self.ncells)
 
-        sigma_ref_cfg = cfg.get("sigma_d_per_H_ref", None)
-        if sigma_ref_cfg is None:
-            valid = np.isfinite(sigma_d_cm2) & (sigma_d_cm2 > 0.0)
-            if not np.any(valid):
-                raise ValueError("Gow17TimeStepper: sigma_d_per_H has no positive finite values")
-            self.sigma_d_per_H_ref = float(np.nanmedian(sigma_d_cm2[valid]))
-        else:
-            if isinstance(sigma_ref_cfg, str):
-                self.sigma_d_per_H_ref = float(Quantity(sigma_ref_cfg).to("cm^2").magnitude)
-            else:
-                self.sigma_d_per_H_ref = float(sigma_ref_cfg)
-
-        self.Zd_arr = np.divide(
-            sigma_d_cm2,
-            self.sigma_d_per_H_ref,
-            out=np.ones(self.ncells, dtype=np.float64),
-            where=(self.sigma_d_per_H_ref > 0.0),
-        )
-
         self.Zg_arr = _broadcast_scalar_or_array(self.Zg, self.ncells)
         self.ion_rate_arr = _broadcast_scalar_or_array(self.ion_rate_s, self.ncells)
+        self.sigma_d_CO_per_H, self.Zd_arr, self.sigma_d_ISM_ref = _resolve_co_dust_scalings(
+            cfg=cfg,
+            sigma_d_cm2=sigma_d_cm2,
+            ncells=self.ncells,
+        )
+        self.S_CO, self.F_CRUV_CO_pdes_arr, self.k_crdes_CO_arr = _resolve_co_phase_controls(
+            cfg=cfg,
+            ion_rate_arr=self.ion_rate_arr,
+            ncells=self.ncells,
+        )
         self.gradv_arr = _broadcast_scalar_or_array(self.gradv_scalar, self.ncells)
         self.Leff_CO_max_arr = _broadcast_scalar_or_array(self.Leff_CO_max_scalar, self.ncells)
 
@@ -174,14 +166,24 @@ class Gow17TimeStepper:
 
         self.visser = VisserShielding(b_kms=float(self.b_kms))
 
+        zero_cell = np.zeros(self.ncells, dtype=np.float64)
         self._co_phase_kw = dict(
-            co_sigma_d_per_H_ref=(float(self.sigma_d_per_H_ref) if self.enable_co_phase else 0.0),
             co_E_bind_co=(float(E_BIND_CO) if self.enable_co_phase else 0.0),
             co_nu0_co=(float(NU0_CO) if self.enable_co_phase else 0.0),
-            co_F_DRAINE=(float(F_DRAINE) if self.enable_co_phase else 0.0),
             co_Y_CO=(float(Y_CO) if self.enable_co_phase else 0.0),
             co_N_SURF=(float(N_SURF) if self.enable_co_phase else 0.0),
             co_N_LAY=(int(N_LAY) if self.enable_co_phase else 0),
+            co_S_CO=(float(self.S_CO) if self.enable_co_phase else 0.0),
+            co_F_CRUV_CO_pdes=(
+                np.ascontiguousarray(self.F_CRUV_CO_pdes_arr, dtype=np.float64)
+                if self.enable_co_phase
+                else zero_cell
+            ),
+            co_k_crdes_CO=(
+                np.ascontiguousarray(self.k_crdes_CO_arr, dtype=np.float64)
+                if self.enable_co_phase
+                else zero_cell
+            ),
         )
 
         y_prev = getattr(rad, "gow17_y", None)
@@ -420,8 +422,13 @@ class Gow17TimeStepper:
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
             GPE=GPE,
-            GISRF=GISRF,
+            F_CO_pdes_photon=GISRF,
             Gph=Gph,
+            sigma_d_CO_per_H=(
+                self.sigma_d_CO_per_H
+                if self.enable_co_phase
+                else np.zeros(self.ncells, dtype=np.float64)
+            ),
             reltol=self.reltol,
             abstol=self.abstol,
             mxsteps=self.mxsteps,
@@ -501,8 +508,13 @@ class Gow17TimeStepper:
                 Zg=self.Zg_arr,
                 ion_rate=self.ion_rate_arr,
                 GPE=GPE,
-                GISRF=GISRF,
+                F_CO_pdes_photon=GISRF,
                 Gph=Gph,
+                sigma_d_CO_per_H=(
+                    self.sigma_d_CO_per_H
+                    if self.enable_co_phase
+                    else np.zeros(self.ncells, dtype=np.float64)
+                ),
                 reltol=self.reltol,
                 abstol=self.abstol,
                 mxsteps=self.mxsteps,
@@ -547,8 +559,13 @@ class Gow17TimeStepper:
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
             GPE=GPE,
-            GISRF=GISRF,
+            F_CO_pdes_photon=GISRF,
             Gph=Gph,
+            sigma_d_CO_per_H=(
+                self.sigma_d_CO_per_H
+                if self.enable_co_phase
+                else np.zeros(self.ncells, dtype=np.float64)
+            ),
             reltol=self.reltol,
             abstol=self.abstol,
             mxsteps=self.mxsteps,

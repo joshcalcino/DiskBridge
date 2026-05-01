@@ -143,6 +143,29 @@ hard = "photon"
 c_ion = "photon"
 co_pdes = "photon"
 
+[chemistry.gow17]
+use_uv_products = true
+hard_uv_for_directional_shielding = true
+use_physical_co_pdes_photon_flux = true
+
+[chemistry.gow17.dust]
+sigma_d_CO_per_H_source = "radmc"
+sigma_d_CO_per_H_constant = "1.0e-21 cm^2"
+Zd_gow17_grain_source = "gas_dust_ratio"
+Zd_gow17_grain_constant = 1.0
+sigma_d_ISM_ref = "1.0e-21 cm^2"
+allow_median_sigma_ref = false
+
+[chemistry.gow17.co_phase]
+S_CO = 1.0
+S_CO_mode = "constant"
+enable_cruv_pdes = true
+F_CRUV_CO_pdes_ref = "1.0e4 1/(cm^2 s)"
+zeta_ref = "1.0e-17 1/s"
+cruv_scales_with_zeta = true
+enable_crdes_CO = false
+k_crdes_CO = "0.0 1/s"
+
 # =============================================================================
 # PINTE SWITCHES MODEL
 # Simple threshold-based abundance switches (Pinte et al. style)

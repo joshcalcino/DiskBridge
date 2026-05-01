@@ -286,6 +286,68 @@ def gow17_budget_diagnostics(
     }
 
 
+def project_gow17_state_to_budgets(
+    y: np.ndarray,
+    *,
+    xCtot,
+    xOtot=None,
+) -> np.ndarray:
+    """Project a GOW17 state onto non-negative C/O abundance budgets.
+
+    The projection is intentionally conservative: it only rescales explicitly
+    carbon-bearing and oxygen-bearing species when their summed abundance
+    exceeds the supplied elemental budget. Hydrogen bookkeeping is left to the
+    native network state.
+    """
+    import diskbridge._gow17 as _g
+
+    y_proj = np.asarray(y, dtype=np.float64).copy()
+    y_proj[...] = np.maximum(y_proj, 0.0)
+
+    xCtot_arr = np.asarray(xCtot, dtype=np.float64)
+    carbon_species = [
+        _g.I_HCOP,
+        _g.I_CHX,
+        _g.I_CO,
+        _g.I_CO_ICE,
+        _g.I_CP,
+    ]
+    c_sum = np.zeros(y_proj.shape[:-1], dtype=np.float64)
+    for idx in carbon_species:
+        c_sum += y_proj[..., idx]
+    c_scale = np.divide(
+        xCtot_arr,
+        c_sum,
+        out=np.ones_like(c_sum, dtype=np.float64),
+        where=(c_sum > xCtot_arr) & (c_sum > 0.0),
+    )
+    for idx in carbon_species:
+        y_proj[..., idx] *= c_scale
+
+    if xOtot is not None:
+        xOtot_arr = np.asarray(xOtot, dtype=np.float64)
+        oxygen_species = [
+            _g.I_OHX,
+            _g.I_HCOP,
+            _g.I_CO,
+            _g.I_CO_ICE,
+            _g.I_OP,
+        ]
+        o_sum = np.zeros(y_proj.shape[:-1], dtype=np.float64)
+        for idx in oxygen_species:
+            o_sum += y_proj[..., idx]
+        o_scale = np.divide(
+            xOtot_arr,
+            o_sum,
+            out=np.ones_like(o_sum, dtype=np.float64),
+            where=(o_sum > xOtot_arr) & (o_sum > 0.0),
+        )
+        for idx in oxygen_species:
+            y_proj[..., idx] *= o_scale
+
+    return y_proj
+
+
 def validate_chemistry_state(
     nH: Quantity,
     nH2: Quantity = None,
