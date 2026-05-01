@@ -178,6 +178,7 @@ def check_photodesorption_diagnostics(
 def gow17_budget_diagnostics(
     y: np.ndarray,
     xCtot,
+    xOtot=None,
     rtol: float = 1e-2,
     logger=None,
 ) -> dict:
@@ -235,12 +236,29 @@ def gow17_budget_diagnostics(
     xCOice = y[..., _g.I_CO_ICE]
 
     xCtot = np.asarray(xCtot, dtype=np.float64)
+    xOtot_arr = None if xOtot is None else np.asarray(xOtot, dtype=np.float64)
 
     xH_accounted = xOHx + xCHx + xHCOp + 3.0 * xH3p + 2.0 * xH2p + xHp + 2.0 * xH2
     xH_atom_raw = 1.0 - xH_accounted
 
     xC_accounted = xHCOp + xCHx + xCO + xCOice + xCplus
     xC_neutral_raw = xCtot - xC_accounted
+
+    if xOtot_arr is not None:
+        xOplus = y[..., _g.I_OP]
+        xO_accounted = xOHx + xHCOp + xCO + xCOice + xOplus
+        xO_neutral_raw = xOtot_arr - xO_accounted
+        o_xO_neutral_min = float(np.min(xO_neutral_raw))
+        o_xO_accounted_max = float(np.max(xO_accounted))
+        o_budget_violation = float(max(
+            0.0,
+            -o_xO_neutral_min,
+            float(np.max(xO_accounted - xOtot_arr)),
+        ))
+    else:
+        o_xO_neutral_min = float("nan")
+        o_xO_accounted_max = float("nan")
+        o_budget_violation = float("nan")
 
     h_xH_atom_min = float(np.min(xH_atom_raw))
     h_xH_accounted_max = float(np.max(xH_accounted))
@@ -275,14 +293,22 @@ def gow17_budget_diagnostics(
             f"gow17 C budget violation = {c_budget_violation:.3e} > {rtol:.1e} "
             f"(min xC_neutral={c_xC_neutral_min:.3e}, max xC_accounted={c_xC_accounted_max:.3e})"
         )
+    if xOtot_arr is not None and o_budget_violation > rtol:
+        _warn(
+            f"gow17 O budget violation = {o_budget_violation:.3e} > {rtol:.1e} "
+            f"(min xO_neutral={o_xO_neutral_min:.3e}, max xO_accounted={o_xO_accounted_max:.3e})"
+        )
 
     return {
         "h_xH_atom_min": h_xH_atom_min,
         "h_xH_accounted_max": h_xH_accounted_max,
         "c_xC_neutral_min": c_xC_neutral_min,
         "c_xC_accounted_max": c_xC_accounted_max,
+        "o_xO_neutral_min": o_xO_neutral_min,
+        "o_xO_accounted_max": o_xO_accounted_max,
         "h_budget_violation": h_budget_violation,
         "c_budget_violation": c_budget_violation,
+        "o_budget_violation": o_budget_violation,
     }
 
 

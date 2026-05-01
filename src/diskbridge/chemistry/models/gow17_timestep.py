@@ -24,6 +24,7 @@ from diskbridge.chemistry.models.gow17 import (
     IPH_CO,
     IPH_H2,
     XC_STD,
+    XO_STD,
     XHE,
     I_HEP,
     I_OHX,
@@ -44,32 +45,22 @@ from diskbridge.chemistry.models.gow17 import (
     _electron_abundance,
     _as_cgs_f64,
     _broadcast_scalar_or_array,
+    _actual_solver_uv_fields,
+    _build_gow17_abstol,
     _compute_shielding_and_gph,
     _co_pdes_draine_flux,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_co_phase_controls,
+    _resolve_local_chi_factor,
+    _resolve_temperature_config,
+    _warn_if_co_phase_settings_ignored,
 )
+from diskbridge.chemistry.validation import project_gow17_state_to_budgets
 from diskbridge.radmc3d.uv_products import validate_uv_chemistry_config
 
 KB_CGS = 1.380649e-16
 YR_TO_S = 365.25 * 24.0 * 3600.0
-
-
-def _build_abstol(abstol0: float) -> np.ndarray:
-    abstol = np.full(N_Y, float(abstol0), dtype=np.float64)
-    abstol[I_HEP] = 1.0e-15
-    abstol[I_OHX] = 1.0e-15
-    abstol[I_CHX] = 1.0e-15
-    abstol[I_CO] = 1.0e-15
-    abstol[I_CO_ICE] = 1.0e-15
-    abstol[I_CP] = 1.0e-15
-    abstol[I_HCOP] = max(float(abstol0), 1.0e-20)
-    abstol[I_H2] = 1.0e-8
-    abstol[I_HP] = 1.0e-15
-    abstol[I_H3P] = 1.0e-15
-    abstol[I_H2P] = 1.0e-15
-    return abstol
 
 
 def _default_y0_single() -> np.ndarray:
@@ -96,8 +87,23 @@ class Gow17TimeStepper:
         cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
         self.runtime_mode = None
 
-        self.const_temp = bool(cfg.get("const_temp", True))
-        self.enable_co_phase = bool(cfg.get("enable_co_phase", False))
+        self.temperature_cfg = _resolve_temperature_config(cfg)
+        self.temperature_mode = str(self.temperature_cfg["mode"])
+        self.const_temp = bool(self.temperature_cfg["const_temp"])
+        if self.temperature_mode == "constant_debug":
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Gow17TimeStepper: using constant_debug Tgas; this is for "
+                "debugging/regression only and is not a physically valid "
+                "disc/PDR temperature model."
+            )
+        self.enable_co_phase = bool(cfg.get("enable_co_phase", True))
+        _warn_if_co_phase_settings_ignored(
+            cfg,
+            enable_co_phase=self.enable_co_phase,
+            context="Gow17TimeStepper",
+        )
         self.chi_is_incident = bool(cfg.get("chi_is_incident", False))
         if self.chi_is_incident:
             if getattr(rad, "Av", None) is None:
@@ -131,7 +137,10 @@ class Gow17TimeStepper:
         self.isDust_cooling = bool(cfg.get("isDust_cooling", False))
         self.isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
 
-        self.local_chi_factor = float(cfg.get("local_chi_factor", 0.5))
+        self.local_chi_factor = _resolve_local_chi_factor(
+            cfg,
+            chi_is_incident=self.chi_is_incident,
+        )
         self.shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
 
         self.rad = rad
@@ -140,9 +149,21 @@ class Gow17TimeStepper:
         nH = rad.ensure_nH()
         chi = rad.ensure_chi()
         Tdust = rad.ensure_dust_temperature()
-        Tgas = rad.ensure_gas_temperature()
-        if Tgas is None:
+        if self.temperature_mode == "constant_debug":
+            Tgas = Quantity(
+                np.full(
+                    _as_cgs_f64(Tdust, "K").shape,
+                    float(self.temperature_cfg["constant_debug_Tgas"]),
+                    dtype=np.float64,
+                ),
+                "K",
+            )
+        elif self.temperature_mode == "dust":
             Tgas = Tdust
+        else:
+            Tgas = rad.ensure_gas_temperature()
+            if Tgas is None:
+                Tgas = Tdust
 
         self.shape = _as_cgs_f64(nH, "cm^-3").shape
         self.ncells = int(np.prod(self.shape))
@@ -150,7 +171,7 @@ class Gow17TimeStepper:
         self.nH_cm3 = _as_cgs_f64(nH, "cm^-3")
         self.nH_flat = self.nH_cm3.reshape(self.ncells)
 
-        self.abstol = _build_abstol(self.abstol0)
+        self.abstol = _build_gow17_abstol(cfg, self.abstol0)
 
         sigma_d = rad.ensure_sigma_d_per_H()
         sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(self.ncells)
@@ -171,6 +192,7 @@ class Gow17TimeStepper:
         self.Leff_CO_max_arr = _broadcast_scalar_or_array(self.Leff_CO_max_scalar, self.ncells)
 
         self.xCtot_flat = self.Zg_arr * float(XC_STD)
+        self.xOtot_flat = self.Zg_arr * float(XO_STD)
 
         self.Av_flat = None
         if self.chi_is_incident:
@@ -209,12 +231,14 @@ class Gow17TimeStepper:
 
         if not self.enable_co_phase:
             self.y_state[:, I_CO_ICE] = 0.0
+        self.y_state[:, :] = self._project_state(self.y_state)
 
         if not self.const_temp and (y_prev is None):
-            Tgas = rad.ensure_gas_temperature()
-            if Tgas is None:
-                Tgas = rad.ensure_dust_temperature()
-            T_flat = _as_cgs_f64(Tgas, "K").reshape(self.ncells)
+            T_flat = np.clip(
+                _as_cgs_f64(Tgas, "K"),
+                float(self.temperature_cfg["Tgas_floor"]),
+                float(self.temperature_cfg["Tgas_ceiling"]),
+            ).reshape(self.ncells)
             xe0 = _electron_abundance(self.y_state)
             Cv0 = _cv_cold(self.y_state[:, I_H2], xe0)
             self.y_state[:, I_E] = Cv0 * T_flat
@@ -230,6 +254,16 @@ class Gow17TimeStepper:
         self.shielding_reltol = float(cfg.get("shielding_reltol", 1.0e-3))
         self.shielding_abstol = float(cfg.get("shielding_abstol", 1.0e-15))
 
+    def _project_state(self, y: np.ndarray) -> np.ndarray:
+        y_proj = project_gow17_state_to_budgets(
+            np.asarray(y, dtype=np.float64),
+            xCtot=self.xCtot_flat,
+            xOtot=self.xOtot_flat,
+        )
+        if not self.enable_co_phase:
+            y_proj[:, I_CO_ICE] = 0.0
+        return np.ascontiguousarray(y_proj, dtype=np.float64)
+
     def _prepare_environment(
         self,
         *,
@@ -238,6 +272,7 @@ class Gow17TimeStepper:
         rad = self.rad
         if y_state is None:
             y_state = self.y_state
+        y_state = self._project_state(y_state)
 
         if self.chi_is_incident:
             chi_broad = rad.ensure_chi()
@@ -282,10 +317,26 @@ class Gow17TimeStepper:
 
         Tdust_flat = _as_cgs_f64(rad.ensure_dust_temperature(), "K").reshape(self.ncells)
 
-        Tgas = rad.ensure_gas_temperature()
-        if Tgas is None:
+        if self.temperature_mode == "constant_debug":
+            Tgas = Quantity(
+                np.full(
+                    self.shape,
+                    float(self.temperature_cfg["constant_debug_Tgas"]),
+                    dtype=np.float64,
+                ),
+                "K",
+            )
+        elif self.temperature_mode == "dust":
             Tgas = rad.ensure_dust_temperature()
-        T_flat = _as_cgs_f64(Tgas, "K").reshape(self.ncells)
+        else:
+            Tgas = rad.ensure_gas_temperature()
+            if Tgas is None:
+                Tgas = rad.ensure_dust_temperature()
+        T_flat = np.clip(
+            _as_cgs_f64(Tgas, "K"),
+            float(self.temperature_cfg["Tgas_floor"]),
+            float(self.temperature_cfg["Tgas_ceiling"]),
+        ).reshape(self.ncells)
 
         theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,
@@ -322,10 +373,12 @@ class Gow17TimeStepper:
         theta_co: np.ndarray,
         theta_c: np.ndarray,
         chi_dust_arr: np.ndarray,
+        Gph: np.ndarray,
+        GISRF: np.ndarray,
     ) -> dict:
         rad = self.rad
 
-        self.y_state[:, :] = np.asarray(y_new, dtype=np.float64)
+        self.y_state[:, :] = self._project_state(y_new)
         status = np.asarray(status, dtype=np.int32)
 
         y_out = self.y_state.reshape(self.shape + (N_Y,))
@@ -376,7 +429,19 @@ class Gow17TimeStepper:
         rad.theta_co = Quantity(theta_co_arr, "dimensionless")
         rad.theta_h2 = Quantity(theta_h2_arr, "dimensionless")
         rad.theta_c = Quantity(theta_c_arr, "dimensionless")
-        rad.chi_eff = Quantity(chi_dust_arr * theta_co_arr, "dimensionless")
+        actual_uv = _actual_solver_uv_fields(
+            Gph=Gph,
+            F_CO_pdes_external=GISRF,
+            shape=self.shape,
+        )
+        rad.G_CO_diss_actual = Quantity(actual_uv["G_CO_diss_actual"], "dimensionless")
+        rad.G_C_ion_actual = Quantity(actual_uv["G_C_ion_actual"], "dimensionless")
+        rad.G_H2_diss_actual = Quantity(actual_uv["G_H2_diss_actual"], "dimensionless")
+        rad.F_CO_pdes_external_actual = Quantity(
+            actual_uv["F_CO_pdes_external_actual"],
+            "1/(cm^2 s)",
+        )
+        rad.chi_eff = rad.G_CO_diss_actual
 
         if not self.const_temp:
             xe_out = _electron_abundance(y_out)
@@ -442,7 +507,7 @@ class Gow17TimeStepper:
         chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment()
 
         result = _gow17.solve_batch_time(
-            y0=np.ascontiguousarray(self.y_state, dtype=np.float64),
+            y0=self._project_state(self.y_state),
             nH=self.nH_flat,
             Tgas=T_flat,
             Tdust=Tdust_flat,
@@ -478,7 +543,7 @@ class Gow17TimeStepper:
             userJac=self.userJac,
             verbose=self.verbose,
         )
-        y_new = self._repair_failed_cells(result["y"], result["status"])
+        y_new = self._project_state(self._repair_failed_cells(result["y"], result["status"]))
         return self._commit_solution(
             y_new=y_new,
             status=np.asarray(result["status"], dtype=np.int32),
@@ -486,6 +551,8 @@ class Gow17TimeStepper:
             theta_co=theta_co,
             theta_c=theta_c,
             chi_dust_arr=chi_dust_arr,
+            Gph=Gph,
+            GISRF=GISRF,
         )
 
     def solve_equilibrium(self) -> dict:
@@ -496,7 +563,7 @@ class Gow17TimeStepper:
         if max_iter < N:
             raise ValueError("Gow17TimeStepper.solve_equilibrium: shielding_max_iter must be >= astrochem_n_updates")
 
-        y_state = np.ascontiguousarray(self.y_state.copy(), dtype=np.float64)
+        y_state = self._project_state(self.y_state.copy())
 
         if N == 1:
             t_targets = np.array([self.astrochem_t_end_s], dtype=np.float64)
@@ -528,7 +595,7 @@ class Gow17TimeStepper:
                 y_state=y_state,
             )
             result_time = _gow17.solve_batch_time(
-                y0=np.ascontiguousarray(y_state, dtype=np.float64),
+                    y0=self._project_state(y_state),
                 nH=self.nH_flat,
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
@@ -564,7 +631,9 @@ class Gow17TimeStepper:
                 userJac=self.userJac,
                 verbose=self.verbose,
             )
-            y_state[:, :] = self._repair_failed_cells(result_time["y"], result_time["status"])
+            y_state[:, :] = self._project_state(
+                self._repair_failed_cells(result_time["y"], result_time["status"])
+            )
 
             xCO_new = y_state[:, I_CO]
             xH2_new = y_state[:, I_H2]
@@ -579,7 +648,7 @@ class Gow17TimeStepper:
             y_state=y_state,
         )
         result = _gow17.solve_batch_equilibrium(
-            y0=np.ascontiguousarray(y_state, dtype=np.float64),
+            y0=self._project_state(y_state),
             nH=self.nH_flat,
             Tgas=T_flat,
             Tdust=Tdust_flat,
@@ -617,7 +686,7 @@ class Gow17TimeStepper:
             userJac=self.userJac,
             verbose=self.verbose,
         )
-        y_final = self._repair_failed_cells(result["y"], result["status"])
+        y_final = self._project_state(self._repair_failed_cells(result["y"], result["status"]))
         return self._commit_solution(
             y_new=y_final,
             status=np.asarray(result["status"], dtype=np.int32),
@@ -625,4 +694,6 @@ class Gow17TimeStepper:
             theta_co=theta_co,
             theta_c=theta_c,
             chi_dust_arr=chi_dust_arr,
+            Gph=Gph,
+            GISRF=GISRF,
         )

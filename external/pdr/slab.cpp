@@ -121,20 +121,17 @@ void Slab::SolveEq(const double tolfac, const double tmin,
   double xCI = 0.;
   double fac = 0.;
   double xCtot = ode_.GetxCtot();
-  	/* create array of NH */
-	if (logNH_) {
-		NH_arr_[0] = NH_min_;
-		if (ngrid_ > 1) {
-			fac = pow(10, (log10(NH_total_) - log10(NH_min_)) / (ngrid_ - 1));
-			for (int i=1; i<ngrid_; i++) {
-				NH_arr_[i] = NH_arr_[i-1] * fac;
-			}
-			NH_arr_[ngrid_ - 1] = NH_total_;
-		}
-	} else {
-		fac = NH_total_/ngrid_;
-		for (int i=0; i<ngrid_; i++) {
-			NH_arr_[i] = fac * (i + 1);
+  /* create array of NH */
+  if (logNH_) {
+    NH_arr_[0] = NH_min_;
+    fac = pow( 10, ( log10(NH_total_) - log10(NH_min_) )/ngrid_ );
+    for (int i=1; i<ngrid_; i++) {
+      NH_arr_[i] = NH_arr_[i-1]*fac;
+    }
+  } else {
+    fac = NH_total_/ngrid_;
+    for (int i=0; i<ngrid_; i++) {
+      NH_arr_[i] = fac * (i + 1);
     }
   }
 
