@@ -1468,7 +1468,7 @@ class RadModel:
     def ensure_uv_product(
         self,
         name: str,
-        fallback_to_chi: bool = True,
+        fallback_to_chi: bool = False,
     ) -> Quantity:
         """Return a UV product, optionally falling back to ``chi``.
 

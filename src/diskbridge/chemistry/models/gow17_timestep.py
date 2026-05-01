@@ -5,7 +5,7 @@ import numpy as np
 import diskbridge
 import diskbridge._gow17 as _gow17
 
-from diskbridge._config import resolve_model_config
+from diskbridge._config import get_config, resolve_model_config
 from diskbridge._units import Quantity
 from diskbridge._constants import (
     E_BIND_CO,
@@ -45,10 +45,12 @@ from diskbridge.chemistry.models.gow17 import (
     _as_cgs_f64,
     _broadcast_scalar_or_array,
     _compute_shielding_and_gph,
+    _co_pdes_draine_flux,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_co_phase_controls,
 )
+from diskbridge.radmc3d.uv_products import validate_uv_chemistry_config
 
 KB_CGS = 1.380649e-16
 YR_TO_S = 365.25 * 24.0 * 3600.0
@@ -92,6 +94,7 @@ class Gow17TimeStepper:
 
     def __init__(self, rad, config: dict):
         cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
+        self.runtime_mode = None
 
         self.const_temp = bool(cfg.get("const_temp", True))
         self.enable_co_phase = bool(cfg.get("enable_co_phase", False))
@@ -99,6 +102,17 @@ class Gow17TimeStepper:
         if self.chi_is_incident:
             if getattr(rad, "Av", None) is None:
                 raise ValueError("Gow17TimeStepper: chi_is_incident=True requires rad.Av to be set")
+            if rad.has_uv_product("G_CO_diss"):
+                raise ValueError(
+                    "Gow17TimeStepper: chi_is_incident=True is incompatible "
+                    "with registered UV product fields"
+                )
+        else:
+            full_cfg = dict(get_config())
+            chemistry_cfg = dict(full_cfg.get("chemistry", {}))
+            chemistry_cfg["gow17"] = dict(cfg)
+            full_cfg["chemistry"] = chemistry_cfg
+            self.runtime_mode = validate_uv_chemistry_config(full_cfg)
 
         self.reltol = float(cfg.get("reltol", 1e-4))
         self.abstol0 = float(cfg.get("abstol0", 1e-15))
@@ -225,17 +239,29 @@ class Gow17TimeStepper:
         if y_state is None:
             y_state = self.y_state
 
-        chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
-        G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=True)
-        G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=True)
-        G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=True)
-        G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=True)
-        try:
+        if self.chi_is_incident:
+            chi_broad = rad.ensure_chi()
+            G_CO_diss = chi_broad
+            G_H2_diss = chi_broad
+            G_C_ion = chi_broad
+            G_CO_pdes = chi_broad
+            F_CO_pdes_photon = None
+        elif self.runtime_mode is not None and self.runtime_mode.products_enabled:
+            chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
+            G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
+            G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
+            G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
+            G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
             F_CO_pdes_photon = rad.ensure_uv_product(
                 "F_CO_pdes_photon",
                 fallback_to_chi=False,
             )
-        except KeyError:
+        else:
+            chi_broad = rad.ensure_chi()
+            G_CO_diss = chi_broad
+            G_H2_diss = chi_broad
+            G_C_ion = chi_broad
+            G_CO_pdes = chi_broad
             F_CO_pdes_photon = None
 
         chi_dust_arr = _as_cgs_f64(chi_broad, "dimensionless")
@@ -245,7 +271,9 @@ class Gow17TimeStepper:
         G_C_ion_flat = _as_cgs_f64(G_C_ion, "dimensionless").reshape(self.ncells)
         G_CO_pdes_flat = _as_cgs_f64(G_CO_pdes, "dimensionless").reshape(self.ncells)
         if F_CO_pdes_photon is None:
-            F_CO_pdes_photon_flat = None
+            F_CO_pdes_photon_flat = (
+                G_CO_pdes_flat * _co_pdes_draine_flux()
+            )
         else:
             F_CO_pdes_photon_flat = _as_cgs_f64(
                 F_CO_pdes_photon,

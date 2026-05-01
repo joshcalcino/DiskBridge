@@ -101,8 +101,8 @@ class UVRuntimeMode:
         Whether process-specific UV products are enabled.
     mode : str
         UV product computation mode.
-    fallback : str
-        Fallback field outside product-measured regions.
+    outer_product_policy : str
+        Explicit policy for product fields outside product-measured regions.
     register_measured_mask : bool
         Whether segmented merging registers a measured-product mask.
     use_hard_directional_weights : bool
@@ -115,7 +115,7 @@ class UVRuntimeMode:
 
     products_enabled: bool
     mode: str
-    fallback: str
+    outer_product_policy: str
     register_measured_mask: bool
     use_hard_directional_weights: bool
     use_physical_pdes_flux: bool
@@ -745,7 +745,7 @@ def validate_uv_chemistry_config(
 
     products_enabled = bool(uv_cfg.get("enabled", True))
     mode = str(uv_cfg.get("mode", "disc_segment_only"))
-    fallback = str(uv_cfg.get("fallback_outside_disc_segment", "chi_broad"))
+    outer_policy = str(uv_cfg.get("outer_product_policy", "draine_equivalent"))
     register_mask = bool(uv_cfg.get("register_measured_mask", True))
     threshold = float(uv_cfg.get("stellar_fraction_threshold", 0.01))
 
@@ -773,15 +773,18 @@ def validate_uv_chemistry_config(
         raise ValueError("chemistry.gow17.chi_is_incident=true is incompatible with UV products")
     if chi_is_incident and segmented:
         raise ValueError("chemistry.gow17.chi_is_incident=true is incompatible with segmented RT")
-    if mode == "disc_segment_only" and fallback != "chi_broad":
-        raise ValueError("disc_segment_only UV products require fallback_outside_disc_segment='chi_broad'")
+    if mode == "disc_segment_only" and outer_policy != "draine_equivalent":
+        raise ValueError(
+            "disc_segment_only UV products require "
+            "outer_product_policy='draine_equivalent'"
+        )
     if threshold <= 0.0:
         raise ValueError("radmc3d.uv_products.stellar_fraction_threshold must be positive")
 
     return UVRuntimeMode(
         products_enabled=products_enabled,
         mode=mode,
-        fallback=fallback,
+        outer_product_policy=outer_policy,
         register_measured_mask=register_mask,
         use_hard_directional_weights=hard_weights,
         use_physical_pdes_flux=use_physical_flux,

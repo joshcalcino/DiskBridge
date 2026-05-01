@@ -154,7 +154,15 @@ def _uv_product_draine_reference(uv_product: str, weighting: str) -> float:
     """
     specs = uv_product_specs_from_config(get_config().get("radmc3d", {}).get("uv_products", {}))
     unit = "1/(cm^2 s)" if str(weighting).lower() == "photon" else "erg/cm^3"
-    return float(draine_reference_for_product(uv_product, specs).to(unit).magnitude)
+    product_name = "chi_broad" if str(uv_product) == "chi" else uv_product
+    return float(draine_reference_for_product(product_name, specs).to(unit).magnitude)
+
+
+def _ensure_weight_field(rad: "RadModel", uv_product: str):
+    """Return the scalar field used for directional weights without hidden fallback."""
+    if str(uv_product) == "chi":
+        return rad.ensure_chi()
+    return rad.ensure_uv_product(uv_product, fallback_to_chi=False)
 
 
 def _apply_uniform_weights_outside_radius(
@@ -317,7 +325,7 @@ def ensure_W_rays(
         return existing
 
     # --- Memory estimate ---
-    chi_radmc = rad.ensure_uv_product(uv_product, fallback_to_chi=True)
+    chi_radmc = _ensure_weight_field(rad, uv_product)
     chi_arr = np.asarray(chi_radmc.to("dimensionless").magnitude, dtype=np.float64)
     n_cells = chi_arr.size
     npix = 12 * int(nside) ** 2
@@ -409,7 +417,7 @@ def maybe_ensure_W_rays(
     params = diskbridge.params
 
     # 1. Skip for 1-D meshes (HEALPix not used)
-    chi = rad.ensure_uv_product(uv_product, fallback_to_chi=True)
+    chi = _ensure_weight_field(rad, uv_product)
     chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=np.float64)
     if is_effectively_1d(rad.model.mesh, chi_arr.shape):
         logger.debug("W_rays: skipping for effectively 1-D mesh")

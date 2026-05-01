@@ -128,7 +128,7 @@ Y_CO = 1.0e-3                  # CO photodesorption yield (molecules/photon)
 [radmc3d.uv_products]
 enabled = true
 mode = "disc_segment_only"
-fallback_outside_disc_segment = "chi_broad"
+outer_product_policy = "draine_equivalent"
 register_measured_mask = true
 stellar_fraction_threshold = 0.01
 

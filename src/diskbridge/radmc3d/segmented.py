@@ -262,15 +262,12 @@ class SegmentedRadRunner:
 
             rad = RadModel(seg_model, model_dir=segment_dir)
             rad.read_dust_temperature(fname=temp_path)
-            try:
-                rad._postprocess_chi(
-                    mean_path,
-                    disc_uv_min if is_final else rad.params.uv_min,
-                    disc_uv_max if is_final else rad.params.uv_max,
-                    compute_products=bool(uv_products_enabled and is_final),
-                )
-            except ValueError:
-                rad._postprocess_chi(mean_path, rad.params.uv_min, rad.params.uv_max)
+            rad._postprocess_chi(
+                mean_path,
+                disc_uv_min if is_final else rad.params.uv_min,
+                disc_uv_max if is_final else rad.params.uv_max,
+                compute_products=bool(uv_products_enabled and is_final),
+            )
 
             merged_T, merged_chi = self._merge_segment_fields(
                 merged_T=merged_T,
@@ -289,7 +286,7 @@ class SegmentedRadRunner:
                         indexer=seg_indexer,
                         axis_order=axis_order,
                         segment_level=level,
-                        measured=bool(is_final and rad.has_uv_product("G_CO_diss")),
+                        measured=bool(is_final),
                     )
                 )
 
@@ -359,7 +356,7 @@ class SegmentedRadRunner:
             "chi": merged_chi,
             "uv_products": merged_uv_products,
             "uv_product_mode": "disc_segment_only",
-            "uv_product_fallback": "chi_broad",
+            "outer_product_policy": runtime_mode.outer_product_policy,
             "uv_product_measured_mask": uv_product_measured_mask,
             "segment_id": segment_id,
         }
@@ -507,32 +504,61 @@ class SegmentedRadRunner:
             ),
         )
 
-    def _segment_uv_product_fields(self, rad: 'RadModel') -> dict[str, Quantity]:
-        """Return UV products for a segment with broad-chi fallbacks.
+    def _segment_uv_product_fields(
+        self,
+        rad: 'RadModel',
+        *,
+        measured: bool,
+    ) -> dict[str, Quantity]:
+        """Return UV products for measured or Draine-equivalent segments.
 
         Parameters
         ----------
         rad : RadModel
             Segment RADMC-3D wrapper.
+        measured : bool
+            Whether process-specific products were measured in this segment.
 
         Returns
         -------
         dict
             UV product quantities on the segment grid.
         """
-        fallback = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
-        products: dict[str, Quantity] = {}
-        f_pdes_ref = draine_reference_for_product("F_CO_pdes_photon").to("1/(cm^2 s)").magnitude
+        chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
+        if measured:
+            missing = [
+                name
+                for name in UV_PRODUCT_MERGED_FIELD_NAMES
+                if not rad.has_uv_product(name)
+            ]
+            if missing:
+                raise RuntimeError(
+                    "Measured UV-product segment is missing required fields: "
+                    + ", ".join(missing)
+                )
+            return {
+                name: rad.ensure_uv_product(name, fallback_to_chi=False)
+                for name in UV_PRODUCT_MERGED_FIELD_NAMES
+            }
+
+        products: dict[str, Quantity] = {"chi_broad": chi_broad}
+        uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
+        specs = uv_product_specs_from_config(uv_cfg)
+        f_pdes_ref = (
+            draine_reference_for_product("F_CO_pdes_photon", specs)
+            .to("1/(cm^2 s)")
+            .magnitude
+        )
         for name in UV_PRODUCT_MERGED_FIELD_NAMES:
-            if rad.has_uv_product(name):
-                products[name] = rad.ensure_uv_product(name, fallback_to_chi=False)
-            elif name == "F_CO_pdes_photon":
+            if name == "chi_broad":
+                continue
+            if name == "F_CO_pdes_photon":
                 products[name] = Quantity(
-                    np.asarray(fallback.to("dimensionless").magnitude) * float(f_pdes_ref),
+                    np.asarray(chi_broad.to("dimensionless").magnitude) * float(f_pdes_ref),
                     "1/(cm^2 s)",
                 )
             else:
-                products[name] = fallback
+                products[name] = chi_broad
         return products
 
     def _merge_segment_uv_products(
@@ -573,7 +599,7 @@ class SegmentedRadRunner:
         tuple
             Merged products, measured mask, and segment id arrays.
         """
-        products = self._segment_uv_product_fields(rad)
+        products = self._segment_uv_product_fields(rad, measured=measured)
 
         if merged_uv_products is None:
             merged_uv_products = {
@@ -1344,7 +1370,7 @@ class SegmentedRadRunner:
             'chi': base_rad.chi,
             'uv_products': merged_uv_products,
             'uv_product_mode': 'disc_segment_only',
-            'uv_product_fallback': 'chi_broad',
+            'outer_product_policy': runtime_mode.outer_product_policy,
             'uv_product_measured_mask': uv_product_measured_mask,
             'segment_id': segment_id,
         }

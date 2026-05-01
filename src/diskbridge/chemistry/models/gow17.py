@@ -754,9 +754,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tgas = rad.ensure_dust_temperature()
     Tdust = rad.ensure_dust_temperature()
 
-    explicit_uv_products = rad.has_uv_product("G_CO_diss")
     f_co_pdes_ref = _co_pdes_draine_flux()
-    if chi_is_incident and not explicit_uv_products:
+    if chi_is_incident:
         chi = rad.ensure_chi()
         G_CO_diss = chi
         G_H2_diss = chi
@@ -766,31 +765,38 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             chi.to("dimensionless").magnitude * f_co_pdes_ref,
             "1/(cm^2 s)",
         )
+    elif runtime_mode is not None and runtime_mode.products_enabled:
+        chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
+        G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
+        G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
+        G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
+        G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
+        F_CO_pdes_photon = rad.ensure_uv_product(
+            "F_CO_pdes_photon",
+            fallback_to_chi=False,
+        )
     else:
-        chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=True)
-        G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=True)
-        G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=True)
-        G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=True)
-        G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=True)
-        try:
-            F_CO_pdes_photon = rad.ensure_uv_product(
-                "F_CO_pdes_photon",
-                fallback_to_chi=False,
-            )
-        except KeyError:
-            F_CO_pdes_photon = Quantity(
-                G_CO_pdes.to("dimensionless").magnitude * f_co_pdes_ref,
-                "1/(cm^2 s)",
-            )
+        chi = rad.ensure_chi()
+        G_CO_diss = chi
+        G_H2_diss = chi
+        G_C_ion = chi
+        G_CO_pdes = chi
+        F_CO_pdes_photon = Quantity(
+            G_CO_pdes.to("dimensionless").magnitude * f_co_pdes_ref,
+            "1/(cm^2 s)",
+        )
 
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
     # files are unavailable (shielding then falls back to isotropic averaging).
-    directional_uv_product = (
-        "G_CO_diss"
-        if runtime_mode is None or runtime_mode.use_hard_directional_weights
-        else "chi_broad"
-    )
+    if chi_is_incident:
+        directional_uv_product = "chi"
+    else:
+        directional_uv_product = (
+            "G_CO_diss"
+            if runtime_mode is None or runtime_mode.use_hard_directional_weights
+            else "chi_broad"
+        )
     maybe_ensure_W_rays(rad, nside=nside, uv_product=directional_uv_product)
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
