@@ -188,6 +188,7 @@ def compute_uv_direction_weights_healpix(
     kext_uv: np.ndarray,
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
+    star_uv_reference_energy_density: float = U_DRAINE,
     progress_chunks: int | None = None,
     cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -216,6 +217,9 @@ def compute_uv_direction_weights_healpix(
     star_uv_luminosity_erg_s : float
         Total stellar UV band luminosity in erg/s.
         Set to 0.0 if no central star.
+    star_uv_reference_energy_density : float, optional
+        Draine reference energy density for the same stellar UV band in
+        erg cm^-3.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
     cache_dir : Path or str or None, optional
@@ -323,7 +327,8 @@ def compute_uv_direction_weights_healpix(
         r_cell = np.sqrt(np.sum(cell_centers**2, axis=1))  # cm
         r_cell = np.maximum(r_cell, 1e-30)
         F_uv = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
-        chi_star_unatt = F_uv / (C_LIGHT * U_DRAINE)
+        u_ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
+        chi_star_unatt = F_uv / (C_LIGHT * u_ref)
 
         # 5.3 Attenuate
         chi_star_dir_att = chi_star_unatt * np.exp(-tau_star)

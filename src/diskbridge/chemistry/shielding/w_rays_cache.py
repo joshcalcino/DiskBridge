@@ -42,6 +42,13 @@ from diskbridge.chemistry.shielding.dust_uv_tau import (
     prepare_dust_density_fields,
     resolve_uv_tau_mode,
 )
+from diskbridge.radmc3d.uv_products import (
+    C_CGS,
+    H_CGS,
+    default_isrf_path,
+    load_draine_reference,
+)
+from diskbridge._constants import U_DRAINE
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
@@ -84,6 +91,58 @@ def _build_cache_key(
         None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
         None if outer_weight_mode is None else str(outer_weight_mode),
         str(uv_product),
+    )
+
+
+def _draine_band_energy_density(uv_min_um: float, uv_max_um: float) -> float:
+    """Compute Draine reference energy density over a wavelength band.
+
+    Parameters
+    ----------
+    uv_min_um, uv_max_um : float
+        Band limits in micron.
+
+    Returns
+    -------
+    float
+        Band energy density in erg cm^-3.
+    """
+    lam_nm, photon_flux_nm = load_draine_reference(default_isrf_path())
+    lo_nm = float(uv_min_um) * 1.0e3
+    hi_nm = float(uv_max_um) * 1.0e3
+    if hi_nm <= lo_nm:
+        raise ValueError("uv_max_um must be greater than uv_min_um")
+
+    mask = (lam_nm > lo_nm) & (lam_nm < hi_nm)
+    lam = np.concatenate(([lo_nm], lam_nm[mask], [hi_nm])).astype(np.float64)
+    photon = np.interp(lam, lam_nm, photon_flux_nm).astype(np.float64)
+    energy_flux_nm = photon * H_CGS * C_CGS / (lam * 1.0e-7)
+    u_band = float(np.trapezoid(energy_flux_nm, lam) / C_CGS)
+    return u_band if u_band > 0.0 else float(U_DRAINE)
+
+
+def _uv_product_band_um(uv_product: str) -> tuple[float, float]:
+    """Return wavelength limits for a UV product in micron.
+
+    Parameters
+    ----------
+    uv_product : str
+        UV product name.
+
+    Returns
+    -------
+    tuple of float
+        Lower and upper wavelength limits in micron.
+    """
+    if uv_product == "G_C_ion":
+        return 0.0912, 0.1101
+    if uv_product in {"G_CO_diss", "G_H2_diss"}:
+        return 0.0912, 0.1118
+    if uv_product == "G_CO_pdes":
+        return 0.0912, 0.2050
+    return (
+        float(diskbridge.params.uv_min.to("um").magnitude),
+        float(diskbridge.params.uv_max.to("um").magnitude),
     )
 
 
@@ -237,7 +296,7 @@ def ensure_W_rays(
         return existing
 
     # --- Memory estimate ---
-    chi_radmc = rad.ensure_chi()
+    chi_radmc = rad.ensure_uv_product(uv_product, fallback_to_chi=True)
     chi_arr = np.asarray(chi_radmc.to("dimensionless").magnitude, dtype=np.float64)
     n_cells = chi_arr.size
     npix = 12 * int(nside) ** 2
@@ -259,6 +318,9 @@ def ensure_W_rays(
             kext_uv=kext_uv,
             chi_ext0=float(chi_ext0),
             star_uv_luminosity_erg_s=float(star_uv_luminosity_erg_s),
+            star_uv_reference_energy_density=_draine_band_energy_density(
+                *_uv_product_band_um(uv_product)
+            ),
             cache_dir=cache_dir,
         )
     )
@@ -311,7 +373,7 @@ def maybe_ensure_W_rays(
     ----------
     rad : RadModel
         RADMC-3D model wrapper with ``rad.model``, ``rad.inputs_dir``, and
-        ``rad.ensure_chi()`` available.
+        UV product accessors available.
     nside : int
         HEALPix Nside (npix = 12 * nside**2).
     uv_product : str, optional
@@ -338,15 +400,7 @@ def maybe_ensure_W_rays(
     if isinstance(species_base, list):
         species_base = species_base[0]
 
-    if uv_product == "G_C_ion":
-        uv_min_um = 0.0912
-        uv_max_um = 0.1101
-    elif uv_product in {"G_CO_diss", "G_H2_diss"}:
-        uv_min_um = 0.0912
-        uv_max_um = 0.1118
-    else:
-        uv_min_um = float(params.uv_min.to("um").magnitude)
-        uv_max_um = float(params.uv_max.to("um").magnitude)
+    uv_min_um, uv_max_um = _uv_product_band_um(uv_product)
 
     mode, kext_uv = resolve_uv_tau_mode(
         rad.model,

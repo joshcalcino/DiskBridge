@@ -10,6 +10,7 @@ import numpy as np
 import shutil
 
 from diskbridge._logging import logger
+from diskbridge._config import get_config
 from diskbridge._units import units, Quantity
 from diskbridge.model import Model
 from diskbridge.model.field import Field
@@ -38,6 +39,18 @@ class SegmentedRadRunner:
     def __init__(self, base_model: Model, base_model_dir: Path):
         self.base_model = base_model
         self.base_model_dir = Path(base_model_dir)
+
+    def _uv_products_enabled(self) -> bool:
+        """Return whether segmented UV products are enabled in configuration.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``[radmc3d.uv_products].enabled`` is enabled.
+        """
+        cfg = get_config()
+        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
+        return bool(uv_cfg.get("enabled", True))
 
     def _parse_segment_dir(self, segment_dir: Path) -> tuple[int, float | None, bool]:
         """Parse a segmented-run directory name.
@@ -159,6 +172,7 @@ class SegmentedRadRunner:
         merged_uv_products: Optional[dict[str, Quantity]] = None
         uv_product_measured_mask: Optional[np.ndarray] = None
         segment_id: Optional[np.ndarray] = None
+        uv_products_enabled = self._uv_products_enabled()
         segments: list[dict[str, Any]] = []
         split_radii_au: list[float] = []
 
@@ -191,7 +205,7 @@ class SegmentedRadRunner:
                     mean_path,
                     Quantity(91.2, "nm") if is_final else rad.params.uv_min,
                     Quantity(206.7, "nm") if is_final else rad.params.uv_max,
-                    compute_products=bool(is_final),
+                    compute_products=bool(uv_products_enabled and is_final),
                 )
             except ValueError:
                 rad._postprocess_chi(mean_path, rad.params.uv_min, rad.params.uv_max)
@@ -203,30 +217,19 @@ class SegmentedRadRunner:
                 indexer=seg_indexer,
                 axis_order=axis_order,
             )
-            merged_uv_products, uv_product_measured_mask, segment_id = (
-                self._merge_segment_uv_products(
-                    merged_uv_products=merged_uv_products,
-                    uv_product_measured_mask=uv_product_measured_mask,
-                    segment_id=segment_id,
-                    rad=rad,
-                    indexer=seg_indexer,
-                    axis_order=axis_order,
-                    segment_level=level,
-                    measured=bool(is_final and rad.has_uv_product("G_CO_diss")),
+            if uv_products_enabled:
+                merged_uv_products, uv_product_measured_mask, segment_id = (
+                    self._merge_segment_uv_products(
+                        merged_uv_products=merged_uv_products,
+                        uv_product_measured_mask=uv_product_measured_mask,
+                        segment_id=segment_id,
+                        rad=rad,
+                        indexer=seg_indexer,
+                        axis_order=axis_order,
+                        segment_level=level,
+                        measured=bool(is_final and rad.has_uv_product("G_CO_diss")),
+                    )
                 )
-            )
-            merged_uv_products, uv_product_measured_mask, segment_id = (
-                self._merge_segment_uv_products(
-                    merged_uv_products=merged_uv_products,
-                    uv_product_measured_mask=uv_product_measured_mask,
-                    segment_id=segment_id,
-                    rad=rad,
-                    indexer=seg_indexer,
-                    axis_order=axis_order,
-                    segment_level=level,
-                    measured=False,
-                )
-            )
 
             segments.append(
                 {
@@ -762,7 +765,7 @@ class SegmentedRadRunner:
         segment_id: Optional[np.ndarray] = None
         mcmono_wav_um_use: Optional[np.ndarray] = None
         mcmono_wav_um_disc: Optional[np.ndarray] = None
-        uv_products_enabled = True
+        uv_products_enabled = self._uv_products_enabled()
         disc_uv_min = Quantity(91.2, "nm")
         disc_uv_max = Quantity(206.7, "nm")
 
@@ -840,6 +843,19 @@ class SegmentedRadRunner:
                 indexer=seg_indexer,
                 axis_order=axis_order,
             )
+            if uv_products_enabled:
+                merged_uv_products, uv_product_measured_mask, segment_id = (
+                    self._merge_segment_uv_products(
+                        merged_uv_products=merged_uv_products,
+                        uv_product_measured_mask=uv_product_measured_mask,
+                        segment_id=segment_id,
+                        rad=rad,
+                        indexer=seg_indexer,
+                        axis_order=axis_order,
+                        segment_level=level,
+                        measured=False,
+                    )
+                )
 
             segments.append(
                 {
@@ -879,18 +895,19 @@ class SegmentedRadRunner:
                         uv_min=disc_uv_min,
                         uv_max=disc_uv_max,
                     )
-                    merged_uv_products, uv_product_measured_mask, segment_id = (
-                        self._merge_segment_uv_products(
-                            merged_uv_products=merged_uv_products,
-                            uv_product_measured_mask=uv_product_measured_mask,
-                            segment_id=segment_id,
-                            rad=rad,
-                            indexer=seg_indexer,
-                            axis_order=axis_order,
-                            segment_level=level,
-                            measured=uv_products_enabled,
+                    if uv_products_enabled:
+                        merged_uv_products, uv_product_measured_mask, segment_id = (
+                            self._merge_segment_uv_products(
+                                merged_uv_products=merged_uv_products,
+                                uv_product_measured_mask=uv_product_measured_mask,
+                                segment_id=segment_id,
+                                rad=rad,
+                                indexer=seg_indexer,
+                                axis_order=axis_order,
+                                segment_level=level,
+                                measured=True,
+                            )
                         )
-                    )
                 segments[-1]['nphot_thermal'] = int(nphot_therm_final)
                 segments[-1]['nphot_mono'] = int(nphot_mono_final)
                 segments[-1]['is_final'] = True
@@ -966,18 +983,19 @@ class SegmentedRadRunner:
                         uv_min=disc_uv_min,
                         uv_max=disc_uv_max,
                     )
-                    merged_uv_products, uv_product_measured_mask, segment_id = (
-                        self._merge_segment_uv_products(
-                            merged_uv_products=merged_uv_products,
-                            uv_product_measured_mask=uv_product_measured_mask,
-                            segment_id=segment_id,
-                            rad=rad,
-                            indexer=seg_indexer,
-                            axis_order=axis_order,
-                            segment_level=level,
-                            measured=uv_products_enabled,
+                    if uv_products_enabled:
+                        merged_uv_products, uv_product_measured_mask, segment_id = (
+                            self._merge_segment_uv_products(
+                                merged_uv_products=merged_uv_products,
+                                uv_product_measured_mask=uv_product_measured_mask,
+                                segment_id=segment_id,
+                                rad=rad,
+                                indexer=seg_indexer,
+                                axis_order=axis_order,
+                                segment_level=level,
+                                measured=True,
+                            )
                         )
-                    )
                 segments[-1]['nphot_thermal'] = int(nphot_therm_final)
                 segments[-1]['nphot_mono'] = int(nphot_mono_final)
                 segments[-1]['is_final'] = True
@@ -1009,18 +1027,19 @@ class SegmentedRadRunner:
                         uv_min=disc_uv_min,
                         uv_max=disc_uv_max,
                     )
-                    merged_uv_products, uv_product_measured_mask, segment_id = (
-                        self._merge_segment_uv_products(
-                            merged_uv_products=merged_uv_products,
-                            uv_product_measured_mask=uv_product_measured_mask,
-                            segment_id=segment_id,
-                            rad=rad,
-                            indexer=seg_indexer,
-                            axis_order=axis_order,
-                            segment_level=level,
-                            measured=uv_products_enabled,
+                    if uv_products_enabled:
+                        merged_uv_products, uv_product_measured_mask, segment_id = (
+                            self._merge_segment_uv_products(
+                                merged_uv_products=merged_uv_products,
+                                uv_product_measured_mask=uv_product_measured_mask,
+                                segment_id=segment_id,
+                                rad=rad,
+                                indexer=seg_indexer,
+                                axis_order=axis_order,
+                                segment_level=level,
+                                measured=True,
+                            )
                         )
-                    )
                 segments[-1]['nphot_thermal'] = int(nphot_therm_final)
                 segments[-1]['nphot_mono'] = int(nphot_mono_final)
                 segments[-1]['is_final'] = True
@@ -1081,18 +1100,19 @@ class SegmentedRadRunner:
                     indexer=final_indexer,
                     axis_order=axis_order,
                 )
-                merged_uv_products, uv_product_measured_mask, segment_id = (
-                    self._merge_segment_uv_products(
-                        merged_uv_products=merged_uv_products,
-                        uv_product_measured_mask=uv_product_measured_mask,
-                        segment_id=segment_id,
-                        rad=final_rad,
-                        indexer=final_indexer,
-                        axis_order=axis_order,
-                        segment_level=level + 1,
-                        measured=uv_products_enabled,
+                if uv_products_enabled:
+                    merged_uv_products, uv_product_measured_mask, segment_id = (
+                        self._merge_segment_uv_products(
+                            merged_uv_products=merged_uv_products,
+                            uv_product_measured_mask=uv_product_measured_mask,
+                            segment_id=segment_id,
+                            rad=final_rad,
+                            indexer=final_indexer,
+                            axis_order=axis_order,
+                            segment_level=level + 1,
+                            measured=True,
+                        )
                     )
-                )
                 segments.append(
                     {
                         'level': int(level + 1),
@@ -1128,32 +1148,33 @@ class SegmentedRadRunner:
             Field(quantity='chi', data=merged_chi, axis_order=axis_order),
         )
 
-        if merged_uv_products is None:
-            raise ValueError("Segmented RT produced no merged UV products")
-        if uv_product_measured_mask is None or segment_id is None:
-            raise ValueError("Segmented RT produced incomplete UV product metadata")
+        if uv_products_enabled:
+            if merged_uv_products is None:
+                raise ValueError("Segmented RT produced no merged UV products")
+            if uv_product_measured_mask is None or segment_id is None:
+                raise ValueError("Segmented RT produced incomplete UV product metadata")
 
-        for name, product in merged_uv_products.items():
+            for name, product in merged_uv_products.items():
+                self.base_model.gas_register(
+                    name,
+                    Field(quantity=name, data=product, axis_order=axis_order),
+                )
             self.base_model.gas_register(
-                name,
-                Field(quantity=name, data=product, axis_order=axis_order),
+                'uv_product_measured_mask',
+                Field(
+                    quantity='uv_product_measured_mask',
+                    data=Quantity(uv_product_measured_mask, "dimensionless"),
+                    axis_order=axis_order,
+                ),
             )
-        self.base_model.gas_register(
-            'uv_product_measured_mask',
-            Field(
-                quantity='uv_product_measured_mask',
-                data=Quantity(uv_product_measured_mask, "dimensionless"),
-                axis_order=axis_order,
-            ),
-        )
-        self.base_model.gas_register(
-            'segment_id',
-            Field(
-                quantity='segment_id',
-                data=Quantity(segment_id, "dimensionless"),
-                axis_order=axis_order,
-            ),
-        )
+            self.base_model.gas_register(
+                'segment_id',
+                Field(
+                    quantity='segment_id',
+                    data=Quantity(segment_id, "dimensionless"),
+                    axis_order=axis_order,
+                ),
+            )
 
         self.base_model.validate_canonical_axis_orders(include_dust=False)
 
@@ -1162,8 +1183,12 @@ class SegmentedRadRunner:
         # workflow-level custom file writing.
         base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
         base_rad.dust_temperature = merged_T
-        base_rad.uv_products = merged_uv_products
-        base_rad.chi = merged_uv_products["chi_broad"]
+        if uv_products_enabled and merged_uv_products is not None:
+            base_rad.uv_products = merged_uv_products
+            base_rad.chi = merged_uv_products["chi_broad"]
+        else:
+            base_rad.uv_products = {"chi_broad": merged_chi}
+            base_rad.chi = merged_chi
         base_rad.outputs_dir.mkdir(parents=True, exist_ok=True)
 
         if self.base_model.dust is None:
@@ -1209,7 +1234,7 @@ class SegmentedRadRunner:
             'segments': segments,
             'scout_runs': scout_runs,
             'temperature': merged_T,
-            'chi': merged_uv_products["chi_broad"],
+            'chi': base_rad.chi,
             'uv_products': merged_uv_products,
             'uv_product_mode': 'disc_segment_only',
             'uv_product_fallback': 'chi_broad',
