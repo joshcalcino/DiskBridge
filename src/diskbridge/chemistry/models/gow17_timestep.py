@@ -52,7 +52,9 @@ from diskbridge.chemistry.models.gow17 import (
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_co_phase_controls,
+    _resolve_co_phase_runtime_params,
     _resolve_local_chi_factor,
+    _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _warn_if_co_phase_settings_ignored,
 )
@@ -85,6 +87,7 @@ class Gow17TimeStepper:
 
     def __init__(self, rad, config: dict):
         cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
+        self.cfg = cfg
         self.runtime_mode = None
 
         self.temperature_cfg = _resolve_temperature_config(cfg)
@@ -95,7 +98,7 @@ class Gow17TimeStepper:
 
             logging.getLogger(__name__).warning(
                 "Gow17TimeStepper: using constant_debug Tgas; this is for "
-                "debugging/regression only and is not a physically valid "
+                "debugging only and is not a physically valid "
                 "disc/PDR temperature model."
             )
         self.enable_co_phase = bool(cfg.get("enable_co_phase", True))
@@ -134,7 +137,7 @@ class Gow17TimeStepper:
         self.Zg = float(cfg.get("Zg", 1.0))
         self.gradv_scalar = float(cfg.get("gradv", 1.0e-14))
         self.Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
-        self.isDust_cooling = bool(cfg.get("isDust_cooling", False))
+        self.isDust_cooling = bool(cfg.get("isDust_cooling", True))
         self.isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
 
         self.local_chi_factor = _resolve_local_chi_factor(
@@ -170,6 +173,15 @@ class Gow17TimeStepper:
 
         self.nH_cm3 = _as_cgs_f64(nH, "cm^-3")
         self.nH_flat = self.nH_cm3.reshape(self.ncells)
+        T_init = np.clip(
+            _as_cgs_f64(Tgas, "K"),
+            float(self.temperature_cfg["Tgas_floor"]),
+            float(self.temperature_cfg["Tgas_ceiling"]),
+        )
+        self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
+            cfg,
+            T_init,
+        )
 
         self.abstol = _build_gow17_abstol(cfg, self.abstol0)
 
@@ -201,14 +213,15 @@ class Gow17TimeStepper:
             self.Av_flat = Av_arr.reshape(self.ncells)
 
         self.visser = VisserShielding(b_kms=float(self.b_kms))
+        self.co_phase_params = _resolve_co_phase_runtime_params(cfg)
 
         zero_cell = np.zeros(self.ncells, dtype=np.float64)
         self._co_phase_kw = dict(
-            co_E_bind_co=(float(E_BIND_CO) if self.enable_co_phase else 0.0),
-            co_nu0_co=(float(NU0_CO) if self.enable_co_phase else 0.0),
-            co_Y_CO=(float(Y_CO) if self.enable_co_phase else 0.0),
-            co_N_SURF=(float(N_SURF) if self.enable_co_phase else 0.0),
-            co_N_LAY=(int(N_LAY) if self.enable_co_phase else 0),
+            co_E_bind_co=(float(self.co_phase_params["E_bind_CO"]) if self.enable_co_phase else 0.0),
+            co_nu0_co=(float(self.co_phase_params["nu0_CO"]) if self.enable_co_phase else 0.0),
+            co_Y_CO=(float(self.co_phase_params["Y_CO"]) if self.enable_co_phase else 0.0),
+            co_N_SURF=(float(self.co_phase_params["N_SURF"]) if self.enable_co_phase else 0.0),
+            co_N_LAY=(int(self.co_phase_params["N_LAY"]) if self.enable_co_phase else 0),
             co_S_CO=(float(self.S_CO) if self.enable_co_phase else 0.0),
             co_F_CRUV_CO_pdes=(
                 np.ascontiguousarray(self.F_CRUV_CO_pdes_arr, dtype=np.float64)
@@ -337,6 +350,11 @@ class Gow17TimeStepper:
             float(self.temperature_cfg["Tgas_floor"]),
             float(self.temperature_cfg["Tgas_ceiling"]),
         ).reshape(self.ncells)
+        self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
+            self.cfg,
+            T_flat.reshape(self.shape),
+        )
+        self.visser = VisserShielding(b_kms=float(self.b_kms))
 
         theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,
@@ -447,15 +465,23 @@ class Gow17TimeStepper:
             xe_out = _electron_abundance(y_out)
             Cv_out = _cv_cold(y_out[..., I_H2], xe_out)
             T_out = y_out[..., I_E] / Cv_out
-            T_out = np.clip(T_out, 2.7, 1e6)
+            T_out = np.clip(
+                T_out,
+                float(self.temperature_cfg["Tgas_floor"]),
+                float(self.temperature_cfg["Tgas_ceiling"]),
+            )
             rad.Tgas_gow17 = Quantity(T_out, "K")
             rad.gas_temperature = rad.Tgas_gow17
+        rad.b_CO_kms = Quantity(self.b_CO_kms_arr.reshape(self.shape), "km/s")
 
         return {
             "status": status,
             "theta_co": theta_co_arr,
             "theta_h2": theta_h2_arr,
             "theta_c": theta_c_arr,
+            "b_CO_kms": self.b_CO_kms_arr.reshape(self.shape),
+            "shielding_linewidth": dict(self.shielding_linewidth_meta),
+            "co_phase_params": dict(self.co_phase_params),
         }
 
     def _repair_failed_cells(self, y_new: np.ndarray, status: np.ndarray) -> np.ndarray:

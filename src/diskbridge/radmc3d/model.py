@@ -1256,6 +1256,8 @@ class RadModel:
 
         self.dust_temperature = out.get('temperature')
         self.chi = out.get('chi')
+        if out.get('uv_products') is not None:
+            self.uv_products = out['uv_products']
         split_radii = list(out.get('split_radii_au', []))
         isotropic_outside = float(split_radii[-1]) if split_radii else None
         self.isotropic_weight_outside_r_au = isotropic_outside
@@ -1294,6 +1296,8 @@ class RadModel:
 
         self.dust_temperature = out.get("temperature")
         self.chi = out.get("chi")
+        if out.get("uv_products") is not None:
+            self.uv_products = out["uv_products"]
         split_radii = list(out.get("split_radii_au", []))
         isotropic_outside = float(split_radii[-1]) if split_radii else None
         self.isotropic_weight_outside_r_au = isotropic_outside

@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include <sundials/sundials_context.h>
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -659,6 +661,215 @@ static py::dict solve_batch_time(
     return out;
 }
 
+
+static py::dict eval_rhs_batch(
+    const py::array_t<double, py::array::c_style | py::array::forcecast> y,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> nH,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> F_CO_pdes_photon,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Gph,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> sigma_d_CO_per_H,
+    const bool const_temp,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
+    const bool isDust_cooling,
+    const bool isCoolingCOThin,
+    const double fH2gr,
+    const double fHplusgr,
+    const double fCplusgr,
+    const double fHeplusgr,
+    const double fSplusgr,
+    const double fSiplusgr,
+    const double fCplusCR,
+    const double co_E_bind_co,
+    const double co_nu0_co,
+    const double co_Y_CO,
+    const double co_N_SURF,
+    const int co_N_LAY,
+    const double co_S_CO,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_F_CRUV_CO_pdes,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> co_k_crdes_CO) {
+
+    if (y.ndim() != 2 || y.shape(1) != N_Y) {
+        throw std::invalid_argument("y must be 2D with shape (Ncells, 15)");
+    }
+    const py::ssize_t Ncells = y.shape(0);
+    if (nH.ndim() != 1 || nH.size() != Ncells) {
+        throw std::invalid_argument("nH must be 1D with length Ncells");
+    }
+    if (Tgas.ndim() != 1 || Tgas.size() != Ncells) {
+        throw std::invalid_argument("Tgas must be 1D with length Ncells");
+    }
+    if (Tdust.ndim() != 1 || Tdust.size() != Ncells) {
+        throw std::invalid_argument("Tdust must be 1D with length Ncells");
+    }
+    if (Zd.ndim() != 1 || Zd.size() != Ncells) {
+        throw std::invalid_argument("Zd must be 1D with length Ncells");
+    }
+    if (Zg.ndim() != 1 || Zg.size() != Ncells) {
+        throw std::invalid_argument("Zg must be 1D with length Ncells");
+    }
+    if (ion_rate.ndim() != 1 || ion_rate.size() != Ncells) {
+        throw std::invalid_argument("ion_rate must be 1D with length Ncells");
+    }
+    if (GPE.ndim() != 1 || GPE.size() != Ncells) {
+        throw std::invalid_argument("GPE must be 1D with length Ncells");
+    }
+    if (F_CO_pdes_photon.ndim() != 1 || F_CO_pdes_photon.size() != Ncells) {
+        throw std::invalid_argument("F_CO_pdes_photon must be 1D with length Ncells");
+    }
+    if (Gph.ndim() != 2 || Gph.shape(0) != Ncells || Gph.shape(1) != N_PH) {
+        throw std::invalid_argument("Gph must be 2D with shape (Ncells, 7)");
+    }
+    if (sigma_d_CO_per_H.ndim() != 1 || sigma_d_CO_per_H.size() != Ncells) {
+        throw std::invalid_argument("sigma_d_CO_per_H must be 1D with length Ncells");
+    }
+    if (gradv.ndim() != 1 || gradv.size() != Ncells) {
+        throw std::invalid_argument("gradv must be 1D with length Ncells");
+    }
+    if (Leff_CO_max.ndim() != 1 || Leff_CO_max.size() != Ncells) {
+        throw std::invalid_argument("Leff_CO_max must be 1D with length Ncells");
+    }
+    if (co_F_CRUV_CO_pdes.ndim() != 1 || co_F_CRUV_CO_pdes.size() != Ncells) {
+        throw std::invalid_argument("co_F_CRUV_CO_pdes must be 1D with length Ncells");
+    }
+    if (co_k_crdes_CO.ndim() != 1 || co_k_crdes_CO.size() != Ncells) {
+        throw std::invalid_argument("co_k_crdes_CO must be 1D with length Ncells");
+    }
+
+    const double *y_ptr = y.data();
+    const double *nH_ptr = nH.data();
+    const double *Tgas_ptr = Tgas.data();
+    const double *Tdust_ptr = Tdust.data();
+    const double *Zd_ptr = Zd.data();
+    const double *Zg_ptr = Zg.data();
+    const double *ion_rate_ptr = ion_rate.data();
+    const double *GPE_ptr = GPE.data();
+    const double *F_CO_pdes_photon_ptr = F_CO_pdes_photon.data();
+    const double *Gph_ptr = Gph.data();
+    const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
+    const double *gradv_ptr = gradv.data();
+    const double *Leff_CO_max_ptr = Leff_CO_max.data();
+    const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
+    const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
+
+    py::array_t<double> rhs_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(N_Y)});
+    py::array_t<double> thermo_out(py::array::ShapeContainer{Ncells, static_cast<py::ssize_t>(15)});
+    py::array_t<int> status_out(py::array::ShapeContainer{Ncells});
+    double *rhs_ptr = static_cast<double *>(rhs_out.mutable_data());
+    double *thermo_ptr = static_cast<double *>(thermo_out.mutable_data());
+    int *status_ptr = static_cast<int *>(status_out.mutable_data());
+
+    std::atomic<long long> n_failure{0};
+
+    py::gil_scoped_release release;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (py::ssize_t i = 0; i < Ncells; ++i) {
+        SUNContext sunctx = NULL;
+        N_Vector y_vec = NULL;
+        N_Vector ydot_vec = NULL;
+        try {
+            int flag = SUNContext_Create(SUN_COMM_NULL, &sunctx);
+            if (flag != 0 || sunctx == NULL) {
+                throw std::runtime_error("eval_rhs_batch: SUNContext_Create failed");
+            }
+            y_vec = N_VNew_Serial(N_Y, sunctx);
+            ydot_vec = N_VNew_Serial(N_Y, sunctx);
+            if (y_vec == NULL || ydot_vec == NULL) {
+                throw std::runtime_error("eval_rhs_batch: N_VNew_Serial failed");
+            }
+            for (int j = 0; j < N_Y; ++j) {
+                NV_Ith_S(y_vec, j) = y_ptr[i * N_Y + j];
+                NV_Ith_S(ydot_vec, j) = 0.0;
+                rhs_ptr[i * N_Y + j] = 0.0;
+            }
+
+            gow17 ode;
+            ode.SetnH(nH_ptr[i]);
+            ode.SetIonRate(ion_rate_ptr[i]);
+            ode.SetZg(Zg_ptr[i]);
+            ode.SetZd(Zd_ptr[i]);
+            ode.SetfH2gr(fH2gr);
+            ode.SetfHplusgr(fHplusgr);
+            ode.SetfCplusgr(fCplusgr);
+            ode.SetfHeplusgr(fHeplusgr);
+            ode.SetfSplusgr(fSplusgr);
+            ode.SetfSiplusgr(fSiplusgr);
+            ode.SetfCplusCR(fCplusCR);
+            ode.SetGradv(gradv_ptr[i]);
+            ode.SetTdust(Tdust_ptr[i]);
+            ode.SetCOPhaseParams(
+                sigma_d_CO_per_H_ptr[i],
+                co_E_bind_co,
+                co_nu0_co,
+                co_Y_CO,
+                co_N_SURF,
+                co_N_LAY,
+                co_S_CO,
+                co_F_CRUV_CO_pdes_ptr[i],
+                co_k_crdes_CO_ptr[i]);
+            ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            ode.IsDustCooling(isDust_cooling);
+            ode.SetCoolingCOThin(isCoolingCOThin);
+            if (const_temp) {
+                ode.SetConstTemp(Tgas_ptr[i]);
+            }
+
+            double GPE_cell = GPE_ptr[i];
+            double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
+            double Gph_cell[N_PH];
+            for (int j = 0; j < N_PH; ++j) {
+                Gph_cell[j] = Gph_ptr[i * N_PH + j];
+            }
+            ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
+
+            const int rhs_flag = ode.RHS(0.0, y_vec, ydot_vec);
+            if (rhs_flag != 0) {
+                throw std::runtime_error("eval_rhs_batch: gow17 RHS returned nonzero status");
+            }
+            for (int j = 0; j < N_Y; ++j) {
+                rhs_ptr[i * N_Y + j] = NV_Ith_S(ydot_vec, j);
+            }
+            ode.CopyThermoRates(thermo_ptr + i * 15);
+            status_ptr[i] = 0;
+        } catch (const std::exception &) {
+            for (int j = 0; j < N_Y; ++j) {
+                rhs_ptr[i * N_Y + j] = 0.0;
+            }
+            for (int j = 0; j < 15; ++j) {
+                thermo_ptr[i * 15 + j] = 0.0;
+            }
+            status_ptr[i] = -1;
+            n_failure.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (ydot_vec != NULL) {
+            N_VDestroy(ydot_vec);
+        }
+        if (y_vec != NULL) {
+            N_VDestroy(y_vec);
+        }
+        if (sunctx != NULL) {
+            SUNContext_Free(&sunctx);
+        }
+    }
+
+    py::gil_scoped_acquire acquire;
+
+    py::dict out;
+    out["rhs"] = rhs_out;
+    out["thermo_rates"] = thermo_out;
+    out["status"] = status_out;
+    out["failure_cells"] = n_failure.load();
+    return out;
+}
+
+
 PYBIND11_MODULE(_gow17, m) {
     m.attr("N_Y") = N_Y;
     m.attr("N_PH") = N_PH;
@@ -822,6 +1033,42 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("co_k_crdes_CO"),
         py::arg("userJac"),
         py::arg("verbose") = false);
+
+
+    m.def(
+        "eval_rhs_batch",
+        &eval_rhs_batch,
+        py::arg("y"),
+        py::arg("nH"),
+        py::arg("Tgas"),
+        py::arg("Tdust"),
+        py::arg("Zd"),
+        py::arg("Zg"),
+        py::arg("ion_rate"),
+        py::arg("GPE"),
+        py::arg("F_CO_pdes_photon"),
+        py::arg("Gph"),
+        py::arg("sigma_d_CO_per_H"),
+        py::arg("const_temp"),
+        py::arg("gradv"),
+        py::arg("Leff_CO_max"),
+        py::arg("isDust_cooling") = false,
+        py::arg("isCoolingCOThin") = false,
+        py::arg("fH2gr"),
+        py::arg("fHplusgr"),
+        py::arg("fCplusgr"),
+        py::arg("fHeplusgr"),
+        py::arg("fSplusgr"),
+        py::arg("fSiplusgr"),
+        py::arg("fCplusCR"),
+        py::arg("co_E_bind_co"),
+        py::arg("co_nu0_co"),
+        py::arg("co_Y_CO"),
+        py::arg("co_N_SURF"),
+        py::arg("co_N_LAY"),
+        py::arg("co_S_CO"),
+        py::arg("co_F_CRUV_CO_pdes"),
+        py::arg("co_k_crdes_CO"));
 
     m.def(
         "co_freezeout_rate_cgs",

@@ -60,7 +60,9 @@ class SegmentedRadRunner:
         threshold: float,
     ) -> Optional[float]:
         """Return radius where stellar UV reaches the configured product fraction."""
-        params = self.base_model.params
+        import diskbridge
+
+        params = diskbridge.params
         threshold = float(threshold)
         if threshold <= 0.0:
             return None

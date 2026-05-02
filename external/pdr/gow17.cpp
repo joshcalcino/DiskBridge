@@ -4,6 +4,17 @@
 #include "gow17.h"
 #include "co_phase.h"
 
+namespace {
+inline double gow17_clamp(double x, double lo, double hi) {
+  if (!std::isfinite(x)) return lo;
+  return std::min(std::max(x, lo), hi);
+}
+
+inline double gow17_finite_or(double x, double fallback) {
+  return std::isfinite(x) ? x : fallback;
+}
+}
+
 /*------------Initialize static members of the class --------*/
 /*species list and map*/
 const std::string gow17::spec_list_[kDimen+n_ghost_] =
@@ -570,6 +581,9 @@ void gow17::ChemInit_(const double *y) {
     T = y[iE_] / Thermo::CvCold(y[iH2_], xHe_, y[ie_]);
     //printf("Calcuate T from E.\n");
   }
+  if (!std::isfinite(T) || T <= 0.0) {
+    T = 2.7;
+  }
 	const double logT = log10(T);
 	const double logT4 = log10(T/1.0e4);
 	const double lnTe = log(T * 8.6173e-5);
@@ -636,8 +650,19 @@ void gow17::ChemInit_(const double *y) {
   /*--- H2O+ + e branching--
   (1) H3+ + *O -> OH + H2
   (27) H3+ + *O + *e -> H2 + *O + *H     */
-  const double h2oplus_ratio =
-                6e-10 * y[iH2_] / ( 5.3e-6 / sqrt(T) * y[ie_] );
+  const double xe_eff_h2oplus = std::max(
+      gow17_finite_or(y[ie_], 0.0),
+      1.0e-30);
+  const double T_rate_h2oplus = std::max(
+      gow17_finite_or(T, 2.7),
+      2.7);
+  const double denom_h2oplus = (5.3e-6 / sqrt(T_rate_h2oplus)) * xe_eff_h2oplus;
+  double h2oplus_ratio = 0.0;
+  if (denom_h2oplus > 0.0 && std::isfinite(denom_h2oplus)) {
+    h2oplus_ratio = 6.0e-10 * std::max(gow17_finite_or(y[iH2_], 0.0), 0.0)
+                    / denom_h2oplus;
+  }
+  h2oplus_ratio = gow17_clamp(h2oplus_ratio, 0.0, 1.0e30);
   const double fac_H2Oplus_H2 = h2oplus_ratio / (h2oplus_ratio + 1.);
   const double fac_H2Oplus_e = 1. / (h2oplus_ratio + 1.);
   k2body_[1] *= fac_H2Oplus_H2;
@@ -701,22 +726,15 @@ void gow17::ChemInit_(const double *y) {
    *   (5) Si+ + *e + gr -> *Si + gr
    *   , rate dependent on e aboundance. */
   const double GPE_val = (GPE_ != NULL) ? (*GPE_) : 0.0;
-  const bool grain_inputs_ok = std::isfinite(T) && T > 0.0
-      && std::isfinite(y[ie_]) && y[ie_] > 0.0
-      && std::isfinite(GPE_val) && GPE_val >= 0.0
-      && std::isfinite(nH_) && nH_ > 0.0;
-  const double T_rate = grain_inputs_ok ? T : 2.7;
+  const double T_rate = gow17_clamp(gow17_finite_or(T, 2.7), 2.7, 1.0e5);
+  const double xe_eff_grain = std::max(gow17_finite_or(y[ie_], 0.0), 1.0e-30);
+  const double GPE_eff = std::max(gow17_finite_or(GPE_val, 0.0), 0.0);
+  const double nH_eff = std::max(gow17_finite_or(nH_, 0.0), 1.0e-300);
   const double log_T_rate = log(T_rate);
-  if (grain_inputs_ok) {
-	psi_gr_fac_ = 1.7 * GPE_val * sqrt(T_rate) / nH_;
-	psi = psi_gr_fac_ / y[ie_];
-  } else {
-	psi_gr_fac_ = 0.0;
-	psi = 1.0e-12;
-  }
-  if (!std::isfinite(psi) || psi <= 0.0) {
-	psi = 1.0e-12;
-  }
+  const double psi_raw = 1.7 * std::max(GPE_eff, 1.0e-30) * sqrt(T_rate)
+                         / nH_eff / xe_eff_grain;
+  psi = gow17_clamp(psi_raw, 1.0e-12, 1.0e12);
+  psi_gr_fac_ = psi * xe_eff_grain;
 	kgr_[1] = 1.0e-14 * cHp_[0] /
 		           (
 			           1.0 + cHp_[1]*pow(psi, cHp_[2]) *
@@ -752,6 +770,30 @@ void gow17::ChemInit_(const double *y) {
 										             *pow( psi, -cSip_[5]-cSip_[6]*log_T_rate )
 									 )
 								) * nH_ * Zd_ * fSiplusgr_;
+
+#ifdef DISKBRIDGE_GOW17_DEBUG_RATES
+  for (int i = 0; i < n_2body_; ++i) {
+    if (!std::isfinite(k2body_[i])) {
+      throw std::runtime_error("gow17: non-finite k2body rate");
+    }
+  }
+  for (int i = 0; i < n_ph_; ++i) {
+    if (!std::isfinite(kph_[i])) {
+      throw std::runtime_error("gow17: non-finite photorate");
+    }
+  }
+  for (int i = 0; i < n_gr_; ++i) {
+    if (!std::isfinite(kgr_[i])) {
+      throw std::runtime_error("gow17: non-finite grain rate");
+    }
+  }
+  for (int i = 0; i < n_cr_; ++i) {
+    if (!std::isfinite(kcr_[i])) {
+      throw std::runtime_error("gow17: non-finite cosmic-ray rate");
+    }
+  }
+#endif
+
 	return;
 }
 

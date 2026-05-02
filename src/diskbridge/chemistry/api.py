@@ -159,6 +159,29 @@ def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) 
         )
 
 
+def _gow17_validation_summary(meta: dict) -> dict:
+    """Return a compact summary for GOW17 validation runs."""
+    diag = meta.get("gow17_diagnostics", {})
+    return {
+        "n_fail": int(meta.get("n_fail", -1)),
+        "max_status": int(meta.get("max_status", 0)),
+        "temperature_mode": meta.get("temperature_mode"),
+        "enable_co_phase": bool(meta.get("enable_co_phase", False)),
+        "b_CO_mode": meta.get("b_CO_mode"),
+        "rhs_status": int(diag.get("gow17_rhs_status", 0)),
+        "rhs_residual_max_global": float(diag.get("gow17_rhs_residual_max_global", float("nan"))),
+        "thermal_balance_residual_max_abs": float(
+            diag.get("thermal_balance_residual_max_abs", float("nan"))
+        ),
+        "tevol_max_cells_total": int(diag.get("tevol_max_cells_total", 0)),
+        "negative_abundance_corrections_total": int(
+            diag.get("negative_abundance_corrections_total", 0)
+        ),
+        "cvode_failure_cells_total": int(diag.get("cvode_failure_cells_total", 0)),
+        "exception_failure_cells_total": int(diag.get("exception_failure_cells_total", 0)),
+    }
+
+
 def run_chemistry(
     rad: 'RadModel',
     model: str,
@@ -258,5 +281,9 @@ def run_chemistry(
         (Path(output_dir) / "chemistry_meta.json").write_text(
             json.dumps(jsonable(result.meta), indent=2, sort_keys=True) + "\n"
         )
+        if model_lower == "gow17":
+            (Path(output_dir) / "gow17_validation_summary.json").write_text(
+                json.dumps(jsonable(_gow17_validation_summary(result.meta)), indent=2, sort_keys=True) + "\n"
+            )
     
     return result

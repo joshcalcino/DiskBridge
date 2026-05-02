@@ -144,6 +144,32 @@ def _append_equilibrium_solver_diagnostics(hist: dict[str, list], result: dict) 
     )
 
 
+def _append_time_solver_diagnostics(hist: dict[str, list], result: dict) -> None:
+    """Append native fixed-time solver diagnostic counters to histories."""
+    hist["time_negative_abundance_cells_hist"].append(
+        int(result.get("negative_abundance_cells", 0))
+    )
+    hist["time_negative_abundance_corrections_hist"].append(
+        int(result.get("negative_abundance_corrections", 0))
+    )
+    hist["time_cvode_failure_cells_hist"].append(int(result.get("cvode_failure_cells", 0)))
+    hist["time_exception_failure_cells_hist"].append(
+        int(result.get("exception_failure_cells", 0))
+    )
+
+
+def _summarize_time_solver_diagnostics(hist: dict[str, list]) -> dict:
+    """Return arrays plus totals/maxima for native fixed-time diagnostics."""
+    out = {}
+    for key, vals in hist.items():
+        arr = np.asarray(vals, dtype=np.int64)
+        out[key] = arr
+        base = key.removesuffix("_hist")
+        out[f"{base}_total"] = int(np.sum(arr)) if arr.size else 0
+        out[f"{base}_max"] = int(np.max(arr)) if arr.size else 0
+    return out
+
+
 def _summarize_equilibrium_solver_diagnostics(hist: dict[str, list]) -> dict:
     """Return arrays plus totals/maxima for native equilibrium diagnostics."""
     out = {}
@@ -548,6 +574,267 @@ def _resolve_co_phase_controls(
     return float(S_CO), np.maximum(F_cruv, 0.0), np.maximum(k_crdes_arr, 0.0)
 
 
+
+
+def _resolve_co_phase_runtime_params(cfg: dict) -> dict[str, float | int]:
+    """Resolve CO phase physical parameters from runtime config.
+
+    Import-time constants remain fallbacks, but sensitivity studies can now pass
+    overrides through ``run_gow17(..., config=...)`` or ``Gow17TimeStepper``.
+    """
+    chemistry_cfg = get_config().get("chemistry", {})
+    common_cfg = chemistry_cfg.get("common", {}) if isinstance(chemistry_cfg, dict) else {}
+    co_cfg = _nested_cfg(cfg, "co_phase")
+
+    def _lookup(names: tuple[str, ...], common_name: str, fallback):
+        for name in names:
+            if name in co_cfg:
+                return co_cfg[name]
+        if isinstance(common_cfg, dict) and common_name in common_cfg:
+            return common_cfg[common_name]
+        return fallback
+
+    E_bind_CO = _maybe_quantity_to_float(
+        _lookup(("E_bind_CO", "E_bind_co", "E_bind_co_K"), "E_bind_co", f"{float(E_BIND_CO):.16e} K"),
+        "K",
+    )
+    nu0_CO = _maybe_quantity_to_float(
+        _lookup(("nu0_CO", "nu0_co"), "nu0_co", f"{float(NU0_CO):.16e} 1/s"),
+        "1/s",
+    )
+    Y_CO_local = float(_lookup(("Y_CO", "y_CO"), "Y_CO", float(Y_CO)))
+    N_LAY_local = int(_lookup(("N_LAY", "n_lay"), "N_LAY", int(N_LAY)))
+    N_SURF_local = _maybe_quantity_to_float(
+        _lookup(("N_SURF", "n_surf", "N_surf"), "n_surf", f"{float(N_SURF):.16e} 1/cm^2"),
+        "1/cm^2",
+    )
+
+    if E_bind_CO < 0.0 or nu0_CO < 0.0 or Y_CO_local < 0.0 or N_SURF_local < 0.0:
+        raise ValueError("gow17 CO phase parameters must be non-negative")
+    if N_LAY_local < 0:
+        raise ValueError("gow17 CO phase N_LAY must be non-negative")
+
+    return {
+        "E_bind_CO": float(E_bind_CO),
+        "nu0_CO": float(nu0_CO),
+        "Y_CO": float(Y_CO_local),
+        "N_LAY": int(N_LAY_local),
+        "N_SURF": float(N_SURF_local),
+    }
+
+
+def _resolve_shielding_linewidth(cfg: dict, Tgas_K: np.ndarray) -> tuple[float, np.ndarray, dict]:
+    """Resolve scalar Visser linewidth plus per-cell diagnostic linewidths."""
+    shield_cfg = _nested_cfg(cfg, "shielding")
+    mode = str(shield_cfg.get("b_CO_mode", "constant")).lower()
+    b_const = float(shield_cfg.get("b_CO_constant_kms", cfg.get("b_kms", 0.3)))
+    v_turb = float(shield_cfg.get("v_turb_kms", 0.03))
+    b_min = float(shield_cfg.get("b_CO_min_kms", 0.03))
+    b_max = float(shield_cfg.get("b_CO_max_kms", 3.0))
+    if b_min <= 0.0 or b_max <= 0.0 or b_max < b_min:
+        raise ValueError("gow17 shielding linewidth requires 0 < b_CO_min_kms <= b_CO_max_kms")
+
+    T_arr = np.asarray(Tgas_K, dtype=np.float64)
+    if mode == "constant":
+        b_arr = np.full(T_arr.shape, b_const, dtype=np.float64)
+    elif mode == "thermal+turbulent":
+        mCO = 28.0 * float(M_H)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
+        b_arr = np.sqrt(np.maximum(b_thermal, 0.0) ** 2 + max(v_turb, 0.0) ** 2)
+    else:
+        raise ValueError(
+            "gow17 shielding b_CO_mode must be 'constant' or 'thermal+turbulent', "
+            f"got {mode!r}"
+        )
+
+    b_arr = np.clip(np.where(np.isfinite(b_arr), b_arr, b_const), b_min, b_max)
+    finite = np.isfinite(b_arr)
+    b_scalar = float(np.nanmedian(b_arr[finite])) if np.any(finite) else float(np.clip(b_const, b_min, b_max))
+    b_scalar = float(np.clip(b_scalar, b_min, b_max))
+    meta = {
+        "b_CO_mode": mode,
+        "b_CO_constant_kms": float(b_const),
+        "v_turb_kms": float(v_turb),
+        "b_CO_min_kms": float(b_min),
+        "b_CO_max_kms": float(b_max),
+        "b_CO_scalar_kms": float(b_scalar),
+        "b_CO_scalar_approximation": bool(mode != "constant"),
+        "b_CO_bins_used": [float(b_scalar)],
+    }
+    return b_scalar, b_arr, meta
+
+
+def _dominant_process_id(rates: list[np.ndarray]) -> np.ndarray:
+    """Return 1-based dominant process IDs, with 0 for cells with no positive rates."""
+    if not rates:
+        return np.zeros(0, dtype=np.int16)
+    stack = np.stack([np.asarray(r, dtype=np.float64).reshape(-1) for r in rates], axis=0)
+    finite = np.where(np.isfinite(stack), stack, -np.inf)
+    ids = np.argmax(finite, axis=0).astype(np.int16) + 1
+    ids[np.nanmax(np.where(np.isfinite(stack), stack, 0.0), axis=0) <= 0.0] = 0
+    return ids
+
+
+_THERMO_HEATING_NAMES = (
+    "cosmic_ray",
+    "photoelectric",
+    "h2_grain",
+    "h2_pump",
+    "h2_diss",
+)
+_THERMO_COOLING_NAMES = (
+    "cplus",
+    "c",
+    "o",
+    "lya",
+    "co_rot",
+    "h2",
+    "dust",
+    "recombination",
+    "h2_diss",
+    "hi_ion",
+)
+
+
+def _empty_rhs_residual_diagnostics(shape: tuple, *, status: int, message: str) -> tuple[dict, dict]:
+    nan = np.full(shape, np.nan, dtype=np.float64)
+    fields = {
+        "gow17_rhs_residual_max": Quantity(nan, "dimensionless"),
+        "gow17_rhs_residual_CO": Quantity(nan, "dimensionless"),
+        "gow17_rhs_residual_CO_ice": Quantity(nan, "dimensionless"),
+        "gow17_rhs_residual_Cplus": Quantity(nan, "dimensionless"),
+        "thermal_balance_residual": Quantity(nan, "erg/s"),
+    }
+    diag = {
+        "gow17_rhs_status": int(status),
+        "gow17_rhs_message": str(message),
+        "gow17_rhs_residual_max_global": float("nan"),
+    }
+    return fields, diag
+
+
+def _compute_rhs_residual_diagnostics(
+    *,
+    y_out: np.ndarray,
+    nH_flat: np.ndarray,
+    Tgas_flat: np.ndarray,
+    Tdust_flat: np.ndarray,
+    Zd_arr: np.ndarray,
+    Zg_arr: np.ndarray,
+    ion_rate_arr: np.ndarray,
+    GPE: np.ndarray,
+    GISRF: np.ndarray,
+    Gph: np.ndarray,
+    sigma_d_CO_per_H: np.ndarray,
+    const_temp: bool,
+    gradv_arr: np.ndarray,
+    Leff_CO_max_arr: np.ndarray,
+    isDust_cooling: bool,
+    isCoolingCOThin: bool,
+    fH2gr: float,
+    fHplusgr: float,
+    fCplusgr: float,
+    fHeplusgr: float,
+    fSplusgr: float,
+    fSiplusgr: float,
+    fCplusCR: float,
+    co_phase_kw: dict,
+    abstol: np.ndarray,
+    reltol: float,
+    t_resid: float,
+    shape: tuple,
+) -> tuple[dict, dict]:
+    """Evaluate native RHS at the returned state and scale by solver tolerances."""
+    if not hasattr(_gow17, "eval_rhs_batch"):
+        return _empty_rhs_residual_diagnostics(
+            shape,
+            status=-2,
+            message="native _gow17.eval_rhs_batch is unavailable; rebuild the extension",
+        )
+
+    y_flat = np.ascontiguousarray(np.asarray(y_out, dtype=np.float64).reshape(-1, N_Y))
+    try:
+        result = _gow17.eval_rhs_batch(
+            y=y_flat,
+            nH=np.ascontiguousarray(nH_flat, dtype=np.float64),
+            Tgas=np.ascontiguousarray(Tgas_flat, dtype=np.float64),
+            Tdust=np.ascontiguousarray(Tdust_flat, dtype=np.float64),
+            Zd=np.ascontiguousarray(Zd_arr, dtype=np.float64),
+            Zg=np.ascontiguousarray(Zg_arr, dtype=np.float64),
+            ion_rate=np.ascontiguousarray(ion_rate_arr, dtype=np.float64),
+            GPE=np.ascontiguousarray(GPE, dtype=np.float64),
+            F_CO_pdes_photon=np.ascontiguousarray(GISRF, dtype=np.float64),
+            Gph=np.ascontiguousarray(Gph, dtype=np.float64),
+            sigma_d_CO_per_H=np.ascontiguousarray(sigma_d_CO_per_H, dtype=np.float64),
+            const_temp=bool(const_temp),
+            gradv=np.ascontiguousarray(gradv_arr, dtype=np.float64),
+            Leff_CO_max=np.ascontiguousarray(Leff_CO_max_arr, dtype=np.float64),
+            isDust_cooling=bool(isDust_cooling),
+            isCoolingCOThin=bool(isCoolingCOThin),
+            fH2gr=float(fH2gr),
+            fHplusgr=float(fHplusgr),
+            fCplusgr=float(fCplusgr),
+            fHeplusgr=float(fHeplusgr),
+            fSplusgr=float(fSplusgr),
+            fSiplusgr=float(fSiplusgr),
+            fCplusCR=float(fCplusCR),
+            **co_phase_kw,
+        )
+    except Exception as exc:  # pragma: no cover - protects production runs from diagnostic failures
+        return _empty_rhs_residual_diagnostics(shape, status=-1, message=str(exc))
+
+    rhs = np.asarray(result.get("rhs"), dtype=np.float64).reshape(-1, N_Y)
+    status = np.asarray(result.get("status", np.zeros(rhs.shape[0], dtype=np.int32)), dtype=np.int32)
+    abstol_vec = np.asarray(abstol, dtype=np.float64).reshape(1, N_Y)
+    scale = abstol_vec + float(reltol) * np.maximum(np.abs(y_flat), abstol_vec)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        rhs_resid = np.abs(rhs) * max(float(t_resid), 0.0) / scale
+    rhs_resid[~np.isfinite(rhs_resid)] = np.nan
+    resid_max = np.nanmax(rhs_resid, axis=1)
+
+    fields = {
+        "gow17_rhs_residual_max": Quantity(resid_max.reshape(shape), "dimensionless"),
+        "gow17_rhs_residual_CO": Quantity(rhs_resid[:, I_CO].reshape(shape), "dimensionless"),
+        "gow17_rhs_residual_CO_ice": Quantity(rhs_resid[:, I_CO_ICE].reshape(shape), "dimensionless"),
+        "gow17_rhs_residual_Cplus": Quantity(rhs_resid[:, I_CP].reshape(shape), "dimensionless"),
+    }
+
+    thermo = np.asarray(result.get("thermo_rates", np.zeros((rhs.shape[0], 15))), dtype=np.float64)
+    thermo = thermo.reshape(rhs.shape[0], 15)
+    heating = np.maximum(thermo[:, : len(_THERMO_HEATING_NAMES)], 0.0)
+    cooling = np.maximum(thermo[:, len(_THERMO_HEATING_NAMES) :], 0.0)
+    heating_total = np.sum(heating, axis=1)
+    cooling_total = np.sum(cooling, axis=1)
+    thermal_residual = rhs[:, I_E]
+    fields["thermal_balance_residual"] = Quantity(thermal_residual.reshape(shape), "erg/s")
+    fields["thermal_heating_total"] = Quantity(heating_total.reshape(shape), "erg/s")
+    fields["thermal_cooling_total"] = Quantity(cooling_total.reshape(shape), "erg/s")
+
+    for i, name in enumerate(_THERMO_HEATING_NAMES):
+        fields[f"thermal_heating_{name}"] = Quantity(heating[:, i].reshape(shape), "erg/s")
+    for i, name in enumerate(_THERMO_COOLING_NAMES):
+        fields[f"thermal_cooling_{name}"] = Quantity(cooling[:, i].reshape(shape), "erg/s")
+
+    heat_id = _dominant_process_id([heating[:, i] for i in range(heating.shape[1])])
+    cool_id = _dominant_process_id([cooling[:, i] for i in range(cooling.shape[1])])
+    fields["thermal_heating_dominant_id"] = Quantity(heat_id.reshape(shape), "dimensionless")
+    fields["thermal_cooling_dominant_id"] = Quantity(cool_id.reshape(shape), "dimensionless")
+
+    diag = {
+        "gow17_rhs_status": int(0 if np.all(status == 0) else -1),
+        "gow17_rhs_failure_cells": int(np.sum(status != 0)),
+        "gow17_rhs_residual_max_global": float(np.nanmax(resid_max)) if resid_max.size else float("nan"),
+        "gow17_rhs_residual_CO_max": float(np.nanmax(rhs_resid[:, I_CO])) if rhs_resid.size else float("nan"),
+        "gow17_rhs_residual_CO_ice_max": float(np.nanmax(rhs_resid[:, I_CO_ICE])) if rhs_resid.size else float("nan"),
+        "gow17_rhs_residual_Cplus_max": float(np.nanmax(rhs_resid[:, I_CP])) if rhs_resid.size else float("nan"),
+        "rhs_residual_time_s": float(t_resid),
+        "thermal_balance_residual_max_abs": float(np.nanmax(np.abs(thermal_residual))) if thermal_residual.size else float("nan"),
+        "thermal_heating_process_id_map": {i + 1: name for i, name in enumerate(_THERMO_HEATING_NAMES)},
+        "thermal_cooling_process_id_map": {i + 1: name for i, name in enumerate(_THERMO_COOLING_NAMES)},
+    }
+    return fields, diag
+
 def _compute_co_phase_diagnostics(
     *,
     y_out: np.ndarray,
@@ -563,10 +850,18 @@ def _compute_co_phase_diagnostics(
     G_C_ion_actual: np.ndarray | None = None,
     G_H2_diss_actual: np.ndarray | None = None,
     enable_co_phase: bool,
+    co_phase_params: dict[str, float | int] | None = None,
 ) -> dict:
-    """Compute CO gas/ice phase-rate diagnostics from the final state."""
+    """Compute solver-consistent CO gas/ice phase-rate diagnostics."""
     shape = y_out.shape[:-1]
     ncells = int(np.prod(shape))
+
+    params = co_phase_params or {}
+    E_bind_CO_local = float(params.get("E_bind_CO", E_BIND_CO))
+    nu0_CO_local = float(params.get("nu0_CO", NU0_CO))
+    Y_CO_local = float(params.get("Y_CO", Y_CO))
+    N_LAY_local = int(params.get("N_LAY", N_LAY))
+    N_SURF_local = float(params.get("N_SURF", N_SURF))
 
     xCO = np.asarray(y_out[..., I_CO], dtype=np.float64).reshape(ncells)
     xCO_ice = np.asarray(y_out[..., I_CO_ICE], dtype=np.float64).reshape(ncells)
@@ -594,16 +889,23 @@ def _compute_co_phase_diagnostics(
         sigma_flat = np.zeros(ncells, dtype=np.float64)
         F_cruv = np.zeros(ncells, dtype=np.float64)
         k_crdes = np.zeros(ncells, dtype=np.float64)
+        E_bind_CO_local = 0.0
+        nu0_CO_local = 0.0
+        Y_CO_local = 0.0
+        N_LAY_local = 0
+        N_SURF_local = 0.0
 
     mCO = 28.0 * float(M_H)
     vth = np.sqrt(8.0 * KB_CGS * np.maximum(Tgas_flat, 0.0) / (np.pi * mCO))
     k_freeze = np.maximum(S_CO, 0.0) * sigma_flat * nH_flat * vth
 
     with np.errstate(over="ignore", invalid="ignore"):
-        k_thermal = float(NU0_CO) * np.exp(-float(E_BIND_CO) / np.maximum(Tdust_flat, 1.0e-30))
+        k_thermal = float(nu0_CO_local) * np.exp(
+            -float(E_bind_CO_local) / np.maximum(Tdust_flat, 1.0e-30)
+        )
 
     n_ice = xCO_ice * nH_flat
-    n_ice_act_max = 4.0 * sigma_flat * nH_flat * float(N_SURF) * float(N_LAY)
+    n_ice_act_max = 4.0 * sigma_flat * nH_flat * float(N_SURF_local) * int(N_LAY_local)
     n_ice_act = np.minimum(np.maximum(n_ice, 0.0), np.maximum(n_ice_act_max, 0.0))
     f_active = np.divide(
         n_ice_act,
@@ -612,8 +914,10 @@ def _compute_co_phase_diagnostics(
         where=(n_ice > 0.0),
     )
     F_total = np.maximum(F_star, 0.0) + np.maximum(F_cruv, 0.0)
-    if int(N_LAY) > 0 and float(N_SURF) > 0.0:
-        k_pd_surface = F_total * float(Y_CO) / (4.0 * float(N_SURF) * float(N_LAY))
+    if int(N_LAY_local) > 0 and float(N_SURF_local) > 0.0:
+        k_pd_surface = F_total * float(Y_CO_local) / (
+            4.0 * float(N_SURF_local) * int(N_LAY_local)
+        )
     else:
         k_pd_surface = np.zeros(ncells, dtype=np.float64)
 
@@ -631,6 +935,7 @@ def _compute_co_phase_diagnostics(
     k_H2_photodiss = KPH_H2_BASE * Gh2_actual
     R_photodiss_per_H = k_CO_photodiss * xCO
     R_heplus_per_H = 1.6e-9 * nH_flat * xHeplus * xCO
+    R_gas_form_proxy_per_H = np.zeros(ncells, dtype=np.float64)
     total_co = xCO + xCO_ice
     co_gas_fraction = np.divide(
         xCO,
@@ -638,6 +943,25 @@ def _compute_co_phase_diagnostics(
         out=np.zeros(ncells, dtype=np.float64),
         where=(total_co > 0.0),
     )
+    co_ice_fraction = np.divide(
+        xCO_ice,
+        total_co,
+        out=np.zeros(ncells, dtype=np.float64),
+        where=(total_co > 0.0),
+    )
+
+    loss_id = _dominant_process_id(
+        [R_freeze_per_H, R_photodiss_per_H, R_heplus_per_H]
+    )
+    gain_id = _dominant_process_id(
+        [R_pd_per_H, R_thermal_per_H, R_crdes_per_H, R_gas_form_proxy_per_H]
+    )
+    c_reliability_flag = (
+        (Tdust_flat < 25.0)
+        & (co_ice_fraction > 0.9)
+        & (G_C_ion_actual is not None)
+        & (Gc_actual < 1.0e-8)
+    ).astype(np.int16)
 
     return {
         "sigma_d_CO_per_H": Quantity(sigma_flat.reshape(shape), "cm^2"),
@@ -665,7 +989,12 @@ def _compute_co_phase_diagnostics(
         "CO_gain_photodesorption_per_H": Quantity(R_pd_per_H.reshape(shape), "1/s"),
         "CO_gain_thermal_desorption_per_H": Quantity(R_thermal_per_H.reshape(shape), "1/s"),
         "CO_gain_crdes_per_H": Quantity(R_crdes_per_H.reshape(shape), "1/s"),
+        "CO_gain_gas_phase_proxy_per_H": Quantity(R_gas_form_proxy_per_H.reshape(shape), "1/s"),
+        "CO_loss_dominant_id": Quantity(loss_id.reshape(shape), "dimensionless"),
+        "CO_gain_dominant_id": Quantity(gain_id.reshape(shape), "dimensionless"),
         "CO_gas_fraction": Quantity(co_gas_fraction.reshape(shape), "dimensionless"),
+        "CO_ice_fraction": Quantity(co_ice_fraction.reshape(shape), "dimensionless"),
+        "C_abundance_interpretation_flag": Quantity(c_reliability_flag.reshape(shape), "dimensionless"),
     }
 
 
@@ -893,15 +1222,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     L_geo_min = float(cfg.get("L_geo_min", 1e10))
     L_geo_max = float(cfg.get("L_geo_max", 1e20))
     Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
-    isDust_cooling = bool(cfg.get("isDust_cooling", False))
+    isDust_cooling = bool(cfg.get("isDust_cooling", True))
     isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
     temperature_cfg = _resolve_temperature_config(cfg)
     temperature_mode = str(temperature_cfg["mode"])
     const_temp = bool(temperature_cfg["const_temp"])
     if temperature_mode == "constant_debug":
         logger.warning(
-            "gow17: using constant_debug Tgas; this is for debugging/regression "
-            "only and is not a physically valid disc/PDR temperature model."
+            "gow17: using constant_debug Tgas; this is for debugging only "
+            "and is not a physically valid disc/PDR temperature model."
         )
 
     reltol = float(cfg.get("reltol", 1e-4))
@@ -1034,6 +1363,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ncells = nH_cm3.size
 
     Tdust_K = _as_cgs_f64(Tdust, "K")
+    b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(cfg, T_K)
 
     nH_flat = nH_cm3.reshape(ncells)
     T_flat = T_K.reshape(ncells)
@@ -1187,6 +1517,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         nH2_out = Quantity(xH2 * nH_cm3, "cm^-3")
 
         xe = _electron_abundance(y_out)
+        if not const_temp:
+            Cv_slab = _cv_cold(y_out[..., I_H2], xe)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                T_out_slab = y_out[..., I_E] / Cv_slab
+            T_out_slab = np.clip(
+                T_out_slab,
+                float(temperature_cfg["Tgas_floor"]),
+                float(temperature_cfg["Tgas_ceiling"]),
+            )
+        else:
+            T_out_slab = T_flat.reshape(shape)
+        T_status_slab = np.zeros(shape, dtype=np.int32)
 
         xH_atom = 1.0 - (
             y_out[..., I_OHX]
@@ -1229,6 +1571,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
         fields = {
             "co_ice": nco_ice,
+            "Tgas": Quantity(T_out_slab, "K"),
+            "Tgas_minus_Tdust": Quantity(T_out_slab - Tdust_flat.reshape(shape), "K"),
+            "Tgas_status": Quantity(T_status_slab, "dimensionless"),
+            "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
             "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
             "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
             "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
@@ -1255,6 +1601,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         rad.nCplus = nCplus
         rad.nC = nC
         rad.ne = ne
+        rad.Tgas_gow17 = fields["Tgas"]
+        rad.gas_temperature = rad.Tgas_gow17
 
         n_fail = 0
         max_status = 0
@@ -1264,6 +1612,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "enable_co_phase": bool(enable_co_phase),
             "nside": int(nside),
             "b_kms": float(b_kms),
+            "b_CO_kms_scalar": float(b_kms),
+            "b_CO_mode": str(shielding_linewidth_meta["b_CO_mode"]),
             "ion_rate_s": float(ion_rate_s),
             "Zg": float(Zg0),
             "Zd": float(Zd0),
@@ -1300,6 +1650,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ion_rate_arr=ion_rate_arr,
         ncells=ncells,
     )
+    co_phase_params = _resolve_co_phase_runtime_params(cfg)
 
 
     Leff_CO_max_arr = _broadcast_scalar_or_array(Leff_CO_max_scalar, ncells)
@@ -1493,13 +1844,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "cvode_failure_cells_hist": [],
         "exception_failure_cells_hist": [],
     }
+    time_solver_diag_hist = {
+        "time_negative_abundance_cells_hist": [],
+        "time_negative_abundance_corrections_hist": [],
+        "time_cvode_failure_cells_hist": [],
+        "time_exception_failure_cells_hist": [],
+    }
 
     def _state_temperature(y: np.ndarray) -> np.ndarray:
         xe = _electron_abundance(y)
         Cv = _cv_cold(y[:, I_H2], xe)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             T_state = y[:, I_E] / Cv
-        return np.clip(T_state, 2.7, 1e6)
+        return np.clip(T_state, float(temperature_cfg["Tgas_floor"]), float(temperature_cfg["Tgas_ceiling"]))
 
     def _project(y: np.ndarray) -> np.ndarray:
         y_arr = np.asarray(y, dtype=np.float64)
@@ -1543,11 +1900,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     # Common keyword dict for CO phase parameters passed to batch solvers.
     _zero_cell = np.zeros(ncells, dtype=np.float64)
     _co_phase_kw = dict(
-        co_E_bind_co=(float(E_BIND_CO) if enable_co_phase else 0.0),
-        co_nu0_co=(float(NU0_CO) if enable_co_phase else 0.0),
-        co_Y_CO=(float(Y_CO) if enable_co_phase else 0.0),
-        co_N_SURF=(float(N_SURF) if enable_co_phase else 0.0),
-        co_N_LAY=(int(N_LAY) if enable_co_phase else 0),
+        co_E_bind_co=(float(co_phase_params["E_bind_CO"]) if enable_co_phase else 0.0),
+        co_nu0_co=(float(co_phase_params["nu0_CO"]) if enable_co_phase else 0.0),
+        co_Y_CO=(float(co_phase_params["Y_CO"]) if enable_co_phase else 0.0),
+        co_N_SURF=(float(co_phase_params["N_SURF"]) if enable_co_phase else 0.0),
+        co_N_LAY=(int(co_phase_params["N_LAY"]) if enable_co_phase else 0),
         co_S_CO=(float(S_CO) if enable_co_phase else 0.0),
         co_F_CRUV_CO_pdes=(
             np.ascontiguousarray(F_CRUV_CO_pdes_arr, dtype=np.float64)
@@ -1804,6 +2161,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     userJac=userJac,
                     verbose=verbose,
                 )
+                _append_time_solver_diagnostics(time_solver_diag_hist, result)
 
                 y_state[:, :] = _project(result["y"])
                 acceleration_cells = 0
@@ -2083,6 +2441,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             else 0
         ),
         "abstol": np.asarray(abstol, dtype=np.float64),
+        "co_phase_E_bind_CO": float(co_phase_params["E_bind_CO"]),
+        "co_phase_nu0_CO": float(co_phase_params["nu0_CO"]),
+        "co_phase_Y_CO": float(co_phase_params["Y_CO"]),
+        "co_phase_N_SURF": float(co_phase_params["N_SURF"]),
+        "co_phase_N_LAY": int(co_phase_params["N_LAY"]),
+        "directional_weight_product": str(directional_uv_product),
+        "directional_weight_approximation": True,
+        "theta_c_uses_CO_direction_weights": bool(directional_uv_product == "G_CO_diss"),
+        "theta_h2_uses_CO_direction_weights": bool(directional_uv_product == "G_CO_diss"),
+        **shielding_linewidth_meta,
     }
     if coupling_mode == "astrochem":
         if astrochem_n_updates > 0:
@@ -2094,6 +2462,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         equilibrium_solver_diag_hist
     )
     gow17_diag.update(equilibrium_solver_diag)
+    time_solver_diag = _summarize_time_solver_diagnostics(time_solver_diag_hist)
+    gow17_diag.update(time_solver_diag)
     if equilibrium_solver_diag["tevol_max_cells_total"] > 0:
         logger.warning(
             "gow17: some cells reached tevol_max before SolveEq convergence; "
@@ -2114,7 +2484,34 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "gow17: native solver applied %d negative-abundance corrections.",
             equilibrium_solver_diag["negative_abundance_corrections_total"],
         )
+    if time_solver_diag.get("time_cvode_failure_cells_total", 0) > 0:
+        logger.warning(
+            "gow17: CVODE failures occurred in %d accumulated fixed-time cells.",
+            time_solver_diag["time_cvode_failure_cells_total"],
+        )
+    if time_solver_diag.get("time_exception_failure_cells_total", 0) > 0:
+        logger.warning(
+            "gow17: non-CVODE exceptions occurred in %d accumulated fixed-time cells.",
+            time_solver_diag["time_exception_failure_cells_total"],
+        )
+    if time_solver_diag.get("time_negative_abundance_corrections_total", 0) > 0:
+        logger.warning(
+            "gow17: native fixed-time solver applied %d negative-abundance corrections.",
+            time_solver_diag["time_negative_abundance_corrections_total"],
+        )
     gow17_diag.update(budget_diag)
+
+    if not const_temp:
+        T_out = _state_temperature(y_out.reshape(ncells, N_Y)).reshape(shape)
+    else:
+        T_out = T_flat.reshape(shape)
+    T_status = np.zeros(shape, dtype=np.int32)
+    bad_T = (
+        (~np.isfinite(T_out))
+        | (T_out < float(temperature_cfg["Tgas_floor"]))
+        | (T_out > float(temperature_cfg["Tgas_ceiling"]))
+    )
+    T_status[bad_T] = -1
 
     rad.gow17_convergence = gow17_diag
 
@@ -2126,6 +2523,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     fields = {
         "co_ice": nco_ice,
+        "Tgas": Quantity(T_out, "K"),
+        "Tgas_minus_Tdust": Quantity(T_out - Tdust_flat.reshape(shape), "K"),
+        "Tgas_status": Quantity(T_status, "dimensionless"),
+        "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
         "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
         "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
         "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
@@ -2148,7 +2549,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         _compute_co_phase_diagnostics(
             y_out=y_out,
             nH_cm3=nH_cm3,
-            Tgas_K=T_flat.reshape(shape),
+            Tgas_K=T_out,
             Tdust_K=Tdust_flat.reshape(shape),
             sigma_d_CO_per_H=(
                 sigma_d_CO_per_H.reshape(shape)
@@ -2171,8 +2572,69 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             G_C_ion_actual=actual_uv["G_C_ion_actual"],
             G_H2_diss_actual=actual_uv["G_H2_diss_actual"],
             enable_co_phase=enable_co_phase,
+            co_phase_params=co_phase_params,
         )
     )
+    gow17_diag["CO_loss_dominant_id_map"] = {
+        0: "none",
+        1: "freezeout",
+        2: "photodissociation",
+        3: "He+ destruction",
+    }
+    gow17_diag["CO_gain_dominant_id_map"] = {
+        0: "none",
+        1: "photodesorption",
+        2: "thermal_desorption",
+        3: "cosmic_ray_desorption",
+        4: "gas_phase_formation_proxy",
+    }
+    gow17_diag["C_abundance_interpretation_flag_map"] = {
+        0: "nominal",
+        1: "cold_shielded_CO_freezeout_dominated_neutral_C_upper_limit",
+    }
+
+    rhs_t_cfg = cfg.get("rhs_residual_t", cfg.get("rhs_residual_time", tmax))
+    rhs_t_resid = _maybe_quantity_to_float(rhs_t_cfg, "s")
+    rhs_fields, rhs_diag = _compute_rhs_residual_diagnostics(
+        y_out=y_out,
+        nH_flat=nH_flat,
+        Tgas_flat=T_out.reshape(ncells),
+        Tdust_flat=Tdust_flat,
+        Zd_arr=Zd_arr,
+        Zg_arr=Zg_arr,
+        ion_rate_arr=ion_rate_arr,
+        GPE=GPE,
+        GISRF=GISRF,
+        Gph=Gph,
+        sigma_d_CO_per_H=(sigma_d_CO_per_H if enable_co_phase else _zero_cell),
+        const_temp=const_temp,
+        gradv_arr=gradv_arr,
+        Leff_CO_max_arr=Leff_CO_max_arr,
+        isDust_cooling=isDust_cooling,
+        isCoolingCOThin=isCoolingCOThin,
+        fH2gr=fH2gr,
+        fHplusgr=fHplusgr,
+        fCplusgr=fCplusgr,
+        fHeplusgr=fHeplusgr,
+        fSplusgr=fSplusgr,
+        fSiplusgr=fSiplusgr,
+        fCplusCR=fCplusCR,
+        co_phase_kw=_co_phase_kw,
+        abstol=abstol,
+        reltol=reltol,
+        t_resid=rhs_t_resid,
+        shape=shape,
+    )
+    fields.update(rhs_fields)
+    gow17_diag.update(rhs_diag)
+    rhs_warn = float(cfg.get("rhs_residual_warn", 1.0e6))
+    rhs_max = float(gow17_diag.get("gow17_rhs_residual_max_global", np.nan))
+    if np.isfinite(rhs_max) and rhs_max > rhs_warn:
+        logger.warning(
+            "gow17: native RHS residual diagnostic is large (max scaled residual=%0.3e).",
+            rhs_max,
+        )
+    rad.gow17_convergence = gow17_diag
 
     rad.gow17_y = y_out
     rad.nco_gas = nco_gas
@@ -2185,12 +2647,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     rad.nC = nC
     rad.ne = ne
 
-    if not const_temp:
-        xe_out = _electron_abundance(y_out)
-        Cv_out = _cv_cold(y_out[..., I_H2], xe_out)
-        T_out = y_out[..., I_E] / Cv_out
-        T_out = np.clip(T_out, 2.7, 1e6)
-        rad.Tgas_gow17 = Quantity(T_out, "K")
+    rad.Tgas_gow17 = Quantity(T_out, "K")
+    rad.gas_temperature = rad.Tgas_gow17
 
     n_fail = int(np.sum(status != 0))
     max_status = int(np.max(status)) if status.size else 0
@@ -2209,11 +2667,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "enable_co_phase": bool(enable_co_phase),
         "nside": int(nside),
         "b_kms": float(b_kms),
+        "b_CO_kms_scalar": float(b_kms),
+        "b_CO_mode": str(shielding_linewidth_meta["b_CO_mode"]),
         "ion_rate_s": float(ion_rate_s),
         "Zg": float(Zg),
         "Zd": float(Zd),
         "sigma_d_ISM_ref": float(sigma_d_ISM_ref),
         "S_CO": float(S_CO),
+        "co_phase_E_bind_CO": float(co_phase_params["E_bind_CO"]),
+        "co_phase_nu0_CO": float(co_phase_params["nu0_CO"]),
+        "co_phase_Y_CO": float(co_phase_params["Y_CO"]),
+        "co_phase_N_SURF": float(co_phase_params["N_SURF"]),
+        "co_phase_N_LAY": int(co_phase_params["N_LAY"]),
         "co_phase_cruv_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_cruv_pdes", True)),
         "co_phase_crdes_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_crdes_CO", False)),
         "temperature_mode": temperature_mode,

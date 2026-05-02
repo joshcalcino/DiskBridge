@@ -150,6 +150,8 @@ hard_uv_for_directional_shielding = true
 use_physical_co_pdes_photon_flux = true
 enable_co_phase = true
 chi_is_incident = false
+rhs_residual_warn = 1.0e6
+isDust_cooling = true
 
 [chemistry.gow17.temperature]
 mode = "computed"
@@ -168,6 +170,13 @@ abstol_Cplus = 1.0e-20
 abstol_HCOplus = 1.0e-22
 abstol_e = 1.0e-22
 abstol_H2 = 1.0e-10
+
+[chemistry.gow17.shielding]
+b_CO_mode = "constant"
+b_CO_constant_kms = 0.3
+v_turb_kms = 0.03
+b_CO_min_kms = 0.03
+b_CO_max_kms = 3.0
 
 [chemistry.gow17.dust]
 sigma_d_CO_per_H_source = "radmc"
