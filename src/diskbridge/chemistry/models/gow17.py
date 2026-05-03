@@ -665,6 +665,33 @@ def _resolve_shielding_linewidth(cfg: dict, Tgas_K: np.ndarray) -> tuple[float, 
     return b_scalar, b_arr, meta
 
 
+def _resolve_visser_table_linewidth(
+    b_kms: float,
+    shielding_linewidth_meta: dict,
+) -> tuple[float, VisserShielding, dict]:
+    """Load the nearest Visser table and align the scalar shielding b value."""
+    b_requested = float(b_kms)
+    visser = VisserShielding(b_kms=b_requested)
+    b_table = float(visser.b_kms)
+    meta = dict(shielding_linewidth_meta)
+    meta["b_CO_requested_scalar_kms"] = b_requested
+    meta["b_CO_table_kms"] = b_table
+
+    if abs(b_table - b_requested) > 1.0e-6:
+        logger.warning(
+            "gow17: requested CO shielding b_kms=%.6g km/s, but the nearest "
+            "available Visser table is %.6g km/s; using the table value for "
+            "CO/H2 shielding. Per-cell b_CO_kms is retained as a diagnostic.",
+            b_requested,
+            b_table,
+        )
+        meta["b_CO_scalar_approximation"] = True
+
+    meta["b_CO_scalar_kms"] = b_table
+    meta["b_CO_bins_used"] = [b_table]
+    return b_table, visser, meta
+
+
 def _dominant_process_id(rates: list[np.ndarray]) -> np.ndarray:
     """Return 1-based dominant process IDs, with 0 for cells with no positive rates."""
     if not rates:
@@ -1784,7 +1811,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             Leff_CO_max_arr[candidate_flat_idx] = L_geo_cand
             rad.Lgeo_gow17 = Leff_CO_max_arr.reshape(shape)
 
-    visser = VisserShielding(b_kms=float(b_kms))
+    b_kms, visser, shielding_linewidth_meta = _resolve_visser_table_linewidth(
+        b_kms,
+        shielding_linewidth_meta,
+    )
 
     y0_single = np.zeros(N_Y, dtype=np.float64)
     y0_single[I_HEP] = 1.45e-08

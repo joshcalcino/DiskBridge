@@ -15,8 +15,6 @@ from diskbridge._constants import (
     Y_CO,
 )
 
-from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
-
 from diskbridge.chemistry.models.gow17 import (
     N_Y,
     N_PH,
@@ -56,6 +54,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_local_chi_factor,
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
+    _resolve_visser_table_linewidth,
     _warn_if_co_phase_settings_ignored,
 )
 from diskbridge.chemistry.validation import project_gow17_state_to_budgets
@@ -212,7 +211,10 @@ class Gow17TimeStepper:
             Av_arr = _as_cgs_f64(Av_q, "dimensionless")
             self.Av_flat = Av_arr.reshape(self.ncells)
 
-        self.visser = VisserShielding(b_kms=float(self.b_kms))
+        self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
+            self.b_kms,
+            self.shielding_linewidth_meta,
+        )
         self.co_phase_params = _resolve_co_phase_runtime_params(cfg)
 
         zero_cell = np.zeros(self.ncells, dtype=np.float64)
@@ -354,7 +356,10 @@ class Gow17TimeStepper:
             self.cfg,
             T_flat.reshape(self.shape),
         )
-        self.visser = VisserShielding(b_kms=float(self.b_kms))
+        self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
+            self.b_kms,
+            self.shielding_linewidth_meta,
+        )
 
         theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,

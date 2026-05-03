@@ -162,12 +162,20 @@ def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) 
 def _gow17_validation_summary(meta: dict) -> dict:
     """Return a compact summary for GOW17 validation runs."""
     diag = meta.get("gow17_diagnostics", {})
+    time_cvode_failure_cells_total = int(sum(diag.get("time_cvode_failure_cells_hist", [])))
+    time_exception_failure_cells_total = int(sum(diag.get("time_exception_failure_cells_hist", [])))
+    time_negative_abundance_corrections_total = int(
+        sum(diag.get("time_negative_abundance_corrections_hist", []))
+    )
     return {
         "n_fail": int(meta.get("n_fail", -1)),
         "max_status": int(meta.get("max_status", 0)),
         "temperature_mode": meta.get("temperature_mode"),
         "enable_co_phase": bool(meta.get("enable_co_phase", False)),
         "b_CO_mode": meta.get("b_CO_mode"),
+        "b_CO_requested_scalar_kms": diag.get("b_CO_requested_scalar_kms"),
+        "b_CO_table_kms": diag.get("b_CO_table_kms"),
+        "b_CO_scalar_approximation": bool(diag.get("b_CO_scalar_approximation", False)),
         "rhs_status": int(diag.get("gow17_rhs_status", 0)),
         "rhs_residual_max_global": float(diag.get("gow17_rhs_residual_max_global", float("nan"))),
         "thermal_balance_residual_max_abs": float(
@@ -179,6 +187,9 @@ def _gow17_validation_summary(meta: dict) -> dict:
         ),
         "cvode_failure_cells_total": int(diag.get("cvode_failure_cells_total", 0)),
         "exception_failure_cells_total": int(diag.get("exception_failure_cells_total", 0)),
+        "time_cvode_failure_cells_total": time_cvode_failure_cells_total,
+        "time_exception_failure_cells_total": time_exception_failure_cells_total,
+        "time_negative_abundance_corrections_total": time_negative_abundance_corrections_total,
     }
 
 

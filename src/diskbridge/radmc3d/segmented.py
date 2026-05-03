@@ -206,14 +206,52 @@ class SegmentedRadRunner:
             raise FileNotFoundError(f"No segmented RT directory found: {segments_root}")
 
         parsed_segments: list[tuple[int, float | None, bool, Path]] = []
-        for segment_dir in segments_root.iterdir():
-            if not segment_dir.is_dir():
-                continue
+        summary_path = self.base_model_dir / "plots" / "segmented_rt" / "diagnostic_summary.json"
+        if summary_path.exists():
             try:
-                level, rmax_au, is_final = self._parse_segment_dir(segment_dir)
-            except ValueError:
-                continue
-            parsed_segments.append((level, rmax_au, is_final, segment_dir))
+                with summary_path.open("r") as f:
+                    summary = json.load(f)
+                manifest_segments = summary.get("segmented_rt", {}).get("segments", [])
+            except Exception as exc:
+                logger.warning(
+                    "Could not read segmented RT manifest %s; falling back to directory scan: %s",
+                    summary_path,
+                    exc,
+                )
+                manifest_segments = []
+            for entry in manifest_segments:
+                work_dir = entry.get("work_dir")
+                if not work_dir:
+                    continue
+                segment_dir = Path(work_dir)
+                if not segment_dir.is_absolute():
+                    segment_dir = self.base_model_dir / segment_dir
+                if not segment_dir.exists():
+                    logger.warning("Skipping missing segmented RT manifest entry: %s", segment_dir)
+                    continue
+                try:
+                    level, rmax_au, parsed_is_final = self._parse_segment_dir(segment_dir)
+                except ValueError:
+                    logger.warning("Skipping invalid segmented RT manifest entry: %s", segment_dir)
+                    continue
+                parsed_segments.append(
+                    (
+                        level,
+                        rmax_au,
+                        bool(entry.get("is_final", parsed_is_final)),
+                        segment_dir,
+                    )
+                )
+
+        if not parsed_segments:
+            for segment_dir in segments_root.iterdir():
+                if not segment_dir.is_dir():
+                    continue
+                try:
+                    level, rmax_au, is_final = self._parse_segment_dir(segment_dir)
+                except ValueError:
+                    continue
+                parsed_segments.append((level, rmax_au, is_final, segment_dir))
 
         parsed_segments.sort(key=lambda item: (item[0], item[2]))
         if not parsed_segments:
