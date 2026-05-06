@@ -13,6 +13,8 @@ import diskbridge
 from diskbridge.visualization.profiles import plot_phi_avg_rz_slice
 import numpy as np
 from diskbridge.model.field import Field
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 # Load parameters for this example and update the global params
@@ -31,8 +33,197 @@ rho_disk_min = 1e-21 * diskbridge.units('g/cm^3')
 r_max = 200 * diskbridge.units('au')
 
 WEIGHT_MODE = "margins"
+DUST_ISM_COMPLEMENT_GAMMA = 2.0
 
 mesh = model.mesh
+
+PLOT_DIR = Path("plots")
+KEY_PLOT_DIR = PLOT_DIR / "key"
+BIN_PLOT_DIR = PLOT_DIR / "dust_bins"
+SUPPORT_PLOT_DIR = PLOT_DIR / "supporting"
+for _plot_dir in (KEY_PLOT_DIR, BIN_PLOT_DIR, SUPPORT_PLOT_DIR):
+    _plot_dir.mkdir(parents=True, exist_ok=True)
+
+
+def key_plot(filename):
+    return KEY_PLOT_DIR / filename
+
+
+def bin_plot(filename):
+    return BIN_PLOT_DIR / filename
+
+
+def supporting_plot(filename):
+    return SUPPORT_PLOT_DIR / filename
+
+
+def write_plot_index():
+    index = """# Leon sim6 plot guide
+
+Start with these:
+
+1. `key/midplane_radial_dust_diagnostics_margins.png`
+   Shows whether the bright inner feature is gas, disc dust, ISM dust, or dust/gas.
+2. `key/dust_components_inner_zoverr_vs_r_margins_percentile.png`
+   Side-by-side inner gas, total dust, disc dust, and ISM dust maps.
+3. `key/dust_density_inner_zoverr_vs_r_margins_percentile.png`
+   Cleaner zoom of the bright inner dust structure.
+4. `key/dust_to_gas_inner_zoverr_vs_r_margins.png`
+   Shows where the dust-to-gas ratio is being boosted or suppressed.
+5. `key/dust_weight_inner_theta_zoverr_vs_r_margins.png`
+   Shows the effective dust disc weight after smooth ISM-complement compression.
+
+Supporting plots:
+
+- `supporting/` contains full-domain gas, dust, mask, and component-total maps.
+- `dust_bins/` contains one plot per dust-size bin. Use these only when you need
+  to inspect which grain sizes are responsible.
+"""
+    (PLOT_DIR / "README.md").write_text(index)
+
+
+def log_percentile_limits(data, lower=1.0, upper=99.0, max_dyn_range_dex=8.0):
+    values = np.asarray(data, dtype=float)
+    ok = np.isfinite(values) & (values > 0.0)
+    if not np.any(ok):
+        raise ValueError("No positive finite values for log percentile limits")
+    logv = np.log10(values[ok])
+    vmin = float(np.nanpercentile(logv, lower))
+    vmax = float(np.nanpercentile(logv, upper))
+    if max_dyn_range_dex is not None and np.isfinite(vmax):
+        vmin = max(vmin, vmax - float(max_dyn_range_dex))
+    return vmin, vmax
+
+
+def phi_avg_log_panel(
+    ax,
+    model,
+    field,
+    *,
+    title,
+    vmin=None,
+    vmax=None,
+    xlim=None,
+    ylim=None,
+    cmap="viridis",
+):
+    r_edges_au = model.mesh.edges("r").to("au").magnitude
+    theta_edges = model.mesh.edges("theta").to("radian").magnitude
+    data = field.data.to("g/cm^3").magnitude
+    data_phi = np.mean(data, axis=2)
+    z_plot = np.log10(np.maximum(data_phi, np.finfo(np.float64).tiny)).T
+    y_edges = np.cos(theta_edges)
+    if y_edges[0] > y_edges[-1]:
+        y_edges = y_edges[::-1]
+        z_plot = z_plot[::-1, :]
+    pc = ax.pcolormesh(
+        r_edges_au,
+        y_edges,
+        z_plot,
+        shading="auto",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_xscale("log")
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_title(title)
+    ax.set_xlabel("r [au]")
+    ax.set_ylabel("z/r")
+    return pc
+
+
+def plot_inner_component_comparison(
+    *,
+    gas_field,
+    total_dust_field,
+    disk_dust_field,
+    ism_dust_field,
+    output,
+    xlim,
+    ylim,
+):
+    panels = [
+        ("gas density", gas_field),
+        ("total dust", total_dust_field),
+        ("disc dust", disk_dust_field),
+        ("ISM dust", ism_dust_field),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True)
+    for ax, (title, field) in zip(axes.ravel(), panels):
+        data = field.data.to("g/cm^3").magnitude
+        vmin, vmax = log_percentile_limits(data, 1.0, 99.5)
+        pc = phi_avg_log_panel(
+            ax,
+            model,
+            field,
+            title=title,
+            vmin=vmin,
+            vmax=vmax,
+            xlim=xlim,
+            ylim=ylim,
+        )
+        cbar = fig.colorbar(pc, ax=ax)
+        cbar.set_label("log10 density [g cm^-3]")
+
+    fig.tight_layout()
+    fig.savefig(output, dpi=220)
+    plt.close(fig)
+
+
+def plot_midplane_radial_diagnostics(
+    *,
+    gas_density,
+    total_dust_density,
+    disk_dust_density,
+    ism_dust_density,
+    dtg_total,
+    dtg_disk,
+    dtg_ism,
+    disk_weight,
+    output,
+):
+    r_au = model.mesh.centers("r").to("au").magnitude
+    theta = model.mesh.centers("theta").to("radian").magnitude
+    mid_idx = int(np.argmin(np.abs(theta - 0.5 * np.pi)))
+
+    def mid_phi_mean(arr):
+        arr = np.asarray(arr, dtype=float)
+        return np.nanmean(arr[:, mid_idx, :], axis=1)
+
+    fig, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+
+    axes[0].loglog(r_au, mid_phi_mean(gas_density), label="gas", color="0.15")
+    axes[0].loglog(r_au, mid_phi_mean(total_dust_density), label="total dust", color="tab:blue")
+    axes[0].loglog(r_au, mid_phi_mean(disk_dust_density), label="disc dust", color="tab:orange")
+    axes[0].loglog(r_au, mid_phi_mean(ism_dust_density), label="ISM dust", color="tab:green")
+    axes[0].set_ylabel("midplane density [g cm^-3]")
+    axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].semilogx(r_au, mid_phi_mean(dtg_total), label="total", color="tab:blue")
+    axes[1].semilogx(r_au, mid_phi_mean(dtg_disk), label="disc component", color="tab:orange")
+    axes[1].semilogx(r_au, mid_phi_mean(dtg_ism), label="ISM component", color="tab:green")
+    axes[1].axhline(1e-2, color="0.3", linestyle="--", linewidth=1.0, label="1e-2")
+    axes[1].set_yscale("log")
+    axes[1].set_ylabel("midplane dust/gas")
+    axes[1].legend(loc="best", fontsize=8)
+
+    axes[2].semilogx(r_au, mid_phi_mean(disk_weight), color="tab:purple")
+    axes[2].set_ylabel("midplane dust disc weight")
+    axes[2].set_xlabel("r [au]")
+    axes[2].set_ylim(-0.05, 1.05)
+
+    for ax in axes:
+        ax.set_xlim(float(np.nanmin(r_au[r_au > 0.0])), 300.0)
+        ax.grid(True, which="both", alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(output, dpi=220)
+    plt.close(fig)
 
 fthres = 2.0
 
@@ -46,7 +237,7 @@ r_min_au = float(np.min(r_positive))
 plot_phi_avg_rz_slice(
     model,
     "density",
-    output="gas_density_zoverr_vs_r_premask.png",
+    output=supporting_plot("gas_density_zoverr_vs_r_premask.png"),
     x_axis="r",
     y_axis="z/r",
     log10=True,
@@ -76,8 +267,9 @@ model.gas_register("disk_mask", disk.mask)
 mask = disk.mask.data.magnitude.astype(bool)
 print(f"mask fraction (theta) = {mask.mean():.6f}")
 
-w = model.gas["disk_weight"].data.to("dimensionless").magnitude
-w_ism = 1.0 - w
+w_raw = np.clip(model.gas["disk_weight"].data.to("dimensionless").magnitude, 0.0, 1.0)
+w_ism = (1.0 - w_raw) ** DUST_ISM_COMPLEMENT_GAMMA
+w = 1.0 - w_ism
 
 disk_weight_field = Field(
     data=diskbridge.Quantity(w, "dimensionless"),
@@ -89,6 +281,9 @@ ism_weight_field = Field(
     quantity="mask",
     axis_order=mesh.axis_names(),
 )
+
+model.gas_register("dust_weight", disk_weight_field)
+model.gas_register("dust_ism_weight", ism_weight_field)
 
 model.dust.add_component_from_mask(mask=disk_weight_field, mode="settling")
 model.dust.add_component_from_mask(mask=ism_weight_field, mode="proportional")
@@ -136,7 +331,7 @@ r_min = float(np.min(r_positive))
 plot_phi_avg_rz_slice(
     model,
     "disk_mask",
-    output="disk_mask_theta_zoverr_vs_r.png",
+    output=supporting_plot("disk_mask_theta_zoverr_vs_r.png"),
     x_axis="r",
     y_axis="z/r",
     log10=False,
@@ -145,6 +340,10 @@ plot_phi_avg_rz_slice(
 )
 
 component_totals = {}
+dust_density_disk_total = None
+dust_density_ism_total = None
+dtg_disk = None
+dtg_ism = None
 
 for bin_name, dust_bin in model.dust.bins.items():
     bin_density = dust_bin["density"]
@@ -163,7 +362,7 @@ for bin_name, dust_bin in model.dust.bins.items():
         component_totals[comp_idx] = component_totals[comp_idx] + bin_density.data
 
     size_um = float(dust_bin.size.to("um").magnitude)
-    output = f"{prefix}{bin_name}_{size_um:.6g}um_zoverr_vs_r.png"
+    output = bin_plot(f"{prefix}{bin_name}_{size_um:.6g}um_zoverr_vs_r.png")
 
     plot_phi_avg_rz_slice(
         model,
@@ -185,7 +384,7 @@ if 0 in component_totals:
     plot_phi_avg_rz_slice(
         model,
         dust_density_disk_total,
-        output="dust_density_disk_total_zoverr_vs_r.png",
+        output=supporting_plot("dust_density_disk_total_zoverr_vs_r.png"),
         x_axis="r",
         y_axis="z/r",
         log10=True,
@@ -212,7 +411,7 @@ if 0 in component_totals:
     plot_phi_avg_rz_slice(
         model,
         dtg_disk_field,
-        output="dust_to_gas_disk_total_zoverr_vs_r.png",
+        output=supporting_plot("dust_to_gas_disk_total_zoverr_vs_r.png"),
         x_axis="r",
         y_axis="z/r",
         log10=True,
@@ -231,7 +430,7 @@ if 1 in component_totals:
     plot_phi_avg_rz_slice(
         model,
         dust_density_ism_total,
-        output="dust_density_ism_total_zoverr_vs_r.png",
+        output=supporting_plot("dust_density_ism_total_zoverr_vs_r.png"),
         x_axis="r",
         y_axis="z/r",
         log10=True,
@@ -258,7 +457,7 @@ if 1 in component_totals:
     plot_phi_avg_rz_slice(
         model,
         dtg_ism_field,
-        output="dust_to_gas_ism_total_zoverr_vs_r.png",
+        output=supporting_plot("dust_to_gas_ism_total_zoverr_vs_r.png"),
         x_axis="r",
         y_axis="z/r",
         log10=True,
@@ -271,7 +470,7 @@ if 1 in component_totals:
 plot_phi_avg_rz_slice(
     model,
     "density",
-    output="gas_density_zoverr_vs_r.png",
+    output=supporting_plot("gas_density_zoverr_vs_r.png"),
     x_axis="r",
     y_axis="z/r",
     log10=True,
@@ -290,7 +489,7 @@ vmax_global = float(np.nanmax(dust_density_log)) - 3
 plot_phi_avg_rz_slice(
     model,
     dust_density,
-    output=f"dust_density_zoverr_vs_r_{WEIGHT_MODE}.png",
+    output=supporting_plot(f"dust_density_zoverr_vs_r_{WEIGHT_MODE}.png"),
     x_axis="r",
     y_axis="z/r",
     log10=True,
@@ -298,6 +497,34 @@ plot_phi_avg_rz_slice(
     xlim=(r_min, 300.0),
     vmin=vmin_global,
     vmax=vmax_global,
+)
+
+vmin_dust_p, vmax_dust_p = log_percentile_limits(dust_density_data, 1.0, 99.5)
+plot_phi_avg_rz_slice(
+    model,
+    dust_density,
+    output=supporting_plot(f"dust_density_zoverr_vs_r_{WEIGHT_MODE}_percentile.png"),
+    x_axis="r",
+    y_axis="z/r",
+    log10=True,
+    xscale="log",
+    xlim=(r_min, 300.0),
+    vmin=vmin_dust_p,
+    vmax=vmax_dust_p,
+)
+
+plot_phi_avg_rz_slice(
+    model,
+    dust_density,
+    output=key_plot(f"dust_density_inner_zoverr_vs_r_{WEIGHT_MODE}_percentile.png"),
+    x_axis="r",
+    y_axis="z/r",
+    log10=True,
+    xscale="log",
+    xlim=(r_min, 80.0),
+    ylim=(-0.35, 0.35),
+    vmin=vmin_dust_p,
+    vmax=vmax_dust_p,
 )
 
 dtg_total = np.full_like(rho_g, np.nan, dtype=float)
@@ -318,7 +545,7 @@ dtg_total_field = Field(
 plot_phi_avg_rz_slice(
     model,
     dtg_total_field,
-    output=f"dust_to_gas_zoverr_vs_r_{WEIGHT_MODE}.png",
+    output=supporting_plot(f"dust_to_gas_zoverr_vs_r_{WEIGHT_MODE}.png"),
     x_axis="r",
     y_axis="z/r",
     log10=True,
@@ -330,8 +557,22 @@ plot_phi_avg_rz_slice(
 
 plot_phi_avg_rz_slice(
     model,
+    dtg_total_field,
+    output=key_plot(f"dust_to_gas_inner_zoverr_vs_r_{WEIGHT_MODE}.png"),
+    x_axis="r",
+    y_axis="z/r",
+    log10=True,
+    xscale="log",
+    xlim=(r_min, 80.0),
+    ylim=(-0.35, 0.35),
+    vmin=vmin_dtg_total,
+    vmax=vmax_dtg_total,
+)
+
+plot_phi_avg_rz_slice(
+    model,
     model.gas["disk_weight"],
-    output=f"disk_weight_theta_zoverr_vs_r_{WEIGHT_MODE}.png",
+    output=supporting_plot(f"disk_weight_theta_zoverr_vs_r_{WEIGHT_MODE}.png"),
     x_axis="r",
     y_axis="z/r",
     log10=False,
@@ -339,8 +580,44 @@ plot_phi_avg_rz_slice(
     xlim=(r_min, 300.0),
 )
 
+plot_phi_avg_rz_slice(
+    model,
+    model.gas["dust_weight"],
+    output=key_plot(f"dust_weight_inner_theta_zoverr_vs_r_{WEIGHT_MODE}.png"),
+    x_axis="r",
+    y_axis="z/r",
+    log10=False,
+    xscale="log",
+    xlim=(r_min, 80.0),
+    ylim=(-0.35, 0.35),
+)
+
+if dust_density_disk_total is not None and dust_density_ism_total is not None:
+    plot_inner_component_comparison(
+        gas_field=model.gas["density"],
+        total_dust_field=dust_density,
+        disk_dust_field=dust_density_disk_total,
+        ism_dust_field=dust_density_ism_total,
+        output=key_plot(f"dust_components_inner_zoverr_vs_r_{WEIGHT_MODE}_percentile.png"),
+        xlim=(r_min, 80.0),
+        ylim=(-0.35, 0.35),
+    )
+
+if dtg_disk is not None and dtg_ism is not None:
+    plot_midplane_radial_diagnostics(
+        gas_density=rho_g,
+        total_dust_density=rho_d,
+        disk_dust_density=dust_density_disk_total.data.to("g/cm^3").magnitude,
+        ism_dust_density=dust_density_ism_total.data.to("g/cm^3").magnitude,
+        dtg_total=dtg_total,
+        dtg_disk=dtg_disk,
+        dtg_ism=dtg_ism,
+        disk_weight=model.gas["dust_weight"].data.to("dimensionless").magnitude,
+        output=key_plot(f"midplane_radial_dust_diagnostics_{WEIGHT_MODE}.png"),
+    )
+
 rho_d = model.dust["density"].data.to("g/cm^3").magnitude
-w = model.gas["disk_weight"].data.to("dimensionless").magnitude
+w = model.gas["dust_weight"].data.to("dimensionless").magnitude
 
 rho_d_phi = np.mean(rho_d, axis=2)
 w_phi = np.mean(w, axis=2)
@@ -354,4 +631,4 @@ sel = (w_mid > 0.1) & (w_mid < 0.9)
 
 edge = np.nanpercentile(grad[sel], 90) if np.any(sel) else np.nan
 print(f"[{WEIGHT_MODE}] edge_harshness_p90_dex_per_theta_cell = {edge}")
-
+write_plot_index()

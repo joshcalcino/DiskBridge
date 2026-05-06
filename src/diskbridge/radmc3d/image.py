@@ -20,6 +20,7 @@ from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 from .run import ensure_temperature_symlink
+from .line_transfer.preflight import ensure_gas_temperature_for_nonlte
 import diskbridge
 from .molecule import RadMolecule
 
@@ -32,7 +33,7 @@ AU = diskbridge.units('au').to('cm').magnitude
 class RadImage:
     """RADMC-3D image class for reading and writing FITS files.
     
-    This class handles reading RADMC-3D image.out files and writing
+    This class handles reading RADMC-3D binary image.bout files and writing
     FITS files with proper WCS headers for use with astronomical tools.
     
     Attributes
@@ -72,7 +73,7 @@ class RadImage:
     >>> 
     >>> # Read an image
     >>> img = RadImage()
-    >>> img.readImage('image.out')
+    >>> img.readImage('image.bout')
     >>> 
     >>> # Write to FITS
     >>> img.writeFits('output.fits', dpc=140.0, coord='16h32m22s -24d28m30s')
@@ -177,23 +178,25 @@ class RadImage:
         """
         cleanup_symlink_paths(self._active_symlinks)
         
-    def readImage(self, fname: str | Path = 'image.out', binary: bool = False) -> None:
+    def readImage(self, fname: str | Path = 'image.bout', binary: bool = True) -> None:
         """Read a RADMC-3D image file.
         
         Parameters
         ----------
         fname : str or Path, optional
-            Path to the RADMC-3D image file (default: 'image.out')
+            Path to the RADMC-3D binary image file (default: 'image.bout')
         binary : bool, optional
-            Whether to read binary format (default: False, reads ASCII)
+            Kept for API compatibility. DiskBridge image handling uses binary RADMC output.
             
         Notes
         -----
-        This method reads RADMC-3D image output files in either ASCII or binary
-        format. The image data is stored in erg/s/cm^2/Hz/ster units and also
-        converted to Jy/pixel units.
+        This method reads RADMC-3D stream binary image output files. The image
+        data is stored in erg/s/cm^2/Hz/ster units and also converted to
+        Jy/pixel units.
         """
         fname = Path(fname)
+        if not fname.is_absolute():
+            fname = self.model_dir / fname
         self.filename = str(fname)
         
         logger.info(f"Reading RADMC-3D image: {fname}")
@@ -216,8 +219,10 @@ class RadImage:
     def _readImageBinary(self, fname: Path) -> None:
         """Read binary format image.bout file."""
         with open(fname, 'rb') as f:
-            # Read header
-            header = np.fromfile(f, dtype=np.int32, count=4)
+            # RADMC-3D stream binary images use 64-bit integer header values.
+            header = np.fromfile(f, dtype=np.int64, count=4)
+            if header.size != 4:
+                raise ValueError(f"Could not read RADMC-3D binary image header from {fname}")
             iformat = header[0]
             self.nx = header[1]
             self.ny = header[2]
@@ -308,7 +313,7 @@ class RadImage:
         Examples
         --------
         >>> img = RadImage()
-        >>> img.readImage('image.out')
+        >>> img.readImage('image.bout')
         >>> img.writeFits('co_line.fits', dpc=140.0, 
         ...               coord='16h32m22s -24d28m30s',
         ...               object_name='HD_163296')
@@ -575,9 +580,9 @@ class RadImage:
             )
             
             # Read image
-            self.readImage('image.out')
+            self.readImage('image.bout')
             
-            image_file = self.model_dir / 'image.out'
+            image_file = self.model_dir / 'image.bout'
             if image_file.exists() or image_file.is_symlink():
                 image_file.unlink()
             
@@ -732,9 +737,9 @@ class RadImage:
             )
             
             # Read image
-            self.readImage('image.out')
+            self.readImage('image.bout')
             
-            image_file = self.model_dir / 'image.out'
+            image_file = self.model_dir / 'image.bout'
             if image_file.exists() or image_file.is_symlink():
                 image_file.unlink()
             
@@ -871,7 +876,7 @@ class RadImage:
         **kwargs : additional flags for radmc3d
         """
         # Build command
-        cmd = ['radmc3d', 'image']
+        cmd = ['radmc3d', 'image', 'imageunform']
         cmd += ['npix', str(npix)]
         cmd += ['incl', str(incl)]
         cmd += ['posang', str(posang)]
@@ -916,9 +921,9 @@ class RadImage:
         cmd_str = ' '.join(cmd)
         logger.info(f"Running: {cmd_str}")
         
-        image_file = self.model_dir / 'image.out'
-        if image_file.exists() or image_file.is_symlink():
-            image_file.unlink()
+        for image_file in (self.model_dir / 'image.bout', self.model_dir / 'image.out'):
+            if image_file.exists() or image_file.is_symlink():
+                image_file.unlink()
         
         # Create symlinks to organized input files
         self.create_symlinks()
@@ -947,6 +952,12 @@ class RadImage:
                     f"radmc3d image failed with exit code {returncode} and errors:\n{errors}"
                 )
             raise RuntimeError(f"radmc3d image failed with exit code {returncode}")
+
+        if not (self.model_dir / "image.bout").exists():
+            errors = _extract_radmc_errors(log_path)
+            if errors:
+                raise RuntimeError(f"radmc3d image did not produce image.bout; errors:\n{errors}")
+            raise RuntimeError(f"radmc3d image completed but did not produce {self.model_dir / 'image.bout'}")
         
         logger.debug("RADMC-3D image completed successfully")
     
@@ -1321,10 +1332,18 @@ class RadImage:
                     with open(inp_file, 'r') as f:
                         content = f.read()
 
+        use_line_gas_temperature = abs(line_mode) in {3, 4}
+        if use_line_gas_temperature:
+            ensure_gas_temperature_for_nonlte(
+                self.model_dir,
+                {"tgas_eq_tdust": "0"},
+                use_gow17_tgas=True,
+            )
+
         settings = {
             "incl_lines": "1",
             "lines_mode": str(line_mode),
-            "tgas_eq_tdust": "1",
+            "tgas_eq_tdust": "0" if use_line_gas_temperature else "1",
             "itempdecoup": "1",
             "rto_style": "3",
         }
@@ -1381,7 +1400,7 @@ class RadImage:
         collider = str(line_params["line_colliders"][index]).lower()
         colliders = []
         if collider not in {"", "none", "off", "0"}:
-            colliders = [collider]
+            colliders = [part.strip() for part in collider.split(",") if part.strip()]
 
         line_mode = int(line_params["line_mode"][index])
         if abs(line_mode) in {3, 4} and not colliders:
