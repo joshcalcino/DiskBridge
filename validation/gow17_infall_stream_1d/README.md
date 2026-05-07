@@ -78,6 +78,20 @@ The stellar radiation source is defined by:
 - `mdot_msun_yr`: the accretion rate
 - `accretion_fill_factor`: the fractional stellar surface area covered by the hotspot
 
+The run script supports two radiation modes:
+
+- `draine_scalar`: the historical validation setup. It converts the broad
+  stellar `912-2067 Angstrom` energy flux into a single Draine-normalized
+  scalar and gives that same Draine-shaped field to all GOW17 photochannels.
+- `stellar_products`: the corrected setup. It keeps the same 1D incident-slab
+  columns and dust attenuation, but supplies separate stellar-spectrum UV
+  products for CO dissociation, H2 dissociation, C ionization, and CO
+  photodesorption.
+
+The old saved validation outputs under `out/energy_0_tdust_0_eqtrack_1_*`
+were produced with `draine_scalar`. Corrected outputs are written with a
+`_rad_stellar_products` suffix, so they do not overwrite those old runs.
+
 In the current command-line workflow, these are not chosen independently. Selecting one of the supported temperatures from `run.py` automatically selects a fixed PMS-style radius, mass, and accretion rate. So when you pick `4000 K`, `6000 K`, `6750 K`, `7500 K`, or `10000 K`, you are choosing a full stellar preset, not only a temperature.
 
 The temperature sets the spectral shape of the photospheric blackbody, while the radius sets the emitting area and therefore the luminosity normalization. If `mdot_msun_yr > 0`, the model also adds a hotspot UV component whose luminosity scales with accretion power and whose emitting area is set by `accretion_fill_factor`. Changing from one preset to another therefore changes both the hardness of the stellar spectrum and the total UV output in the selected band.
@@ -355,6 +369,29 @@ The run directory created under `out/` is:
 
 ```text
 energy_<0|1>_tdust_<0|1>_eqtrack_<0|1>_teff_<temperature>K
+```
+
+Runs using `--radiation-mode stellar_products` append
+`_rad_stellar_products` to that directory name.
+
+Corrected stellar-spectrum example without mp4 generation:
+
+```bash
+python validation/gow17_infall_stream_1d/run.py \
+  --evolve-energy 0 \
+  --estimate-tdust 0 \
+  --track-infall-equilibrium 0 \
+  --teff-k 6750 \
+  --radiation-mode stellar_products \
+  --make-movies 0
+```
+
+Compare an old scalar run against a corrected run:
+
+```bash
+python validation/gow17_infall_stream_1d/compare_runs.py \
+  --old-dir validation/gow17_infall_stream_1d/out/energy_0_tdust_0_eqtrack_1_teff_6750K \
+  --new-dir validation/gow17_infall_stream_1d/out/energy_0_tdust_0_eqtrack_0_teff_6750K_rad_stellar_products
 ```
 
 ## Output Files

@@ -9,6 +9,30 @@ if TYPE_CHECKING:
 from diskbridge._units import Quantity
 
 
+def add_default_line_colliders_from_gow17(
+    result,
+    rad: Optional['RadModel'] = None,
+    opr: float = 3.0,
+):
+    """Add GOW17-derived line-transfer collider densities to a result."""
+
+    del rad
+    opr_value = float(opr)
+    if opr_value < 0.0:
+        raise ValueError("line_h2_opr must be non-negative")
+    if "h2" not in result.number_densities:
+        raise KeyError("GOW17 line collider derivation requires number_densities['h2']")
+
+    n_h2 = result.number_densities["h2"].to("cm^-3")
+    f_p = 1.0 / (1.0 + opr_value)
+    f_o = opr_value / (1.0 + opr_value)
+    result.number_densities["p-h2"] = Quantity(f_p * n_h2.magnitude, "cm^-3")
+    result.number_densities["o-h2"] = Quantity(f_o * n_h2.magnitude, "cm^-3")
+    result.meta["line_h2_opr"] = opr_value
+    result.meta["derived_line_colliders"] = ["p-h2", "o-h2"]
+    return result
+
+
 def write_numberdens(
     rad: 'RadModel',
     species: str,

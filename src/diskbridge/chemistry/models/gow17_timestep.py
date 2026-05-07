@@ -107,13 +107,15 @@ class Gow17TimeStepper:
             context="Gow17TimeStepper",
         )
         self.chi_is_incident = bool(cfg.get("chi_is_incident", False))
+        self.incident_uv_products = bool(cfg.get("incident_uv_products", False))
         if self.chi_is_incident:
             if getattr(rad, "Av", None) is None:
                 raise ValueError("Gow17TimeStepper: chi_is_incident=True requires rad.Av to be set")
-            if rad.has_uv_product("G_CO_diss"):
+            if rad.has_uv_product("G_CO_diss") and not self.incident_uv_products:
                 raise ValueError(
                     "Gow17TimeStepper: chi_is_incident=True is incompatible "
-                    "with registered UV product fields"
+                    "with registered UV product fields unless "
+                    "incident_uv_products=True"
                 )
         else:
             full_cfg = dict(get_config())
@@ -290,12 +292,23 @@ class Gow17TimeStepper:
         y_state = self._project_state(y_state)
 
         if self.chi_is_incident:
-            chi_broad = rad.ensure_chi()
-            G_CO_diss = chi_broad
-            G_H2_diss = chi_broad
-            G_C_ion = chi_broad
-            G_CO_pdes = chi_broad
-            F_CO_pdes_photon = None
+            if self.incident_uv_products:
+                chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
+                G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
+                G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
+                G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
+                G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
+                F_CO_pdes_photon = rad.ensure_uv_product(
+                    "F_CO_pdes_photon",
+                    fallback_to_chi=False,
+                )
+            else:
+                chi_broad = rad.ensure_chi()
+                G_CO_diss = chi_broad
+                G_H2_diss = chi_broad
+                G_C_ion = chi_broad
+                G_CO_pdes = chi_broad
+                F_CO_pdes_photon = None
         elif self.runtime_mode is not None and self.runtime_mode.products_enabled:
             chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
             G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)

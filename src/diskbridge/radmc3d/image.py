@@ -21,6 +21,7 @@ from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 from .run import ensure_temperature_symlink
 from .line_transfer.preflight import ensure_gas_temperature_for_nonlte
+from .line_transfer.molecule_data import stage_molecule_file_for_colliders
 import diskbridge
 from .molecule import RadMolecule
 
@@ -1405,7 +1406,7 @@ class RadImage:
         line_mode = int(line_params["line_mode"][index])
         if abs(line_mode) in {3, 4} and not colliders:
             raise ValueError(
-                f"line_mode={line_mode} for {molecule} requires line_colliders."
+                f"line_mode={line_mode} for {molecule} has no automatic collider policy."
             )
 
         return {
@@ -1439,9 +1440,23 @@ class RadImage:
         if lines_file.exists():
             content = lines_file.read_text()
             if content == expected_content:
+                if colliders:
+                    stage_molecule_file_for_colliders(
+                        self.inputs_dir / f"molecule_{molecule}.inp",
+                        self.inputs_dir / f"molecule_{molecule}.inp",
+                        colliders,
+                        copy_mode="copy",
+                    )
                 return
 
         logger.info(f"Creating lines.inp for {molecule}...")
         lines_file.write_text(expected_content)
+        if colliders:
+            stage_molecule_file_for_colliders(
+                self.inputs_dir / f"molecule_{molecule}.inp",
+                self.inputs_dir / f"molecule_{molecule}.inp",
+                colliders,
+                copy_mode="copy",
+            )
         
         logger.info(f"Created lines.inp to {lines_file}")

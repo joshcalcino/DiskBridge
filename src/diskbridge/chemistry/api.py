@@ -10,7 +10,11 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
-from diskbridge.chemistry.io import write_gas_temperature, write_many
+from diskbridge.chemistry.io import (
+    add_default_line_colliders_from_gow17,
+    write_gas_temperature,
+    write_many,
+)
 from diskbridge.model.field import Field
 from diskbridge.serialization import jsonable
 
@@ -271,9 +275,16 @@ def run_chemistry(
             )
         result = model_fn(rad, config)
 
+    if model_lower == "gow17":
+        result = add_default_line_colliders_from_gow17(
+            result,
+            rad=rad,
+            opr=config.get("line_h2_opr", 3.0),
+        )
+
     _attach_chemistry_result_to_model(rad, result)
     
-    if write and result.number_densities and not load_existing:
+    if write and result.number_densities and (not load_existing or model_lower == "gow17"):
         write_many(rad, result.number_densities, output_dir)
 
     if write and getattr(rad, 'Tgas_gow17', None) is not None and not load_existing:

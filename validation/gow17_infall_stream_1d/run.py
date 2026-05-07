@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from driver import InfallStream1DConfig, run_with_error_plot
+from driver import InfallStream1DConfig, RADIATION_MODES, RADIATION_MODE_DRAINE_SCALAR, run_with_error_plot
 
 
 def _radius_rsun_from_lstar_teff(lstar_lsun: float, teff_K: float, *, teff_sun_K: float = 5772.0) -> float:
@@ -104,6 +104,25 @@ def main() -> int:
         help="Minimum UV field strength chi applied during equilibrium and evolution.",
     )
     parser.add_argument(
+        "--radiation-mode",
+        dest="radiation_mode",
+        choices=RADIATION_MODES,
+        default=RADIATION_MODE_DRAINE_SCALAR,
+        help=(
+            "Radiation treatment. draine_scalar reproduces the old broad-band "
+            "Draine-shaped approximation; stellar_products uses spectrum-aware "
+            "GOW17 UV products while retaining the 1D incident slab geometry."
+        ),
+    )
+    parser.add_argument(
+        "--make-movies",
+        dest="make_movies",
+        type=int,
+        choices=(0, 1),
+        default=int(InfallStream1DConfig.make_movies),
+        help="Write mp4 abundance movies.",
+    )
+    parser.add_argument(
         "--max-dlnchi",
         dest="max_dlnchi",
         type=float,
@@ -131,14 +150,18 @@ def main() -> int:
         teff_K=float(stellar["teff_K"]),
         mdot_msun_yr=float(stellar.get("mdot_msun_yr", 0.0)),
         min_chi=float(args.min_chi),
+        radiation_mode=str(args.radiation_mode),
+        make_movies=bool(args.make_movies),
         max_dlnchi=float(args.max_dlnchi),
         output_time_power=float(args.output_time_power),
     )
 
     teff_tag = f"{int(cfg.teff_K)}"
+    mode_tag = "" if cfg.radiation_mode == RADIATION_MODE_DRAINE_SCALAR else f"_rad_{cfg.radiation_mode}"
     case_dir = out_root / (
         f"energy_{int(cfg.evolve_energy)}_tdust_{int(cfg.estimate_tdust)}"
         f"_eqtrack_{int(cfg.track_infall_equilibrium)}_teff_{teff_tag}K"
+        f"{mode_tag}"
     )
     return int(run_with_error_plot(case_dir, cfg))
 

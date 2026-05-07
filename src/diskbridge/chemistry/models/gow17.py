@@ -1166,8 +1166,23 @@ def _compute_shielding_and_gph(
     if chi_is_incident:
         if Av_flat is None:
             raise RuntimeError("gow17: internal error (Av_flat missing)")
-        G0_half = 0.5 * chi_dust_flat
-        Gph[:, :] = G0_half[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
+        G0_local = float(local_chi_factor) * chi_dust_flat
+        Gph[:, :] = G0_local[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
+        Gph[:, IPH_CO] = (
+            float(local_chi_factor)
+            * G_CO_diss_flat
+            * np.exp(-float(_KPH_AVFAC[IPH_CO]) * Av_flat)
+        )
+        Gph[:, IPH_H2] = (
+            float(local_chi_factor)
+            * G_H2_diss_flat
+            * np.exp(-float(_KPH_AVFAC[IPH_H2]) * Av_flat)
+        )
+        Gph[:, IPH_C] = (
+            float(local_chi_factor)
+            * G_C_ion_flat
+            * np.exp(-float(_KPH_AVFAC[IPH_C]) * Av_flat)
+        )
         NH_over_Zd = Av_flat * (1.87e21)
         NH_flat_loc = np.divide(
             NH_over_Zd,
@@ -1176,11 +1191,15 @@ def _compute_shielding_and_gph(
             where=(Zd_arr > 0.0),
         )
         GPE = np.ascontiguousarray(
-            G0_half * np.exp(-NH_flat_loc * _SIGMA_PE_CGS * Zd_arr),
+            G0_local * np.exp(-NH_flat_loc * _SIGMA_PE_CGS * Zd_arr),
             dtype=np.float64,
         )
+        if F_CO_pdes_photon_flat is None:
+            F_CO_pdes_photon_flat = G_CO_pdes_flat * float(F_DRAINE)
         GISRF = np.ascontiguousarray(
-            G0_half * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr) * float(F_DRAINE),
+            float(local_chi_factor)
+            * F_CO_pdes_photon_flat
+            * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr),
             dtype=np.float64,
         )
     else:
@@ -1297,6 +1316,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
 
     chi_is_incident = bool(cfg.get("chi_is_incident", False))
+    incident_uv_products = bool(cfg.get("incident_uv_products", False))
     local_chi_factor = _resolve_local_chi_factor(
         cfg,
         chi_is_incident=chi_is_incident,
@@ -1305,9 +1325,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     runtime_mode = None
     if not chi_is_incident:
         runtime_mode = validate_uv_chemistry_config(_full_config_with_gow17_cfg(cfg))
-    elif rad.has_uv_product("G_CO_diss"):
+    elif rad.has_uv_product("G_CO_diss") and not incident_uv_products:
         raise ValueError(
-            "gow17: chi_is_incident=True is incompatible with registered UV product fields"
+            "gow17: chi_is_incident=True is incompatible with registered UV "
+            "product fields unless incident_uv_products=True"
         )
 
     Tdust = rad.ensure_dust_temperature()
@@ -1330,15 +1351,26 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     f_co_pdes_ref = _co_pdes_draine_flux()
     if chi_is_incident:
-        chi = rad.ensure_chi()
-        G_CO_diss = chi
-        G_H2_diss = chi
-        G_C_ion = chi
-        G_CO_pdes = chi
-        F_CO_pdes_photon = Quantity(
-            chi.to("dimensionless").magnitude * f_co_pdes_ref,
-            "1/(cm^2 s)",
-        )
+        if incident_uv_products:
+            chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
+            G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
+            G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
+            G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
+            G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
+            F_CO_pdes_photon = rad.ensure_uv_product(
+                "F_CO_pdes_photon",
+                fallback_to_chi=False,
+            )
+        else:
+            chi = rad.ensure_chi()
+            G_CO_diss = chi
+            G_H2_diss = chi
+            G_C_ion = chi
+            G_CO_pdes = chi
+            F_CO_pdes_photon = Quantity(
+                chi.to("dimensionless").magnitude * float(F_DRAINE),
+                "1/(cm^2 s)",
+            )
     elif runtime_mode is not None and runtime_mode.products_enabled:
         chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
         G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)

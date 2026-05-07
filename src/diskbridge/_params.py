@@ -65,7 +65,7 @@ class Params:
     nline: Union[int, List[int]]
     turbvel: Union[Quantity, List[Quantity]]
     line_mode: Union[int, List[int]]
-    line_colliders: Union[str, List[str]]
+    line_h2_opr: float
     photodissociation: Union[bool, List[bool]]
     freezeout: Union[bool, List[bool]]
     photodesorption: Union[bool, List[bool]]
@@ -160,6 +160,21 @@ PARAM_UNITS = {
 def _parse_bool(raw: str) -> bool:
     raw = raw.strip().lower()
     return raw in ("1", "true", "t", "yes", "y")
+
+
+def default_line_colliders_for_species(species: str) -> List[str]:
+    """Return the chemistry-aware collider set for a non-LTE line species."""
+
+    species = str(species).strip().lower()
+    if species in {"co", "13co", "c18o", "c17o"}:
+        return ["p-h2", "o-h2"]
+    if species in {"catom", "c", "ci"}:
+        return ["h", "p-h2", "o-h2", "e"]
+    if species in {"c+", "cplus", "cii"}:
+        return ["h", "p-h2", "o-h2", "e"]
+    raise ValueError(
+        f"No configured non-LTE collider policy for line species {species!r}"
+    )
 
 
 def _parse_scalar(raw: str, target_type, param_name: str = ''):
@@ -379,7 +394,6 @@ def canonicalize_line_params(params_obj: Params) -> dict:
         "nline",
         "turbvel",
         "line_mode",
-        "line_colliders",
         "photodissociation",
         "freezeout",
         "photodesorption",
@@ -405,9 +419,16 @@ def canonicalize_line_params(params_obj: Params) -> dict:
             )
 
     canonical["gasspecies"] = [str(sp).lower() for sp in canonical["gasspecies"]]
-    canonical["line_colliders"] = [
-        str(sp).lower() for sp in canonical["line_colliders"]
-    ]
+    colliders = []
+    for species_name, line_mode in zip(
+        canonical["gasspecies"],
+        canonical["line_mode"],
+    ):
+        if abs(int(line_mode)) in {3, 4}:
+            colliders.append(",".join(default_line_colliders_for_species(species_name)))
+        else:
+            colliders.append("none")
+    canonical["line_colliders"] = colliders
     return canonical
 
 
