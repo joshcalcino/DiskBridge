@@ -84,6 +84,23 @@ I_SIP = _gow17.I_SIP
 I_OP = _gow17.I_OP
 I_E = _gow17.I_E
 
+GOW17_STATE_SPECIES = {
+    "he+": I_HEP,
+    "ohx": I_OHX,
+    "chx": I_CHX,
+    "co": I_CO,
+    "co_ice": I_CO_ICE,
+    "c+": I_CP,
+    "hco+": I_HCOP,
+    "h2": I_H2,
+    "h+": I_HP,
+    "h3+": I_H3P,
+    "h2+": I_H2P,
+    "s+": I_SP,
+    "si+": I_SIP,
+    "o+": I_OP,
+}
+
 KB_CGS = 1.380649e-16
 _YR_TO_S = float(Quantity("1 yr").to("s").magnitude)
 
@@ -284,6 +301,31 @@ def _electron_abundance(y: np.ndarray) -> np.ndarray:
         + y[..., I_SIP]
         + y[..., I_OP]
     )
+
+
+def _gow17_species_outputs(
+    y_out: np.ndarray,
+    nH_cm3: np.ndarray,
+    *,
+    x_h: np.ndarray,
+    x_catom: np.ndarray,
+    x_e: np.ndarray,
+) -> tuple[dict[str, Quantity], dict[str, Quantity]]:
+    """Return abundance and number-density outputs for all GOW17 species."""
+
+    abundances = {
+        name: Quantity(y_out[..., idx], "dimensionless")
+        for name, idx in GOW17_STATE_SPECIES.items()
+    }
+    abundances["h"] = Quantity(np.maximum(x_h, 0.0), "dimensionless")
+    abundances["catom"] = Quantity(np.maximum(x_catom, 0.0), "dimensionless")
+    abundances["e"] = Quantity(np.maximum(x_e, 0.0), "dimensionless")
+
+    number_densities = {
+        name: Quantity(q.magnitude * nH_cm3, "cm^-3")
+        for name, q in abundances.items()
+    }
+    return abundances, number_densities
 
 
 def _apply_astrochem_aitken_acceleration(
@@ -1613,20 +1655,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ne = Quantity(xe * nH_cm3, "cm^-3")
         nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
 
-        abundances = {
-            "co": Quantity(xCO, "dimensionless"),
-            "co_ice": Quantity(xCO_ice, "dimensionless"),
-        }
-
-        number_densities = {
-            "co": nco_gas,
-            "co_ice": nco_ice,
-            "c+": nCplus,
-            "catom": nC,
-            "e": ne,
-            "h2": nH2_out,
-            "h": nH_atom,
-        }
+        abundances, number_densities = _gow17_species_outputs(
+            y_out,
+            nH_cm3,
+            x_h=xH_atom,
+            x_catom=xC_neutral,
+            x_e=xe,
+        )
 
         fields = {
             "co_ice": nco_ice,
@@ -2444,20 +2479,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             rtol=float(reltol),
         )
 
-    abundances = {
-        "co": Quantity(xCO, "dimensionless"),
-        "co_ice": Quantity(xCO_ice, "dimensionless"),
-    }
-
-    number_densities = {
-        "co": nco_gas,
-        "co_ice": nco_ice,
-        "c+": nCplus,
-        "catom": nC,
-        "e": ne,
-        "h2": nH2_out,
-        "h": nH_atom,
-    }
+    abundances, number_densities = _gow17_species_outputs(
+        y_out,
+        nH_cm3,
+        x_h=xH_atom,
+        x_catom=xC_neutral,
+        x_e=xe,
+    )
 
     gow17_diag = {
         "coupling_mode": coupling_mode,
