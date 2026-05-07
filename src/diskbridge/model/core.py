@@ -598,4 +598,3 @@ def puff_up_model(
     new.disk.puff_up_disk(n, zmax_over_H=zmax_over_H)
     return new
 
-

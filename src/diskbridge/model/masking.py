@@ -292,150 +292,79 @@ def _evaluate_threshold_params(
     return fthres_use, fthres_vr_use
 
 
-def _compute_ring_criteria(
+def _threshold_for_cells(
+    threshold: Union[float, np.ndarray],
+    r_bin: np.ndarray,
+    valid: np.ndarray,
+) -> np.ndarray:
+    if np.isscalar(threshold):
+        return np.full_like(r_bin, float(threshold), dtype=float)
+
+    arr = np.asarray(threshold, dtype=float).reshape(-1)
+    out = np.full_like(r_bin, np.nan, dtype=float)
+    out[valid] = arr[r_bin[valid]]
+    return out
+
+
+def _compute_cell_criteria_mask(
     rho: Quantity,
-    dV_mag: np.ndarray,
     disk_frame: DiskFrameData,
     Pth: Quantity,
-    r_grid: Quantity,
-    r_edges: Quantity,
-    theta_edges: np.ndarray,
-    nR: int,
-    n_theta_bins: int,
+    r_bin: np.ndarray,
+    t_bin: np.ndarray,
+    valid: np.ndarray,
     rho_disk_min: Quantity,
     fthres_use: Union[float, np.ndarray],
     fthres_vr_use: Union[float, np.ndarray],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
-    """Compute Joos ring-level criteria and diagnostics.
+) -> np.ndarray:
+    """Evaluate Joos criteria per cell and keep midplane-connected theta columns."""
+    fthres_grid = _threshold_for_cells(fthres_use, r_bin, valid)
+    fthres_vr_grid = _threshold_for_cells(fthres_vr_use, r_bin, valid)
 
-    Cells are binned into (r_bin, theta_from_midplane_bin). For each ring, this computes:
+    vphi_abs = np.abs(disk_frame.vphi_d.to_base_units().magnitude)
+    vR_abs = np.abs(disk_frame.vR_d.to_base_units().magnitude)
+    vz_abs = np.abs(disk_frame.vz_d.to_base_units().magnitude)
+    rho_base = rho.to_base_units().magnitude
+    rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units().magnitude
+    P = Pth.to_base_units().magnitude
 
-    - Volume-weighted averages of |vphi|, |vR|, |vz|
-    - Average density
-    - Average rotational energy density ~ 0.5 * rho * vphi^2
-    - Average thermal pressure
-
-    It then evaluates the Joos-style boolean criteria per ring and returns
-    ring_pass = c1 & c2 & c3 & c5.
-
-    Args:
-        rho: Gas density.
-        dV_mag: Cell volumes (magnitude array).
-        disk_frame: Disk-frame velocities and theta_from_midplane.
-        Pth: Thermal pressure.
-        r_grid: Cell-center radii.
-        r_edges: Radial bin edges.
-        theta_edges: theta_from_midplane bin edges.
-        nR: Number of radial bins.
-        n_theta_bins: Number of theta bins.
-        rho_disk_min: Density threshold.
-        fthres_use: Threshold for vphi vs vz and rot vs P.
-        fthres_vr_use: Threshold for vphi vs vR.
-
-    Returns:
-        ring_pass: Boolean array (nR, n_theta_bins) of rings passing all criteria.
-        sum_w_2d: Volume weights per ring (nR, n_theta_bins).
-        theta_edges: The theta_from_midplane edges used for binning.
-        diag: Dict of ring-averaged diagnostic arrays with keys:
-            vphi, vR, vz, rot, P, rho (each shaped (nR, n_theta_bins)).
-    """
-    r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
-    t_bin = np.digitize(disk_frame.theta_from_midplane, theta_edges) - 1
-    valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
-
-    ring_index = (r_bin * n_theta_bins + t_bin).astype(np.int64)
-    ring_index_flat = ring_index[valid].ravel()
-    dV_w = dV_mag[valid].ravel()
-    if dV_w.size == 0:
-        raise ValueError("No valid cells for ring binning (check mesh/edges)")
-
-    nbins = nR * n_theta_bins
-    sum_w = np.bincount(ring_index_flat, weights=dV_w, minlength=nbins)
-
-    def ring_avg(q_mag_flat: np.ndarray) -> np.ndarray:
-        num = np.bincount(ring_index_flat, weights=(q_mag_flat * dV_w), minlength=nbins)
-        out = np.zeros(nbins, dtype=float)
-        ok_w = sum_w > 0.0
-        out[ok_w] = num[ok_w] / sum_w[ok_w]
-        return out.reshape(nR, n_theta_bins)
-
-    vphi_avg = ring_avg(np.abs(disk_frame.vphi_d.to_base_units().magnitude)[valid].ravel())
-    vR_avg = ring_avg(np.abs(disk_frame.vR_d.to_base_units().magnitude)[valid].ravel())
-    vz_avg = ring_avg(np.abs(disk_frame.vz_d.to_base_units().magnitude)[valid].ravel())
-    rho_avg_base = ring_avg(rho.to_base_units().magnitude[valid].ravel())
-
-    rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units()
-    rot_avg = ring_avg(rot.magnitude[valid].ravel())
-    P_avg = ring_avg(Pth.to_base_units().magnitude[valid].ravel())
-
-    c1 = vphi_avg > (fthres_vr_use * vR_avg)
-    c2 = vphi_avg > (fthres_use * vz_avg)
-    c3 = rot_avg > (fthres_use * P_avg)
-    c5 = rho_avg_base > rho_disk_min.to_base_units().magnitude
-    ring_pass = c1 & c2 & c3 & c5
-
-    diag = dict(
-        vphi=vphi_avg,
-        vR=vR_avg,
-        vz=vz_avg,
-        rot=rot_avg,
-        P=P_avg,
-        rho=rho_avg_base,
+    cell_pass = (
+        valid
+        & (vphi_abs > (fthres_vr_grid * vR_abs))
+        & (vphi_abs > (fthres_grid * vz_abs))
+        & (rot > (fthres_grid * P))
+        & (rho_base > rho_disk_min.to_base_units().magnitude)
     )
 
-    return ring_pass, sum_w.reshape(nR, n_theta_bins), theta_edges, diag
+    connected = np.zeros_like(cell_pass, dtype=bool)
+    nr, _ntheta, nphi = cell_pass.shape
+    for ir in range(nr):
+        for iphi in range(nphi):
+            populated = np.flatnonzero(valid[ir, :, iphi])
+            if populated.size == 0:
+                continue
 
+            pass_idx = populated[cell_pass[ir, populated, iphi]]
+            if pass_idx.size == 0:
+                continue
 
-def _apply_connectivity(
-    ring_pass: np.ndarray,
-    sum_w_2d: np.ndarray,
-    theta_edges: np.ndarray,
-    nR: int,
-    n_theta_bins: int,
-) -> np.ndarray:
-    """Enforce per-radius connectivity around the midplane.
+            theta_col = disk_frame.theta_from_midplane[ir, populated, iphi]
+            order_local = np.argsort(theta_col)
+            pop_order = populated[order_local]
+            seed = int(pass_idx[np.argmin(np.abs(disk_frame.theta_from_midplane[ir, pass_idx, iphi]))])
+            seed_pos = np.flatnonzero(pop_order == seed)
+            if seed_pos.size == 0:
+                continue
 
-    For each radial bin, selects a contiguous band of theta bins that:
+            k = int(seed_pos[0])
+            while k < pop_order.size and cell_pass[ir, pop_order[k], iphi]:
+                connected[ir, pop_order[k], iphi] = True
+                k += 1
 
-    - Are populated (nonzero volume weight)
-    - Pass the Joos criteria
-    - Are connected to the midplane seed (closest theta bin to 0 among pass-candidates)
-
-    Args:
-        ring_pass: Boolean array (nR, n_theta_bins) from ring-level criteria.
-        sum_w_2d: Volume weights per ring (nR, n_theta_bins).
-        theta_edges: theta_from_midplane bin edges.
-        nR: Number of radial bins.
-        n_theta_bins: Number of theta bins.
-
-    Returns:
-        connected: Boolean array (nR, n_theta_bins) for connected disk rings.
-    """
-    theta_centers = 0.5 * (theta_edges[:-1] + theta_edges[1:])
-    connected = np.zeros_like(ring_pass, dtype=bool)
-    for i in range(nR):
-        populated_idx = np.flatnonzero(sum_w_2d[i] > 0.0)
-        if populated_idx.size == 0:
-            continue
-
-        seed_candidates = populated_idx[ring_pass[i, populated_idx]]
-        if seed_candidates.size == 0:
-            continue
-
-        mid_t = int(seed_candidates[np.argmin(np.abs(theta_centers[seed_candidates]))])
-
-        pop_order = populated_idx[np.argsort(theta_centers[populated_idx])]
-        k0 = int(np.flatnonzero(pop_order == mid_t)[0])
-
-        k = k0
-        while k < pop_order.size and ring_pass[i, pop_order[k]]:
-            connected[i, pop_order[k]] = True
-            k += 1
-
-        k = k0 - 1
-        while k >= 0 and ring_pass[i, pop_order[k]]:
-            connected[i, pop_order[k]] = True
-            k -= 1
+            k = int(seed_pos[0]) - 1
+            while k >= 0 and cell_pass[ir, pop_order[k], iphi]:
+                connected[ir, pop_order[k], iphi] = True
+                k -= 1
 
     return connected
 
@@ -462,29 +391,16 @@ def set_mask_from_joos_disk(
     This function:
 
     1) Estimates the disk angular-momentum axis and transforms velocities into a disk frame.
-    2) Bins cells into (r, theta_from_midplane) rings and computes ring-averaged diagnostics.
-    3) Applies Joos-style criteria:
+    2) Evaluates Joos-style criteria directly on individual cells:
        - vphi dominates over vR and vz (with thresholds fthres / fthres_vr)
        - rotational support dominates over thermal pressure
        - density exceeds rho_disk_min
-    4) Enforces per-radius connectivity (a contiguous band around the midplane).
-    5) Registers the boolean mask as model.gas["disk_mask"].
-    6) Returns a SubModel with the same boolean mask.
+    3) Enforces connectivity to the midplane.
+    4) Registers the boolean mask as model.gas["disk_mask"].
+    5) Returns a SubModel with the same boolean mask.
 
-    Optionally, it can also compute a continuous weight field w in [0, 1] and register it
-    into model.gas[weight_name]. This is intended for soft transitions (e.g., dust mixing)
-    while keeping the disk mask itself crisp.
-
-    Weight modes:
-    - none: no weight is computed/registered.
-    - distance: weight is a sigmoid of signed distance (in theta-bin units) from the
-      connected disk band boundary.
-    - margins: weight is a sigmoid of the weakest (minimum) log-margin among the Joos
-      criteria, multiplied by a soft connectivity weight derived from the connected band.
-
-      Note: In margins mode, if both numerator and denominator in a criterion are near zero,
-      the log-margin can be near 0, mapping to ~0.5 before the connectivity factor. This is
-      usually suppressed by the connectivity weight.
+    Optionally, it can also register the same binary mask into model.gas[weight_name]
+    for workflows that expect a component mask field.
 
     Args:
         model: DiskBridge Model with spherical mesh and gas fields.
@@ -498,13 +414,12 @@ def set_mask_from_joos_disk(
         n_r_bins: Optional downsampling of radial bins (cannot refine beyond native).
         n_theta_bins: Number of theta_from_midplane bins used for ring averages.
         r_max: Optional maximum radius included in the final boolean mask.
-        weight_mode: none, distance, or margins.
-        weight_name: Name of the registered gas Field that stores the weight.
-        weight_delta_bins: Boundary-layer thickness for distance (and connectivity softening
-            in margins), in theta-bin units. Must be > 0.
-        weight_m0: Softness of the criterion-margin sigmoid in margins. Must be > 0.
-        weight_floor: Values below this are clipped to 0, and above (1 - weight_floor)
-            clipped to 1.
+        weight_mode: If "none", no weight field is registered. Any other value registers
+            the binary cell-wise disk mask as model.gas[weight_name].
+        weight_name: Name of the registered gas Field that stores the binary disk mask.
+        weight_delta_bins: Retained for API compatibility; ignored by the cell-wise mask.
+        weight_m0: Retained for API compatibility; ignored by the cell-wise mask.
+        weight_floor: Retained for API compatibility; ignored by the cell-wise mask.
 
     Returns:
         SubModel representing the disk region. The returned SubModel.mask is boolean.
@@ -519,12 +434,6 @@ def set_mask_from_joos_disk(
         raise ValueError(
             f"set_mask_from_joos_disk only supports spherical coordinates, got {mesh.coord_system}"
         )
-
-    if weight_mode != "none":
-        if float(weight_delta_bins) <= 0.0:
-            raise ValueError("weight_delta_bins must be > 0")
-        if weight_mode == "margins" and float(weight_m0) <= 0.0:
-            raise ValueError("weight_m0 must be > 0 for weight_mode='margins'")
 
     r_c = mesh.centers("r")
     theta_c = mesh.centers("theta")
@@ -545,8 +454,6 @@ def set_mask_from_joos_disk(
     phi_e_rad = phi_e.to("radian").magnitude
     dphi = phi_e_rad[1:] - phi_e_rad[:-1]
     dV = r3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
-    dV_mag = dV.to_base_units().magnitude
-
     rho = model.gas["density"].data.to_base_units()
     vr = model.gas["vr"].data.to_base_units()
     vphi = model.gas["vphi"].data.to_base_units()
@@ -587,91 +494,32 @@ def set_mask_from_joos_disk(
         fthres, fthres_vr, r_edges, nR
     )
 
-    ring_pass, sum_w_2d, theta_edges, diag = _compute_ring_criteria(
-        rho, dV_mag, disk_frame, Pth, r_grid, r_edges, theta_edges,
-        nR, n_theta_bins, rho_disk_min, fthres_use, fthres_vr_use
-    )
-
-    connected = _apply_connectivity(ring_pass, sum_w_2d, theta_edges, nR, n_theta_bins)
-
     r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
     t_bin = np.digitize(disk_frame.theta_from_midplane, theta_edges) - 1
     valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
-    ring_index = (r_bin * n_theta_bins + t_bin).astype(np.int64)
-    ring_index_flat = ring_index[valid].ravel()
 
-    connected_flat = connected.reshape(-1)
-    mask = np.zeros_like(r_grid_mag, dtype=bool)
-    mask_valid = connected_flat[ring_index_flat]
-    mask[valid] = mask_valid
+    mask = _compute_cell_criteria_mask(
+        rho,
+        disk_frame,
+        Pth,
+        r_bin,
+        t_bin,
+        valid,
+        rho_disk_min,
+        fthres_use,
+        fthres_vr_use,
+    )
+
+    if r_max is not None:
+        mask &= (r_grid <= r_max)
 
     if weight_mode != "none":
-        def _sigmoid(x: np.ndarray) -> np.ndarray:
-            x = np.clip(x, -60.0, 60.0)
-            return 1.0 / (1.0 + np.exp(-x))
-
-        if weight_mode == "distance":
-            w_ring = np.zeros_like(connected, dtype=float)
-            j = np.arange(n_theta_bins)
-            for i in range(nR):
-                idx = np.flatnonzero(connected[i])
-                if idx.size == 0:
-                    continue
-                j0, j1 = int(idx[0]), int(idx[-1])
-                inside = (j >= j0) & (j <= j1)
-                d = np.empty_like(j, dtype=float)
-                d[inside] = np.minimum(j[inside] - j0, j1 - j[inside])
-                d[~inside] = -np.minimum(np.abs(j[~inside] - j0), np.abs(j[~inside] - j1))
-                w_ring[i] = _sigmoid(d / float(weight_delta_bins))
-        elif weight_mode == "margins":
-            eps = np.finfo(np.float64).tiny
-            vphi = diag["vphi"]
-            vR = diag["vR"]
-            vz = diag["vz"]
-            rot = diag["rot"]
-            P = diag["P"]
-            rho_avg = diag["rho"]
-
-            m1 = np.log((vphi + eps) / (fthres_vr_use * vR + eps))
-            m2 = np.log((vphi + eps) / (fthres_use * vz + eps))
-            m3 = np.log((rot + eps) / (fthres_use * P + eps))
-            m5 = np.log((rho_avg + eps) / (rho_disk_min.to_base_units().magnitude + eps))
-            m = np.minimum.reduce([m1, m2, m3, m5])
-            w_marg = _sigmoid(m / float(weight_m0))
-
-            w_conn = np.zeros_like(connected, dtype=float)
-            j = np.arange(n_theta_bins)
-            for i in range(nR):
-                idx = np.flatnonzero(connected[i])
-                if idx.size == 0:
-                    continue
-                j0, j1 = int(idx[0]), int(idx[-1])
-                inside = (j >= j0) & (j <= j1)
-                d = np.empty_like(j, dtype=float)
-                d[inside] = np.minimum(j[inside] - j0, j1 - j[inside])
-                d[~inside] = -np.minimum(np.abs(j[~inside] - j0), np.abs(j[~inside] - j1))
-                w_conn[i] = _sigmoid(d / float(weight_delta_bins))
-
-            w_ring = w_marg * w_conn
-        else:
-            raise ValueError(f"Unknown weight_mode={weight_mode!r}")
-
-        w_grid = np.zeros_like(r_grid_mag, dtype=float)
-        w_flat = w_ring.reshape(-1)
-        w_grid[valid] = w_flat[ring_index_flat]
-        w_grid = np.clip(w_grid, 0.0, 1.0)
-        w_grid[w_grid < weight_floor] = 0.0
-        w_grid[w_grid > 1.0 - weight_floor] = 1.0
-
         w_field = Field(
-            data=Quantity(w_grid, "dimensionless"),
+            data=Quantity(mask.astype(float), "dimensionless"),
             quantity="mask",
             axis_order=mesh.axis_names(),
         )
         model.gas_register(weight_name, w_field)
-
-    if r_max is not None:
-        mask &= (r_grid <= r_max)
 
     disk_region = model.set_mask_from_array(mask, is_a_disk=True)
     model.gas_register("disk_mask", disk_region.mask)
