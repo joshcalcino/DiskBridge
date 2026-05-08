@@ -48,6 +48,7 @@ width            = 2.0             # width around los_v = 0 to compute the chann
 nline            = 40              # number of lines 
 turbvel          = 0.0             # turbulent velocity in m/s 
 line_mode        = 1               # RADMC-3D line mode: 1=LTE, 3=LVG non-LTE
+line_colliders   = gow17_lamda     # strict GOW17/LAMDA non-LTE collider policy
 line_h2_opr      = 3.0             # ortho/para H2 ratio for GOW17-derived line collider densities
 photodissociation = F              # turn on photodissocaiton 
 freezeout        = F              # turn on freeze-out 

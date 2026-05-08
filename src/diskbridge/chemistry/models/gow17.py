@@ -310,8 +310,13 @@ def _gow17_species_outputs(
     x_h: np.ndarray,
     x_catom: np.ndarray,
     x_e: np.ndarray,
+    line_h2_opr: float = 3.0,
 ) -> tuple[dict[str, Quantity], dict[str, Quantity]]:
     """Return abundance and number-density outputs for all GOW17 species."""
+
+    opr = float(line_h2_opr)
+    if not np.isfinite(opr) or opr <= 0.0:
+        raise ValueError("line_h2_opr must be a positive finite number")
 
     abundances = {
         name: Quantity(y_out[..., idx], "dimensionless")
@@ -325,6 +330,10 @@ def _gow17_species_outputs(
         name: Quantity(q.magnitude * nH_cm3, "cm^-3")
         for name, q in abundances.items()
     }
+    n_h2 = number_densities["h2"].to("cm^-3").magnitude
+    number_densities["p-h2"] = Quantity(n_h2 / (1.0 + opr), "cm^-3")
+    number_densities["o-h2"] = Quantity(n_h2 * opr / (1.0 + opr), "cm^-3")
+    number_densities["he"] = Quantity(XHE * nH_cm3, "cm^-3")
     return abundances, number_densities
 
 
@@ -1661,6 +1670,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             x_h=xH_atom,
             x_catom=xC_neutral,
             x_e=xe,
+            line_h2_opr=cfg.get("line_h2_opr", 3.0),
         )
 
         fields = {
@@ -2485,6 +2495,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         x_h=xH_atom,
         x_catom=xC_neutral,
         x_e=xe,
+        line_h2_opr=cfg.get("line_h2_opr", 3.0),
     )
 
     gow17_diag = {

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Dict
 from pathlib import Path
 
+import numpy as np
+
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
@@ -18,8 +20,8 @@ def add_default_line_colliders_from_gow17(
 
     del rad
     opr_value = float(opr)
-    if opr_value < 0.0:
-        raise ValueError("line_h2_opr must be non-negative")
+    if not np.isfinite(opr_value) or opr_value <= 0.0:
+        raise ValueError("line_h2_opr must be a positive finite number")
     if "h2" not in result.number_densities:
         raise KeyError("GOW17 line collider derivation requires number_densities['h2']")
 
@@ -28,8 +30,12 @@ def add_default_line_colliders_from_gow17(
     f_o = opr_value / (1.0 + opr_value)
     result.number_densities["p-h2"] = Quantity(f_p * n_h2.magnitude, "cm^-3")
     result.number_densities["o-h2"] = Quantity(f_o * n_h2.magnitude, "cm^-3")
+    if "h+" not in result.number_densities:
+        raise KeyError("GOW17 line collider derivation requires number_densities['h+']")
+    if "he" not in result.number_densities:
+        raise KeyError("GOW17 line collider derivation requires number_densities['he']")
     result.meta["line_h2_opr"] = opr_value
-    result.meta["derived_line_colliders"] = ["p-h2", "o-h2"]
+    result.meta["derived_line_colliders"] = ["h", "e", "h+", "he", "p-h2", "o-h2"]
     return result
 
 

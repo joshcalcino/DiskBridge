@@ -20,8 +20,8 @@ from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 from .run import ensure_temperature_symlink
+from .colliders import gow17_lamda_colliders, install_validated_molecule_file
 from .line_transfer.preflight import ensure_gas_temperature_for_nonlte
-from .line_transfer.molecule_data import stage_molecule_file_for_colliders
 import diskbridge
 from .molecule import RadMolecule
 
@@ -1206,53 +1206,22 @@ class RadImage:
         
         return sanitized
 
-    def _ensure_repo_moldata_file(self, molecule: str) -> Path:
-        """Ensure the shared LAMDA file exists under the repo data directory."""
-        moldata_dir = REPO_ROOT / "data" / "moldata"
-        moldata_dir.mkdir(parents=True, exist_ok=True)
-
-        local_dat = moldata_dir / f"{molecule}.dat"
-        if local_dat.exists():
-            return local_dat
-
-        logger.info(
-            "Molecule data not found in repo cache, downloading %s to %s...",
-            molecule,
-            local_dat,
-        )
-
-        import urllib.request
-
-        try:
-            url = f'https://home.strw.leidenuniv.nl/~moldata/datafiles/{molecule}.dat'
-            urllib.request.urlretrieve(url, local_dat)
-            logger.info("Downloaded shared moldata file %s", local_dat)
-        except Exception as e:
-            logger.error(f"Failed to download molecule data: {e}")
-            raise RuntimeError(
-                f"data/moldata/{molecule}.dat not found and download failed"
-            ) from e
-
-        return local_dat
-    
     def _ensure_molecule_file(self, molecule: str) -> None:
-        """Ensure molecule data file exists, download if necessary.
+        """Install the validated official LAMDA molecule data file.
         
         Parameters
         ----------
         molecule : str
             Molecule name (e.g., 'co')
         """
-        # Create inputs_dir if it doesn't exist
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
-        
-        mol_file = self.inputs_dir / f'molecule_{molecule}.inp'
-        if mol_file.exists():
-            return
-
-        local_dat = self._ensure_repo_moldata_file(molecule)
-        shutil.copyfile(local_dat, mol_file)
-        logger.info(f"Copied local moldata file {local_dat} to {mol_file}")
+        moldata_dir = REPO_ROOT / "data" / "moldata"
+        install_validated_molecule_file(
+            species=molecule,
+            moldata_dir=moldata_dir,
+            inputs_dir=self.inputs_dir,
+        )
+        logger.info("Installed validated official LAMDA moldata for %s", molecule)
     
     def _ensure_gas_velocity(self) -> None:
         """Ensure gas velocity file exists, create if necessary."""
@@ -1390,7 +1359,7 @@ class RadImage:
             If the molecule is not configured in the parameter file.
         """
         line_params = diskbridge.canonicalize_line_params(self.params)
-        mol_lower = str(molecule).lower()
+        mol_lower = str(molecule).lower().strip()
         species = line_params["gasspecies"]
         if mol_lower not in species:
             raise ValueError(
@@ -1398,21 +1367,40 @@ class RadImage:
             )
 
         index = species.index(mol_lower)
-        collider = str(line_params["line_colliders"][index]).lower()
-        colliders = []
-        if collider not in {"", "none", "off", "0"}:
-            colliders = [part.strip() for part in collider.split(",") if part.strip()]
-
         line_mode = int(line_params["line_mode"][index])
-        if abs(line_mode) in {3, 4} and not colliders:
+
+        if abs(line_mode) not in {3, 4}:
+            return {
+                "line_mode": line_mode,
+                "colliders": [],
+            }
+
+        value = str(getattr(self.params, "line_colliders", "")).strip().lower()
+        if value != "gow17_lamda":
             raise ValueError(
-                f"line_mode={line_mode} for {molecule} has no automatic collider policy."
+                "For GOW17 non-LTE line transfer, DiskBridge supports only "
+                "line_colliders = gow17_lamda. "
+                "Do not use [h2, h], h2, h, auto, or arbitrary collider lists."
             )
 
         return {
             "line_mode": line_mode,
-            "colliders": colliders,
+            "colliders": gow17_lamda_colliders(mol_lower),
         }
+
+    def _require_collider_density_files(self, colliders: list[str]) -> None:
+        missing = []
+        for collider in colliders:
+            binary = self.inputs_dir / f"numberdens_{collider}.binp"
+            ascii_ = self.inputs_dir / f"numberdens_{collider}.inp"
+            if not binary.exists() and not ascii_.exists():
+                missing.append(collider)
+        if missing:
+            raise RuntimeError(
+                "Missing required GOW17/LAMDA collider density files: "
+                + ", ".join(f"numberdens_{c}.binp" for c in missing)
+                + ". Run GOW17 with write=True before non-LTE line transfer."
+            )
     
     def _ensure_lines_inp(self, molecule: str) -> None:
         """Ensure lines.inp file exists for specified molecule.
@@ -1427,6 +1415,8 @@ class RadImage:
 
         setup = self._line_setup_for_molecule(molecule)
         colliders = setup["colliders"] if abs(setup["line_mode"]) in {3, 4} else []
+        if colliders:
+            self._require_collider_density_files(colliders)
         expected_lines = [
             "2",
             "1",
@@ -1440,23 +1430,9 @@ class RadImage:
         if lines_file.exists():
             content = lines_file.read_text()
             if content == expected_content:
-                if colliders:
-                    stage_molecule_file_for_colliders(
-                        self.inputs_dir / f"molecule_{molecule}.inp",
-                        self.inputs_dir / f"molecule_{molecule}.inp",
-                        colliders,
-                        copy_mode="copy",
-                    )
                 return
 
         logger.info(f"Creating lines.inp for {molecule}...")
         lines_file.write_text(expected_content)
-        if colliders:
-            stage_molecule_file_for_colliders(
-                self.inputs_dir / f"molecule_{molecule}.inp",
-                self.inputs_dir / f"molecule_{molecule}.inp",
-                colliders,
-                copy_mode="copy",
-            )
         
         logger.info(f"Created lines.inp to {lines_file}")

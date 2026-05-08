@@ -466,12 +466,13 @@ def _neutral_c_abundance(y: np.ndarray, Zg: float) -> np.ndarray:
     return np.maximum(xC, 0.0)
 
 
-def _extract_abundance_profiles(y: np.ndarray, Zg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _extract_abundance_profiles(y: np.ndarray, Zg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return (
         np.asarray(y[:, I_CO], dtype=float).copy(),
         _neutral_c_abundance(y, Zg).copy(),
         np.asarray(y[:, I_CP], dtype=float).copy(),
         np.asarray(y[:, I_CHX], dtype=float).copy(),
+        np.asarray(y[:, I_HCOP], dtype=float).copy(),
     )
 
 
@@ -539,10 +540,12 @@ def _render_abundance_movie(
     xc_hist: np.ndarray,
     xcp_hist: np.ndarray,
     xchx_hist: np.ndarray,
+    xhcop_hist: np.ndarray,
     xco_eq_hist: np.ndarray | None = None,
     xc_eq_hist: np.ndarray | None = None,
     xcp_eq_hist: np.ndarray | None = None,
     xchx_eq_hist: np.ndarray | None = None,
+    xhcop_eq_hist: np.ndarray | None = None,
     fps: int,
     max_duration_s: float | None = None,
 ) -> None:
@@ -555,28 +558,33 @@ def _render_abundance_movie(
     xc_movie = np.asarray(xc_hist, dtype=float)[frame_idx]
     xcp_movie = np.asarray(xcp_hist, dtype=float)[frame_idx]
     xchx_movie = np.asarray(xchx_hist, dtype=float)[frame_idx]
+    xhcop_movie = np.asarray(xhcop_hist, dtype=float)[frame_idx]
     xco_eq_movie = None if xco_eq_hist is None else np.asarray(xco_eq_hist, dtype=float)[frame_idx]
     xc_eq_movie = None if xc_eq_hist is None else np.asarray(xc_eq_hist, dtype=float)[frame_idx]
     xcp_eq_movie = None if xcp_eq_hist is None else np.asarray(xcp_eq_hist, dtype=float)[frame_idx]
     xchx_eq_movie = None if xchx_eq_hist is None else np.asarray(xchx_eq_hist, dtype=float)[frame_idx]
+    xhcop_eq_movie = None if xhcop_eq_hist is None else np.asarray(xhcop_eq_hist, dtype=float)[frame_idx]
 
     fig, ax = plt.subplots(figsize=(8.0, 4.8))
     line_co, = ax.plot([], [], label="CO", lw=2.0)
     line_c, = ax.plot([], [], label="C", lw=2.0)
     line_cp, = ax.plot([], [], label="C+", lw=2.0)
     line_chx, = ax.plot([], [], label="CHx", lw=2.0)
+    line_hcop, = ax.plot([], [], label="HCO+", lw=2.0)
     line_co_eq = None
     line_c_eq = None
     line_cp_eq = None
     line_chx_eq = None
+    line_hcop_eq = None
     if xco_eq_movie is not None:
         line_co_eq, = ax.plot([], [], "--", color=line_co.get_color(), label="_nolegend_", lw=1.8)
         line_c_eq, = ax.plot([], [], "--", color=line_c.get_color(), label="_nolegend_", lw=1.8)
         line_cp_eq, = ax.plot([], [], "--", color=line_cp.get_color(), label="_nolegend_", lw=1.8)
         line_chx_eq, = ax.plot([], [], "--", color=line_chx.get_color(), label="_nolegend_", lw=1.8)
+        line_hcop_eq, = ax.plot([], [], "--", color=line_hcop.get_color(), label="_nolegend_", lw=1.8)
 
     ax.set_xlim(float(np.min(x_au)), float(np.max(x_au)))
-    ax.set_ylim(1.0e-9, 1.0e-3)
+    ax.set_ylim(1.0e-13, 2.0e-3)
     ax.set_yscale("log")
     ax.set_xlabel("x along stream [au] (front=0)")
     ax.set_ylabel("abundance x")
@@ -588,13 +596,15 @@ def _render_abundance_movie(
         line_c.set_data(x_au, np.maximum(xc_movie[i], 1.0e-300))
         line_cp.set_data(x_au, np.maximum(xcp_movie[i], 1.0e-300))
         line_chx.set_data(x_au, np.maximum(xchx_movie[i], 1.0e-300))
-        artists = [line_co, line_c, line_cp, line_chx]
+        line_hcop.set_data(x_au, np.maximum(xhcop_movie[i], 1.0e-300))
+        artists = [line_co, line_c, line_cp, line_chx, line_hcop]
         if xco_eq_movie is not None:
             line_co_eq.set_data(x_au, np.maximum(xco_eq_movie[i], 1.0e-300))
             line_c_eq.set_data(x_au, np.maximum(xc_eq_movie[i], 1.0e-300))
             line_cp_eq.set_data(x_au, np.maximum(xcp_eq_movie[i], 1.0e-300))
             line_chx_eq.set_data(x_au, np.maximum(xchx_eq_movie[i], 1.0e-300))
-            artists.extend([line_co_eq, line_c_eq, line_cp_eq, line_chx_eq])
+            line_hcop_eq.set_data(x_au, np.maximum(xhcop_eq_movie[i], 1.0e-300))
+            artists.extend([line_co_eq, line_c_eq, line_cp_eq, line_chx_eq, line_hcop_eq])
         title = (
             f"nH={_fmt_compact(nH_cm3)} cm^-3 | "
             f"r={_fmt_compact(float(r_face_movie[i]) / float(AU), 4)} au | "
@@ -747,9 +757,9 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         relax_record_steps = _build_init_relax_record_steps(int(cfg.init_relax_n_steps), max_init_movie_frames)
         next_relax_record = 1
 
-        key_idx = np.asarray([I_H2, I_CO, I_CHX, I_CP], dtype=np.int64)
+        key_idx = np.asarray([I_H2, I_CO, I_CHX, I_CP, I_HCOP], dtype=np.int64)
         y_relax0 = np.asarray(stepper.y_state, dtype=float).reshape(ncells, N_Y)
-        xco0, xc0, xcp0, xchx0 = _extract_abundance_profiles(y_relax0, cfg.Zg)
+        xco0, xc0, xcp0, xchx0, xhcop0 = _extract_abundance_profiles(y_relax0, cfg.Zg)
         relax_t_hist = [0.0]
         relax_r_face_hist = [float(r_face_cm)]
         relax_chi_face_hist = [float(chi_cells[0])]
@@ -757,6 +767,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         relax_xc_hist = [xc0]
         relax_xcp_hist = [xcp0]
         relax_xchx_hist = [xchx0]
+        relax_xhcop_hist = [xhcop0]
         t_relax = 0.0
         converged = False
         for i_relax in range(int(cfg.init_relax_n_steps)):
@@ -767,7 +778,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             denom = np.maximum(np.abs(y_new), float(cfg.abstol0))
             rel = float(np.max(np.abs(y_new - y_prev) / denom))
             y_relax = np.asarray(stepper.y_state, dtype=float).reshape(ncells, N_Y)
-            xco_relax, xc_relax, xcp_relax, xchx_relax = _extract_abundance_profiles(y_relax, cfg.Zg)
+            xco_relax, xc_relax, xcp_relax, xchx_relax, xhcop_relax = _extract_abundance_profiles(y_relax, cfg.Zg)
             step_num = i_relax + 1
             should_record = False
             if next_relax_record < len(relax_record_steps) and step_num >= int(relax_record_steps[next_relax_record]):
@@ -785,6 +796,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 relax_xc_hist.append(xc_relax)
                 relax_xcp_hist.append(xcp_relax)
                 relax_xchx_hist.append(xchx_relax)
+                relax_xhcop_hist.append(xhcop_relax)
             if converged:
                 break
         if cfg.make_movies:
@@ -800,6 +812,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xc_hist=np.asarray(relax_xc_hist, dtype=float),
                 xcp_hist=np.asarray(relax_xcp_hist, dtype=float),
                 xchx_hist=np.asarray(relax_xchx_hist, dtype=float),
+                xhcop_hist=np.asarray(relax_xhcop_hist, dtype=float),
                 fps=int(cfg.movie_fps),
                 max_duration_s=float(cfg.movie_max_duration_s),
             )
@@ -820,6 +833,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xc_hist = np.zeros_like(xco_hist)
     xcp_hist = np.zeros_like(xco_hist)
     xchx_hist = np.zeros_like(xco_hist)
+    xhcop_hist = np.zeros_like(xco_hist)
 
     Tgas_front = np.zeros_like(t_hist)
     Tdust_front = np.zeros_like(t_hist)
@@ -827,6 +841,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xc_eq_hist = None
     xcp_eq_hist = None
     xchx_eq_hist = None
+    xhcop_eq_hist = None
     Tgas_front_eq = None
     Tdust_front_eq = None
 
@@ -852,6 +867,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xc_eq_hist = np.zeros_like(xco_hist)
         xcp_eq_hist = np.zeros_like(xco_hist)
         xchx_eq_hist = np.zeros_like(xco_hist)
+        xhcop_eq_hist = np.zeros_like(xco_hist)
         Tgas_front_eq = np.zeros_like(t_hist)
         Tdust_front_eq = np.zeros_like(t_hist)
 
@@ -862,6 +878,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xc_store: np.ndarray,
         xcp_store: np.ndarray,
         xchx_store: np.ndarray,
+        xhcop_store: np.ndarray,
         Tgas_store: np.ndarray,
         Tdust_store: np.ndarray,
         k: int,
@@ -870,6 +887,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xco_store[k, :] = y[:, I_CO]
         xcp_store[k, :] = y[:, I_CP]
         xchx_store[k, :] = y[:, I_CHX]
+        xhcop_store[k, :] = y[:, I_HCOP]
         xc_store[k, :] = _neutral_c_abundance(y, cfg.Zg)
 
         Tdust_store[k] = float(rad_local.dust_temperature.to("K").magnitude.reshape(-1)[i_front])
@@ -885,6 +903,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xc_store=xc_hist,
             xcp_store=xcp_hist,
             xchx_store=xchx_hist,
+            xhcop_store=xhcop_hist,
             Tgas_store=Tgas_front,
             Tdust_store=Tdust_front,
             k=k,
@@ -897,6 +916,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xc_store=xc_eq_hist,
                 xcp_store=xcp_eq_hist,
                 xchx_store=xchx_eq_hist,
+                xhcop_store=xhcop_eq_hist,
                 Tgas_store=Tgas_front_eq,
                 Tdust_store=Tdust_front_eq,
                 k=k,
@@ -1039,6 +1059,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xc_hist = xc_hist[: k + 1, :]
             xcp_hist = xcp_hist[: k + 1, :]
             xchx_hist = xchx_hist[: k + 1, :]
+            xhcop_hist = xhcop_hist[: k + 1, :]
             Tgas_front = Tgas_front[: k + 1]
             Tdust_front = Tdust_front[: k + 1]
             if cfg.track_infall_equilibrium:
@@ -1046,6 +1067,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xc_eq_hist = xc_eq_hist[: k + 1, :]
                 xcp_eq_hist = xcp_eq_hist[: k + 1, :]
                 xchx_eq_hist = xchx_eq_hist[: k + 1, :]
+                xhcop_eq_hist = xhcop_eq_hist[: k + 1, :]
                 Tgas_front_eq = Tgas_front_eq[: k + 1]
                 Tdust_front_eq = Tdust_front_eq[: k + 1]
             break
@@ -1064,6 +1086,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "xc_hist": xc_hist,
         "xcp_hist": xcp_hist,
         "xchx_hist": xchx_hist,
+        "xhcop_hist": xhcop_hist,
         "Tgas_front": Tgas_front,
         "Tdust_front": Tdust_front,
     }
@@ -1074,6 +1097,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 "xc_eq_hist": xc_eq_hist,
                 "xcp_eq_hist": xcp_eq_hist,
                 "xchx_eq_hist": xchx_eq_hist,
+                "xhcop_eq_hist": xhcop_eq_hist,
                 "Tgas_front_eq": Tgas_front_eq,
                 "Tdust_front_eq": Tdust_front_eq,
             }
@@ -1095,10 +1119,12 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xc_hist=xc_hist,
             xcp_hist=xcp_hist,
             xchx_hist=xchx_hist,
+            xhcop_hist=xhcop_hist,
             xco_eq_hist=xco_eq_hist,
             xc_eq_hist=xc_eq_hist,
             xcp_eq_hist=xcp_eq_hist,
             xchx_eq_hist=xchx_eq_hist,
+            xhcop_eq_hist=xhcop_eq_hist,
             fps=int(cfg.movie_fps),
             max_duration_s=float(cfg.movie_max_duration_s),
         )
