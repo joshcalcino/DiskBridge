@@ -74,6 +74,7 @@ from .profiles import (
 )
 from .diagnostics import (
     make_chemistry_diagnostic_plots,
+    make_dust_component_diagnostic_plots,
     make_segmented_rt_diagnostic_plots,
 )
 
@@ -107,6 +108,7 @@ __all__ = [
     'plot_small_dust_rz_slice',
     'ProfilePlotter',
     'make_chemistry_diagnostic_plots',
+    'make_dust_component_diagnostic_plots',
     'make_segmented_rt_diagnostic_plots',
     # Quick functions
     'quick_slice',

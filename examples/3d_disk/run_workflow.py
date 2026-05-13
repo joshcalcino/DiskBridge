@@ -12,6 +12,10 @@ This script:
 import diskbridge
 import diskbridge.chemistry as chemistry
 from diskbridge.radmc3d import RadWriter, RadModel, RadImage
+from diskbridge.visualization.diagnostics import make_dust_component_diagnostic_plots
+
+import os
+from pathlib import Path
 
 
 # Load parameters for this example and update the global params
@@ -29,6 +33,20 @@ model = diskbridge.load_model(
 
 # Set dust size distribution from gas, proportional to gas density
 model.dust.set_distribution(mode="proportional")
+
+DIAGNOSTIC_PLOTS = os.environ.get("DISKBRIDGE_DIAGNOSTIC_PLOTS", "1").lower() not in {
+    "0",
+    "false",
+    "f",
+    "no",
+    "n",
+    "off",
+}
+make_dust_component_diagnostic_plots(
+    model,
+    Path("plots") / "dust_components",
+    diagnostics=DIAGNOSTIC_PLOTS,
+)
 
 # Write RADMC-3D input files and compute dust opacities
 writer = RadWriter(model)
@@ -57,4 +75,3 @@ img.make_line_image(
     molecule="co",
     transition=p.iline,
 )
-

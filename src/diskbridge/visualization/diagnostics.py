@@ -419,6 +419,545 @@ def _plot_field_maps(
     return outputs
 
 
+def _positive_log_percentile_limits(
+    data: np.ndarray,
+    *,
+    lower: float = 1.0,
+    upper: float = 99.0,
+    max_dyn_range_dex: float | None = 8.0,
+) -> tuple[float, float] | tuple[None, None]:
+    values = np.asarray(data, dtype=float)
+    ok = np.isfinite(values) & (values > 0.0)
+    if not np.any(ok):
+        return None, None
+    log_values = np.log10(values[ok])
+    vmin = float(np.nanpercentile(log_values, lower))
+    vmax = float(np.nanpercentile(log_values, upper))
+    if max_dyn_range_dex is not None and np.isfinite(vmax):
+        vmin = max(vmin, vmax - float(max_dyn_range_dex))
+    return vmin, vmax
+
+
+def _component_density_fields(model: "Model") -> dict[int, Field]:
+    dust = getattr(model, "dust", None)
+    if dust is None:
+        return {}
+
+    totals: dict[int, Quantity] = {}
+    for bin_name, dust_bin in getattr(dust, "bins", {}).items():
+        density = dust_bin["density"]
+        if hasattr(dust, "_global_bins"):
+            comp_idx, _ = dust._global_bins[bin_name]
+        else:
+            comp_idx = 0
+        if comp_idx not in totals:
+            totals[int(comp_idx)] = density.data.copy()
+        else:
+            totals[int(comp_idx)] = totals[int(comp_idx)] + density.data
+
+    total_density = dust["density"] if getattr(dust, "bins", None) else None
+    if total_density is None:
+        return {}
+
+    fields: dict[int, Field] = {}
+    for comp_idx, data in totals.items():
+        fields[comp_idx] = Field(
+            data=data,
+            quantity=total_density.quantity,
+            axis_order=total_density.axis_order,
+            attrs={"source": "dust_component_bins", "component_index": comp_idx},
+        )
+    return fields
+
+
+def _dust_to_gas_field(
+    model: "Model",
+    dust_density: Field,
+    *,
+    quantity: str,
+) -> Field:
+    rho_g = field_data_as_order(
+        model.gas["density"],
+        model.mesh.axis_names(),
+    ).to("g/cm^3").magnitude
+    rho_d = field_data_as_order(
+        dust_density,
+        model.mesh.axis_names(),
+    ).to("g/cm^3").magnitude
+    ratio = np.divide(
+        np.asarray(rho_d, dtype=float),
+        np.asarray(rho_g, dtype=float),
+        out=np.full_like(rho_g, np.nan, dtype=float),
+        where=rho_g > 0.0,
+    )
+    return Field(
+        data=Quantity(ratio, "dimensionless"),
+        quantity=quantity,
+        axis_order=model.mesh.axis_names(),
+    )
+
+
+def _plot_dust_component_masks(
+    model: "Model",
+    masks: list[tuple[str, Field]],
+    output: Path,
+    *,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> Path | None:
+    if not masks:
+        return None
+
+    import matplotlib.pyplot as plt
+
+    mesh = model.mesh
+    r_edges_au = mesh.edges("r").to("au").magnitude
+    theta_edges = mesh.edges("theta").to("radian").magnitude
+    y_edges = np.cos(theta_edges)
+
+    fig, axes = plt.subplots(
+        1,
+        len(masks),
+        figsize=(4.5 * len(masks), 3.6),
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.atleast_1d(axes)
+    for ax, (label, field) in zip(axes, masks):
+        data = field_data_as_order(field, mesh.axis_names()).to("dimensionless").magnitude
+        z_plot = np.nanmean(np.asarray(data, dtype=float), axis=2).T
+        y_plot = y_edges
+        if y_plot[0] > y_plot[-1]:
+            y_plot = y_plot[::-1]
+            z_plot = z_plot[::-1, :]
+        pc = ax.pcolormesh(
+            r_edges_au,
+            y_plot,
+            z_plot,
+            shading="auto",
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        fig.colorbar(pc, ax=ax)
+        ax.set_xscale("log")
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.set_title(f"{label} mask")
+        ax.set_xlabel("r [au]")
+        ax.set_ylabel("z/r")
+
+    fig.tight_layout()
+    fig.savefig(output, dpi=220)
+    plt.close(fig)
+    return output
+
+
+def _plot_dust_component_comparison(
+    model: "Model",
+    panels: list[tuple[str, Field]],
+    output: Path,
+    *,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> Path | None:
+    if not panels:
+        return None
+
+    import matplotlib.pyplot as plt
+
+    mesh = model.mesh
+    r_edges_au = mesh.edges("r").to("au").magnitude
+    theta_edges = mesh.edges("theta").to("radian").magnitude
+    y_edges = np.cos(theta_edges)
+
+    ncols = 2 if len(panels) > 1 else 1
+    nrows = int(np.ceil(len(panels) / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(5.0 * ncols, 3.6 * nrows),
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.atleast_1d(axes).ravel()
+    for ax, (label, field) in zip(axes, panels):
+        data = field_data_as_order(field, model.mesh.axis_names()).to("g/cm^3").magnitude
+        vmin, vmax = _positive_log_percentile_limits(data, upper=99.5)
+        z_plot = np.log10(np.maximum(np.nanmean(data, axis=2), np.finfo(np.float64).tiny)).T
+        y_plot = y_edges
+        if y_plot[0] > y_plot[-1]:
+            y_plot = y_plot[::-1]
+            z_plot = z_plot[::-1, :]
+        pc = ax.pcolormesh(
+            r_edges_au,
+            y_plot,
+            z_plot,
+            shading="auto",
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        fig.colorbar(pc, ax=ax)
+        ax.set_xscale("log")
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.set_xlabel("r [au]")
+        ax.set_ylabel("z/r")
+        ax.set_title(label)
+    for ax in axes[len(panels):]:
+        ax.set_visible(False)
+    fig.tight_layout()
+    fig.savefig(output, dpi=220)
+    plt.close(fig)
+    return output
+
+
+def _plot_midplane_dust_diagnostics(
+    model: "Model",
+    *,
+    output: Path,
+    component_density_fields: dict[int, Field],
+    component_labels: dict[int, str],
+    component_dtg_fields: dict[int, Field],
+    mask_field: Field | None,
+) -> Path | None:
+    if "density" not in model.gas or not hasattr(model, "dust"):
+        return None
+    try:
+        dust_density = model.dust["density"]
+    except Exception:
+        return None
+
+    import matplotlib.pyplot as plt
+
+    r_au = model.mesh.centers("r").to("au").magnitude
+    theta = model.mesh.centers("theta").to("radian").magnitude
+    mid_idx = int(np.argmin(np.abs(theta - 0.5 * np.pi)))
+
+    def mid_phi_mean(field: Field) -> np.ndarray:
+        data = field_data_as_order(field, model.mesh.axis_names()).magnitude
+        return np.nanmean(np.asarray(data, dtype=float)[:, mid_idx, :], axis=1)
+
+    total_dtg = _dust_to_gas_field(model, dust_density, quantity="dust_to_gas_total")
+
+    fig, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+    axes[0].loglog(r_au, mid_phi_mean(model.gas["density"]), label="gas", color="0.15")
+    axes[0].loglog(r_au, mid_phi_mean(dust_density), label="total dust", color="tab:blue")
+    for comp_idx, field in sorted(component_density_fields.items()):
+        axes[0].loglog(
+            r_au,
+            mid_phi_mean(field),
+            label=f"{component_labels.get(comp_idx, f'component {comp_idx}')} dust",
+        )
+    axes[0].set_ylabel("midplane density [g cm^-3]")
+    axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].semilogx(r_au, mid_phi_mean(total_dtg), label="total", color="tab:blue")
+    for comp_idx, field in sorted(component_dtg_fields.items()):
+        axes[1].semilogx(
+            r_au,
+            mid_phi_mean(field),
+            label=component_labels.get(comp_idx, f"component {comp_idx}"),
+        )
+    axes[1].axhline(1e-2, color="0.3", linestyle="--", linewidth=1.0, label="1e-2")
+    axes[1].set_yscale("log")
+    axes[1].set_ylabel("midplane dust/gas")
+    axes[1].legend(loc="best", fontsize=8)
+
+    if mask_field is not None:
+        axes[2].semilogx(r_au, mid_phi_mean(mask_field), color="tab:purple")
+        axes[2].set_ylim(-0.05, 1.05)
+    axes[2].set_ylabel("midplane disc weight")
+    axes[2].set_xlabel("r [au]")
+
+    positive = r_au[np.isfinite(r_au) & (r_au > 0.0)]
+    if positive.size:
+        axes[2].set_xlim(float(np.nanmin(positive)), float(np.nanmax(positive)))
+    for ax in axes:
+        ax.grid(True, which="both", alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(output, dpi=220)
+    plt.close(fig)
+    return output
+
+
+def make_dust_component_diagnostic_plots(
+    model: "Model",
+    plots_dir: str | Path,
+    *,
+    diagnostics: bool = True,
+    component_labels: dict[int, str] | None = None,
+    inner_r_max_au: float | None = 80.0,
+    inner_z_over_r: float = 0.35,
+    include_bin_plots: bool = False,
+) -> list[Path]:
+    """Create dust distribution diagnostics for disc/ISM component workflows.
+
+    The function is intentionally workflow-level: run files only pass
+    ``diagnostics=True`` and receive saved plots plus a JSON manifest.
+    """
+    if not diagnostics:
+        return []
+    if not hasattr(model, "dust"):
+        return []
+
+    components = list(getattr(model.dust, "_components", []))
+    if not components:
+        return []
+
+    labels = {0: "disc", 1: "ISM"}
+    if component_labels is not None:
+        labels.update(component_labels)
+
+    plots_dir = Path(plots_dir)
+    key_dir = plots_dir / "key"
+    support_dir = plots_dir / "supporting"
+    bin_dir = plots_dir / "dust_bins"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    support_dir.mkdir(parents=True, exist_ok=True)
+    if include_bin_plots:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+    r_au = model.mesh.centers("r").to("au").magnitude
+    r_positive = r_au[np.isfinite(r_au) & (r_au > 0.0)]
+    if r_positive.size:
+        r_min_au = float(np.nanmin(r_positive))
+        r_max_au = float(np.nanmax(r_positive))
+    else:
+        r_min_au = 1.0
+        r_max_au = 1.0
+    xlim_full = (r_min_au, r_max_au)
+    xlim_inner = (
+        r_min_au,
+        min(float(inner_r_max_au), r_max_au) if inner_r_max_au is not None else r_max_au,
+    )
+    ylim_inner = (-float(inner_z_over_r), float(inner_z_over_r))
+
+    made: list[Path] = []
+    summary: dict[str, Any] = {
+        "plots_dir": str(plots_dir),
+        "n_components": len(components),
+        "components": [],
+        "plots": [],
+    }
+
+    component_density_fields = _component_density_fields(model)
+    component_dtg_fields: dict[int, Field] = {}
+    try:
+        total_dust_density = model.dust["density"]
+    except Exception:
+        total_dust_density = None
+    masks: list[tuple[str, Field]] = []
+    for idx, component in enumerate(components):
+        label = labels.get(idx, f"component_{idx}")
+        distribution = getattr(component, "distribution", None)
+        meta = {
+            "component_index": idx,
+            "label": label,
+            "mode": getattr(component, "mode", None),
+            "dust_to_gas_ratio": getattr(component, "dust_to_gas_ratio", None),
+            "nbin": getattr(distribution, "nbin", None),
+        }
+        if distribution is not None:
+            meta["amin_um"] = float(distribution.amin.to("um").magnitude)
+            meta["amax_um"] = float(distribution.amax.to("um").magnitude)
+            meta["bin_centers_um"] = [
+                float(value)
+                for value in np.asarray(distribution.bin_centers.to("um").magnitude, dtype=float)
+            ]
+            meta["mass_fractions"] = [
+                float(value)
+                for value in np.asarray(distribution.mass_fractions, dtype=float)
+            ]
+        summary["components"].append(jsonable(meta))
+        mask = getattr(component, "mask", None)
+        if mask is not None:
+            masks.append((label, mask))
+
+    for comp_idx, field in sorted(component_density_fields.items()):
+        label = labels.get(comp_idx, f"component_{comp_idx}")
+        safe = _safe_name(label.lower())
+        density_data = field_data_as_order(field, model.mesh.axis_names()).to("g/cm^3").magnitude
+        vmin, vmax = _positive_log_percentile_limits(density_data, upper=99.5)
+        out = support_dir / f"dust_density_{safe}_total_zoverr_vs_r.png"
+        plot_phi_avg_rz_slice(
+            model,
+            field,
+            output=out,
+            x_axis="r",
+            y_axis="z/r",
+            log10=True,
+            xscale="log",
+            xlim=xlim_full,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        made.append(out)
+
+        dtg_field = _dust_to_gas_field(
+            model,
+            field,
+            quantity=f"dust_to_gas_{safe}",
+        )
+        component_dtg_fields[comp_idx] = dtg_field
+        dtg_data = field_data_as_order(dtg_field, model.mesh.axis_names()).magnitude
+        vmin_dtg, vmax_dtg = _positive_log_percentile_limits(dtg_data)
+        out = support_dir / f"dust_to_gas_{safe}_total_zoverr_vs_r.png"
+        plot_phi_avg_rz_slice(
+            model,
+            dtg_field,
+            output=out,
+            x_axis="r",
+            y_axis="z/r",
+            log10=True,
+            xscale="log",
+            xlim=xlim_full,
+            vmin=vmin_dtg,
+            vmax=vmax_dtg,
+        )
+        made.append(out)
+
+    if "density" in model.gas:
+        out = support_dir / "gas_density_zoverr_vs_r.png"
+        plot_phi_avg_rz_slice(
+            model,
+            "density",
+            output=out,
+            x_axis="r",
+            y_axis="z/r",
+            log10=True,
+            xscale="log",
+            xlim=xlim_full,
+        )
+        made.append(out)
+
+    if total_dust_density is not None:
+        dust_density = total_dust_density
+        dust_data = field_data_as_order(dust_density, model.mesh.axis_names()).to("g/cm^3").magnitude
+        vmin_dust, vmax_dust = _positive_log_percentile_limits(dust_data, upper=99.5)
+        for out, xlim, ylim in (
+            (support_dir / "dust_density_total_zoverr_vs_r.png", xlim_full, None),
+            (key_dir / "dust_density_inner_zoverr_vs_r.png", xlim_inner, ylim_inner),
+        ):
+            plot_phi_avg_rz_slice(
+                model,
+                dust_density,
+                output=out,
+                x_axis="r",
+                y_axis="z/r",
+                log10=True,
+                xscale="log",
+                xlim=xlim,
+                ylim=ylim,
+                vmin=vmin_dust,
+                vmax=vmax_dust,
+            )
+            made.append(out)
+
+        total_dtg = _dust_to_gas_field(model, dust_density, quantity="dust_to_gas_total")
+        dtg_data = field_data_as_order(total_dtg, model.mesh.axis_names()).magnitude
+        vmin_dtg, vmax_dtg = _positive_log_percentile_limits(dtg_data)
+        out = key_dir / "dust_to_gas_inner_zoverr_vs_r.png"
+        plot_phi_avg_rz_slice(
+            model,
+            total_dtg,
+            output=out,
+            x_axis="r",
+            y_axis="z/r",
+            log10=True,
+            xscale="log",
+            xlim=xlim_inner,
+            ylim=ylim_inner,
+            vmin=vmin_dtg,
+            vmax=vmax_dtg,
+        )
+        made.append(out)
+
+    masks_plot = _plot_dust_component_masks(
+        model,
+        masks,
+        key_dir / "dust_component_masks_inner_zoverr_vs_r.png",
+        xlim=xlim_inner,
+        ylim=ylim_inner,
+    )
+    if masks_plot is not None:
+        made.append(masks_plot)
+    for label, mask in masks:
+        safe = _safe_name(label.lower())
+        out = support_dir / f"dust_component_{safe}_mask_zoverr_vs_r.png"
+        plot_phi_avg_rz_slice(
+            model,
+            mask,
+            output=out,
+            x_axis="r",
+            y_axis="z/r",
+            log10=False,
+            xscale="log",
+            xlim=xlim_full,
+        )
+        made.append(out)
+
+    panels = [("gas density", model.gas["density"])] if "density" in model.gas else []
+    if total_dust_density is not None:
+        panels.append(("total dust", total_dust_density))
+    for comp_idx, field in sorted(component_density_fields.items()):
+        panels.append((f"{labels.get(comp_idx, f'component {comp_idx}')} dust", field))
+    comparison = _plot_dust_component_comparison(
+        model,
+        panels,
+        key_dir / "dust_components_inner_zoverr_vs_r.png",
+        xlim=xlim_inner,
+        ylim=ylim_inner,
+    )
+    if comparison is not None:
+        made.append(comparison)
+
+    mask_for_profile = masks[0][1] if masks else None
+    profile = _plot_midplane_dust_diagnostics(
+        model,
+        output=key_dir / "midplane_radial_dust_diagnostics.png",
+        component_density_fields=component_density_fields,
+        component_labels=labels,
+        component_dtg_fields=component_dtg_fields,
+        mask_field=mask_for_profile,
+    )
+    if profile is not None:
+        made.append(profile)
+
+    if include_bin_plots:
+        for bin_name, dust_bin in getattr(model.dust, "bins", {}).items():
+            density = dust_bin["density"]
+            comp_idx, local_idx = getattr(model.dust, "_global_bins", {}).get(bin_name, (0, bin_name))
+            size_um = float(dust_bin.size.to("um").magnitude)
+            label = _safe_name(labels.get(int(comp_idx), f"component_{comp_idx}").lower())
+            out = bin_dir / (
+                f"dust_bin_{label}_local{local_idx}_{bin_name}_{size_um:.6g}um_zoverr_vs_r.png"
+            )
+            plot_phi_avg_rz_slice(
+                model,
+                density,
+                output=out,
+                x_axis="r",
+                y_axis="z/r",
+                log10=True,
+                xscale="log",
+                xlim=xlim_full,
+            )
+            made.append(out)
+
+    summary["plots"] = [str(path) for path in made]
+    (plots_dir / "dust_component_diagnostics_summary.json").write_text(
+        json.dumps(jsonable(summary), indent=2, sort_keys=True) + "\n"
+    )
+    return made
+
+
 def _write_summary(
     *,
     rad: "RadModel",

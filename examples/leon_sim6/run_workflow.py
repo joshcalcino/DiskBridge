@@ -11,6 +11,7 @@ This script:
 
 import diskbridge
 from diskbridge.visualization.profiles import plot_phi_avg_rz_slice
+from diskbridge.visualization.diagnostics import make_dust_component_diagnostic_plots
 import numpy as np
 from diskbridge.model.field import Field
 import matplotlib.pyplot as plt
@@ -330,6 +331,12 @@ for WEIGHT_MODE in WEIGHT_MODES_TO_TEST:
         mask="disk_mask",
         complement=True,
         mode="proportional",
+    )
+
+    make_dust_component_diagnostic_plots(
+        model,
+        PLOT_DIR / "dust_components",
+        diagnostics=True,
     )
 
     disk_component_mask_field = model.dust._components[0].mask
