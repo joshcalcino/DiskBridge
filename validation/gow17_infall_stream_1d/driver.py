@@ -257,17 +257,17 @@ def _compute_uv_product_cells(
     dilution = 1.0 / (4.0 * np.pi * r**2)
 
     chi_raw = float(sources["chi_broad"]) * dilution
-    floor_extra = np.maximum(float(min_chi) - chi_raw, 0.0)
+    ambient = float(min_chi)
 
     products = {
-        "chi_broad": chi_raw + floor_extra,
-        "G_CO_diss": float(sources["G_CO_diss"]) * dilution + floor_extra,
-        "G_H2_diss": float(sources["G_H2_diss"]) * dilution + floor_extra,
-        "G_C_ion": float(sources["G_C_ion"]) * dilution + floor_extra,
-        "G_CO_pdes": float(sources["G_CO_pdes"]) * dilution + floor_extra,
+        "chi_broad": chi_raw + ambient,
+        "G_CO_diss": float(sources["G_CO_diss"]) * dilution + ambient,
+        "G_H2_diss": float(sources["G_H2_diss"]) * dilution + ambient,
+        "G_C_ion": float(sources["G_C_ion"]) * dilution + ambient,
+        "G_CO_pdes": float(sources["G_CO_pdes"]) * dilution + ambient,
         "F_CO_pdes_photon": (
             float(sources["F_CO_pdes_photon"]) * dilution
-            + floor_extra * float(sources["F_CO_pdes_draine"])
+            + ambient * float(sources["F_CO_pdes_draine"])
         ),
     }
     return {name: np.asarray(value, dtype=float) for name, value in products.items()}
@@ -280,8 +280,8 @@ def _compute_chi_cells(Luv_erg_s: float, r_cell_cm: np.ndarray) -> np.ndarray:
     return np.asarray(chi, dtype=float)
 
 
-def _apply_min_chi(chi_cells: np.ndarray, min_chi: float) -> np.ndarray:
-    return np.maximum(np.asarray(chi_cells, dtype=float), float(min_chi))
+def _add_ambient_chi(chi_cells: np.ndarray, min_chi: float) -> np.ndarray:
+    return np.asarray(chi_cells, dtype=float) + float(min_chi)
 
 
 def _estimate_tdust_grey(cfg: InfallStream1DConfig, *, r_cell_cm: np.ndarray, Av_cent: np.ndarray) -> np.ndarray:
@@ -310,7 +310,7 @@ def _evaluate_environment(
 ) -> tuple[float, np.ndarray, np.ndarray | None]:
     r_face_cm = max(_freefall_radius_from_time(r_face_start_cm, t_s, M_g), r_stop_cm)
     r_cell = r_face_cm + np.asarray(x_cent_cm, dtype=float)
-    chi_cells = _apply_min_chi(_compute_chi_cells(Luv_erg_s, r_cell), cfg.min_chi)
+    chi_cells = _add_ambient_chi(_compute_chi_cells(Luv_erg_s, r_cell), cfg.min_chi)
     td_cells = None
     if cfg.estimate_tdust:
         td_cells = _estimate_tdust_grey(cfg, r_cell_cm=r_cell, Av_cent=Av_cent)
@@ -408,19 +408,16 @@ def _suggest_infall_dt(
     r_face_now = float(r_face_now_cm)
     r_front_cell_now = max(r_face_now + x_front, 1.0e-30)
     chi_front_raw = float(_compute_chi_cells(Luv_erg_s, np.asarray([r_front_cell_now], dtype=float))[0])
+    chi_front_total = chi_front_raw + float(cfg.min_chi)
+    chi_front_target = chi_front_total * np.exp(max_dlnchi)
+    chi_raw_target = chi_front_target - float(cfg.min_chi)
+    if not (chi_raw_target > chi_front_raw > 0.0) or not np.isfinite(chi_raw_target):
+        return t_limit - t_now
 
-    if float(cfg.min_chi) > 0.0 and chi_front_raw < float(cfg.min_chi):
-        r_front_cell_floor = np.sqrt(
-            float(Luv_erg_s) / (4.0 * np.pi * float(C_LIGHT) * float(U_DRAINE) * float(cfg.min_chi))
-        )
-        r_face_floor = max(float(r_front_cell_floor) - x_front, float(r_stop_cm))
-        if r_face_floor < r_face_now:
-            t_floor = _freefall_time_to_radius(r_face_start_cm, r_face_floor, M_g)
-            dt_floor = max(float(t_floor) - t_now, 0.0)
-            if dt_floor > 0.0:
-                return min(dt_floor, t_limit - t_now)
-
-    r_face_target = max(r_front_cell_now * np.exp(-0.5 * max_dlnchi) - x_front, float(r_stop_cm))
+    r_front_cell_target = np.sqrt(
+        float(Luv_erg_s) / (4.0 * np.pi * float(C_LIGHT) * float(U_DRAINE) * chi_raw_target)
+    )
+    r_face_target = max(float(r_front_cell_target) - x_front, float(r_stop_cm))
     if not (r_face_target < r_face_now):
         return t_limit - t_now
 

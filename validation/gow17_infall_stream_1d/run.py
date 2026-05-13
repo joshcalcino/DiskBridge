@@ -101,7 +101,7 @@ def main() -> int:
         dest="min_chi",
         type=float,
         default=InfallStream1DConfig.min_chi,
-        help="Minimum UV field strength chi applied during equilibrium and evolution.",
+        help="Ambient Draine-like UV background added to the stellar field during equilibrium and evolution.",
     )
     parser.add_argument(
         "--radiation-mode",

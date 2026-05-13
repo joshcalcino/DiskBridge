@@ -50,7 +50,7 @@ For each density in `InfallStream1DConfig.nH_list_cm3`, the code:
    `912-2067 Angstrom` from the photospheric blackbody and, if `mdot_msun_yr > 0`, an added accretion hotspot component using the same prescription as DiskBridge's broader UV machinery.
 10. Converts that UV luminosity into the local incident UV field at each cell:
     `chi = F_UV / (c U_Draine)`.
-11. Multiplies the incident field by 2 before storing it in `rad.chi`.
+11. Stores the incident UV field in `rad.chi`; in `draine_scalar` mode only, the scalar field is multiplied by 2 as a model-specific normalization.
 12. Builds a fixed output/history cadence with `n_steps + 1` times spanning the start of infall to the stopping radius, biased toward late times by `output_time_power`.
 13. Evolves the chemistry and, if enabled, the gas temperature with
     `Gow17TimeStepper` on a separate adaptive substep sequence between those output times.
@@ -159,13 +159,17 @@ Since `F = c U` for a freely streaming radiation field, this conversion expresse
 - `chi = 10` means it is ten times stronger
 - `chi = 1e4` means it is four orders of magnitude stronger
 
-In the current implementation, the computed `chi` is then floored at a configurable minimum value:
+In the current implementation, the computed stellar field is then combined with a configurable ambient Draine-like background:
 
-`chi_used = max(chi, min_chi)`
+`chi_used = chi_star + min_chi`
 
 with default `min_chi = 0.1`.
 
-This floor is applied before the field is passed to the chemistry. It prevents the initial equilibrium calculation and subsequent evolution from seeing an incident UV field weaker than `0.1` times the Draine field.
+For `stellar_products`, the same additive background is applied to each Draine-normalized UV product:
+
+`G_product_used = G_product_star + min_chi`
+
+and the physical CO photodesorption photon flux receives the matching Draine photon background. This represents a fixed ambient UV field plus the diluted stellar contribution, rather than a subtractive floor that turns off as the stellar broad-band field rises.
 
 ### How Distance Is Defined In This Setup
 
@@ -186,11 +190,13 @@ The front position is not fixed. During the run it moves inward from `r_face_sta
 
 ### What The Chemistry Actually Receives
 
-After computing the cell-by-cell `chi`, the code stores:
+In `draine_scalar` mode, after computing the cell-by-cell `chi_used`, the code stores:
 
 `rad.chi = 2 * chi_used`
 
 The factor of 2 is part of the present implementation. It is not derived in the README because the driver itself does not document a physical justification for it. For now, it should be treated as a model-specific normalization choice used by this validation setup.
+
+In `stellar_products` mode, `rad.chi` and the process-specific UV products are assigned directly from the additive-background stellar-product calculation; the scalar factor-of-2 path is not used for those products.
 
 The chemistry and shielding routines therefore see a UV field that depends on:
 
@@ -199,7 +205,7 @@ The chemistry and shielding routines therefore see a UV field that depends on:
 - the chosen UV wavelength band
 - the current front distance from the star
 - the cell depth into the stream
-- the minimum field floor `min_chi`
+- the ambient Draine-like background `min_chi`
 - the factor-of-2 normalization applied before assigning `rad.chi`
 
 ### Extinction And Shielding
@@ -304,7 +310,7 @@ For each adaptive chemistry step, the driver:
 
 1. Uses the current free-fall radius to estimate how fast the illuminated front cell's incident UV field is changing.
 2. Chooses a substep so that the front cell changes by at most `max_dlnchi` in natural-log UV field, `ln(chi)`.
-3. If the front cell is still below the imposed `min_chi` floor, allows the solver to jump directly to either the floor-crossing time or the next output time.
+3. Chooses the target radius using the additive broad field, `chi_star + min_chi`, so the ambient background does not create an artificial constant-field phase.
 4. Evaluates the UV field and optional grey dust temperature at the midpoint of the accepted substep and holds that environment fixed while `Gow17TimeStepper` advances the chemistry.
 5. Refreshes the end-of-step environment before starting the next adaptive step or recording output.
 
@@ -420,7 +426,7 @@ If the run fails, the top-level output directory receives:
 
 - The model is 1D and does not solve multidimensional radiative transfer.
 - The UV field is geometric dilution of a blackbody in a fixed wavelength band.
-- The factor of 2 applied to `chi` is part of the current implementation and should be treated as a modeling choice specific to this validation.
+- In `draine_scalar` mode, the factor of 2 applied to `chi` is part of the current implementation and should be treated as a modeling choice specific to this validation. The `stellar_products` path assigns the process-specific products directly.
 - The dust temperature estimate is grey and heuristic.
 - The stream density is static while only the front radius changes.
 - The model is designed for comparative tests and diagnostics, not precision dust thermal structure predictions.

@@ -94,6 +94,73 @@ def _build_cache_key(
     )
 
 
+def _bytes_to_gib(nbytes: int | float) -> float:
+    return float(nbytes) / float(2**30)
+
+
+def _estimate_w_rays_memory_bytes(
+    *,
+    n_cells: int,
+    npix: int,
+    nbin: int,
+    include_star: bool,
+) -> dict[str, int | float]:
+    """Estimate peak memory for building directional HEALPix UV weights.
+
+    The old estimate only counted the final ``W_rays`` array. The build path
+    also keeps dense ray maps for dust columns, tau, source contributions, the
+    total contribution map, and normalization temporaries.
+    """
+    n_cells = int(n_cells)
+    npix = int(npix)
+    nbin = int(nbin)
+    if n_cells < 0 or npix < 0 or nbin < 0:
+        raise ValueError("n_cells, npix, and nbin must be non-negative")
+
+    float64_bytes = np.dtype(np.float64).itemsize
+    bool_bytes = np.dtype(bool).itemsize
+    index_bytes = np.dtype(np.intp).itemsize
+
+    ray_map_bytes = n_cells * npix * float64_bytes
+    cell_scalar_bytes = n_cells * float64_bytes
+
+    # Dense ray-sized arrays alive near the normalization step:
+    # dust columns (nbin), tau_ext, uv_ext, uv_star, uv_iso, uv_total, W_rays,
+    # plus two conservative temporaries from masked advanced-index division.
+    dense_ray_map_count = nbin + 8
+    dense_ray_peak_bytes = dense_ray_map_count * ray_map_bytes
+
+    non_ray_bytes = (
+        cell_scalar_bytes  # chi_arr
+        + nbin * cell_scalar_bytes  # prepared dust_rho_bins held by caller
+        + nbin * cell_scalar_bytes  # fields_stack inside column integration
+        + n_cells * bool_bytes  # candidate_mask
+        + n_cells * 3 * index_bytes  # candidate_idx
+        + n_cells * 3 * float64_bytes  # cell_centers
+    )
+    if include_star:
+        non_ray_bytes += (
+            nbin * cell_scalar_bytes  # dust_fields_stack for starward rays
+            + nbin * cell_scalar_bytes  # star_cols
+            + 6 * cell_scalar_bytes  # tau/r/F/chi/star-dir helper arrays
+            + n_cells * index_bytes  # k_star
+        )
+
+    estimated_peak_bytes = dense_ray_peak_bytes + non_ray_bytes
+
+    return {
+        "ray_map_bytes": ray_map_bytes,
+        "w_rays_final_bytes": ray_map_bytes,
+        "dust_column_bytes": nbin * ray_map_bytes,
+        "uv_working_ray_bytes": 5 * ray_map_bytes,
+        "normalization_temp_bytes": 2 * ray_map_bytes,
+        "dense_ray_map_count": dense_ray_map_count,
+        "dense_ray_peak_bytes": dense_ray_peak_bytes,
+        "non_ray_bytes": non_ray_bytes,
+        "estimated_peak_bytes": estimated_peak_bytes,
+    }
+
+
 def _uv_product_band_um(uv_product: str) -> tuple[float, float]:
     """Return wavelength limits for a UV product in micron.
 
@@ -329,12 +396,31 @@ def ensure_W_rays(
     chi_arr = np.asarray(chi_radmc.to("dimensionless").magnitude, dtype=np.float64)
     n_cells = chi_arr.size
     npix = 12 * int(nside) ** 2
-    nbytes = n_cells * npix * 8  # float64
-    gib = nbytes / (2**30)
+    nbin = len(dust_rho_bins)
+    memory = _estimate_w_rays_memory_bytes(
+        n_cells=n_cells,
+        npix=npix,
+        nbin=nbin,
+        include_star=float(star_uv_luminosity_erg_s) > 0.0,
+    )
+    gib = _bytes_to_gib(int(memory["w_rays_final_bytes"]))
+    peak_gib = _bytes_to_gib(int(memory["estimated_peak_bytes"]))
 
     logger.info(
-        "Allocating W_rays: shape=(%d, %d) float64 => %.2f GiB",
-        n_cells, npix, gib,
+        "Allocating W_rays: shape=(%d, %d) float64, nbin=%d => %.2f GiB final; "
+        "estimated build peak %.2f GiB "
+        "(dense ray maps=%d, dust columns %.2f GiB, UV maps %.2f GiB, "
+        "normalization temps %.2f GiB, geometry/input %.2f GiB)",
+        n_cells,
+        npix,
+        nbin,
+        gib,
+        peak_gib,
+        int(memory["dense_ray_map_count"]),
+        _bytes_to_gib(int(memory["dust_column_bytes"])),
+        _bytes_to_gib(int(memory["uv_working_ray_bytes"])),
+        _bytes_to_gib(int(memory["normalization_temp_bytes"])),
+        _bytes_to_gib(int(memory["non_ray_bytes"])),
     )
 
     # --- Compute ---
