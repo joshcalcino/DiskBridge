@@ -35,6 +35,7 @@ from diskbridge._logging import logger
 from diskbridge._config import get_config
 from diskbridge._units import units
 from diskbridge.chemistry.shielding.angular_uv_weights import (
+    _chunk_size_from_memory_budget,
     compute_star_uv_source_strength,
     compute_uv_direction_weights_healpix,
 )
@@ -232,97 +233,6 @@ def _ensure_weight_field(rad: "RadModel", uv_product: str):
     return rad.ensure_uv_product(uv_product, fallback_to_chi=False)
 
 
-def _apply_uniform_weights_outside_radius(
-    W_rays: np.ndarray,
-    cell_centers: np.ndarray,
-    *,
-    isotropic_outside_r_cm: float,
-) -> np.ndarray:
-    """Force uniform HEALPix weights outside a spherical radius."""
-    if W_rays.ndim != 2:
-        raise ValueError(f"W_rays must be 2-D, got shape {W_rays.shape}")
-    if cell_centers.shape != (W_rays.shape[0], 3):
-        raise ValueError(
-            f"cell_centers must have shape ({W_rays.shape[0]}, 3), got {cell_centers.shape}"
-        )
-
-    radii_cm = np.sqrt(np.sum(np.asarray(cell_centers, dtype=float) ** 2, axis=1))
-    outer_mask = radii_cm >= float(isotropic_outside_r_cm)
-    if not np.any(outer_mask):
-        return W_rays
-
-    W_out = np.asarray(W_rays, dtype=float).copy()
-    W_out[outer_mask, :] = 1.0 / float(W_out.shape[1])
-    return W_out
-
-
-def _apply_tau_weights_outside_radius(
-    W_rays: np.ndarray,
-    tau_ext_rays: np.ndarray,
-    cell_centers: np.ndarray,
-    *,
-    isotropic_outside_r_cm: float,
-) -> np.ndarray:
-    """Force boundary-tau directional weights outside a spherical radius."""
-    if W_rays.ndim != 2:
-        raise ValueError(f"W_rays must be 2-D, got shape {W_rays.shape}")
-    if tau_ext_rays.shape != W_rays.shape:
-        raise ValueError(
-            f"tau_ext_rays must match W_rays shape {W_rays.shape}, got {tau_ext_rays.shape}"
-        )
-    if cell_centers.shape != (W_rays.shape[0], 3):
-        raise ValueError(
-            f"cell_centers must have shape ({W_rays.shape[0]}, 3), got {cell_centers.shape}"
-        )
-
-    radii_cm = np.sqrt(np.sum(np.asarray(cell_centers, dtype=float) ** 2, axis=1))
-    outer_mask = radii_cm >= float(isotropic_outside_r_cm)
-    if not np.any(outer_mask):
-        return W_rays
-
-    W_out = np.asarray(W_rays, dtype=float).copy()
-    outer_idx = np.where(outer_mask)[0]
-    tau_outer = np.asarray(tau_ext_rays[outer_mask], dtype=float)
-    tau_outer = np.clip(tau_outer, 0.0, 700.0)
-    raw = np.exp(-tau_outer)
-    sums = np.sum(raw, axis=1, keepdims=True)
-    valid = sums[:, 0] > 0.0
-    if np.any(valid):
-        W_out[outer_idx[valid], :] = raw[valid, :] / sums[valid, :]
-    if np.any(~valid):
-        W_out[outer_idx[~valid], :] = 1.0 / float(W_out.shape[1])
-    return W_out
-
-
-def _apply_outer_background_weights(
-    W_rays: np.ndarray,
-    *,
-    tau_ext_rays: np.ndarray,
-    cell_centers: np.ndarray,
-    isotropic_outside_r_cm: float,
-    mode: str,
-) -> np.ndarray:
-    """Apply the configured background-dominated outer weighting mode."""
-    mode = str(mode).strip().lower()
-    if mode == "uniform":
-        return _apply_uniform_weights_outside_radius(
-            W_rays,
-            cell_centers,
-            isotropic_outside_r_cm=isotropic_outside_r_cm,
-        )
-    if mode == "tau":
-        return _apply_tau_weights_outside_radius(
-            W_rays,
-            tau_ext_rays,
-            cell_centers,
-            isotropic_outside_r_cm=isotropic_outside_r_cm,
-        )
-    raise ValueError(
-        "segmented_outer_weight_mode must be 'tau' or 'uniform', "
-        f"got {mode!r}"
-    )
-
-
 def ensure_W_rays(
     rad: "RadModel",
     *,
@@ -335,6 +245,9 @@ def ensure_W_rays(
     isotropic_outside_r_au: float | None = None,
     outer_weight_mode: str | None = None,
     uv_product: str = "chi",
+    chunk_size: int | None = None,
+    memory_budget_gib: float | None = None,
+    keep_debug_arrays: bool | None = None,
 ) -> np.ndarray:
     """Compute and cache ``rad.W_rays``; return existing cache on repeat calls.
 
@@ -360,6 +273,13 @@ def ensure_W_rays(
     cache_dir : str or None, optional
         Directory for HEALPix geometry / column caching (passed through to
         ``compute_uv_direction_weights_healpix``).
+    chunk_size : int or None, optional
+        Number of candidate cells per UV-weight build chunk.
+    memory_budget_gib : float or None, optional
+        Approximate working-memory budget per chunk, excluding final W_rays.
+    keep_debug_arrays : bool or None, optional
+        Keep full diagnostic ray maps. Defaults to false in
+        ``compute_uv_direction_weights_healpix``.
 
     Returns
     -------
@@ -397,6 +317,24 @@ def ensure_W_rays(
     n_cells = chi_arr.size
     npix = 12 * int(nside) ** 2
     nbin = len(dust_rho_bins)
+    if memory_budget_gib is None:
+        memory_budget_gib = getattr(diskbridge.params, "w_rays_memory_budget_gib", None)
+    if chunk_size is None:
+        chunk_size = getattr(diskbridge.params, "w_rays_chunk_size", None)
+    if chunk_size is not None:
+        chunk_size = int(chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("w_rays_chunk_size must be positive")
+    resolved_chunk_size = (
+        max(1, min(int(chunk_size), n_cells))
+        if chunk_size is not None
+        else _chunk_size_from_memory_budget(
+            n_candidates=n_cells,
+            npix=npix,
+            nbin=nbin,
+            memory_budget_gib=memory_budget_gib,
+        )
+    )
     memory = _estimate_w_rays_memory_bytes(
         n_cells=n_cells,
         npix=npix,
@@ -408,7 +346,7 @@ def ensure_W_rays(
 
     logger.info(
         "Allocating W_rays: shape=(%d, %d) float64, nbin=%d => %.2f GiB final; "
-        "estimated build peak %.2f GiB "
+        "unchunked estimated build peak %.2f GiB "
         "(dense ray maps=%d, dust columns %.2f GiB, UV maps %.2f GiB, "
         "normalization temps %.2f GiB, geometry/input %.2f GiB)",
         n_cells,
@@ -421,6 +359,22 @@ def ensure_W_rays(
         _bytes_to_gib(int(memory["uv_working_ray_bytes"])),
         _bytes_to_gib(int(memory["normalization_temp_bytes"])),
         _bytes_to_gib(int(memory["non_ray_bytes"])),
+    )
+    chunk_memory = _estimate_w_rays_memory_bytes(
+        n_cells=resolved_chunk_size,
+        npix=npix,
+        nbin=nbin,
+        include_star=float(star_uv_luminosity_erg_s) > 0.0,
+    )
+    chunk_peak_gib = _bytes_to_gib(
+        int(memory["w_rays_final_bytes"]) + int(chunk_memory["estimated_peak_bytes"])
+    )
+    logger.info(
+        "Chunked W_rays build: chunk_size=%d (%d chunk(s)); estimated peak %.2f GiB "
+        "including final W_rays and one chunk",
+        resolved_chunk_size,
+        (n_cells + resolved_chunk_size - 1) // resolved_chunk_size,
+        chunk_peak_gib,
     )
 
     # --- Compute ---
@@ -435,18 +389,18 @@ def ensure_W_rays(
             star_uv_luminosity_erg_s=float(star_uv_luminosity_erg_s),
             star_uv_reference_energy_density=uv_reference,
             star_uv_weighting=uv_weighting,
+            chunk_size=resolved_chunk_size,
+            memory_budget_gib=memory_budget_gib,
+            keep_debug_arrays=keep_debug_arrays,
+            isotropic_outside_r_cm=(
+                None
+                if isotropic_outside_r_au is None
+                else float(isotropic_outside_r_au) * units("au").to("cm").magnitude
+            ),
+            outer_weight_mode="tau" if outer_weight_mode is None else str(outer_weight_mode),
             cache_dir=cache_dir,
         )
     )
-
-    if isotropic_outside_r_au is not None:
-        W_rays = _apply_outer_background_weights(
-            W_rays,
-            tau_ext_rays=np.asarray(_debug["tau_ext_rays"], dtype=float),
-            cell_centers=_cell_centers,
-            isotropic_outside_r_cm=float(isotropic_outside_r_au) * units("au").to("cm").magnitude,
-            mode="tau" if outer_weight_mode is None else str(outer_weight_mode),
-        )
 
     # Discard debug dict to save memory; keep only W_rays.
     del _debug, _candidate_idx, _dirs, _cell_centers

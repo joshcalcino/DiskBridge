@@ -80,6 +80,67 @@ from diskbridge.chemistry.shielding.healpix_columns import (
 from diskbridge.chemistry.shielding.healpix_utils import integrate_starward_rays_multi
 
 
+DEFAULT_W_RAYS_MEMORY_BUDGET_GIB = 64.0
+
+
+def _chunk_size_from_memory_budget(
+    *,
+    n_candidates: int,
+    npix: int,
+    nbin: int,
+    memory_budget_gib: float | None,
+) -> int:
+    if n_candidates <= 0:
+        return 0
+    if memory_budget_gib is None:
+        memory_budget_gib = DEFAULT_W_RAYS_MEMORY_BUDGET_GIB
+    budget_bytes = float(memory_budget_gib) * float(2**30)
+    if not np.isfinite(budget_bytes) or budget_bytes <= 0.0:
+        return int(n_candidates)
+
+    # Per-cell, per-pixel dense temporaries held inside one chunk:
+    # dust columns for each bin, tau_ext, uv_ext, and a little headroom for
+    # normalization/copy temporaries.  The final W_rays array is allocated once
+    # outside this budget.
+    bytes_per_candidate = int(np.dtype(np.float64).itemsize) * int(npix) * (int(nbin) + 4)
+    return max(1, min(int(n_candidates), int(budget_bytes // max(bytes_per_candidate, 1))))
+
+
+def _apply_outer_weights_to_chunk(
+    W_chunk: np.ndarray,
+    tau_ext_rays: np.ndarray,
+    cell_centers_chunk: np.ndarray,
+    *,
+    isotropic_outside_r_cm: float,
+    mode: str,
+) -> None:
+    radii_cm = np.sqrt(np.sum(np.asarray(cell_centers_chunk, dtype=float) ** 2, axis=1))
+    outer_mask = radii_cm >= float(isotropic_outside_r_cm)
+    if not np.any(outer_mask):
+        return
+
+    mode = str(mode).strip().lower()
+    if mode == "uniform":
+        W_chunk[outer_mask, :] = 1.0 / float(W_chunk.shape[1])
+        return
+    if mode != "tau":
+        raise ValueError(
+            "segmented_outer_weight_mode must be 'tau' or 'uniform', "
+            f"got {mode!r}"
+        )
+
+    tau_outer = np.asarray(tau_ext_rays[outer_mask], dtype=float)
+    tau_outer = np.clip(tau_outer, 0.0, 700.0)
+    raw = np.exp(-tau_outer)
+    sums = np.sum(raw, axis=1, keepdims=True)
+    outer_idx = np.where(outer_mask)[0]
+    valid = sums[:, 0] > 0.0
+    if np.any(valid):
+        W_chunk[outer_idx[valid], :] = raw[valid, :] / sums[valid, :]
+    if np.any(~valid):
+        W_chunk[outer_idx[~valid], :] = 1.0 / float(W_chunk.shape[1])
+
+
 def planck_band_luminosity(
     R_cm: float,
     T_K: float,
@@ -288,6 +349,11 @@ def compute_uv_direction_weights_healpix(
     star_uv_reference_energy_density: float = U_DRAINE,
     star_uv_weighting: str = "energy",
     progress_chunks: int | None = None,
+    chunk_size: int | None = None,
+    memory_budget_gib: float | None = None,
+    keep_debug_arrays: bool | None = None,
+    isotropic_outside_r_cm: float | None = None,
+    outer_weight_mode: str = "tau",
     cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Compute per-direction UV weights for HEALPix shielding averages.
@@ -322,6 +388,19 @@ def compute_uv_direction_weights_healpix(
         Weighting for the stellar source strength.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
+    chunk_size : int or None, optional
+        Number of candidate cells to process per UV-weight chunk. If omitted,
+        a chunk size is derived from ``memory_budget_gib``.
+    memory_budget_gib : float or None, optional
+        Approximate working-memory budget for one chunk, excluding the final
+        ``W_rays`` array. Defaults to a conservative internal budget.
+    keep_debug_arrays : bool or None, optional
+        Keep full-size diagnostic arrays in the returned debug dict. By
+        default this is disabled for normal runs.
+    isotropic_outside_r_cm : float or None, optional
+        If set, replace weights outside this radius using ``outer_weight_mode``.
+    outer_weight_mode : {"tau", "uniform"}, optional
+        Outer-radius weighting mode.
     cache_dir : Path or str or None, optional
         Directory for caching HEALPix geometry and column results.
 
@@ -336,9 +415,8 @@ def compute_uv_direction_weights_healpix(
     cell_centers : ndarray, shape (n_candidates, 3)
         Cartesian cell center positions (cm).
     debug : dict
-        Diagnostic arrays: chi_ext_dir, chi_star_dir_att, chi_iso,
-        chi_radmc_cand, tau_ext_rays, uv_ext_contrib, uv_star_contrib,
-        uv_iso_contrib, and optionally tau_star, chi_star_unatt.
+        Diagnostic arrays when ``keep_debug_arrays`` is true. In normal runs
+        only small scalar summaries are returned.
 
     Raises
     ------
@@ -369,125 +447,218 @@ def compute_uv_direction_weights_healpix(
 
     if n_candidates == 0:
         W_rays = np.full((0, npix), 1.0 / npix, dtype=np.float64)
-        return W_rays, candidate_idx, dirs, cell_centers, {}
+        return W_rays, candidate_idx, dirs, cell_centers, {"keep_debug_arrays": False}
 
     # -- 2. Integrate dust density along HEALPix rays (external tau) ----------
     dust_fields: dict[str, np.ndarray] = {}
     for ibin, rho_bin in enumerate(dust_rho_bins):
         dust_fields[f"dust_bin_{ibin}"] = _as_f64(f"dust_bin_{ibin}", rho_bin)
 
-    _, _, dust_cols = compute_column_rays_healpix(
-        mesh,
-        fields=dust_fields,
-        nside=int(nside),
-        candidate_mask=candidate_mask,
-        progress_chunks=progress_chunks,
-        cache_dir=cache_dir,
-        tracer=tracer,
-        dirs=dirs,
-        candidate_idx=candidate_idx,
-        cell_centers=cell_centers,
-    )
+    if keep_debug_arrays is None:
+        keep_debug_arrays = False
 
-    # -- 3. Compute tau_ext per ray -------------------------------------------
-    tau_ext_rays = compute_tau_uv_from_dust_columns(dust_cols, kext_uv, nbin=nbin)
+    if chunk_size is None:
+        chunk_size = _chunk_size_from_memory_budget(
+            n_candidates=n_candidates,
+            npix=npix,
+            nbin=nbin,
+            memory_budget_gib=memory_budget_gib,
+        )
+    else:
+        chunk_size = int(chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+    chunk_size = max(1, min(int(chunk_size), n_candidates))
 
-    # -- 4. External direct component -----------------------------------------
-    uv_ext_contrib = float(chi_ext0) * np.exp(-tau_ext_rays)  # (n_candidates, npix)
-    chi_ext_dir = uv_ext_contrib.mean(axis=1)  # scalar per cell
+    n_chunks = (n_candidates + chunk_size - 1) // chunk_size
+    uniform = 1.0 / float(npix)
+    W_rays = np.full((n_candidates, npix), uniform, dtype=np.float64)
 
-    # -- 5. Stellar direct component ------------------------------------------
-    chi_star_dir_att = np.zeros(n_candidates, dtype=np.float64)
-    uv_star_contrib = np.zeros((n_candidates, npix), dtype=np.float64)
-
-    debug: dict = {}
-
+    dust_fields_stack = None
     if float(star_uv_luminosity_erg_s) > 0.0:
-        # 5.1 Integrate dust along star-ward rays
         dust_fields_stack = np.ascontiguousarray(
             np.stack(
                 [_as_f64(f"rho_{i}", rho) for i, rho in enumerate(dust_rho_bins)],
                 axis=0,
             ),
             dtype=np.float64,
-        )  # (nbin, dim0, dim1, dim2)
-
-        star_cols = integrate_starward_rays_multi(
-            tracer,
-            cell_centers,
-            dust_fields_stack,
-            candidate_idx=candidate_idx,
-        )  # (n_candidates, nbin)
-
-        tau_star = np.zeros(n_candidates, dtype=np.float64)
-        for ibin in range(nbin):
-            tau_star += kext_uv[ibin] * star_cols[:, ibin]
-
-        # 5.2 Compute unattenuated stellar chi per cell
-        r_cell = np.sqrt(np.sum(cell_centers**2, axis=1))  # cm
-        r_cell = np.maximum(r_cell, 1e-30)
-        F_uv = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
-        ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
-        if str(star_uv_weighting).lower() == "photon":
-            chi_star_unatt = F_uv / ref
-        else:
-            chi_star_unatt = F_uv / (C_LIGHT * ref)
-
-        # 5.3 Attenuate
-        chi_star_dir_att = chi_star_unatt * np.exp(-tau_star)
-
-        # 5.4 Inject delta function into star pixel
-        # Star direction from cell: toward origin = -cell_center / |cell_center|
-        star_dir_x = -cell_centers[:, 0] / r_cell
-        star_dir_y = -cell_centers[:, 1] / r_cell
-        star_dir_z = -cell_centers[:, 2] / r_cell
-        k_star = hp.vec2pix(int(nside), star_dir_x, star_dir_y, star_dir_z)
-
-        # Vectorised injection:
-        # uv_star_contrib[i, k_star[i]] = npix * chi_star_dir_att[i]
-        idx_cells = np.arange(n_candidates)
-        uv_star_contrib[idx_cells, k_star] = npix * chi_star_dir_att
-
-        debug["tau_star"] = tau_star
-        debug["chi_star_unatt"] = chi_star_unatt
-        debug["k_star"] = k_star
-
-        logger.info(
-            "Stellar direct: max(chi_star_unatt)=%.3e, max(tau_star)=%.3e",
-            float(np.max(chi_star_unatt)),
-            float(np.max(tau_star)),
         )
 
-    # -- 6. Isotropic component (RADMC residual) ------------------------------
-    chi_cand = chi_arr[
-        candidate_idx[:, 0], candidate_idx[:, 1], candidate_idx[:, 2]
-    ]
-    chi_iso = np.maximum(chi_cand - chi_ext_dir - chi_star_dir_att, 0.0)
-    uv_iso_contrib = np.broadcast_to(chi_iso[:, None], (n_candidates, npix)).copy()
+    debug_chunks: dict[str, list[np.ndarray]] = {}
+    if keep_debug_arrays:
+        for name in (
+            "chi_ext_dir",
+            "chi_star_dir_att",
+            "chi_iso",
+            "chi_radmc_cand",
+            "tau_ext_rays",
+            "uv_ext_contrib",
+            "uv_star_contrib",
+            "uv_iso_contrib",
+            "uv_total_contrib",
+            "tau_star",
+            "chi_star_unatt",
+            "k_star",
+        ):
+            debug_chunks[name] = []
 
-    # -- 7. Build total and normalise to weights ------------------------------
-    uv_total_contrib = uv_ext_contrib + uv_star_contrib + uv_iso_contrib
-    sum_uv_contrib = uv_total_contrib.sum(axis=1)  # (n_candidates,)
+    chi_iso_medians: list[float] = []
+    max_chi_star_unatt = 0.0
+    max_tau_star = 0.0
 
-    uniform = 1.0 / float(npix)
-    mask_nonzero = sum_uv_contrib > 0.0
-    W_rays = np.full((n_candidates, npix), uniform, dtype=np.float64)
-    W_rays[mask_nonzero] = (
-        uv_total_contrib[mask_nonzero] / sum_uv_contrib[mask_nonzero, None]
+    logger.info(
+        "UV direction weights: processing %d candidates in %d chunk(s) "
+        "(chunk_size=%d, npix=%d, keep_debug_arrays=%s)",
+        n_candidates,
+        n_chunks,
+        chunk_size,
+        npix,
+        bool(keep_debug_arrays),
     )
 
-    # -- 8. Diagnostics -------------------------------------------------------
-    debug.update({
-        "chi_ext_dir": chi_ext_dir,
-        "chi_star_dir_att": chi_star_dir_att,
-        "chi_iso": chi_iso,
-        "chi_radmc_cand": chi_cand,
-        "tau_ext_rays": tau_ext_rays,
-        "uv_ext_contrib": uv_ext_contrib,
-        "uv_star_contrib": uv_star_contrib,
-        "uv_iso_contrib": uv_iso_contrib,
-        "uv_total_contrib": uv_total_contrib,
-    })
+    for ichunk, start in enumerate(range(0, n_candidates, chunk_size), start=1):
+        end = min(start + chunk_size, n_candidates)
+        candidate_idx_chunk = candidate_idx[start:end]
+        cell_centers_chunk = cell_centers[start:end]
+        n_chunk = end - start
+
+        if n_chunks > 1:
+            logger.info(
+                "UV direction weights chunk %d/%d (%d cells)",
+                ichunk,
+                n_chunks,
+                n_chunk,
+            )
+
+        _, _, dust_cols = compute_column_rays_healpix(
+            mesh,
+            fields=dust_fields,
+            nside=int(nside),
+            candidate_mask=None,
+            progress_chunks=progress_chunks,
+            cache_dir=None,
+            tracer=tracer,
+            dirs=dirs,
+            candidate_idx=candidate_idx_chunk,
+            cell_centers=cell_centers_chunk,
+        )
+
+        tau_ext_rays = compute_tau_uv_from_dust_columns(dust_cols, kext_uv, nbin=nbin)
+        uv_ext_contrib = float(chi_ext0) * np.exp(-tau_ext_rays)
+        chi_ext_dir = uv_ext_contrib.mean(axis=1)
+
+        chi_star_dir_att = np.zeros(n_chunk, dtype=np.float64)
+        chi_star_unatt = np.zeros(n_chunk, dtype=np.float64)
+        tau_star = np.zeros(n_chunk, dtype=np.float64)
+        k_star = np.zeros(n_chunk, dtype=np.intp)
+
+        if dust_fields_stack is not None:
+            star_cols = integrate_starward_rays_multi(
+                tracer,
+                cell_centers_chunk,
+                dust_fields_stack,
+                candidate_idx=candidate_idx_chunk,
+            )
+
+            for ibin in range(nbin):
+                tau_star += kext_uv[ibin] * star_cols[:, ibin]
+
+            r_cell = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
+            r_cell = np.maximum(r_cell, 1e-30)
+            F_uv = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
+            ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
+            if str(star_uv_weighting).lower() == "photon":
+                chi_star_unatt = F_uv / ref
+            else:
+                chi_star_unatt = F_uv / (C_LIGHT * ref)
+            chi_star_dir_att = chi_star_unatt * np.exp(-tau_star)
+
+            star_dir_x = -cell_centers_chunk[:, 0] / r_cell
+            star_dir_y = -cell_centers_chunk[:, 1] / r_cell
+            star_dir_z = -cell_centers_chunk[:, 2] / r_cell
+            k_star = hp.vec2pix(int(nside), star_dir_x, star_dir_y, star_dir_z)
+
+            max_chi_star_unatt = max(max_chi_star_unatt, float(np.max(chi_star_unatt)))
+            max_tau_star = max(max_tau_star, float(np.max(tau_star)))
+
+        chi_cand = chi_arr[
+            candidate_idx_chunk[:, 0],
+            candidate_idx_chunk[:, 1],
+            candidate_idx_chunk[:, 2],
+        ]
+        chi_iso = np.maximum(chi_cand - chi_ext_dir - chi_star_dir_att, 0.0)
+        chi_iso_medians.append(float(np.median(chi_iso)))
+
+        sum_uv_contrib = (
+            uv_ext_contrib.sum(axis=1)
+            + float(npix) * chi_iso
+            + float(npix) * chi_star_dir_att
+        )
+        mask_nonzero = sum_uv_contrib > 0.0
+
+        W_chunk = W_rays[start:end]
+        W_chunk[:, :] = uniform
+        if np.any(mask_nonzero):
+            rows_nonzero = np.where(mask_nonzero)[0]
+            W_chunk[rows_nonzero, :] = uv_ext_contrib[rows_nonzero]
+            W_chunk[rows_nonzero, :] += chi_iso[rows_nonzero, None]
+            W_chunk[rows_nonzero, :] /= sum_uv_contrib[rows_nonzero, None]
+            if dust_fields_stack is not None:
+                W_chunk[rows_nonzero, k_star[rows_nonzero]] += (
+                    float(npix)
+                    * chi_star_dir_att[rows_nonzero]
+                    / sum_uv_contrib[rows_nonzero]
+                )
+
+        if isotropic_outside_r_cm is not None:
+            _apply_outer_weights_to_chunk(
+                W_chunk,
+                tau_ext_rays,
+                cell_centers_chunk,
+                isotropic_outside_r_cm=float(isotropic_outside_r_cm),
+                mode=outer_weight_mode,
+            )
+
+        if keep_debug_arrays:
+            uv_star_contrib = np.zeros((n_chunk, npix), dtype=np.float64)
+            if dust_fields_stack is not None:
+                uv_star_contrib[np.arange(n_chunk, dtype=np.intp), k_star] = (
+                    float(npix) * chi_star_dir_att
+                )
+            uv_iso_contrib = np.broadcast_to(chi_iso[:, None], (n_chunk, npix)).copy()
+            uv_total_contrib = uv_ext_contrib + uv_star_contrib + uv_iso_contrib
+            debug_chunks["chi_ext_dir"].append(chi_ext_dir.copy())
+            debug_chunks["chi_star_dir_att"].append(chi_star_dir_att.copy())
+            debug_chunks["chi_iso"].append(chi_iso.copy())
+            debug_chunks["chi_radmc_cand"].append(chi_cand.copy())
+            debug_chunks["tau_ext_rays"].append(tau_ext_rays.copy())
+            debug_chunks["uv_ext_contrib"].append(uv_ext_contrib.copy())
+            debug_chunks["uv_star_contrib"].append(uv_star_contrib)
+            debug_chunks["uv_iso_contrib"].append(uv_iso_contrib)
+            debug_chunks["uv_total_contrib"].append(uv_total_contrib)
+            debug_chunks["tau_star"].append(tau_star.copy())
+            debug_chunks["chi_star_unatt"].append(chi_star_unatt.copy())
+            debug_chunks["k_star"].append(k_star.copy())
+
+    debug: dict = {
+        "keep_debug_arrays": bool(keep_debug_arrays),
+        "chunk_size": int(chunk_size),
+        "n_chunks": int(n_chunks),
+        "median_chi_iso": float(np.median(chi_iso_medians)) if chi_iso_medians else 0.0,
+    }
+    if keep_debug_arrays:
+        debug.update({
+            name: np.concatenate(parts, axis=0)
+            for name, parts in debug_chunks.items()
+            if parts
+        })
+
+    if dust_fields_stack is not None:
+        logger.info(
+            "Stellar direct: max(chi_star_unatt)=%.3e, max(tau_star)=%.3e",
+            max_chi_star_unatt,
+            max_tau_star,
+        )
 
     logger.info(
         "UV direction weights: n_cand=%d, npix=%d, "
@@ -497,7 +668,7 @@ def compute_uv_direction_weights_healpix(
         npix,
         float(chi_ext0),
         float(star_uv_luminosity_erg_s),
-        float(np.median(chi_iso)),
+        float(debug["median_chi_iso"]),
     )
 
     return W_rays, candidate_idx, dirs, cell_centers, debug
