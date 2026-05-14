@@ -1206,6 +1206,12 @@ def _compute_shielding_and_gph(
             nside=nside,
             b_kms=b_kms,
             W_rays=W_rays,
+            chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
+            memory_budget_gib=getattr(
+                diskbridge.params,
+                "pdr_shielding_memory_budget_gib",
+                None,
+            ),
         )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)

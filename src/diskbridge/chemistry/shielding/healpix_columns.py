@@ -41,6 +41,32 @@ from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 import healpy as hp  # type: ignore
 
 
+DEFAULT_PDR_SHIELDING_MEMORY_BUDGET_GIB = 8.0
+
+
+def _chunk_size_from_memory_budget(
+    *,
+    n_candidates: int,
+    npix: int,
+    dense_ray_map_count: int,
+    memory_budget_gib: float | None,
+) -> int:
+    if n_candidates <= 0:
+        return 0
+    if memory_budget_gib is None:
+        memory_budget_gib = DEFAULT_PDR_SHIELDING_MEMORY_BUDGET_GIB
+    budget_bytes = float(memory_budget_gib) * float(2**30)
+    if not np.isfinite(budget_bytes) or budget_bytes <= 0.0:
+        return int(n_candidates)
+
+    bytes_per_candidate = (
+        int(np.dtype(np.float64).itemsize)
+        * int(npix)
+        * max(1, int(dense_ray_map_count))
+    )
+    return max(1, min(int(n_candidates), int(budget_bytes // bytes_per_candidate)))
+
+
 # =============================================================================
 # HEALPIX CACHE UTILITIES
 # =============================================================================
@@ -906,6 +932,8 @@ def compute_pdr_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     W_rays: Optional[np.ndarray] = None,
+    chunk_size: Optional[int] = None,
+    memory_budget_gib: Optional[float] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute PDR shielding factors (H2, CO, C) and effective UV via HEALPix rays.
 
@@ -956,6 +984,13 @@ def compute_pdr_shielding_healpix(
         Directory for caching ray geometry and column results.
     W_rays : ndarray of shape (n_candidates, npix) or None, optional
         Per-direction UV weights. If None, uniform (isotropic) averaging.
+    chunk_size : int or None, optional
+        Number of candidate cells to process per shielding chunk. If omitted,
+        a chunk size is derived from ``memory_budget_gib``.
+    memory_budget_gib : float or None, optional
+        Approximate working-memory budget for one shielding chunk. Defaults to
+        a conservative internal budget because ``W_rays`` may already be
+        resident.
 
     Returns
     -------
@@ -983,13 +1018,10 @@ def compute_pdr_shielding_healpix(
         fields["co"] = _as_f64("nCO", nCO)
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
-
-    candidate_idx, dirs, cols = compute_column_rays_healpix(
+    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
         mesh,
-        fields=fields,
         nside=int(nside),
         candidate_mask=candidate_mask_arr,
-        progress_chunks=progress_chunks,
         cache_dir=cache_dir,
     )
 
@@ -998,7 +1030,71 @@ def compute_pdr_shielding_healpix(
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     theta_pdr = np.ones_like(nH_cgs, dtype=np.float64)
 
-    if candidate_idx.shape[0] > 0:
+    n_candidates = int(candidate_idx.shape[0])
+    npix = int(dirs.shape[0])
+    if W_rays is not None:
+        W_rays = _as_f64("W_rays", W_rays)
+        if W_rays.shape != (n_candidates, npix):
+            raise ValueError(
+                f"W_rays must have shape ({n_candidates}, {npix}), got {W_rays.shape}"
+            )
+
+    if n_candidates > 0:
+        # Dense ray maps alive in a chunk: integrated columns, H2 factors, C
+        # factors, optional CO/PDR factors, and W_rays multiplication inputs.
+        dense_count = 8 if visser is None else 12
+        if chunk_size is None:
+            chunk_size = _chunk_size_from_memory_budget(
+                n_candidates=n_candidates,
+                npix=npix,
+                dense_ray_map_count=dense_count,
+                memory_budget_gib=memory_budget_gib,
+            )
+        else:
+            chunk_size = int(chunk_size)
+            if chunk_size <= 0:
+                raise ValueError("chunk_size must be positive")
+        chunk_size = max(1, min(int(chunk_size), n_candidates))
+        n_chunks = (n_candidates + chunk_size - 1) // chunk_size
+        logger.info(
+            "PDR HEALPix shielding: processing %d candidates in %d chunk(s) "
+            "(chunk_size=%d, npix=%d, fields=%d)",
+            n_candidates,
+            n_chunks,
+            chunk_size,
+            npix,
+            len(fields),
+        )
+
+    if n_candidates == 0:
+        chi_eff_pdr = chi_arr * theta_pdr
+        return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
+
+    for ichunk, start in enumerate(range(0, n_candidates, int(chunk_size)), start=1):
+        end = min(start + int(chunk_size), n_candidates)
+        candidate_idx_chunk = candidate_idx[start:end]
+        cell_centers_chunk = cell_centers[start:end]
+        if n_chunks > 1:
+            logger.info(
+                "PDR HEALPix shielding chunk %d/%d (%d cells)",
+                ichunk,
+                n_chunks,
+                end - start,
+            )
+
+        _, _, cols = compute_column_rays_healpix(
+            mesh,
+            fields=fields,
+            nside=int(nside),
+            candidate_mask=None,
+            progress_chunks=progress_chunks,
+            cache_dir=None,
+            tracer=tracer,
+            dirs=dirs,
+            candidate_idx=candidate_idx_chunk,
+            cell_centers=cell_centers_chunk,
+        )
+
         N_H2_rays = cols["h2"]
         N_C_rays = cols["c"]
 
@@ -1006,10 +1102,11 @@ def compute_pdr_shielding_healpix(
 
         # H2 shielding
         if W_rays is not None:
-            theta_h2_mean = (W_rays * f_sh_rays).sum(axis=1)
+            W_chunk = W_rays[start:end]
+            theta_h2_mean = (W_chunk * f_sh_rays).sum(axis=1)
         else:
             theta_h2_mean = f_sh_rays.mean(axis=1)
-        _scatter_candidates_3d(theta_h2, candidate_idx, theta_h2_mean)
+        _scatter_candidates_3d(theta_h2, candidate_idx_chunk, theta_h2_mean)
 
         # C self-shielding 
         # References: van Dishoeck & Black 1988; Tielens & Hollenbach 1985
@@ -1023,30 +1120,30 @@ def compute_pdr_shielding_healpix(
         theta_c_rays = rc * ry
 
         if W_rays is not None:
-            theta_c_mean = (W_rays * theta_c_rays).sum(axis=1)
+            theta_c_mean = (W_chunk * theta_c_rays).sum(axis=1)
         else:
             theta_c_mean = theta_c_rays.mean(axis=1)
-        _scatter_candidates_3d(theta_c, candidate_idx, theta_c_mean)
+        _scatter_candidates_3d(theta_c, candidate_idx_chunk, theta_c_mean)
 
         theta_pdr_mean = theta_h2_mean
-        _scatter_candidates_3d(theta_pdr, candidate_idx, theta_h2_mean)
+        _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_h2_mean)
 
         if visser is not None:
             N_CO_rays = cols["co"]
             theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
 
             if W_rays is not None:
-                theta_co_mean = (W_rays * theta_co_rays).sum(axis=1)
+                theta_co_mean = (W_chunk * theta_co_rays).sum(axis=1)
             else:
                 theta_co_mean = theta_co_rays.mean(axis=1)
-            _scatter_candidates_3d(theta_co, candidate_idx, theta_co_mean)
+            _scatter_candidates_3d(theta_co, candidate_idx_chunk, theta_co_mean)
 
             theta_pdr_rays = f_sh_rays * theta_co_rays
             if W_rays is not None:
-                theta_pdr_mean = (W_rays * theta_pdr_rays).sum(axis=1)
+                theta_pdr_mean = (W_chunk * theta_pdr_rays).sum(axis=1)
             else:
                 theta_pdr_mean = theta_pdr_rays.mean(axis=1)
-            _scatter_candidates_3d(theta_pdr, candidate_idx, theta_pdr_mean)
+            _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_pdr_mean)
 
     chi_eff_pdr = chi_arr * theta_pdr
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
