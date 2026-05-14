@@ -321,6 +321,8 @@ def ensure_W_rays(
         memory_budget_gib = getattr(diskbridge.params, "w_rays_memory_budget_gib", None)
     if chunk_size is None:
         chunk_size = getattr(diskbridge.params, "w_rays_chunk_size", None)
+    if keep_debug_arrays is None:
+        keep_debug_arrays = getattr(diskbridge.params, "w_rays_keep_debug_arrays", None)
     if chunk_size is not None:
         chunk_size = int(chunk_size)
         if chunk_size <= 0:
