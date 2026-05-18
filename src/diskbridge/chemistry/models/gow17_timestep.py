@@ -55,6 +55,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
+    _shielding_b_grid_from_microturbulence,
     _warn_if_co_phase_settings_ignored,
     _model_microturbulence_grid_kms,
 )
@@ -186,6 +187,14 @@ class Gow17TimeStepper:
             T_init,
             v_turb_grid_kms,
         )
+        self.b_CO_kms_grid = _shielding_b_grid_from_microturbulence(
+            rad,
+            self.b_CO_kms_arr,
+        )
+        self.shielding_linewidth_meta["microturbulence_spatially_constant"] = (
+            self.b_CO_kms_grid is None
+        )
+        self.shielding_linewidth_meta["b_CO_ray_grid"] = self.b_CO_kms_grid is not None
 
         self.abstol = _build_gow17_abstol(cfg, self.abstol0)
 
@@ -374,6 +383,14 @@ class Gow17TimeStepper:
             T_flat.reshape(self.shape),
             v_turb_grid_kms,
         )
+        self.b_CO_kms_grid = _shielding_b_grid_from_microturbulence(
+            self.rad,
+            self.b_CO_kms_arr,
+        )
+        self.shielding_linewidth_meta["microturbulence_spatially_constant"] = (
+            self.b_CO_kms_grid is None
+        )
+        self.shielding_linewidth_meta["b_CO_ray_grid"] = self.b_CO_kms_grid is not None
         self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
             self.b_kms,
             self.shielding_linewidth_meta,
@@ -398,6 +415,7 @@ class Gow17TimeStepper:
             chi_dust_arr=chi_dust_arr,
             visser=self.visser,
             b_kms=self.b_kms,
+            b_CO_kms_grid=self.b_CO_kms_grid,
             nside=self.nside,
             chi_is_incident=self.chi_is_incident,
             local_chi_factor=self.local_chi_factor,

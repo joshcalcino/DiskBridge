@@ -14,7 +14,6 @@ from diskbridge._logging import logger
 from diskbridge._constants import (
     E_BIND_CO,
     NU0_CO,
-    F_DRAINE,
     N_LAY,
     N_SURF,
     Y_CO,
@@ -25,7 +24,10 @@ from diskbridge._constants import (
     M_H,
 )
 from diskbridge.model.profiles import compute_cell_volumes
-from diskbridge.model.microturbulence import ensure_microturbulence_field
+from diskbridge.model.microturbulence import (
+    ensure_microturbulence_field,
+    microturbulence_spatially_constant,
+)
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
     compute_pdr_shielding_1d,
@@ -731,7 +733,6 @@ def _resolve_shielding_linewidth(
 
     b_scalar = float(np.median(b_arr))
     meta = {
-        "microturbulence_grid": True,
         "b_CO_scalar_kms": float(b_scalar),
         "b_CO_scalar_approximation": True,
         "b_CO_bins_used": [float(b_scalar)],
@@ -751,6 +752,16 @@ def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> 
             f"{arr.shape} does not match chemistry field shape {tuple(shape)}"
         )
     return np.ascontiguousarray(arr, dtype=np.float64)
+
+
+def _shielding_b_grid_from_microturbulence(
+    rad: "RadModel",
+    b_CO_kms_arr: np.ndarray,
+) -> np.ndarray | None:
+    is_constant = microturbulence_spatially_constant(rad.model)
+    if not is_constant:
+        return b_CO_kms_arr
+    return None
 
 
 def _resolve_visser_table_linewidth(
@@ -1139,7 +1150,7 @@ def _compute_shielding_and_gph(
     chi_dust_arr: np.ndarray,
     visser,
     b_kms: float,
-    b_CO_kms_arr: np.ndarray | None,
+    b_CO_kms_grid: np.ndarray | None,
     nside: int,
     chi_is_incident: bool,
     local_chi_factor: float,
@@ -1205,15 +1216,15 @@ def _compute_shielding_and_gph(
             if NH_flat_loc.size >= 2:
                 N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
                 N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
-                if b_CO_kms_arr is not None:
-                    b2_line = np.asarray(b_CO_kms_arr, dtype=np.float64).reshape(ncells) ** 2
+                if b_CO_kms_grid is not None:
+                    b2_line = np.asarray(b_CO_kms_grid, dtype=np.float64).reshape(ncells) ** 2
                     N_CO_b2[1:] = np.cumsum(xCO_use[:-1] * b2_line[:-1] * dNH[:-1])
                 N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
 
             from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 
             theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
-            if b_CO_kms_arr is not None:
+            if b_CO_kms_grid is not None:
                 b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
                 theta_co_flat = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
             else:
@@ -1239,7 +1250,7 @@ def _compute_shielding_and_gph(
                 nC=nC_cm3,
                 nH2=nH2_cm3,
                 b_kms=b_kms,
-                b_CO_kms_grid=b_CO_kms_arr,
+                b_CO_kms_grid=b_CO_kms_grid,
                 outer=shielding_outer_1d,
             )
     else:
@@ -1258,7 +1269,7 @@ def _compute_shielding_and_gph(
             nH2=nH2_cm3,
             nside=nside,
             b_kms=b_kms,
-            b_CO_kms_grid=b_CO_kms_arr,
+            b_CO_kms_grid=b_CO_kms_grid,
             W_rays=W_rays,
             chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
             memory_budget_gib=getattr(
@@ -1306,7 +1317,7 @@ def _compute_shielding_and_gph(
             dtype=np.float64,
         )
         if F_CO_pdes_photon_flat is None:
-            F_CO_pdes_photon_flat = G_CO_pdes_flat * float(F_DRAINE)
+            F_CO_pdes_photon_flat = G_CO_pdes_flat * _co_pdes_draine_flux()
         GISRF = np.ascontiguousarray(
             float(local_chi_factor)
             * F_CO_pdes_photon_flat
@@ -1477,7 +1488,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             G_C_ion = chi
             G_CO_pdes = chi
             F_CO_pdes_photon = Quantity(
-                chi.to("dimensionless").magnitude * float(F_DRAINE),
+                chi.to("dimensionless").magnitude * f_co_pdes_ref,
                 "1/(cm^2 s)",
             )
     elif runtime_mode is not None and runtime_mode.products_enabled:
@@ -1537,6 +1548,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         T_K,
         v_turb_grid_kms,
     )
+    b_CO_kms_grid = _shielding_b_grid_from_microturbulence(rad, b_CO_kms_arr)
+    shielding_linewidth_meta["microturbulence_spatially_constant"] = (
+        b_CO_kms_grid is None
+    )
+    shielding_linewidth_meta["b_CO_ray_grid"] = b_CO_kms_grid is not None
 
     nH_flat = nH_cm3.reshape(ncells)
     T_flat = T_K.reshape(ncells)
@@ -2060,7 +2076,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         chi_dust_arr=chi_dust_arr,
         visser=visser,
         b_kms=b_kms,
-        b_CO_kms_arr=b_CO_kms_arr,
+        b_CO_kms_grid=b_CO_kms_grid,
         nside=nside,
         chi_is_incident=chi_is_incident,
         local_chi_factor=local_chi_factor,

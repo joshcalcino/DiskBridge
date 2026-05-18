@@ -107,8 +107,6 @@ class UVRuntimeMode:
         Whether segmented merging registers a measured-product mask.
     use_hard_directional_weights : bool
         Whether GOW17 directional shielding should use hard UV weights.
-    use_physical_pdes_flux : bool
-        Whether CO photodesorption should use physical photon flux.
     stellar_fraction_threshold : float
         Threshold for stellar/accretion UV dominance in segmented logic.
     """
@@ -118,7 +116,6 @@ class UVRuntimeMode:
     outer_product_policy: str
     register_measured_mask: bool
     use_hard_directional_weights: bool
-    use_physical_pdes_flux: bool
     stellar_fraction_threshold: float
 
 
@@ -751,7 +748,6 @@ def validate_uv_chemistry_config(
 
     use_uv_products = bool(gow_cfg.get("use_uv_products", products_enabled))
     hard_weights = bool(gow_cfg.get("hard_uv_for_directional_shielding", products_enabled))
-    use_physical_flux = bool(gow_cfg.get("use_physical_co_pdes_photon_flux", products_enabled))
     chi_is_incident = bool(gow_cfg.get("chi_is_incident", False))
 
     if products_enabled:
@@ -761,11 +757,6 @@ def validate_uv_chemistry_config(
             raise ValueError(
                 "radmc3d.uv_products.enabled requires "
                 "chemistry.gow17.hard_uv_for_directional_shielding=true"
-            )
-        if not use_physical_flux:
-            raise ValueError(
-                "radmc3d.uv_products.enabled requires "
-                "chemistry.gow17.use_physical_co_pdes_photon_flux=true"
             )
     if use_uv_products and not products_enabled:
         raise ValueError("chemistry.gow17.use_uv_products requires radmc3d.uv_products.enabled=true")
@@ -787,6 +778,5 @@ def validate_uv_chemistry_config(
         outer_product_policy=outer_policy,
         register_measured_mask=register_mask,
         use_hard_directional_weights=hard_weights,
-        use_physical_pdes_flux=use_physical_flux,
         stellar_fraction_threshold=threshold,
     )

@@ -7,7 +7,7 @@ from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .downsample import downsample_model
 from .masking import set_mask_from_joos_disk
-from .microturbulence import ensure_microturbulence_field
+from .microturbulence import ensure_microturbulence_field, microturbulence_spatially_constant
 
 def load_model(
     path: Union[str, Path],
@@ -66,6 +66,7 @@ __all__ = [
     "compute_clip_indexer",
     "downsample_model",
     "ensure_microturbulence_field",
+    "microturbulence_spatially_constant",
     "load_model",
     "puff_up_model",
     "set_mask_from_joos_disk",

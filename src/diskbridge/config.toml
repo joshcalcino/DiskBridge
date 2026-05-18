@@ -147,7 +147,6 @@ co_pdes = "photon"
 [chemistry.gow17]
 use_uv_products = true
 hard_uv_for_directional_shielding = true
-use_physical_co_pdes_photon_flux = true
 enable_co_phase = true
 chi_is_incident = false
 rhs_residual_warn = 1.0e6
