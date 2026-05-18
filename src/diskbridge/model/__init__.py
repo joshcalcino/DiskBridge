@@ -36,6 +36,10 @@ def load_model(
         Length units multiplier. Ignored for saved models.
     mass_scale : float, optional
         Mass units multiplier. Ignored for saved models.
+    r_max : Quantity, optional
+        Radial outer edge to keep after loading and rescaling.
+    downsample : int or mapping, optional
+        Cell coarsening factor applied after clipping.
     
     Returns
     -------

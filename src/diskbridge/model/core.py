@@ -223,6 +223,10 @@ class Model:
             Length units multiplier (e.g., 10 means 1 code_length = 10 au). Ignored for saved models.
         mass_scale : float, optional
             Mass units multiplier (e.g., 2 means 1 code_mass = 2 M_sun). Ignored for saved models.
+        r_max : Quantity, optional
+            Radial outer edge to keep after loading and rescaling.
+        downsample : int or mapping, optional
+            Cell coarsening factor applied after clipping.
         
         Returns
         -------
@@ -232,22 +236,8 @@ class Model:
         import pickle
         
         p = Path(path)
-        
-        if p.is_file():
-            if p.suffix.lower() in {".h5", ".hdf5"}:
-                from .io_hdf5 import load_model_hdf5
 
-                model = load_model_hdf5(p)
-                if r_max is not None:
-                    model = model.clip_mesh(r_max=r_max)
-                if downsample is not None:
-                    from .downsample import downsample_model
-
-                    model = downsample_model(model, factor=downsample)
-                return model
-
-            with open(p, 'rb') as f:
-                model = pickle.load(f)
+        def apply_load_transforms(model: "Model") -> "Model":
             if r_max is not None:
                 model = model.clip_mesh(r_max=r_max)
             if downsample is not None:
@@ -255,6 +245,16 @@ class Model:
 
                 model = downsample_model(model, factor=downsample)
             return model
+        
+        if p.is_file():
+            if p.suffix.lower() in {".h5", ".hdf5"}:
+                from .io_hdf5 import load_model_hdf5
+
+                return apply_load_transforms(load_model_hdf5(p))
+
+            with open(p, 'rb') as f:
+                model = pickle.load(f)
+            return apply_load_transforms(model)
         
         if length_scale is None or mass_scale is None:
             try:
@@ -305,15 +305,7 @@ class Model:
             if hasattr(model, 'disk') and model.disk is not None:
                 model.disk.mesh = model.mesh
 
-        if r_max is not None:
-            model = model.clip_mesh(r_max=r_max)
-
-        if downsample is not None:
-            from .downsample import downsample_model
-
-            model = downsample_model(model, factor=downsample)
-
-        return model
+        return apply_load_transforms(model)
     
     def set_mask_from_geometry(
         self,
