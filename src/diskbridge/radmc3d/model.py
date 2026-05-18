@@ -31,7 +31,7 @@ from diskbridge.model.utils import field_data_as_order
 from .data import RadData
 from .cache import should_use_cache, find_cached_output
 from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperature_symlink
-from .wavelengths import build_wavelength_grid, write_wavelength_file, validate_wavelength_array, check_wavelength_range
+from .wavelengths import build_mcmono_wavelengths, write_wavelength_file, validate_wavelength_array, check_wavelength_range
 from .uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
     compute_chi_broad,
@@ -40,6 +40,7 @@ from .uv_products import (
     file_sha256,
     uv_product_schema,
     uv_product_schema_hash,
+    uv_product_edges_from_specs,
     uv_product_specs_from_config,
 )
 from .writer import RadWriter
@@ -958,40 +959,67 @@ class RadModel:
         
         return nphot, uv_min, uv_max, n_wavelengths, all_params_used
     
-    def _prepare_mcmono_wavelengths(
+    def _build_mcmono_wavelengths(
         self,
         wavelengths_um: Optional[np.ndarray],
         uv_min: Quantity,
         uv_max: Quantity,
         n_wavelengths: int,
+        compute_uv_products: bool,
     ) -> np.ndarray:
-        """Prepare mcmono wavelength grid.
+        """Build mcmono wavelength grid.
         
         Returns
         -------
         ndarray
             Wavelength grid in microns
         """
+        extra_edges_um = None
+        if compute_uv_products:
+            uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
+            uv_specs = uv_product_specs_from_config(uv_cfg)
+            # This contract is still a bit confusing: uv_n_wavelengths is the
+            # base grid count, but UV product boundaries are appended exactly.
+            extra_edges_um = uv_product_edges_from_specs(uv_specs) * 1.0e-3
+
         if wavelengths_um is not None:
-            validate_wavelength_array(wavelengths_um, "wavelengths_um")
-            mcmono_lam_um = np.asarray(wavelengths_um, dtype=float)
-            check_wavelength_range(
-                mcmono_lam_um,
-                self.params.lambda_min,
-                self.params.lambda_max,
-                "mcmono wavelength grid",
+            mcmono_lam_um = build_mcmono_wavelengths(
+                wavelength_source="uv",
+                wavelength_file=None,
+                uv_min_um=uv_min.to("micron").magnitude,
+                uv_max_um=uv_max.to("micron").magnitude,
+                n_wavelengths=n_wavelengths,
+                n_uv_enforce=0,
+                spacing="log",
+                provided_wavelengths=wavelengths_um,
+                extra_enforced_wavelengths_um=extra_edges_um,
             )
         else:
-            mcmono_lam_um = build_wavelength_grid(
-                wmin=uv_min,
-                wmax=uv_max,
+            mcmono_lam_um = build_mcmono_wavelengths(
+                wavelength_source="uv",
+                wavelength_file=None,
+                uv_min_um=uv_min.to("micron").magnitude,
+                uv_max_um=uv_max.to("micron").magnitude,
                 n_wavelengths=n_wavelengths,
-                spacing='linear',
+                n_uv_enforce=0,
+                spacing="log",
+                extra_enforced_wavelengths_um=extra_edges_um,
             )
+
+        check_wavelength_range(
+            mcmono_lam_um,
+            self.params.lambda_min,
+            self.params.lambda_max,
+            "mcmono wavelength grid",
+        )
+        return mcmono_lam_um
+
+    def _write_mcmono_wavelengths(self, mcmono_lam_um: np.ndarray) -> None:
+        """Write mcmono wavelength grid."""
+        validate_wavelength_array(mcmono_lam_um, "mcmono wavelength grid")
         
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
         write_wavelength_file(mcmono_wav_file, mcmono_lam_um, file_format='mcmono')
-        return mcmono_lam_um
     
     def _prepare_mcmono_run(self, output_dir: Path) -> None:
         """Prepare environment for mcmono run (external source, temperature)."""
@@ -1091,11 +1119,25 @@ class RadModel:
             nphot, uv_min, uv_max, n_wavelengths, wavelengths_um
         )
         
+        mcmono_lam_um = self._build_mcmono_wavelengths(
+            wavelengths_um,
+            uv_min,
+            uv_max,
+            n_wavelengths,
+            compute_uv_products,
+        )
+
         cache_context = {
             'nphot': int(nphot),
             'uv_min_um': float(uv_min.to('micron').magnitude),
             'uv_max_um': float(uv_max.to('micron').magnitude),
             'n_wavelengths': int(n_wavelengths),
+            'wavelengths_sha256': hashlib.sha256(
+                np.asarray(mcmono_lam_um, dtype=np.float64).tobytes()
+            ).hexdigest(),
+            'wavelengths_size': int(mcmono_lam_um.size),
+            'wavelengths_min_um': float(np.min(mcmono_lam_um)),
+            'wavelengths_max_um': float(np.max(mcmono_lam_um)),
         }
 
         if compute_uv_products:
@@ -1120,17 +1162,6 @@ class RadModel:
                 }
             )
 
-        if wavelengths_um is not None:
-            wav = np.asarray(wavelengths_um, dtype=np.float64)
-            cache_context.update(
-                {
-                    'wavelengths_sha256': hashlib.sha256(wav.tobytes()).hexdigest(),
-                    'wavelengths_size': int(wav.size),
-                    'wavelengths_min_um': float(np.min(wav)),
-                    'wavelengths_max_um': float(np.max(wav)),
-                }
-            )
-        
         if output_dir is None:
             output_dir = self.outputs_dir
         else:
@@ -1159,9 +1190,7 @@ class RadModel:
         self._update_radmc3d_inp_int_params({'nphot_mono': int(nphot)})
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
-        mcmono_lam_um = self._prepare_mcmono_wavelengths(
-            wavelengths_um, uv_min, uv_max, n_wavelengths
-        )
+        self._write_mcmono_wavelengths(mcmono_lam_um)
         self._prepare_mcmono_run(output_dir)
         self._run_mcmono(
             output_dir,
