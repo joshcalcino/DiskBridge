@@ -562,24 +562,29 @@ class Dust(SubModel):
         canon = canonicalize_dust_params(_current_params())
         ncomp = canon['ncomp']
         if component_index >= ncomp:
-            raise ValueError(
-                f"Requested dust component index {component_index}, "
-                f"but canonicalized params define only {ncomp} components."
-            )
+            if ncomp == 1:
+                param_index = 0
+            else:
+                raise ValueError(
+                    f"Requested dust component index {component_index}, "
+                    f"but canonicalized params define only {ncomp} components."
+                )
+        else:
+            param_index = component_index
 
         # Use canonical per-component values if not explicitly provided
         if amin is None:
-            amin = canon['amin'][component_index]
+            amin = canon['amin'][param_index]
         if amax is None:
-            amax = canon['amax'][component_index]
+            amax = canon['amax'][param_index]
         if nbin is None:
-            nbin = int(canon['nbins'][component_index])
+            nbin = int(canon['nbins'][param_index])
         if power_index is None:
-            power_index = float(canon['pindex'][component_index])
+            power_index = float(canon['pindex'][param_index])
         if grain_density is None:
-            grain_density = canon['grain_density'][component_index]
+            grain_density = canon['grain_density'][param_index]
         if dust_to_gas_ratio is None:
-            dust_to_gas_ratio = float(canon['dust_to_gas_ratio'][component_index])
+            dust_to_gas_ratio = float(canon['dust_to_gas_ratio'][param_index])
         
         # Create distribution for this component
         distribution = DustDistribution(
@@ -606,7 +611,7 @@ class Dust(SubModel):
         # Get species base name for this component
         canon_species = canon['species']
         if isinstance(canon_species, list):
-            species_base = canon_species[component_index]
+            species_base = canon_species[param_index]
         else:
             species_base = str(canon_species)
         
@@ -650,6 +655,39 @@ class Dust(SubModel):
             f"{amin.to('um')} to {amax.to('um')}, "
             f"dust/gas={dust_to_gas_ratio:.3e}, mode={mode}"
         )
+
+    def add_to_disk(
+        self,
+        mode: Optional[Literal['proportional', 'settling']] = None,
+        *,
+        include_ism: bool = True,
+        alpha: Optional[float] = None,
+    ) -> None:
+        """Add the canonical disk dust component and, by default, ISM dust."""
+        if self.parent.gas is None or "disk_mask" not in self.parent.gas:
+            raise KeyError("Disk mask not found; call set_mask_from_joos_disk first")
+
+        current_params = _current_params()
+        disk_mode = mode if mode is not None else current_params.disk_dust_mode
+        if disk_mode not in ("proportional", "settling"):
+            raise ValueError("disk_dust_mode must be 'proportional' or 'settling'")
+
+        disk_alpha = alpha
+        if disk_mode == "settling" and disk_alpha is None:
+            disk_alpha = current_params.disk_dust_settling_alpha
+
+        self.add_component_from_mask(
+            mask="disk_mask",
+            mode=disk_mode,
+            alpha=disk_alpha,
+        )
+
+        if include_ism:
+            self.add_component_from_mask(
+                mask="disk_mask",
+                complement=True,
+                mode="proportional",
+            )
         
     def _compute_dust_scale_height(
         self,

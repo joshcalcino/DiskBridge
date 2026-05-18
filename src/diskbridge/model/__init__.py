@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 
 from .mesh import Mesh
 from .field import Field
@@ -7,6 +7,7 @@ from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .downsample import downsample_model
 from .masking import set_mask_from_joos_disk
+from .microturbulence import ensure_microturbulence_field
 
 def load_model(
     path: Union[str, Path],
@@ -15,6 +16,8 @@ def load_model(
     file_units: str = "code",
     length_scale: Optional[float] = None,
     mass_scale: Optional[float] = None,
+    r_max=None,
+    downsample: Optional[Union[int, Mapping[str, int]]] = None,
 ):
     """
     Load a hydro simulation snapshot or a saved DiskBridge model.
@@ -46,6 +49,8 @@ def load_model(
         file_units=file_units,
         length_scale=length_scale,
         mass_scale=mass_scale,
+        r_max=r_max,
+        downsample=downsample,
     )
 
 
@@ -56,6 +61,7 @@ __all__ = [
     "ClipIndexer",
     "compute_clip_indexer",
     "downsample_model",
+    "ensure_microturbulence_field",
     "load_model",
     "puff_up_model",
     "set_mask_from_joos_disk",

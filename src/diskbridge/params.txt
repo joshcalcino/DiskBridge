@@ -35,6 +35,8 @@ pindex           = 3.0         # slope of the power law size distribution
 dust_to_gas_ratio = 1e-2      # dust to gas ratio 
 nbins            = 10         # number of dust bins in the distribution 
 grain_density    = 1.26       # density of the grains in g/cm^3 (may be overwritten)
+disk_dust_mode   = proportional # disk dust mode: proportional|settling
+disk_dust_settling_alpha = 1e-2 # settling alpha used when disk_dust_mode=settling
 
 # Opacity 
 species          = mix_2species_ice70
@@ -47,6 +49,7 @@ abundance        = 1e-4            # abundance of the gasspecies
 width            = 2.0             # width around los_v = 0 to compute the channel maps (km/s) 
 nline            = 40              # number of lines 
 turbvel          = 0.0             # turbulent velocity in m/s 
+microturbulence  = none            # optional RADMC/GOW17 microturbulence in km/s; scalar or [disk, ism]
 line_mode        = 1               # RADMC-3D line mode: 1=LTE, 3=LVG non-LTE
 line_colliders   = gow17_lamda     # strict GOW17/LAMDA non-LTE collider policy
 line_h2_opr      = 3.0             # ortho/para H2 ratio for GOW17-derived line collider densities

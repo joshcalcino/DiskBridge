@@ -52,6 +52,8 @@ class Params:
     dust_to_gas_ratio: Union[float, List[float]]
     nbins: Union[int, List[int]]
     grain_density: Union[Quantity, List[Quantity]]
+    disk_dust_mode: str
+    disk_dust_settling_alpha: float
 
     # opacity (can be scalar or list for multi-component dust)
     species: Union[str, List[str]]
@@ -64,6 +66,7 @@ class Params:
     width: Union[Quantity, List[Quantity]]
     nline: Union[int, List[int]]
     turbvel: Union[Quantity, List[Quantity]]
+    microturbulence: Optional[Union[Quantity, List[Quantity]]]
     line_mode: Union[int, List[int]]
     line_colliders: Union[str, List[str]]
     line_h2_opr: float
@@ -146,6 +149,7 @@ PARAM_UNITS = {
     'grain_density': 'g/cm^3',
     'width': 'km/s',
     'turbvel': 'm/s',
+    'microturbulence': 'km/s',
     'uv_min': 'nm',
     'uv_max': 'nm',
     'rstar': 'solar_radius',
@@ -193,6 +197,10 @@ def _parse_scalar(raw: str, target_type, param_name: str = ''):
 def _parse_value(raw: str, target_type, param_name: str = ''):
     raw = raw.split("#", 1)[0].strip()
     origin = get_origin(target_type)
+
+    if raw.lower() in {"none", "null"}:
+        if target_type is Optional or type(None) in get_args(target_type):
+            return None
 
     # Union[T, List[T]] support (e.g. Union[Quantity, List[Quantity]])
     if origin is Union:

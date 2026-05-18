@@ -242,6 +242,7 @@ def _setup_binning(
 def _evaluate_threshold_params(
     fthres: Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]],
     fthres_vr: Optional[Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]]],
+    fthres_vr_inner: Optional[float],
     r_edges: Quantity,
     nR: int,
 ) -> Tuple[Union[float, np.ndarray], Union[float, np.ndarray]]:
@@ -265,7 +266,27 @@ def _evaluate_threshold_params(
             raise ValueError(f"fthres array length {fthres_arr.size} does not match nR={nR}")
         fthres_use = fthres_arr[:, None]
 
-    if fthres_vr is None:
+    if fthres_vr is not None and fthres_vr_inner is not None:
+        raise ValueError("Specify either fthres_vr or fthres_vr_inner, not both")
+
+    if fthres_vr_inner is not None:
+        r_mid = 0.5 * (r_edges[:-1].to("au").magnitude + r_edges[1:].to("au").magnitude)
+        r_min = float(np.min(r_mid[r_mid > 0.0]))
+        r_max = float(r_edges[-1].to("au").magnitude)
+        if r_max <= r_min:
+            x = np.zeros_like(r_mid)
+        else:
+            x = np.log(np.clip(r_mid, r_min, r_max) / r_min) / np.log(r_max / r_min)
+
+        if np.isscalar(fthres_use):
+            fthres_target = np.full_like(r_mid, float(fthres_use), dtype=float)
+        else:
+            fthres_target = np.asarray(fthres_use, dtype=float).reshape(-1)
+
+        fthres_vr_use = (
+            float(fthres_vr_inner) + (fthres_target - float(fthres_vr_inner)) * x
+        )[:, None]
+    elif fthres_vr is None:
         fthres_vr_use: Union[float, np.ndarray] = fthres_use
     elif callable(fthres_vr):
         r_mid = 0.5 * (r_edges[:-1].to("au").magnitude + r_edges[1:].to("au").magnitude)
@@ -375,13 +396,13 @@ def set_mask_from_joos_disk(
     *,
     fthres: Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]] = 2.0,
     fthres_vr: Optional[Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]]] = None,
+    fthres_vr_inner: Optional[float] = None,
     rho_core_min: Optional[Quantity] = None,
     r_max_for_axis: Optional[Quantity] = None,
     n_r_bins: Optional[int] = None,
     n_theta_bins: Optional[int] = None,
     r_max: Optional[Quantity] = None,
-    weight_mode: str = "none",
-    weight_name: str = "disk_weight",
+    weight_mode: str = "cell",
     weight_delta_bins: float = 3.0,
     weight_m0: float = 0.25,
     weight_floor: float = 1e-4,
@@ -399,8 +420,7 @@ def set_mask_from_joos_disk(
     4) Registers the boolean mask as model.gas["disk_mask"].
     5) Returns a SubModel with the same boolean mask.
 
-    Optionally, it can also register the same binary mask into model.gas[weight_name]
-    for workflows that expect a component mask field.
+    By default, it also registers the same binary mask as model.gas["disk_weight"].
 
     Args:
         model: DiskBridge Model with spherical mesh and gas fields.
@@ -408,6 +428,8 @@ def set_mask_from_joos_disk(
         fthres: Threshold(s) for vphi vs vz and rotational vs thermal support. May be a
             scalar, a length-nR array, or a callable f(R_au)->array.
         fthres_vr: Threshold(s) for vphi vs vR. If None, defaults to fthres.
+        fthres_vr_inner: Inner vphi-vs-vR threshold. If set, fthres_vr ramps
+            logarithmically from this value at the inner radius to fthres at r_max.
         rho_core_min: Density used to define the core region when estimating the disk axis.
             If None, defaults to 10 * rho_disk_min.
         r_max_for_axis: If provided, restricts the axis-estimation core region to r <= this.
@@ -415,8 +437,7 @@ def set_mask_from_joos_disk(
         n_theta_bins: Number of theta_from_midplane bins used for ring averages.
         r_max: Optional maximum radius included in the final boolean mask.
         weight_mode: If "none", no weight field is registered. Any other value registers
-            the binary cell-wise disk mask as model.gas[weight_name].
-        weight_name: Name of the registered gas Field that stores the binary disk mask.
+            the binary cell-wise disk mask as model.gas["disk_weight"].
         weight_delta_bins: Retained for API compatibility; ignored by the cell-wise mask.
         weight_m0: Retained for API compatibility; ignored by the cell-wise mask.
         weight_floor: Retained for API compatibility; ignored by the cell-wise mask.
@@ -491,7 +512,7 @@ def set_mask_from_joos_disk(
     nR = len(r_edges) - 1
 
     fthres_use, fthres_vr_use = _evaluate_threshold_params(
-        fthres, fthres_vr, r_edges, nR
+        fthres, fthres_vr, fthres_vr_inner, r_edges, nR
     )
 
     r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
@@ -519,7 +540,7 @@ def set_mask_from_joos_disk(
             quantity="mask",
             axis_order=mesh.axis_names(),
         )
-        model.gas_register(weight_name, w_field)
+        model.gas_register("disk_weight", w_field)
 
     disk_region = model.set_mask_from_array(mask, is_a_disk=True)
     model.gas_register("disk_mask", disk_region.mask)

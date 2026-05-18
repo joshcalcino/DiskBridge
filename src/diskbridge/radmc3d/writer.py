@@ -18,6 +18,7 @@ from diskbridge._units import Quantity, units
 import diskbridge
 from .opacities import DustOpacityCalculator
 from diskbridge.model.utils import transpose_to_axis_order
+from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
 
 # Physical constants from config
 G_CGS = units('G')
@@ -686,7 +687,8 @@ class RadWriter:
                     **op_kwargs,
                 )
 
-        if self.model.gas is not None and "microturbulence" in self.model.gas:
+        ensure_microturbulence_field(self.model, self.params)
+        if self.model.gas is not None and MICROTURBULENCE_FIELD in self.model.gas:
             self.write_microturbulence(output_dir)
         
         # Write control file
@@ -1145,12 +1147,12 @@ class RadWriter:
             vturb = None
 
         if vturb is None:
-            if self.model.gas is None or "microturbulence" not in self.model.gas:
+            if self.model.gas is None or MICROTURBULENCE_FIELD not in self.model.gas:
                 raise KeyError(
                     "Cannot infer microturbulence field; "
                     "model.gas['microturbulence'] is missing"
                 )
-            vturb = self.model.gas["microturbulence"].data
+            vturb = self.model.gas[MICROTURBULENCE_FIELD].data
 
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'gas')

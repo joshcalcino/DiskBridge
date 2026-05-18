@@ -318,10 +318,7 @@ for WEIGHT_MODE in WEIGHT_MODES_TO_TEST:
         fthres=fthres,
         fthres_vr=fthres_vr_inner_relaxed,
         weight_mode=WEIGHT_MODE,
-        weight_name="disk_weight",
     )
-    
-    model.gas_register("disk_mask", disk.mask)
     
     mask = disk.mask.data.magnitude.astype(bool)
     print(f"mask fraction (theta) = {mask.mean():.6f}")

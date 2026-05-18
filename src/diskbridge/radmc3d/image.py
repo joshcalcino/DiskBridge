@@ -22,6 +22,7 @@ from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symli
 from .run import ensure_temperature_symlink
 from .colliders import gow17_lamda_colliders, install_validated_molecule_file
 from .line_transfer.preflight import ensure_gas_temperature_for_nonlte
+from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
 import diskbridge
 from .molecule import RadMolecule
 
@@ -1263,7 +1264,10 @@ class RadImage:
 
     def _ensure_microturbulence(self) -> None:
         """Ensure microturbulence.binp exists when the model has the field."""
-        if self.model is None or self.model.gas is None or "microturbulence" not in self.model.gas:
+        if self.model is None or self.model.gas is None:
+            return
+        ensure_microturbulence_field(self.model, self.params)
+        if MICROTURBULENCE_FIELD not in self.model.gas:
             return
         vturb_file = self.inputs_dir / "microturbulence.binp"
         if vturb_file.exists():

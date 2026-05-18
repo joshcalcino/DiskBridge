@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Union, TYPE_CHECKING
+from typing import Any, Callable, Dict, Mapping, Optional, Union, TYPE_CHECKING
 from pathlib import Path
 import numpy as np
 
@@ -203,6 +203,8 @@ class Model:
         file_units: str = "code",
         length_scale: Optional[float] = None,
         mass_scale: Optional[float] = None,
+        r_max: Optional[Quantity] = None,
+        downsample: Optional[Union[int, Mapping[str, int]]] = None,
     ) -> "Model":
         """
         Load a hydro snapshot or saved model.
@@ -235,10 +237,24 @@ class Model:
             if p.suffix.lower() in {".h5", ".hdf5"}:
                 from .io_hdf5 import load_model_hdf5
 
-                return load_model_hdf5(p)
+                model = load_model_hdf5(p)
+                if r_max is not None:
+                    model = model.clip_mesh(r_max=r_max)
+                if downsample is not None:
+                    from .downsample import downsample_model
+
+                    model = downsample_model(model, factor=downsample)
+                return model
 
             with open(p, 'rb') as f:
-                return pickle.load(f)
+                model = pickle.load(f)
+            if r_max is not None:
+                model = model.clip_mesh(r_max=r_max)
+            if downsample is not None:
+                from .downsample import downsample_model
+
+                model = downsample_model(model, factor=downsample)
+            return model
         
         if length_scale is None or mass_scale is None:
             try:
@@ -289,6 +305,14 @@ class Model:
             if hasattr(model, 'disk') and model.disk is not None:
                 model.disk.mesh = model.mesh
 
+        if r_max is not None:
+            model = model.clip_mesh(r_max=r_max)
+
+        if downsample is not None:
+            from .downsample import downsample_model
+
+            model = downsample_model(model, factor=downsample)
+
         return model
     
     def set_mask_from_geometry(
@@ -318,13 +342,13 @@ class Model:
         *,
         fthres: Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]] = 2.0,
         fthres_vr: Optional[Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]]] = None,
+        fthres_vr_inner: Optional[float] = None,
         rho_core_min: Optional[Quantity] = None,
         r_max_for_axis: Optional[Quantity] = None,
         n_r_bins: Optional[int] = None,
         n_theta_bins: Optional[int] = None,
         r_max: Optional[Quantity] = None,
-        weight_mode: str = "none",
-        weight_name: str = "disk_weight",
+        weight_mode: str = "cell",
         weight_delta_bins: float = 3.0,
         weight_m0: float = 0.25,
         weight_floor: float = 1e-4,
@@ -336,13 +360,13 @@ class Model:
             rho_disk_min,
             fthres=fthres,
             fthres_vr=fthres_vr,
+            fthres_vr_inner=fthres_vr_inner,
             rho_core_min=rho_core_min,
             r_max_for_axis=r_max_for_axis,
             n_r_bins=n_r_bins,
             n_theta_bins=n_theta_bins,
             r_max=r_max,
             weight_mode=weight_mode,
-            weight_name=weight_name,
             weight_delta_bins=weight_delta_bins,
             weight_m0=weight_m0,
             weight_floor=weight_floor,
@@ -597,4 +621,3 @@ def puff_up_model(
 
     new.disk.puff_up_disk(n, zmax_over_H=zmax_over_H)
     return new
-

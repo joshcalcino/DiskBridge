@@ -25,6 +25,7 @@ from diskbridge._constants import (
     M_H,
 )
 from diskbridge.model.profiles import compute_cell_volumes
+from diskbridge.model.microturbulence import ensure_microturbulence_field
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.columns_1d import (
     compute_pdr_shielding_1d,
@@ -1541,6 +1542,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ncells = nH_cm3.size
 
     Tdust_K = _as_cgs_f64(Tdust, "K")
+    ensure_microturbulence_field(rad.model, diskbridge.params)
     v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
     b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
         cfg,
