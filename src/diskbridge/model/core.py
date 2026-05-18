@@ -233,8 +233,6 @@ class Model:
         Model
             The loaded model instance
         """
-        import pickle
-        
         p = Path(path)
 
         def apply_load_transforms(model: "Model") -> "Model":
@@ -252,9 +250,7 @@ class Model:
 
                 return apply_load_transforms(load_model_hdf5(p))
 
-            with open(p, 'rb') as f:
-                model = pickle.load(f)
-            return apply_load_transforms(model)
+            raise ValueError(f"Unsupported model file format: {p.suffix}")
         
         if length_scale is None or mass_scale is None:
             try:

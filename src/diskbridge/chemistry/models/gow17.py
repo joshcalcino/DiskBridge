@@ -676,72 +676,73 @@ def _resolve_co_phase_runtime_params(cfg: dict) -> dict[str, float | int]:
 
 
 def _resolve_shielding_linewidth(
-    cfg: dict,
     Tgas_K: np.ndarray,
-    v_turb_grid_kms: np.ndarray | None = None,
+    v_turb_grid_kms: np.ndarray,
 ) -> tuple[float, np.ndarray, dict]:
-    """Resolve scalar Visser linewidth plus per-cell diagnostic linewidths."""
-    shield_cfg = _nested_cfg(cfg, "shielding")
-    mode = str(shield_cfg.get("b_CO_mode", "constant")).lower()
-    b_const = float(shield_cfg.get("b_CO_constant_kms", cfg.get("b_kms", 0.3)))
-    v_turb = float(shield_cfg.get("v_turb_kms", 0.03))
-    b_min = float(shield_cfg.get("b_CO_min_kms", 0.03))
-    b_max = float(shield_cfg.get("b_CO_max_kms", 3.0))
-    if b_min <= 0.0 or b_max <= 0.0 or b_max < b_min:
-        raise ValueError("gow17 shielding linewidth requires 0 < b_CO_min_kms <= b_CO_max_kms")
-
+    """Resolve CO shielding linewidth from temperature and microturbulence."""
     T_arr = np.asarray(Tgas_K, dtype=np.float64)
-    if v_turb_grid_kms is not None:
-        v_grid = np.asarray(v_turb_grid_kms, dtype=np.float64)
-        if v_grid.shape != T_arr.shape:
-            raise ValueError(
-                f"microturbulence grid shape {v_grid.shape} does not match Tgas shape {T_arr.shape}"
-            )
-        mCO = 28.0 * float(M_H)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
-        b_arr = np.sqrt(
-            np.maximum(b_thermal, 0.0) ** 2
-            + np.maximum(np.where(np.isfinite(v_grid), v_grid, 0.0), 0.0) ** 2
-        )
-        mode_meta = "thermal+microturbulence_grid"
-    elif mode == "constant":
-        b_arr = np.full(T_arr.shape, b_const, dtype=np.float64)
-        mode_meta = mode
-    elif mode == "thermal+turbulent":
-        mCO = 28.0 * float(M_H)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
-        b_arr = np.sqrt(np.maximum(b_thermal, 0.0) ** 2 + max(v_turb, 0.0) ** 2)
-        mode_meta = mode
-    else:
+
+    if not np.all(np.isfinite(T_arr)):
+        bad = np.argwhere(~np.isfinite(T_arr))
         raise ValueError(
-            "gow17 shielding b_CO_mode must be 'constant' or 'thermal+turbulent', "
-            f"got {mode!r}"
+            "Tgas contains non-finite values while resolving CO shielding linewidth; "
+            f"first bad index={tuple(int(i) for i in bad[0])}, "
+            f"n_bad={bad.shape[0]}"
         )
 
-    b_arr = np.clip(np.where(np.isfinite(b_arr), b_arr, b_const), b_min, b_max)
-    finite = np.isfinite(b_arr)
-    b_scalar = float(np.nanmedian(b_arr[finite])) if np.any(finite) else float(np.clip(b_const, b_min, b_max))
-    b_scalar = float(np.clip(b_scalar, b_min, b_max))
+    v_grid = np.asarray(v_turb_grid_kms, dtype=np.float64)
+    if v_grid.shape != T_arr.shape:
+        raise ValueError(
+            f"microturbulence grid shape {v_grid.shape} does not match Tgas shape {T_arr.shape}"
+        )
+    if not np.all(np.isfinite(v_grid)):
+        bad = np.argwhere(~np.isfinite(v_grid))
+        raise ValueError(
+            "microturbulence grid contains non-finite values; "
+            f"first bad index={tuple(int(i) for i in bad[0])}, "
+            f"n_bad={bad.shape[0]}"
+        )
+    if np.any(v_grid < 0.0):
+        bad = np.argwhere(v_grid < 0.0)
+        raise ValueError(
+            "microturbulence grid contains negative values; "
+            f"first bad index={tuple(int(i) for i in bad[0])}, "
+            f"n_bad={bad.shape[0]}"
+        )
+
+    mCO = 28.0 * float(M_H)
+    b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
+    b_arr = np.sqrt(b_thermal**2 + v_grid**2)
+
+    if not np.all(np.isfinite(b_arr)):
+        bad = np.argwhere(~np.isfinite(b_arr))
+        raise ValueError(
+            "CO shielding linewidth b_CO contains non-finite values; "
+            f"first bad index={tuple(int(i) for i in bad[0])}, "
+            f"n_bad={bad.shape[0]}"
+        )
+    if np.any(b_arr <= 0.0):
+        bad = np.argwhere(b_arr <= 0.0)
+        raise ValueError(
+            "CO shielding linewidth b_CO contains non-positive values; "
+            f"first bad index={tuple(int(i) for i in bad[0])}, "
+            f"n_bad={bad.shape[0]}"
+        )
+
+    b_scalar = float(np.median(b_arr))
     meta = {
-        "b_CO_mode": mode_meta,
-        "b_CO_constant_kms": float(b_const),
-        "v_turb_kms": float(v_turb),
-        "v_turb_grid": bool(v_turb_grid_kms is not None),
-        "b_CO_min_kms": float(b_min),
-        "b_CO_max_kms": float(b_max),
+        "microturbulence_grid": True,
         "b_CO_scalar_kms": float(b_scalar),
-        "b_CO_scalar_approximation": bool(mode_meta != "constant"),
+        "b_CO_scalar_approximation": True,
         "b_CO_bins_used": [float(b_scalar)],
     }
     return b_scalar, b_arr, meta
 
 
-def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> np.ndarray | None:
+def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> np.ndarray:
     gas = getattr(rad.model, "gas", None)
     if gas is None or "microturbulence" not in gas:
-        return None
+        raise ValueError("GOW17 shielding requires params.microturbulence")
     field = gas["microturbulence"]
     arr = np.asarray(field.data.to("km/s").magnitude, dtype=np.float64)
     if arr.shape != tuple(shape):
@@ -763,28 +764,18 @@ def _resolve_visser_table_linewidth(
     meta = dict(shielding_linewidth_meta)
     meta["b_CO_requested_scalar_kms"] = b_requested
     meta["b_CO_table_kms"] = b_table
-    if bool(meta.get("v_turb_grid", False)):
-        try:
-            b_available, _ = visser._available_b_family()
-            meta["b_CO_table_interpolation"] = True
-            meta["b_CO_bins_available"] = [float(v) for v in b_available]
-        except Exception:
-            meta["b_CO_table_interpolation"] = True
+    try:
+        b_available, _ = visser._available_b_family()
+        meta["b_CO_table_interpolation"] = True
+        meta["b_CO_bins_available"] = [float(v) for v in b_available]
+    except Exception:
+        meta["b_CO_table_interpolation"] = True
 
-    if abs(b_table - b_requested) > 1.0e-6 and bool(meta.get("v_turb_grid", False)):
+    if abs(b_table - b_requested) > 1.0e-6:
         logger.info(
             "gow17: requested representative CO shielding b_kms=%.6g km/s; "
             "loaded nearest Visser family at %.6g km/s for table interpolation. "
             "H2 shielding still uses the scalar table value.",
-            b_requested,
-            b_table,
-        )
-        meta["b_CO_scalar_approximation"] = True
-    elif abs(b_table - b_requested) > 1.0e-6:
-        logger.warning(
-            "gow17: requested CO shielding b_kms=%.6g km/s, but the nearest "
-            "available Visser table is %.6g km/s; using the table value for "
-            "CO/H2 shielding. Per-cell b_CO_kms is retained as a diagnostic.",
             b_requested,
             b_table,
         )
@@ -1352,8 +1343,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
 
     nside = int(diskbridge.params.nside)
-    b_kms = float(cfg.get("b_kms", 0.3))
-
     ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
 
     Zg = float(cfg.get("Zg", 1.0))
@@ -1545,9 +1534,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ensure_microturbulence_field(rad.model, diskbridge.params)
     v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
     b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
-        cfg,
         T_K,
-        v_turb_grid_kms=v_turb_grid_kms,
+        v_turb_grid_kms,
     )
 
     nH_flat = nH_cm3.reshape(ncells)
@@ -1792,7 +1780,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "nside": int(nside),
             "b_kms": float(b_kms),
             "b_CO_kms_scalar": float(b_kms),
-            "b_CO_mode": str(shielding_linewidth_meta["b_CO_mode"]),
             "ion_rate_s": float(ion_rate_s),
             "Zg": float(Zg0),
             "Zd": float(Zd0),
@@ -2845,7 +2832,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "nside": int(nside),
         "b_kms": float(b_kms),
         "b_CO_kms_scalar": float(b_kms),
-        "b_CO_mode": str(shielding_linewidth_meta["b_CO_mode"]),
         "ion_rate_s": float(ion_rate_s),
         "Zg": float(Zg),
         "Zd": float(Zd),

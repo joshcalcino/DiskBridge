@@ -56,8 +56,10 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
     _warn_if_co_phase_settings_ignored,
+    _model_microturbulence_grid_kms,
 )
 from diskbridge.chemistry.validation import project_gow17_state_to_budgets
+from diskbridge.model.microturbulence import ensure_microturbulence_field
 from diskbridge.radmc3d.uv_products import validate_uv_chemistry_config
 
 KB_CGS = 1.380649e-16
@@ -132,7 +134,6 @@ class Gow17TimeStepper:
         self.userJac = bool(cfg.get("userJac", False))
         self.verbose = bool(cfg.get("verbose", False))
 
-        self.b_kms = float(cfg.get("b_kms", 0.3))
         self.ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
 
         self.Zg = float(cfg.get("Zg", 1.0))
@@ -174,14 +175,16 @@ class Gow17TimeStepper:
 
         self.nH_cm3 = _as_cgs_f64(nH, "cm^-3")
         self.nH_flat = self.nH_cm3.reshape(self.ncells)
+        ensure_microturbulence_field(rad.model, diskbridge.params)
+        v_turb_grid_kms = _model_microturbulence_grid_kms(rad, self.shape)
         T_init = np.clip(
             _as_cgs_f64(Tgas, "K"),
             float(self.temperature_cfg["Tgas_floor"]),
             float(self.temperature_cfg["Tgas_ceiling"]),
         )
         self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
-            cfg,
             T_init,
+            v_turb_grid_kms,
         )
 
         self.abstol = _build_gow17_abstol(cfg, self.abstol0)
@@ -365,9 +368,11 @@ class Gow17TimeStepper:
             float(self.temperature_cfg["Tgas_floor"]),
             float(self.temperature_cfg["Tgas_ceiling"]),
         ).reshape(self.ncells)
+        ensure_microturbulence_field(self.rad.model, diskbridge.params)
+        v_turb_grid_kms = _model_microturbulence_grid_kms(self.rad, self.shape)
         self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
-            self.cfg,
             T_flat.reshape(self.shape),
+            v_turb_grid_kms,
         )
         self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
             self.b_kms,

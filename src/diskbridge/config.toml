@@ -171,13 +171,6 @@ abstol_HCOplus = 1.0e-22
 abstol_e = 1.0e-22
 abstol_H2 = 1.0e-10
 
-[chemistry.gow17.shielding]
-b_CO_mode = "constant"
-b_CO_constant_kms = 0.3
-v_turb_kms = 0.03
-b_CO_min_kms = 0.03
-b_CO_max_kms = 3.0
-
 [chemistry.gow17.dust]
 sigma_d_CO_per_H_source = "radmc"
 sigma_d_CO_per_H_constant = "1.0e-21 cm^2"

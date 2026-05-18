@@ -176,7 +176,6 @@ def _gow17_validation_summary(meta: dict) -> dict:
         "max_status": int(meta.get("max_status", 0)),
         "temperature_mode": meta.get("temperature_mode"),
         "enable_co_phase": bool(meta.get("enable_co_phase", False)),
-        "b_CO_mode": meta.get("b_CO_mode"),
         "b_CO_requested_scalar_kms": diag.get("b_CO_requested_scalar_kms"),
         "b_CO_table_kms": diag.get("b_CO_table_kms"),
         "b_CO_scalar_approximation": bool(diag.get("b_CO_scalar_approximation", False)),
@@ -250,7 +249,7 @@ def run_chemistry(
     >>> res = run_chemistry(
     ...     rad,
     ...     model="gow17",
-    ...     config=dict(enable_co_phase=True, b_kms=0.3),
+    ...     config=dict(enable_co_phase=True),
     ...     write=True,
     ... )
     >>> nco = res.number_densities["co"]
