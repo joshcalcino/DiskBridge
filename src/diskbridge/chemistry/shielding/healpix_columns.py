@@ -32,7 +32,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
-from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_multi,
 )
@@ -825,6 +825,7 @@ def compute_co_shielding_healpix(
     nH2: np.ndarray,
     nside: int = 4,
     b_kms: Optional[float] = None,
+    b_CO_kms_grid: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     W_rays: Optional[np.ndarray] = None,
@@ -891,6 +892,11 @@ def compute_co_shielding_healpix(
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
 
     fields: dict[str, np.ndarray] = {"co": nCO_cgs, "h2": nH2_cgs}
+    if b_CO_kms_grid is not None:
+        b_grid = _as_f64("b_CO_kms_grid", b_CO_kms_grid)
+        if b_grid.shape != nH_cgs.shape:
+            raise ValueError("b_CO_kms_grid must match nH shape.")
+        fields["co_b2"] = nCO_cgs * b_grid * b_grid
 
     candidate_idx, dirs, cols = compute_column_rays_healpix(
         mesh,
@@ -905,7 +911,11 @@ def compute_co_shielding_healpix(
     if candidate_idx.shape[0] > 0:
         N_CO_rays = cols["co"]
         N_H2_rays = cols["h2"]
-        theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
+        if b_CO_kms_grid is not None:
+            b_eff = np.sqrt(cols["co_b2"] / np.maximum(N_CO_rays, N_SHIELD_MIN))
+            theta_rays = visser.theta_interpolated_b("co", N_CO_rays, N_H2_rays, b_eff)
+        else:
+            theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
 
         if W_rays is not None:
             theta_eff = (W_rays * theta_rays).sum(axis=1)
@@ -929,6 +939,7 @@ def compute_pdr_shielding_healpix(
     nH2: np.ndarray,
     nside: int = 4,
     b_kms: float = 0.3,
+    b_CO_kms_grid: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     W_rays: Optional[np.ndarray] = None,
@@ -1015,7 +1026,13 @@ def compute_pdr_shielding_healpix(
     if visser is not None:
         if nCO is None:
             raise ValueError("nCO is required if visser is provided")
-        fields["co"] = _as_f64("nCO", nCO)
+        nCO_cgs = _as_f64("nCO", nCO)
+        fields["co"] = nCO_cgs
+        if b_CO_kms_grid is not None:
+            b_grid = _as_f64("b_CO_kms_grid", b_CO_kms_grid)
+            if b_grid.shape != nH_cgs.shape:
+                raise ValueError("b_CO_kms_grid must match nH shape")
+            fields["co_b2"] = nCO_cgs * b_grid * b_grid
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
     tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
@@ -1042,7 +1059,7 @@ def compute_pdr_shielding_healpix(
     if n_candidates > 0:
         # Dense ray maps alive in a chunk: integrated columns, H2 factors, C
         # factors, optional CO/PDR factors, and W_rays multiplication inputs.
-        dense_count = 8 if visser is None else 12
+        dense_count = 8 if visser is None else (14 if b_CO_kms_grid is not None else 12)
         if chunk_size is None:
             chunk_size = _chunk_size_from_memory_budget(
                 n_candidates=n_candidates,
@@ -1130,7 +1147,16 @@ def compute_pdr_shielding_healpix(
 
         if visser is not None:
             N_CO_rays = cols["co"]
-            theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
+            if b_CO_kms_grid is not None:
+                b_eff = np.sqrt(cols["co_b2"] / np.maximum(N_CO_rays, N_SHIELD_MIN))
+                theta_co_rays = visser.theta_interpolated_b(
+                    "co",
+                    N_CO_rays,
+                    N_H2_rays,
+                    b_eff,
+                )
+            else:
+                theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
 
             if W_rays is not None:
                 theta_co_mean = (W_chunk * theta_co_rays).sum(axis=1)

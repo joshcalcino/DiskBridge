@@ -162,6 +162,9 @@ class VisserShielding:
 
         self.b_kms = self._parse_co_b_from_file(self.filepath)
         self._grids: Dict[str, ShieldingGrid2D] = self._parse_visser_file(self.filepath)
+        self._grid_cache: Dict[str, Dict[str, ShieldingGrid2D]] = {
+            self.filepath.name: self._grids
+        }
 
     # --------- public API ----------
 
@@ -220,6 +223,74 @@ class VisserShielding:
 
         return np.clip(out, 0.0, 1.0)
 
+    def theta_interpolated_b(
+        self,
+        isotop: str,
+        Nco: ArrayLike,
+        Nh2: ArrayLike,
+        b_kms: ArrayLike,
+    ) -> np.ndarray:
+        """Evaluate shielding with interpolation between bracketing b tables.
+
+        Interpolation is linear in ``b`` and logarithmic in ``theta`` after the
+        normal in-table interpolation over ``log10(Nco)`` and ``log10(Nh2)``.
+        Files are restricted to the same table family as the loaded file
+        (same excitation temperature and isotope-ratio suffix).
+        """
+        iso = isotop.lower()
+        bvals, filenames = self._available_b_family()
+        if bvals.size == 0:
+            return self.theta(iso, Nco, Nh2, b_kms=self.b_kms)
+
+        Nco_arr = np.asarray(Nco, float)
+        Nh2_arr = np.asarray(Nh2, float)
+        b_arr = np.asarray(b_kms, float)
+        Nco_b, Nh2_b, b_b = np.broadcast_arrays(Nco_arr, Nh2_arr, b_arr)
+
+        out = np.ones_like(Nco_b, dtype=float)
+        unshielded = (Nco_b < N_SHIELD_MIN) & (Nh2_b < N_SHIELD_MIN)
+        need_interp = ~unshielded
+        if not np.any(need_interp):
+            return out
+
+        Nco_work = Nco_b[need_interp]
+        Nh2_work = Nh2_b[need_interp]
+        b_work = np.nan_to_num(b_b[need_interp], nan=float(self.b_kms))
+        b_work = np.clip(b_work, float(bvals[0]), float(bvals[-1]))
+
+        hi_idx = np.searchsorted(bvals, b_work, side="right")
+        lo_idx = np.maximum(hi_idx - 1, 0)
+        hi_idx = np.minimum(hi_idx, bvals.size - 1)
+
+        theta_work = np.empty_like(b_work, dtype=float)
+        for lo, hi in sorted(set(zip(lo_idx.tolist(), hi_idx.tolist()))):
+            sel = (lo_idx == lo) & (hi_idx == hi)
+            th_lo = self._theta_from_file(
+                filenames[lo],
+                iso,
+                Nco_work[sel],
+                Nh2_work[sel],
+            )
+            if lo == hi or bvals[lo] == bvals[hi]:
+                theta_work[sel] = th_lo
+                continue
+
+            th_hi = self._theta_from_file(
+                filenames[hi],
+                iso,
+                Nco_work[sel],
+                Nh2_work[sel],
+            )
+            frac = (b_work[sel] - bvals[lo]) / (bvals[hi] - bvals[lo])
+            log_th = (
+                (1.0 - frac) * np.log(np.clip(th_lo, 1.0e-300, 1.0))
+                + frac * np.log(np.clip(th_hi, 1.0e-300, 1.0))
+            )
+            theta_work[sel] = np.exp(log_th)
+
+        out[need_interp] = np.clip(theta_work, 0.0, 1.0)
+        return np.clip(out, 0.0, 1.0)
+
     # --------- filename helpers ----------
 
     @staticmethod
@@ -258,6 +329,67 @@ class VisserShielding:
         bvals = np.array(bvals_list, float)
         j = np.nanargmin(np.abs(bvals - b_kms))
         return files[j]
+
+    @staticmethod
+    def _table_family(name: str) -> str:
+        m = re.match(r"shield\.[^.]+\.(.+)$", name)
+        return m.group(1) if m else ""
+
+    def _available_b_family(self) -> tuple[np.ndarray, list[str]]:
+        family = self._table_family(self.filepath.name)
+        pairs: list[tuple[float, str]] = []
+        for fname in self.available_files():
+            if self._table_family(fname) != family:
+                continue
+            path = self.data_dir / fname
+            try:
+                b_val = self._parse_co_b_from_file(path)
+            except Exception:
+                b_val = np.nan
+            if np.isfinite(b_val):
+                pairs.append((float(b_val), fname))
+        pairs.sort(key=lambda item: item[0])
+        unique: list[tuple[float, str]] = []
+        for b_val, fname in pairs:
+            if unique and abs(unique[-1][0] - b_val) <= 1.0e-12:
+                continue
+            unique.append((b_val, fname))
+        if not unique:
+            return np.array([], dtype=float), []
+        return (
+            np.array([item[0] for item in unique], dtype=float),
+            [item[1] for item in unique],
+        )
+
+    def _grids_for_file(self, filename: str) -> Dict[str, ShieldingGrid2D]:
+        if filename not in self._grid_cache:
+            self._grid_cache[filename] = self._parse_visser_file(self.data_dir / filename)
+        return self._grid_cache[filename]
+
+    def _theta_from_file(
+        self,
+        filename: str,
+        isotop: str,
+        Nco: np.ndarray,
+        Nh2: np.ndarray,
+    ) -> np.ndarray:
+        grids = self._grids_for_file(filename)
+        if isotop not in grids:
+            raise KeyError(
+                f"Isotopologue {isotop} not in {filename}. "
+                f"Available: {list(grids)}"
+            )
+        Nco = np.asarray(Nco, float)
+        Nh2 = np.asarray(Nh2, float)
+        Nco_b, Nh2_b = np.broadcast_arrays(Nco, Nh2)
+        out = np.ones_like(Nco_b, dtype=float)
+        unshielded = (Nco_b < N_SHIELD_MIN) & (Nh2_b < N_SHIELD_MIN)
+        need_interp = ~unshielded
+        if np.any(need_interp):
+            logNco = np.log10(np.maximum(Nco_b[need_interp], N_SHIELD_MIN))
+            logNh2 = np.log10(np.maximum(Nh2_b[need_interp], N_SHIELD_MIN))
+            out[need_interp] = grids[isotop].theta(logNco, logNh2)
+        return np.clip(out, 0.0, 1.0)
 
     # --------- parser ----------
 

@@ -685,6 +685,9 @@ class RadWriter:
                     scattering_mode=scattering_mode,
                     **op_kwargs,
                 )
+
+        if self.model.gas is not None and "microturbulence" in self.model.gas:
+            self.write_microturbulence(output_dir)
         
         # Write control file
         self.write_radmc3d_inp(
@@ -1126,6 +1129,57 @@ class RadWriter:
 
         self.written_files[fpath.name] = fpath
         logger.info(f'Wrote {fpath}')
+
+    def write_microturbulence(
+        self,
+        vturb: Optional[Quantity | str | Path] = None,
+        output_dir: str | Path = '.',
+    ) -> None:
+        """Write RADMC-3D microturbulent linewidth to ``microturbulence.binp``.
+
+        If ``vturb`` is omitted, ``model.gas["microturbulence"]`` is used.
+        Values are written in cm/s.
+        """
+        if isinstance(vturb, (str, Path)) and output_dir == '.':
+            output_dir = vturb
+            vturb = None
+
+        if vturb is None:
+            if self.model.gas is None or "microturbulence" not in self.model.gas:
+                raise KeyError(
+                    "Cannot infer microturbulence field; "
+                    "model.gas['microturbulence'] is missing"
+                )
+            vturb = self.model.gas["microturbulence"].data
+
+        base_dir = Path(output_dir)
+        output_dir = self._get_output_dir(base_dir, 'gas')
+
+        vturb_cgs = vturb.to('cm/s').magnitude
+
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
+        if mesh.coord_system == 'spherical':
+            vturb_cgs = transpose_to_axis_order(
+                np.asarray(vturb_cgs),
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+        elif mesh.coord_system != 'cartesian':
+            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
+
+        vturb_flat = np.asarray(vturb_cgs, dtype=np.float64).flatten()
+        ncells = int(vturb_flat.size)
+
+        fpath = output_dir / 'microturbulence.binp'
+        logger.info(f"Writing microturbulence (binary) to {fpath}: {ncells} cells")
+        with open(fpath, 'wb') as f:
+            np.array([1, 8, ncells], dtype=np.int64).tofile(f)
+            vturb_flat.astype(np.float64).tofile(f)
+
+        self.written_files[fpath.name] = fpath
+        logger.info(f"Wrote {fpath}")
         
     def write_gas_velocity(
         self,

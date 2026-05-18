@@ -39,7 +39,7 @@ from diskbridge.chemistry.shielding.healpix_columns import (
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_with_pathlength,
 )
-from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
 from diskbridge.chemistry.validation import (
     validate_chemistry_state,
@@ -674,7 +674,11 @@ def _resolve_co_phase_runtime_params(cfg: dict) -> dict[str, float | int]:
     }
 
 
-def _resolve_shielding_linewidth(cfg: dict, Tgas_K: np.ndarray) -> tuple[float, np.ndarray, dict]:
+def _resolve_shielding_linewidth(
+    cfg: dict,
+    Tgas_K: np.ndarray,
+    v_turb_grid_kms: np.ndarray | None = None,
+) -> tuple[float, np.ndarray, dict]:
     """Resolve scalar Visser linewidth plus per-cell diagnostic linewidths."""
     shield_cfg = _nested_cfg(cfg, "shielding")
     mode = str(shield_cfg.get("b_CO_mode", "constant")).lower()
@@ -686,13 +690,29 @@ def _resolve_shielding_linewidth(cfg: dict, Tgas_K: np.ndarray) -> tuple[float, 
         raise ValueError("gow17 shielding linewidth requires 0 < b_CO_min_kms <= b_CO_max_kms")
 
     T_arr = np.asarray(Tgas_K, dtype=np.float64)
-    if mode == "constant":
+    if v_turb_grid_kms is not None:
+        v_grid = np.asarray(v_turb_grid_kms, dtype=np.float64)
+        if v_grid.shape != T_arr.shape:
+            raise ValueError(
+                f"microturbulence grid shape {v_grid.shape} does not match Tgas shape {T_arr.shape}"
+            )
+        mCO = 28.0 * float(M_H)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
+        b_arr = np.sqrt(
+            np.maximum(b_thermal, 0.0) ** 2
+            + np.maximum(np.where(np.isfinite(v_grid), v_grid, 0.0), 0.0) ** 2
+        )
+        mode_meta = "thermal+microturbulence_grid"
+    elif mode == "constant":
         b_arr = np.full(T_arr.shape, b_const, dtype=np.float64)
+        mode_meta = mode
     elif mode == "thermal+turbulent":
         mCO = 28.0 * float(M_H)
         with np.errstate(invalid="ignore", divide="ignore"):
             b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
         b_arr = np.sqrt(np.maximum(b_thermal, 0.0) ** 2 + max(v_turb, 0.0) ** 2)
+        mode_meta = mode
     else:
         raise ValueError(
             "gow17 shielding b_CO_mode must be 'constant' or 'thermal+turbulent', "
@@ -704,16 +724,31 @@ def _resolve_shielding_linewidth(cfg: dict, Tgas_K: np.ndarray) -> tuple[float, 
     b_scalar = float(np.nanmedian(b_arr[finite])) if np.any(finite) else float(np.clip(b_const, b_min, b_max))
     b_scalar = float(np.clip(b_scalar, b_min, b_max))
     meta = {
-        "b_CO_mode": mode,
+        "b_CO_mode": mode_meta,
         "b_CO_constant_kms": float(b_const),
         "v_turb_kms": float(v_turb),
+        "v_turb_grid": bool(v_turb_grid_kms is not None),
         "b_CO_min_kms": float(b_min),
         "b_CO_max_kms": float(b_max),
         "b_CO_scalar_kms": float(b_scalar),
-        "b_CO_scalar_approximation": bool(mode != "constant"),
+        "b_CO_scalar_approximation": bool(mode_meta != "constant"),
         "b_CO_bins_used": [float(b_scalar)],
     }
     return b_scalar, b_arr, meta
+
+
+def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> np.ndarray | None:
+    gas = getattr(rad.model, "gas", None)
+    if gas is None or "microturbulence" not in gas:
+        return None
+    field = gas["microturbulence"]
+    arr = np.asarray(field.data.to("km/s").magnitude, dtype=np.float64)
+    if arr.shape != tuple(shape):
+        raise ValueError(
+            "model.gas['microturbulence'] shape "
+            f"{arr.shape} does not match chemistry field shape {tuple(shape)}"
+        )
+    return np.ascontiguousarray(arr, dtype=np.float64)
 
 
 def _resolve_visser_table_linewidth(
@@ -727,8 +762,24 @@ def _resolve_visser_table_linewidth(
     meta = dict(shielding_linewidth_meta)
     meta["b_CO_requested_scalar_kms"] = b_requested
     meta["b_CO_table_kms"] = b_table
+    if bool(meta.get("v_turb_grid", False)):
+        try:
+            b_available, _ = visser._available_b_family()
+            meta["b_CO_table_interpolation"] = True
+            meta["b_CO_bins_available"] = [float(v) for v in b_available]
+        except Exception:
+            meta["b_CO_table_interpolation"] = True
 
-    if abs(b_table - b_requested) > 1.0e-6:
+    if abs(b_table - b_requested) > 1.0e-6 and bool(meta.get("v_turb_grid", False)):
+        logger.info(
+            "gow17: requested representative CO shielding b_kms=%.6g km/s; "
+            "loaded nearest Visser family at %.6g km/s for table interpolation. "
+            "H2 shielding still uses the scalar table value.",
+            b_requested,
+            b_table,
+        )
+        meta["b_CO_scalar_approximation"] = True
+    elif abs(b_table - b_requested) > 1.0e-6:
         logger.warning(
             "gow17: requested CO shielding b_kms=%.6g km/s, but the nearest "
             "available Visser table is %.6g km/s; using the table value for "
@@ -1096,6 +1147,7 @@ def _compute_shielding_and_gph(
     chi_dust_arr: np.ndarray,
     visser,
     b_kms: float,
+    b_CO_kms_arr: np.ndarray | None,
     nside: int,
     chi_is_incident: bool,
     local_chi_factor: float,
@@ -1156,16 +1208,24 @@ def _compute_shielding_and_gph(
 
             N_H2 = np.zeros_like(NH_flat_loc, dtype=np.float64)
             N_CO = np.zeros_like(NH_flat_loc, dtype=np.float64)
+            N_CO_b2 = np.zeros_like(NH_flat_loc, dtype=np.float64)
             N_C = np.zeros_like(NH_flat_loc, dtype=np.float64)
             if NH_flat_loc.size >= 2:
                 N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
                 N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
+                if b_CO_kms_arr is not None:
+                    b2_line = np.asarray(b_CO_kms_arr, dtype=np.float64).reshape(ncells) ** 2
+                    N_CO_b2[1:] = np.cumsum(xCO_use[:-1] * b2_line[:-1] * dNH[:-1])
                 N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
 
             from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 
             theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
-            theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+            if b_CO_kms_arr is not None:
+                b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
+                theta_co_flat = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
+            else:
+                theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
 
             AH2 = 1.17e-8
             tau_H2 = 1.2e-14 * 2.0 * N_H2
@@ -1187,6 +1247,7 @@ def _compute_shielding_and_gph(
                 nC=nC_cm3,
                 nH2=nH2_cm3,
                 b_kms=b_kms,
+                b_CO_kms_grid=b_CO_kms_arr,
                 outer=shielding_outer_1d,
             )
     else:
@@ -1205,6 +1266,7 @@ def _compute_shielding_and_gph(
             nH2=nH2_cm3,
             nside=nside,
             b_kms=b_kms,
+            b_CO_kms_grid=b_CO_kms_arr,
             W_rays=W_rays,
             chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
             memory_budget_gib=getattr(
@@ -1479,7 +1541,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     ncells = nH_cm3.size
 
     Tdust_K = _as_cgs_f64(Tdust, "K")
-    b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(cfg, T_K)
+    v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
+    b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
+        cfg,
+        T_K,
+        v_turb_grid_kms=v_turb_grid_kms,
+    )
 
     nH_flat = nH_cm3.reshape(ncells)
     T_flat = T_K.reshape(ncells)
@@ -2004,6 +2071,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         chi_dust_arr=chi_dust_arr,
         visser=visser,
         b_kms=b_kms,
+        b_CO_kms_arr=b_CO_kms_arr,
         nside=nside,
         chi_is_incident=chi_is_incident,
         local_chi_factor=local_chi_factor,

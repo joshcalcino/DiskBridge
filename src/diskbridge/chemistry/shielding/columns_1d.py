@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
+from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 
 
 def _as_f64(name: str, x) -> np.ndarray:
@@ -109,6 +109,7 @@ def compute_pdr_shielding_1d(
     nC: np.ndarray,
     nH2: np.ndarray,
     b_kms: Optional[float] = None,
+    b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
     nH_cgs = _as_f64("nH", nH)
@@ -120,11 +121,14 @@ def compute_pdr_shielding_1d(
     if visser is not None and nCO is None:
         raise ValueError("compute_pdr_shielding_1d requires nCO when visser is provided")
     nCO_cgs = None if nCO is None else _as_f64("nCO", nCO)
+    b_CO_grid = None if b_CO_kms_grid is None else _as_f64("b_CO_kms_grid", b_CO_kms_grid)
 
     if nH2_cgs.shape != nH_cgs.shape or nC_cgs.shape != nH_cgs.shape:
         raise ValueError("nC and nH2 must match nH shape")
     if nCO_cgs is not None and nCO_cgs.shape != nH_cgs.shape:
         raise ValueError("nCO must match nH shape")
+    if b_CO_grid is not None and b_CO_grid.shape != nH_cgs.shape:
+        raise ValueError("b_CO_kms_grid must match nH shape")
 
     shape = tuple(nH_cgs.shape)
     axis_name, axis_index = effective_1d_axis(mesh, shape)
@@ -148,7 +152,18 @@ def compute_pdr_shielding_1d(
         N_CO = column_to_outer_boundary_1d(
             mesh, nCO_cgs, axis_name=axis_name, axis_index=axis_index, outer=outer
         )
-        theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+        if b_CO_grid is not None:
+            N_CO_b2 = column_to_outer_boundary_1d(
+                mesh,
+                nCO_cgs * b_CO_grid * b_CO_grid,
+                axis_name=axis_name,
+                axis_index=axis_index,
+                outer=outer,
+            )
+            b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
+            theta_co = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
+        else:
+            theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
 
     AH2 = 1.17e-8
     tau_H2 = 1.2e-14 * 2.0 * N_H2
@@ -171,15 +186,19 @@ def compute_co_shielding_1d(
     nCO: np.ndarray,
     nH2: np.ndarray,
     b_kms: float,
+    b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
     nH2_cgs = _as_f64("nH2", nH2)
     nCO_cgs = _as_f64("nCO", nCO)
+    b_CO_grid = None if b_CO_kms_grid is None else _as_f64("b_CO_kms_grid", b_CO_kms_grid)
 
     if nH2_cgs.shape != nH_cgs.shape or nCO_cgs.shape != nH_cgs.shape or chi_arr.shape != nH_cgs.shape:
         raise ValueError("nH, chi, nH2, and nCO must have the same shape")
+    if b_CO_grid is not None and b_CO_grid.shape != nH_cgs.shape:
+        raise ValueError("b_CO_kms_grid must match nH shape")
 
     shape = tuple(nH_cgs.shape)
     axis_name, axis_index = effective_1d_axis(mesh, shape)
@@ -191,6 +210,17 @@ def compute_co_shielding_1d(
         mesh, nCO_cgs, axis_name=axis_name, axis_index=axis_index, outer=outer
     )
 
-    theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+    if b_CO_grid is not None:
+        N_CO_b2 = column_to_outer_boundary_1d(
+            mesh,
+            nCO_cgs * b_CO_grid * b_CO_grid,
+            axis_name=axis_name,
+            axis_index=axis_index,
+            outer=outer,
+        )
+        b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
+        theta_co = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
+    else:
+        theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
     chi_eff = chi_arr * theta_co
     return theta_co, chi_eff

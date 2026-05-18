@@ -161,6 +161,7 @@ def prepare_nonlte_line_run(
         "gas_velocity.inp",
         "gas_temperature.binp",
         "gas_temperature.inp",
+        "microturbulence.binp",
         "stars.inp",
         "external_source.inp",
     ):

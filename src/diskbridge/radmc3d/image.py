@@ -135,6 +135,7 @@ class RadImage:
             'stars.inp', 'dustopac.inp',
             'dust_density.binp',
             'gas_velocity.binp',
+            'microturbulence.binp',
             'gas_temperature.*',
             'numberdens_*.binp',
             'radmc3d.inp', 'lines.inp', 'molecule_*.inp',
@@ -540,6 +541,7 @@ class RadImage:
         # Ensure all required files exist
         self._ensure_molecule_file(molecule)
         self._ensure_gas_velocity()
+        self._ensure_microturbulence()
         self._ensure_radmc3d_inp_configured()
         self._ensure_lines_inp(molecule)
         
@@ -1258,6 +1260,21 @@ class RadImage:
             output_dir=str(self.model_dir)
         )
         logger.info("Created gas_velocity.binp")
+
+    def _ensure_microturbulence(self) -> None:
+        """Ensure microturbulence.binp exists when the model has the field."""
+        if self.model is None or self.model.gas is None or "microturbulence" not in self.model.gas:
+            return
+        vturb_file = self.inputs_dir / "microturbulence.binp"
+        if vturb_file.exists():
+            return
+
+        from .writer import RadWriter
+        writer = RadWriter(self.model)
+        writer.write_microturbulence(
+            output_dir=str(self.model_dir),
+        )
+        logger.info("Created microturbulence.binp")
     
     def _ensure_radmc3d_inp_configured(self) -> None:
         """Ensure radmc3d.inp is properly configured for line transfer."""
