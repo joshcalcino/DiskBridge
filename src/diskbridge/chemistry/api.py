@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from pathlib import Path
+import hashlib
 import json
+
+import numpy as np
 
 if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
@@ -16,7 +19,125 @@ from diskbridge.chemistry.io import (
     write_many,
 )
 from diskbridge.model.field import Field
+from diskbridge.model.microturbulence import ensure_microturbulence_field
+from diskbridge.radmc3d.cache import should_use_cache, stable_json_hash, write_cache_context
+from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES, file_sha256
 from diskbridge.serialization import jsonable
+
+
+def _quantity_context(q, unit: str | None = None) -> dict[str, Any]:
+    data = q.to(unit) if unit is not None else q
+    arr = np.ascontiguousarray(np.asarray(data.magnitude, dtype=np.float64))
+    return {
+        "unit": str(data.units),
+        "shape": list(arr.shape),
+        "sha256": hashlib.sha256(arr.tobytes()).hexdigest(),
+    }
+
+
+def _field_context(field: Field, unit: str | None = None) -> dict[str, Any]:
+    out = _quantity_context(field.data, unit=unit)
+    out["axis_order"] = list(field.axis_order)
+    return out
+
+
+def _file_hashes(root: Path, patterns: tuple[str, ...]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for pattern in patterns:
+        for path in sorted(root.rglob(pattern)):
+            if path.is_file():
+                out[str(path.relative_to(root))] = file_sha256(path)
+    return out
+
+
+def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
+    """Build the explicit dependency context for GOW17 chemistry."""
+    model = rad.model
+    if model.gas is None:
+        raise ValueError("GOW17 cache context requires model.gas")
+
+    ensure_microturbulence_field(model, rad.params)
+
+    gas_units = {
+        "density": "g/cm^3",
+        "dust_temperature": "K",
+        "microturbulence": "km/s",
+        "chi": "dimensionless",
+        "chi_broad": "dimensionless",
+        "chi_h2": "dimensionless",
+        "chi_co": "dimensionless",
+        "chi_c": "dimensionless",
+        "G_CO_pdes": "dimensionless",
+        "F_CO_pdes_photon": "1/(cm^2 s)",
+        "uv_product_measured_mask": "dimensionless",
+        "segment_id": "dimensionless",
+    }
+    gas_fields: dict[str, Any] = {}
+    required = ("density", "dust_temperature", "microturbulence")
+    optional = (
+        "chi",
+        "uv_product_measured_mask",
+        "segment_id",
+        *UV_PRODUCT_MERGED_FIELD_NAMES,
+    )
+    for name in (*required, *optional):
+        if name in model.gas:
+            gas_fields[name] = _field_context(model.gas[name], unit=gas_units.get(name))
+        elif name in required:
+            raise KeyError(f"GOW17 cache context requires gas field {name!r}")
+
+    dust_context: dict[str, Any] = {"present": model.dust is not None}
+    if model.dust is not None:
+        bins: dict[str, Any] = {}
+        for bin_name, dust_bin in sorted(model.dust.bins.items()):
+            bins[bin_name] = {
+                "size": jsonable(dust_bin.size),
+                "size_min": jsonable(dust_bin.size_min),
+                "size_max": jsonable(dust_bin.size_max),
+                "mass_fraction": float(dust_bin.mass_fraction),
+                "density_material": jsonable(dust_bin.density_material),
+                "density": _field_context(dust_bin["density"], unit="g/cm^3"),
+            }
+        dust_context.update(
+            {
+                "nbin": int(model.dust.nbin),
+                "bins": bins,
+            }
+        )
+
+    model_dir = Path(rad.model_dir)
+    upstream_contexts = _file_hashes(
+        model_dir,
+        (
+            "radmc3d_outputs/**/cache_context.json",
+            "segments/**/cache_context.json",
+        ),
+    )
+    opacity_inputs = _file_hashes(
+        Path(rad.inputs_dir),
+        (
+            "dustopac.inp",
+            "dustkappa_*.inp",
+        ),
+    )
+
+    return {
+        "kind": "gow17",
+        "config_sha256": stable_json_hash(config),
+        "params": {
+            "nside": int(rad.params.nside),
+        },
+        "model": {
+            "mesh_shape": list(model.mesh.shape) if model.mesh is not None else None,
+            "mesh_axes": list(model.mesh.axis_names()) if model.mesh is not None else None,
+            "gas_fields": gas_fields,
+            "dust": dust_context,
+        },
+        "radmc": {
+            "upstream_cache_contexts": upstream_contexts,
+            "opacity_inputs": opacity_inputs,
+        },
+    }
 
 
 def load_chemistry_outputs(
@@ -205,6 +326,8 @@ def run_chemistry(
     diagnostic_plots: bool = False,
     plots_dir: Optional[Path] = None,
     load_existing: bool = False,
+    force: bool = False,
+    use_cache: bool = True,
 ) -> ChemistryResult:
     """Run chemistry computation with the specified model.
     
@@ -233,6 +356,10 @@ def run_chemistry(
     load_existing : bool, optional
         Load saved chemistry outputs from ``output_dir`` instead of running the
         chemistry model.
+    force : bool, optional
+        Recompute chemistry even if a valid chemistry cache exists.
+    use_cache : bool, optional
+        If True, GOW17 loads saved outputs when the chemistry cache context matches.
         
     Returns
     -------
@@ -258,21 +385,40 @@ def run_chemistry(
         config = {}
     
     model_lower = model.lower()
+    output_path = Path(output_dir) if output_dir is not None else Path(rad.model_dir)
+    cache_context = None
+    loaded_from_cache = False
 
     if load_existing:
-        if output_dir is None:
-            raise ValueError("load_existing=True requires output_dir")
-        result = load_chemistry_outputs(rad, Path(output_dir))
+        result = load_chemistry_outputs(rad, output_path)
     else:
-        try:
-            model_fn = get_model_callable(model_lower)
-        except ValueError:
-            available = ", ".join(available_models())
-            raise ValueError(
-                f"Unknown chemistry model: {model!r}. "
-                f"Available models: {available}"
+        if use_cache and write and model_lower == "gow17":
+            cache_context = _gow17_cache_context(rad, config)
+            cache_ok, _cached = should_use_cache(
+                output_dir=output_path,
+                candidate_files=["radmc3d_inputs/numberdens_co.binp"],
+                force=force,
+                cache_context=cache_context,
             )
-        result = model_fn(rad, config)
+            if cache_ok:
+                logger.info("Using cached GOW17 chemistry outputs: %s", output_path)
+                result = load_chemistry_outputs(rad, output_path)
+                loaded_from_cache = True
+            else:
+                result = None
+        else:
+            result = None
+
+        if result is None:
+            try:
+                model_fn = get_model_callable(model_lower)
+            except ValueError:
+                available = ", ".join(available_models())
+                raise ValueError(
+                    f"Unknown chemistry model: {model!r}. "
+                    f"Available models: {available}"
+                )
+            result = model_fn(rad, config)
 
     if model_lower == "gow17":
         result = add_default_line_colliders_from_gow17(
@@ -284,26 +430,31 @@ def run_chemistry(
     _attach_chemistry_result_to_model(rad, result)
     
     if write and result.number_densities and (not load_existing or model_lower == "gow17"):
-        write_many(rad, result.number_densities, output_dir)
+        write_many(rad, result.number_densities, output_path)
 
     if write and getattr(rad, 'Tgas_gow17', None) is not None and not load_existing:
-        write_gas_temperature(rad, output_dir=output_dir, binary=True)
+        write_gas_temperature(rad, output_dir=output_path, binary=True)
+
+    result.meta["loaded_from_cache"] = bool(loaded_from_cache or load_existing)
 
     if diagnostic_plots:
         from diskbridge.visualization.diagnostics import make_chemistry_diagnostic_plots
 
-        base_dir = Path(output_dir) if output_dir is not None else Path(rad.model_dir)
-        plot_output_dir = Path(plots_dir) if plots_dir is not None else base_dir / "plots"
+        plot_output_dir = Path(plots_dir) if plots_dir is not None else output_path / "plots"
         made = make_chemistry_diagnostic_plots(rad, result, plot_output_dir)
         result.meta["diagnostic_plots"] = [str(path) for path in made]
 
-    if write and output_dir is not None:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "chemistry_meta.json").write_text(
+    if write:
+        output_path.mkdir(parents=True, exist_ok=True)
+        if cache_context is None and model_lower == "gow17":
+            cache_context = _gow17_cache_context(rad, config)
+        if cache_context is not None and not load_existing:
+            write_cache_context(output_path, cache_context)
+        (output_path / "chemistry_meta.json").write_text(
             json.dumps(jsonable(result.meta), indent=2, sort_keys=True) + "\n"
         )
         if model_lower == "gow17":
-            (Path(output_dir) / "gow17_validation_summary.json").write_text(
+            (output_path / "gow17_validation_summary.json").write_text(
                 json.dumps(jsonable(_gow17_validation_summary(result.meta)), indent=2, sort_keys=True) + "\n"
             )
     

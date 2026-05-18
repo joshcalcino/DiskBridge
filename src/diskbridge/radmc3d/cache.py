@@ -6,11 +6,34 @@ are still valid based on parameter snapshots and signatures.
 
 from __future__ import annotations
 from pathlib import Path
+import hashlib
 import json
 from typing import Sequence, Optional, Any
 
 from diskbridge._logging import logger
+from diskbridge.serialization import jsonable
 from .utils import _read_params_snapshot, _params_signature
+
+
+def stable_json_hash(value: Any) -> str:
+    """Return a stable SHA256 hash for a JSON-compatible value."""
+    payload = json.dumps(
+        jsonable(value),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def write_cache_context(output_dir: Path | str, context: dict[str, Any]) -> Path:
+    """Write a cache context JSON file and return its path."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "cache_context.json"
+    path.write_text(
+        json.dumps(jsonable(context), indent=2, sort_keys=True) + "\n"
+    )
+    return path
 
 
 def check_cache_validity(
@@ -106,9 +129,10 @@ def find_cached_output(
 def should_use_cache(
     output_dir: Path,
     candidate_files: Sequence[str | Path],
-    current_params_path: Path,
-    param_keys: Sequence[str],
+    current_params_path: Optional[Path] = None,
+    param_keys: Sequence[str] = (),
     force: bool = False,
+    cache_context: Optional[dict[str, Any]] = None,
     **override_flags,
 ) -> tuple[bool, Optional[Path]]:
     """Determine if cache should be used and return cached file if valid.
@@ -154,8 +178,13 @@ def should_use_cache(
     if cached_file is None:
         return False, None
 
-    cache_context: dict[str, Any] = dict(override_flags)
+    expected_context: dict[str, Any] = {}
     if cache_context:
+        expected_context.update(jsonable(cache_context))
+    if override_flags:
+        expected_context.update(jsonable(override_flags))
+
+    if expected_context:
         ctx_path = output_dir / 'cache_context.json'
         if not ctx_path.exists():
             logger.info(
@@ -173,8 +202,9 @@ def should_use_cache(
             )
             return False, cached_file
 
+        saved_context = jsonable(saved_context)
         changed_keys = [
-            k for k, v in cache_context.items() if saved_context.get(k) != v
+            k for k, v in expected_context.items() if saved_context.get(k) != v
         ]
         if changed_keys:
             logger.info(
@@ -182,6 +212,10 @@ def should_use_cache(
                 f"changed ({', '.join(changed_keys)}); will recompute."
             )
             return False, cached_file
+
+    if current_params_path is None or not param_keys:
+        logger.info(f"Using cached output: {cached_file}")
+        return True, cached_file
 
     saved_params_path = output_dir / 'params.txt'
     is_valid = check_cache_validity(

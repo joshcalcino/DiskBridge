@@ -701,6 +701,29 @@ class RadWriter:
         )
 
         logger.info("All RADMC-3D input files written successfully")
+
+    def write_model_inputs(
+        self,
+        output_dir: str | Path = '.',
+        *,
+        compute_opacities: bool = True,
+        include_gas_velocity: bool = True,
+        include_external_source: Optional[bool] = None,
+        **kwargs,
+    ) -> None:
+        """Write the complete RADMC-3D input set for the active model."""
+        self.write_all_input_files(output_dir, **kwargs)
+
+        if include_gas_velocity:
+            self.write_gas_velocity(output_dir)
+
+        if include_external_source is None:
+            include_external_source = bool(getattr(self.params, "external_uv", False))
+        if include_external_source:
+            self.write_external_source(output_dir)
+
+        if compute_opacities and self.model.dust is not None and self.model.dust.nbin > 0:
+            self.compute_and_write_dust_opacities(output_dir)
     
     def _ensure_isrf_file(self, path: Path) -> Path:
         if path.is_file():
