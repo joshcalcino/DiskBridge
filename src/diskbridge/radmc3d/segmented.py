@@ -386,6 +386,9 @@ class SegmentedRadRunner:
         base_rad.chi = merged_chi
         if merged_uv_products is not None:
             base_rad.uv_products = merged_uv_products
+            base_rad.radiation_mode = "local_uv_products"
+        else:
+            base_rad.radiation_mode = "local_chi"
 
         out = {
             "loaded_existing": True,
@@ -1359,9 +1362,11 @@ class SegmentedRadRunner:
         if uv_products_enabled and merged_uv_products is not None:
             base_rad.uv_products = merged_uv_products
             base_rad.chi = merged_uv_products["chi_broad"]
+            base_rad.radiation_mode = "local_uv_products"
         else:
             base_rad.uv_products = {"chi_broad": merged_chi}
             base_rad.chi = merged_chi
+            base_rad.radiation_mode = "local_chi"
         base_rad.outputs_dir.mkdir(parents=True, exist_ok=True)
 
         if self.base_model.dust is None:

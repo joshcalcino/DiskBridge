@@ -420,7 +420,7 @@ def run_chemistry(
                 )
             result = model_fn(rad, config)
 
-    if model_lower == "gow17":
+    if model_lower in {"gow17", "gow17_slab"}:
         result = add_default_line_colliders_from_gow17(
             result,
             rad=rad,

@@ -145,10 +145,7 @@ c_ion = "photon"
 co_pdes = "photon"
 
 [chemistry.gow17]
-use_uv_products = true
-hard_uv_for_directional_shielding = true
 enable_co_phase = true
-chi_is_incident = false
 rhs_residual_warn = 1.0e6
 isDust_cooling = true
 

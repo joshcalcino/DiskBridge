@@ -344,7 +344,10 @@ def _assign_environment(
     chi_cells: np.ndarray,
     td_cells: np.ndarray | None,
 ) -> None:
-    rad.chi = Quantity((2.0 * np.asarray(chi_cells, dtype=float)).reshape(shape), "dimensionless")
+    rad.set_incident_uv(
+        chi=Quantity((2.0 * np.asarray(chi_cells, dtype=float)).reshape(shape), "dimensionless"),
+        Av=rad.Av,
+    )
     if td_cells is not None:
         rad.dust_temperature = Quantity(np.asarray(td_cells, dtype=float).reshape(shape), "K")
 
@@ -356,8 +359,7 @@ def _assign_product_environment(
     uv_products: dict[str, np.ndarray],
     td_cells: np.ndarray | None,
 ) -> None:
-    rad.chi = Quantity(np.asarray(uv_products["chi_broad"], dtype=float).reshape(shape), "dimensionless")
-    rad.uv_products = {
+    products = {
         "chi_broad": Quantity(np.asarray(uv_products["chi_broad"], dtype=float).reshape(shape), "dimensionless"),
         "G_CO_diss": Quantity(np.asarray(uv_products["G_CO_diss"], dtype=float).reshape(shape), "dimensionless"),
         "G_H2_diss": Quantity(np.asarray(uv_products["G_H2_diss"], dtype=float).reshape(shape), "dimensionless"),
@@ -368,6 +370,7 @@ def _assign_product_environment(
             "1/(cm^2 s)",
         ),
     }
+    rad.set_incident_uv_products(products=products, Av=rad.Av)
     if td_cells is not None:
         rad.dust_temperature = Quantity(np.asarray(td_cells, dtype=float).reshape(shape), "K")
 
@@ -677,7 +680,6 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     dt_output_ref = float(t_end) / float(n_output_steps)
 
     gow_cfg = {
-        "chi_is_incident": True,
         "shielding_outer_1d": str(cfg.shielding_outer_1d),
         "b_kms": float(cfg.b_kms),
         "ion_rate": str(cfg.ion_rate),
@@ -696,16 +698,6 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "gradv": 1.0e-14,
         "Leff_CO_max": 3.0e20,
     }
-    if radiation_mode == RADIATION_MODE_STELLAR_PRODUCTS:
-        gow_cfg.update(
-            {
-                "incident_uv_products": True,
-                "local_chi_factor": 1.0,
-                "use_uv_products": True,
-                "hard_uv_for_directional_shielding": True,
-                "use_physical_co_pdes_photon_flux": True,
-            }
-        )
     gow_cfg_eq = {
         **gow_cfg,
         "astrochem_n_updates": int(cfg.equilibrium_astrochem_n_updates),

@@ -5,7 +5,7 @@ import numpy as np
 import diskbridge
 import diskbridge._gow17 as _gow17
 
-from diskbridge._config import get_config, resolve_model_config
+from diskbridge._config import resolve_model_config
 from diskbridge._units import Quantity
 from diskbridge._constants import (
     E_BIND_CO,
@@ -47,11 +47,11 @@ from diskbridge.chemistry.models.gow17 import (
     _build_gow17_abstol,
     _compute_shielding_and_gph,
     _co_pdes_draine_flux,
+    _infer_gow17_radiation_mode,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_co_phase_controls,
     _resolve_co_phase_runtime_params,
-    _resolve_local_chi_factor,
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
@@ -61,7 +61,6 @@ from diskbridge.chemistry.models.gow17 import (
 )
 from diskbridge.chemistry.validation import project_gow17_state_to_budgets
 from diskbridge.model.microturbulence import ensure_microturbulence_field
-from diskbridge.radmc3d.uv_products import validate_uv_chemistry_config
 
 KB_CGS = 1.380649e-16
 YR_TO_S = 365.25 * 24.0 * 3600.0
@@ -90,7 +89,6 @@ class Gow17TimeStepper:
     def __init__(self, rad, config: dict):
         cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
         self.cfg = cfg
-        self.runtime_mode = None
 
         self.temperature_cfg = _resolve_temperature_config(cfg)
         self.temperature_mode = str(self.temperature_cfg["mode"])
@@ -109,23 +107,6 @@ class Gow17TimeStepper:
             enable_co_phase=self.enable_co_phase,
             context="Gow17TimeStepper",
         )
-        self.chi_is_incident = bool(cfg.get("chi_is_incident", False))
-        self.incident_uv_products = bool(cfg.get("incident_uv_products", False))
-        if self.chi_is_incident:
-            if getattr(rad, "Av", None) is None:
-                raise ValueError("Gow17TimeStepper: chi_is_incident=True requires rad.Av to be set")
-            if rad.has_uv_product("G_CO_diss") and not self.incident_uv_products:
-                raise ValueError(
-                    "Gow17TimeStepper: chi_is_incident=True is incompatible "
-                    "with registered UV product fields unless "
-                    "incident_uv_products=True"
-                )
-        else:
-            full_cfg = dict(get_config())
-            chemistry_cfg = dict(full_cfg.get("chemistry", {}))
-            chemistry_cfg["gow17"] = dict(cfg)
-            full_cfg["chemistry"] = chemistry_cfg
-            self.runtime_mode = validate_uv_chemistry_config(full_cfg)
 
         self.reltol = float(cfg.get("reltol", 1e-4))
         self.abstol0 = float(cfg.get("abstol0", 1e-15))
@@ -142,12 +123,6 @@ class Gow17TimeStepper:
         self.Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
         self.isDust_cooling = bool(cfg.get("isDust_cooling", True))
         self.isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
-
-        self.local_chi_factor = _resolve_local_chi_factor(
-            cfg,
-            chi_is_incident=self.chi_is_incident,
-        )
-        self.shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
 
         self.rad = rad
         self.nside = int(diskbridge.params.nside)
@@ -173,6 +148,7 @@ class Gow17TimeStepper:
 
         self.shape = _as_cgs_f64(nH, "cm^-3").shape
         self.ncells = int(np.prod(self.shape))
+        self.radiation_mode = _infer_gow17_radiation_mode(rad)
 
         self.nH_cm3 = _as_cgs_f64(nH, "cm^-3")
         self.nH_flat = self.nH_cm3.reshape(self.ncells)
@@ -218,12 +194,6 @@ class Gow17TimeStepper:
 
         self.xCtot_flat = self.Zg_arr * float(XC_STD)
         self.xOtot_flat = self.Zg_arr * float(XO_STD)
-
-        self.Av_flat = None
-        if self.chi_is_incident:
-            Av_q = getattr(rad, "Av", None)
-            Av_arr = _as_cgs_f64(Av_q, "dimensionless")
-            self.Av_flat = Av_arr.reshape(self.ncells)
 
         self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
             self.b_kms,
@@ -303,25 +273,7 @@ class Gow17TimeStepper:
             y_state = self.y_state
         y_state = self._project_state(y_state)
 
-        if self.chi_is_incident:
-            if self.incident_uv_products:
-                chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
-                G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
-                G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
-                G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
-                G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
-                F_CO_pdes_photon = rad.ensure_uv_product(
-                    "F_CO_pdes_photon",
-                    fallback_to_chi=False,
-                )
-            else:
-                chi_broad = rad.ensure_chi()
-                G_CO_diss = chi_broad
-                G_H2_diss = chi_broad
-                G_C_ion = chi_broad
-                G_CO_pdes = chi_broad
-                F_CO_pdes_photon = None
-        elif self.runtime_mode is not None and self.runtime_mode.products_enabled:
+        if self.radiation_mode.uses_uv_products:
             chi_broad = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
             G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
             G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
@@ -407,7 +359,6 @@ class Gow17TimeStepper:
             F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
             xCtot_flat=self.xCtot_flat,
             Zd_arr=self.Zd_arr,
-            Av_flat=self.Av_flat,
             shape=self.shape,
             ncells=self.ncells,
             rad=rad,
@@ -417,9 +368,6 @@ class Gow17TimeStepper:
             b_kms=self.b_kms,
             b_CO_kms_grid=self.b_CO_kms_grid,
             nside=self.nside,
-            chi_is_incident=self.chi_is_incident,
-            local_chi_factor=self.local_chi_factor,
-            shielding_outer_1d=self.shielding_outer_1d,
         )
         return chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF
 
@@ -567,7 +515,7 @@ class Gow17TimeStepper:
     def step(self, dt_s: float) -> dict:
         """
         Advance by dt_s seconds. Assumes caller has already updated:
-          - rad.chi (dimensionless, incident scaling if chi_is_incident=True)
+          - rad.chi (dimensionless, interpreted by rad.radiation_mode)
           - rad.dust_temperature (K)
           - rad.gas_temperature (K) if const_temp=True (or initial guess)
         """

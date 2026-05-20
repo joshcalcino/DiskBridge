@@ -105,8 +105,6 @@ class UVRuntimeMode:
         Explicit policy for product fields outside product-measured regions.
     register_measured_mask : bool
         Whether segmented merging registers a measured-product mask.
-    use_hard_directional_weights : bool
-        Whether GOW17 directional shielding should use hard UV weights.
     stellar_fraction_threshold : float
         Threshold for stellar/accretion UV dominance in segmented logic.
     """
@@ -115,7 +113,6 @@ class UVRuntimeMode:
     mode: str
     outer_product_policy: str
     register_measured_mask: bool
-    use_hard_directional_weights: bool
     stellar_fraction_threshold: float
 
 
@@ -737,33 +734,12 @@ def validate_uv_chemistry_config(
     """
     radmc_cfg = cfg.get("radmc3d", {}) if isinstance(cfg.get("radmc3d", {}), dict) else {}
     uv_cfg = radmc_cfg.get("uv_products", {}) if isinstance(radmc_cfg.get("uv_products", {}), dict) else {}
-    chem_cfg = cfg.get("chemistry", {}) if isinstance(cfg.get("chemistry", {}), dict) else {}
-    gow_cfg = chem_cfg.get("gow17", {}) if isinstance(chem_cfg.get("gow17", {}), dict) else {}
-
     products_enabled = bool(uv_cfg.get("enabled", True))
     mode = str(uv_cfg.get("mode", "disc_segment_only"))
     outer_policy = str(uv_cfg.get("outer_product_policy", "draine_equivalent"))
     register_mask = bool(uv_cfg.get("register_measured_mask", True))
     threshold = float(uv_cfg.get("stellar_fraction_threshold", 0.01))
 
-    use_uv_products = bool(gow_cfg.get("use_uv_products", products_enabled))
-    hard_weights = bool(gow_cfg.get("hard_uv_for_directional_shielding", products_enabled))
-    chi_is_incident = bool(gow_cfg.get("chi_is_incident", False))
-
-    if products_enabled:
-        if not use_uv_products:
-            raise ValueError("radmc3d.uv_products.enabled requires chemistry.gow17.use_uv_products=true")
-        if not hard_weights:
-            raise ValueError(
-                "radmc3d.uv_products.enabled requires "
-                "chemistry.gow17.hard_uv_for_directional_shielding=true"
-            )
-    if use_uv_products and not products_enabled:
-        raise ValueError("chemistry.gow17.use_uv_products requires radmc3d.uv_products.enabled=true")
-    if chi_is_incident and products_enabled:
-        raise ValueError("chemistry.gow17.chi_is_incident=true is incompatible with UV products")
-    if chi_is_incident and segmented:
-        raise ValueError("chemistry.gow17.chi_is_incident=true is incompatible with segmented RT")
     if mode == "disc_segment_only" and outer_policy != "draine_equivalent":
         raise ValueError(
             "disc_segment_only UV products require "
@@ -777,6 +753,5 @@ def validate_uv_chemistry_config(
         mode=mode,
         outer_product_policy=outer_policy,
         register_measured_mask=register_mask,
-        use_hard_directional_weights=hard_weights,
         stellar_fraction_threshold=threshold,
     )

@@ -24,7 +24,6 @@ from diskbridge._constants import EPS_CHI, K_B
 from diskbridge._units import Quantity
 from diskbridge.chemistry.api import run_chemistry
 from diskbridge.chemistry.models.gow17 import _cv_cold
-from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.dust import Dust
 from diskbridge.model.field import Field
@@ -839,8 +838,8 @@ def _build_spherical_cloud_model(
     shape = mesh.shape
     axis_order = mesh.axis_names()
 
-    if is_effectively_1d(mesh, shape):
-        raise RuntimeError(f"Expected non-1D mesh but got shape={shape}")
+    if int(ntheta) <= 1 or int(nphi) <= 1:
+        raise RuntimeError(f"Expected 3D angular mesh but got ntheta={ntheta}, nphi={nphi}")
 
     model = Model()
     model.coord_system = mesh.coord_system
@@ -1072,11 +1071,15 @@ def run_gow17_internal_3d_healpix_sphere(
             uv_n_wavelengths=int(radmc3d_uv_n_wavelengths),
             baseline_radmc3d_inputs_dir=Path(baseline_radmc3d_inputs_dir),
         )
-        radm.chi = chi_rt
+        radm.chi = Quantity(0.5 * chi_rt.to("dimensionless").magnitude, "dimensionless")
+        radm.radiation_mode = "local_chi"
     else:
         # Incident (unattenuated) field everywhere; dust attenuation
-        # is handled inside the chemistry via chi_is_incident=True.
-        radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
+        # is handled inside the chemistry from the model's incident slab mode.
+        radm.set_incident_uv(
+            chi=Quantity(np.full(shape, 0.5 * chi0_incident, dtype=float), "dimensionless"),
+            Av=radm.Av,
+        )
 
     chi_label = "radmc3d" if use_radmc3d_chi else "analytic"
     _print_chi_stats(chi_label, radm.chi, tuple(radm.model.mesh.axis_names()))
@@ -1154,16 +1157,11 @@ def run_gow17_internal_3d_healpix_sphere(
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
-        "local_chi_factor": 0.5,
         "enable_co_phase": False,
         "coupling_mode": str(coupling_mode),
         "astrochem_n_updates": int(astrochem_n_updates),
         "astrochem_t_end_yr": float(astrochem_t_end_yr),
     }
-    if use_radmc3d_chi:
-        gow17_cfg["chi_is_incident"] = False
-    else:
-        gow17_cfg["chi_is_incident"] = True
 
     chem_result = run_chemistry(radm, model="gow17", config=gow17_cfg)
 
@@ -1337,7 +1335,7 @@ def _run_slab_reference(
 ) -> Dict[str, np.ndarray]:
     """Run 1-D slab reference with Gong+17 Appendix factors.
 
-    Uses ``chi_is_incident=True`` and ``Av = 2 * Av_perp`` (the doubling
+    Uses incident slab radiation and ``Av = 2 * Av_perp`` (the doubling
     is already baked into *Av_ref* from the sphere run).  Shielding
     iteration settings are chosen for 1-D convergence and are independent
     of the 3-D sphere run parameters.
@@ -1407,8 +1405,11 @@ def _run_slab_reference(
 
     radm = RadModel(model, model_dir=".")
 
-    radm.chi = Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless")
     radm.Av = Quantity(Av_dense.reshape(shape), "dimensionless")
+    radm.set_incident_uv(
+        chi=Quantity(np.full(shape, chi0_incident, dtype=float), "dimensionless"),
+        Av=radm.Av,
+    )
     radm.gas_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
     radm.dust_temperature = Quantity(np.full(shape, 50.0, dtype=float), "K")
 
@@ -1448,12 +1449,10 @@ def _run_slab_reference(
         "shielding_max_iter": int(shielding_max_iter),
         "shielding_reltol": 1.0e-3,
         "shielding_abstol": 1.0e-20,
-        "local_chi_factor": 0.5,
         "enable_co_phase": False,
-        "chi_is_incident": True,
     }
 
-    run_chemistry(radm, model="gow17", config=gow17_cfg)
+    run_chemistry(radm, model="gow17_slab", config=gow17_cfg)
 
     y_slab = np.asarray(radm.gow17_y, dtype=float)
     Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float).ravel()
@@ -1600,7 +1599,7 @@ def main() -> None:
     out_fixed.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("Run 1: fixed-point coupling (chi_is_incident=True)")
+    print("Run 1: fixed-point coupling (incident slab radiation)")
     print("=" * 60)
 
     y_out_fp, abd_fp, Av_db_fp, info_fp, Av3d_fp, _ = run_gow17_internal_3d_healpix_sphere(
@@ -1646,7 +1645,7 @@ def main() -> None:
     out_astro.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "=" * 60)
-    print("Run 2: AstroChem-style coupling (chi_is_incident=True)")
+    print("Run 2: AstroChem-style coupling (incident slab radiation)")
     print("=" * 60)
 
     y_out_ac, abd_ac, Av_db_ac, info_ac, Av3d_ac, _ = run_gow17_internal_3d_healpix_sphere(
@@ -1696,7 +1695,7 @@ def main() -> None:
     # Run 3: RADMC-3D chi (fixed-point only)
     # ----------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("Run 3: RADMC-3D chi (chi_is_incident=False)")
+    print("Run 3: RADMC-3D local chi")
     print("=" * 60)
 
     radmc3d_model_dir = outdir / (

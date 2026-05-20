@@ -36,7 +36,6 @@ from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.model import RadModel
 from diskbridge._units import Quantity
-from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
 
 
 REF_DIR = Path(__file__).parent.parent / "other_codes" / "pdr" / "out_example_simple"
@@ -86,6 +85,15 @@ def build_model(nH_cm3: float, NH: np.ndarray, chi0: float = 2.0):
         "sigma_d_per_H",
         Field(quantity="sigma_d_per_H", data=sigma, axis_order=("x", "y", "z")),
     )
+    model.gas_register(
+        "microturbulence",
+        Field(
+            quantity="microturbulence",
+            data=Quantity(np.full(shape, 0.3), "km/s"),
+            axis_order=("x", "y", "z"),
+            attrs={"spatially_constant": True},
+        ),
+    )
 
     radm = RadModel(model)
 
@@ -93,15 +101,14 @@ def build_model(nH_cm3: float, NH: np.ndarray, chi0: float = 2.0):
     radm.gas_temperature = Quantity(np.full(shape, 100.0), "K")
     radm.dust_temperature = Quantity(np.full(shape, 20.0), "K")
 
-    # Incident UV field (G0) for a one-sided slab. The reference PDR code uses
-    # a (G0/2) factor internally plus explicit dust attenuation in Av/NH.
-    radm.chi = Quantity(np.full(shape, float(chi0)), "dimensionless")
-
     # Av profile used by the reference PDR code: Av = NH * Zd / 1.87e21.
     # Here we adopt Zd=1, matching the regression reference.
     NH_arr = np.asarray(NH, float)
     Av_arr = NH_arr / 1.87e21
-    radm.Av = Quantity(Av_arr.reshape(shape), "dimensionless")
+    radm.set_incident_uv(
+        chi=Quantity(np.full(shape, float(chi0)), "dimensionless"),
+        Av=Quantity(Av_arr.reshape(shape), "dimensionless"),
+    )
 
     Av_db = Quantity(Av_arr, "dimensionless")
     return radm, Av_db
@@ -116,8 +123,6 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
         "t_end": "2.0e9 yr",
         "b_kms": 3.0,
         "chi0": chi0,
-        "chi_is_incident": True,
-        "slab_1d_equilibrium": True,
         "NH_total": "1.0e22 cm^-2",
         "NH_min": "1.0e17 cm^-2",
         "logNH": True,
@@ -126,7 +131,6 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
         "NCOeff_global": True,
         "bCO_L": True,
         "ion_rate": "2e-16 1/s",
-        "shielding_outer_1d": "min",
         "gradv": 9.0e-14,
         "Leff_CO_max": 3.0e20,
         "reltol": 1.0e-2,
@@ -149,7 +153,7 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
 
     res = None
     for _ in range(n_iter):
-        res = run_chemistry(radm, model="gow17", config=config, write=False)
+        res = run_chemistry(radm, model="gow17_slab", config=config, write=False)
         radm.nco_gas = res.number_densities["co"]
 
     return res
@@ -171,7 +175,7 @@ def diskbridge_nH100(reference_nH100):
 
     nH = 100.0
     radm, Av_db = build_model(nH, NH, chi0=1.0)
-    assert is_effectively_1d(radm.model.mesh, radm.ensure_nH().shape)
+    assert sum(int(n) > 1 for n in radm.ensure_nH().shape) == 1
     res = run_gow17_slab(radm, nH, chi0=1.0, n_iter=4)
 
     Y = np.asarray(radm.gow17_y).reshape(-1, N_Y)

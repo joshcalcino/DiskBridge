@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,10 +30,6 @@ from diskbridge.model.microturbulence import (
     microturbulence_spatially_constant,
 )
 from diskbridge.chemistry.types import ChemistryResult
-from diskbridge.chemistry.shielding.columns_1d import (
-    compute_pdr_shielding_1d,
-    is_effectively_1d,
-)
 from diskbridge.chemistry.shielding.healpix_columns import (
     _prepare_healpix_geometry,
     compute_column_rays_healpix,
@@ -42,7 +39,7 @@ from diskbridge.chemistry.shielding.healpix_columns import (
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_with_pathlength,
 )
-from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
+from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
 from diskbridge.chemistry.validation import (
     validate_chemistry_state,
@@ -50,9 +47,9 @@ from diskbridge.chemistry.validation import (
     project_gow17_state_to_budgets,
 )
 from diskbridge.radmc3d.uv_products import (
+    UV_PRODUCT_MERGED_FIELD_NAMES,
     draine_reference_for_product,
     uv_product_specs_from_config,
-    validate_uv_chemistry_config,
 )
 
 import diskbridge._gow17 as _gow17
@@ -107,7 +104,6 @@ GOW17_STATE_SPECIES = {
 KB_CGS = 1.380649e-16
 _YR_TO_S = float(Quantity("1 yr").to("s").magnitude)
 
-_KPH_AVFAC = np.asarray([3.76, 2.12, 3.88, 2.66, 4.18, 3.10, 2.61], dtype=np.float64)
 _KPH_BASE = np.asarray(
     [3.5e-10, 9.1e-10, 2.4e-10, 3.8e-10, 5.7e-11, 6.0e-10, 4.5e-9],
     dtype=np.float64,
@@ -115,15 +111,37 @@ _KPH_BASE = np.asarray(
 KPH_C_BASE = float(_KPH_BASE[IPH_C])
 KPH_CO_BASE = float(_KPH_BASE[IPH_CO])
 KPH_H2_BASE = float(_KPH_BASE[IPH_H2])
-_SIGMA_PE_CGS = 1.0e-21
-_SIGMA_ISRF_CGS = 3.0e-22
 
 
-def _resolve_local_chi_factor(cfg: dict, *, chi_is_incident: bool) -> float:
-    """Return the UV normalization factor for the selected radiation mode."""
-    if "local_chi_factor" in cfg:
-        return float(cfg["local_chi_factor"])
-    return 0.5 if bool(chi_is_incident) else 1.0
+@dataclass(frozen=True)
+class _Gow17RadiationMode:
+    name: str
+    uses_uv_products: bool
+    directional_uv_product: str
+
+
+def _infer_gow17_radiation_mode(rad: "RadModel") -> _Gow17RadiationMode:
+    """Infer the local-radiation mode for the 3D GOW17 wrapper."""
+    mode = getattr(rad, "radiation_mode", None)
+    has_products = all(rad.has_uv_product(name) for name in UV_PRODUCT_MERGED_FIELD_NAMES)
+
+    if mode is None:
+        mode = "local_uv_products" if has_products else "local_chi"
+
+    valid = {"local_uv_products", "local_chi"}
+    if mode not in valid:
+        raise ValueError(
+            f"gow17 is the 3D wrapper and only accepts local radiation modes "
+            f"{sorted(valid)}; got {mode!r}. Use model='gow17_slab' for slab chemistry."
+        )
+
+    if mode.endswith("uv_products") and not has_products:
+        missing = [name for name in UV_PRODUCT_MERGED_FIELD_NAMES if not rad.has_uv_product(name)]
+        raise KeyError(f"gow17: {mode} requires missing UV product(s): {missing}")
+
+    if mode == "local_uv_products":
+        return _Gow17RadiationMode(mode, True, "G_CO_diss")
+    return _Gow17RadiationMode(mode, False, "chi")
 
 
 def _accumulate_solver_status(status_acc: np.ndarray, status_step: np.ndarray) -> np.ndarray:
@@ -439,16 +457,6 @@ def _nested_cfg(cfg: dict, key: str) -> dict:
     val = cfg.get(key, {})
     return val if isinstance(val, dict) else {}
 
-
-def _full_config_with_gow17_cfg(gow17_cfg: dict) -> dict:
-    """Return current global config with the resolved GOW17 section injected."""
-    full_cfg = dict(get_config())
-    chemistry_cfg = dict(full_cfg.get("chemistry", {}))
-    chemistry_cfg["gow17"] = dict(gow17_cfg)
-    full_cfg["chemistry"] = chemistry_cfg
-    return full_cfg
-
-
 def _co_pdes_draine_flux() -> float:
     """Return configured Draine CO photodesorption photon flux."""
     uv_cfg = get_config().get("radmc3d", {}).get("uv_products", {})
@@ -468,7 +476,7 @@ def _actual_solver_uv_fields(
 ) -> dict[str, np.ndarray]:
     """Return UV fields exactly as passed to the native solver.
 
-    ``Gph`` already includes local_chi_factor and molecular/atomic shielding.
+    ``Gph`` already includes the radiation-mode normalization and molecular/atomic shielding.
     ``F_CO_pdes_external`` is the external CO photodesorption photon flux passed
     to the solver before CRUV/direct CR terms are added in CO phase diagnostics.
     """
@@ -1142,7 +1150,6 @@ def _compute_shielding_and_gph(
     F_CO_pdes_photon_flat: np.ndarray | None,
     xCtot_flat: np.ndarray,
     Zd_arr: np.ndarray,
-    Av_flat,
     shape: tuple,
     ncells: int,
     rad: "RadModel",
@@ -1152,9 +1159,6 @@ def _compute_shielding_and_gph(
     b_kms: float,
     b_CO_kms_grid: np.ndarray | None,
     nside: int,
-    chi_is_incident: bool,
-    local_chi_factor: float,
-    shielding_outer_1d: str,
 ) -> tuple:
     """Compute shielding factors and radiation field arrays from current abundances.
 
@@ -1188,96 +1192,30 @@ def _compute_shielding_and_gph(
         (xC_neutral * nH_flat).reshape(shape), dtype=np.float64
     )
 
-    if is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-        if chi_is_incident:
-            if Av_flat is None:
-                raise RuntimeError("gow17: internal error (Av_flat missing)")
+    from diskbridge.chemistry.shielding.healpix_columns import (
+        compute_pdr_shielding_healpix,
+    )
 
-            NH_over_Zd = Av_flat * (1.87e21)
-            NH_flat_loc = np.divide(
-                NH_over_Zd,
-                Zd_arr,
-                out=np.zeros_like(NH_over_Zd, dtype=np.float64),
-                where=(Zd_arr > 0.0),
-            )
-
-            dNH = np.empty_like(NH_flat_loc, dtype=np.float64)
-            dNH[:-1] = NH_flat_loc[1:] - NH_flat_loc[:-1]
-            dNH[-1] = 0.0
-
-            xH2_use = np.ascontiguousarray(xH2, dtype=np.float64)
-            xCO_use = np.ascontiguousarray(xCO, dtype=np.float64)
-            xC_use = np.ascontiguousarray(xC_neutral, dtype=np.float64)
-
-            N_H2 = np.zeros_like(NH_flat_loc, dtype=np.float64)
-            N_CO = np.zeros_like(NH_flat_loc, dtype=np.float64)
-            N_CO_b2 = np.zeros_like(NH_flat_loc, dtype=np.float64)
-            N_C = np.zeros_like(NH_flat_loc, dtype=np.float64)
-            if NH_flat_loc.size >= 2:
-                N_H2[1:] = np.cumsum(xH2_use[:-1] * dNH[:-1])
-                N_CO[1:] = np.cumsum(xCO_use[:-1] * dNH[:-1])
-                if b_CO_kms_grid is not None:
-                    b2_line = np.asarray(b_CO_kms_grid, dtype=np.float64).reshape(ncells) ** 2
-                    N_CO_b2[1:] = np.cumsum(xCO_use[:-1] * b2_line[:-1] * dNH[:-1])
-                N_C[1:] = np.cumsum(xC_use[:-1] * dNH[:-1])
-
-            from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
-
-            theta_h2_flat = h2_self_shielding_db96(N_H2, b5=float(b_kms))
-            if b_CO_kms_grid is not None:
-                b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
-                theta_co_flat = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
-            else:
-                theta_co_flat = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
-
-            AH2 = 1.17e-8
-            tau_H2 = 1.2e-14 * 2.0 * N_H2
-            y_shield = AH2 * tau_H2
-            ry = np.exp(-y_shield) / (1.0 + y_shield)
-            rc = np.exp(-1.6e-17 * N_C)
-            theta_c_flat = rc * ry
-
-            theta_h2_arr = theta_h2_flat.reshape(shape)
-            theta_co_arr = theta_co_flat.reshape(shape)
-            theta_c_arr = theta_c_flat.reshape(shape)
-        else:
-            theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_1d(
-                mesh=rad.model.mesh,
-                nH=nH_cm3,
-                chi=chi_dust_arr,
-                visser=visser,
-                nCO=nCO_cm3,
-                nC=nC_cm3,
-                nH2=nH2_cm3,
-                b_kms=b_kms,
-                b_CO_kms_grid=b_CO_kms_grid,
-                outer=shielding_outer_1d,
-            )
-    else:
-        from diskbridge.chemistry.shielding.healpix_columns import (
-            compute_pdr_shielding_healpix,
-        )
-
-        W_rays = getattr(rad, "W_rays", None)
-        theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
-            mesh=rad.model.mesh,
-            nH=nH_cm3,
-            chi=chi_dust_arr,
-            visser=visser,
-            nCO=nCO_cm3,
-            nC=nC_cm3,
-            nH2=nH2_cm3,
-            nside=nside,
-            b_kms=b_kms,
-            b_CO_kms_grid=b_CO_kms_grid,
-            W_rays=W_rays,
-            chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
-            memory_budget_gib=getattr(
-                diskbridge.params,
-                "pdr_shielding_memory_budget_gib",
-                None,
-            ),
-        )
+    W_rays = getattr(rad, "W_rays", None)
+    theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
+        mesh=rad.model.mesh,
+        nH=nH_cm3,
+        chi=chi_dust_arr,
+        visser=visser,
+        nCO=nCO_cm3,
+        nC=nC_cm3,
+        nH2=nH2_cm3,
+        nside=nside,
+        b_kms=b_kms,
+        b_CO_kms_grid=b_CO_kms_grid,
+        W_rays=W_rays,
+        chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
+        memory_budget_gib=getattr(
+            diskbridge.params,
+            "pdr_shielding_memory_budget_gib",
+            None,
+        ),
+    )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)
     theta_co_flat = theta_co_arr.reshape(ncells)
@@ -1285,63 +1223,23 @@ def _compute_shielding_and_gph(
 
     # -- Assemble radiation field arrays --
     Gph = np.empty((ncells, N_PH), dtype=np.float64)
-    if chi_is_incident:
-        if Av_flat is None:
-            raise RuntimeError("gow17: internal error (Av_flat missing)")
-        G0_local = float(local_chi_factor) * chi_dust_flat
-        Gph[:, :] = G0_local[:, None] * np.exp(-_KPH_AVFAC[None, :] * Av_flat[:, None])
-        Gph[:, IPH_CO] = (
-            float(local_chi_factor)
-            * G_CO_diss_flat
-            * np.exp(-float(_KPH_AVFAC[IPH_CO]) * Av_flat)
-        )
-        Gph[:, IPH_H2] = (
-            float(local_chi_factor)
-            * G_H2_diss_flat
-            * np.exp(-float(_KPH_AVFAC[IPH_H2]) * Av_flat)
-        )
-        Gph[:, IPH_C] = (
-            float(local_chi_factor)
-            * G_C_ion_flat
-            * np.exp(-float(_KPH_AVFAC[IPH_C]) * Av_flat)
-        )
-        NH_over_Zd = Av_flat * (1.87e21)
-        NH_flat_loc = np.divide(
-            NH_over_Zd,
-            Zd_arr,
-            out=np.zeros_like(NH_over_Zd, dtype=np.float64),
-            where=(Zd_arr > 0.0),
-        )
-        GPE = np.ascontiguousarray(
-            G0_local * np.exp(-NH_flat_loc * _SIGMA_PE_CGS * Zd_arr),
-            dtype=np.float64,
-        )
-        if F_CO_pdes_photon_flat is None:
-            F_CO_pdes_photon_flat = G_CO_pdes_flat * _co_pdes_draine_flux()
+    G_broad = chi_dust_flat
+    Gph[:, :] = G_broad[:, None]
+    Gph[:, IPH_CO] = G_CO_diss_flat
+    Gph[:, IPH_H2] = G_H2_diss_flat
+    Gph[:, IPH_C] = G_C_ion_flat
+    GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
+    if F_CO_pdes_photon_flat is None:
+        f_co_pdes_ref = _co_pdes_draine_flux()
         GISRF = np.ascontiguousarray(
-            float(local_chi_factor)
-            * F_CO_pdes_photon_flat
-            * np.exp(-NH_flat_loc * _SIGMA_ISRF_CGS * Zd_arr),
+            G_CO_pdes_flat * f_co_pdes_ref,
             dtype=np.float64,
         )
     else:
-        G_broad = local_chi_factor * chi_dust_flat
-        Gph[:, :] = G_broad[:, None]
-        Gph[:, IPH_CO] = local_chi_factor * G_CO_diss_flat
-        Gph[:, IPH_H2] = local_chi_factor * G_H2_diss_flat
-        Gph[:, IPH_C] = local_chi_factor * G_C_ion_flat
-        GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
-        if F_CO_pdes_photon_flat is None:
-            f_co_pdes_ref = _co_pdes_draine_flux()
-            GISRF = np.ascontiguousarray(
-                local_chi_factor * G_CO_pdes_flat * f_co_pdes_ref,
-                dtype=np.float64,
-            )
-        else:
-            GISRF = np.ascontiguousarray(
-                local_chi_factor * F_CO_pdes_photon_flat,
-                dtype=np.float64,
-            )
+        GISRF = np.ascontiguousarray(
+            F_CO_pdes_photon_flat,
+            dtype=np.float64,
+        )
 
     Gph[:, IPH_C] *= theta_c_flat
     Gph[:, IPH_CO] *= theta_co_flat
@@ -1419,7 +1317,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shielding_max_iter = int(shielding_max_iter_cfg)
     shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
     shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
-    shielding_outer_1d = str(cfg.get("shielding_outer_1d", "min"))
     tgas_convergence_reltol = float(cfg.get("tgas_convergence_reltol", shielding_reltol))
 
     # -- AstroChem-style coupling config --
@@ -1435,24 +1332,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             f"got {astrochem_acceleration!r}"
         )
 
-    chi_is_incident = bool(cfg.get("chi_is_incident", False))
-    incident_uv_products = bool(cfg.get("incident_uv_products", False))
-    local_chi_factor = _resolve_local_chi_factor(
-        cfg,
-        chi_is_incident=chi_is_incident,
-    )
-    slab_1d_equilibrium = bool(cfg.get("slab_1d_equilibrium", False))
-    runtime_mode = None
-    if not chi_is_incident:
-        runtime_mode = validate_uv_chemistry_config(_full_config_with_gow17_cfg(cfg))
-    elif rad.has_uv_product("G_CO_diss") and not incident_uv_products:
-        raise ValueError(
-            "gow17: chi_is_incident=True is incompatible with registered UV "
-            "product fields unless incident_uv_products=True"
-        )
-
     Tdust = rad.ensure_dust_temperature()
     nH = rad.ensure_nH()
+    radiation_mode = _infer_gow17_radiation_mode(rad)
     if temperature_mode == "constant_debug":
         Tgas = Quantity(
             np.full(
@@ -1470,28 +1352,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             Tgas = Tdust
 
     f_co_pdes_ref = _co_pdes_draine_flux()
-    if chi_is_incident:
-        if incident_uv_products:
-            chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
-            G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
-            G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
-            G_C_ion = rad.ensure_uv_product("G_C_ion", fallback_to_chi=False)
-            G_CO_pdes = rad.ensure_uv_product("G_CO_pdes", fallback_to_chi=False)
-            F_CO_pdes_photon = rad.ensure_uv_product(
-                "F_CO_pdes_photon",
-                fallback_to_chi=False,
-            )
-        else:
-            chi = rad.ensure_chi()
-            G_CO_diss = chi
-            G_H2_diss = chi
-            G_C_ion = chi
-            G_CO_pdes = chi
-            F_CO_pdes_photon = Quantity(
-                chi.to("dimensionless").magnitude * f_co_pdes_ref,
-                "1/(cm^2 s)",
-            )
-    elif runtime_mode is not None and runtime_mode.products_enabled:
+    if radiation_mode.uses_uv_products:
         chi = rad.ensure_uv_product("chi_broad", fallback_to_chi=False)
         G_CO_diss = rad.ensure_uv_product("G_CO_diss", fallback_to_chi=False)
         G_H2_diss = rad.ensure_uv_product("G_H2_diss", fallback_to_chi=False)
@@ -1515,14 +1376,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
     # files are unavailable (shielding then falls back to isotropic averaging).
-    if chi_is_incident:
-        directional_uv_product = "chi"
-    else:
-        directional_uv_product = (
-            "G_CO_diss"
-            if runtime_mode is None or runtime_mode.use_hard_directional_weights
-            else "chi_broad"
-        )
+    directional_uv_product = radiation_mode.directional_uv_product
     maybe_ensure_W_rays(rad, nside=nside, uv_product=directional_uv_product)
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
@@ -1564,258 +1418,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     G_CO_pdes_flat = G_CO_pdes_arr.reshape(ncells)
     F_CO_pdes_photon_flat = F_CO_pdes_photon_arr.reshape(ncells)
 
-    Av_flat = None
-    if chi_is_incident:
-        if not is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-            raise ValueError("gow17: chi_is_incident=True requires an effectively-1D mesh")
-        Av_q = getattr(rad, "Av", None)
-        if Av_q is None:
-            raise ValueError("gow17: chi_is_incident=True requires rad.Av to be set")
-        Av_arr = _as_cgs_f64(Av_q, "dimensionless")
-        if Av_arr.shape != shape:
-            raise ValueError(f"gow17: rad.Av shape {Av_arr.shape} does not match nH shape {shape}")
-        Av_flat = Av_arr.reshape(ncells)
-
-    if slab_1d_equilibrium:
-        if not chi_is_incident:
-            raise ValueError("gow17: slab_1d_equilibrium requires chi_is_incident=True")
-        if not is_effectively_1d(rad.model.mesh, nH_cm3.shape):
-            raise ValueError("gow17: slab_1d_equilibrium requires an effectively-1D mesh")
-        if Av_flat is None:
-            raise RuntimeError("gow17: internal error (Av_flat missing)")
-
-        NH_total_cfg = cfg.get("NH_total", None)
-        NH_min_cfg = cfg.get("NH_min", None)
-        if NH_total_cfg is None or NH_min_cfg is None:
-            raise ValueError("gow17: slab_1d_equilibrium requires NH_total and NH_min in config")
-
-        NH_total = _maybe_quantity_to_float(NH_total_cfg, "cm^-2")
-        NH_min = _maybe_quantity_to_float(NH_min_cfg, "cm^-2")
-        logNH = bool(cfg.get("logNH", True))
-        field_geo = int(cfg.get("field_geo", 0))
-        isdust = bool(cfg.get("isdust", True))
-        isfsH2 = bool(cfg.get("isfsH2", True))
-        isfsCO = bool(cfg.get("isfsCO", True))
-        isfsC = bool(cfg.get("isfsC", True))
-
-        nH0 = float(nH_flat[0])
-        if not np.allclose(nH_flat, nH0, rtol=0.0, atol=0.0):
-            raise ValueError("gow17: slab_1d_equilibrium requires uniform nH")
-
-        chi0 = float(chi_dust_flat[0])
-        if not np.allclose(chi_dust_flat, chi0, rtol=0.0, atol=0.0):
-            raise ValueError("gow17: slab_1d_equilibrium requires uniform chi")
-
-        sigma_d = rad.ensure_sigma_d_per_H()
-        sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
-        valid = np.isfinite(sigma_d_cm2) & (sigma_d_cm2 > 0.0)
-        if not np.any(valid):
-            raise ValueError("gow17: slab_1d_equilibrium requires positive finite sigma_d_per_H")
-        sigma_d_per_H_ref = float(np.nanmedian(sigma_d_cm2[valid]))
-        Zd0 = float(np.nanmedian(sigma_d_cm2[valid]) / sigma_d_per_H_ref)
-
-        Zg0 = float(Zg)
-        ion0 = float(ion_rate_s)
-        gradv0 = float(gradv_scalar)
-
-        NCOeff_global = bool(cfg.get("NCOeff_global", True))
-        bCO_L = bool(cfg.get("bCO_L", True))
-
-        y0 = np.zeros(N_Y, dtype=np.float64)
-        y0[I_HEP] = 1.450654e-08
-        y0[I_H3P] = 2.681411e-07
-        y0[I_CP] = 1.0e-4
-        y0[I_CO] = 1.0e-7
-        y0[I_H2] = 0.1
-        y0[I_CO_ICE] = 0.0
-        if not const_temp:
-            Cv0 = _cv_cold(
-                np.asarray([y0[I_H2]], dtype=np.float64),
-                np.asarray([0.0], dtype=np.float64),
-            )[0]
-            y0[I_E] = Cv0 * float(T_flat[0])
-
-        abstol = _build_gow17_abstol(cfg, abstol0)
-        abstol[I_E] = float(
-            _cv_cold(
-                np.asarray([0.1], dtype=np.float64),
-                np.asarray([0.0], dtype=np.float64),
-            )[0]
-        )
-
-        slab = _gow17.solve_slab_1d_equilibrium(
-            nH=nH0,
-            G0=(2.0 * chi0),
-            ngrid=int(ncells),
-            NH_total=float(NH_total),
-            logNH=bool(logNH),
-            NH_min=float(NH_min),
-            field_geo=int(field_geo),
-            isdust=bool(isdust),
-            isfsH2=bool(isfsH2),
-            isfsCO=bool(isfsCO),
-            isfsC=bool(isfsC),
-            Zg=float(Zg0),
-            Zd=float(Zd0),
-            ion_rate=float(ion0),
-            reltol=float(reltol),
-            abstol=abstol,
-            mxsteps=int(mxsteps),
-            maxord=int(maxord),
-            tolfac=float(tolfac),
-            tmin=float(tmin),
-            tmax=float(tmax),
-            verbose=bool(verbose),
-            y0=y0,
-            const_temp=bool(const_temp),
-            Tgas=float(T_flat[0]),
-            gradv=float(gradv0),
-            NCOeff_global=bool(NCOeff_global),
-            bCO_L=bool(bCO_L),
-            fH2gr=float(fH2gr),
-            fHplusgr=float(fHplusgr),
-            fCplusgr=float(fCplusgr),
-            fHeplusgr=float(fHeplusgr),
-            fSplusgr=float(fSplusgr),
-            fSiplusgr=float(fSiplusgr),
-            fCplusCR=float(fCplusCR),
-            co_sigma_d_per_H_ref=0.0,
-            co_E_bind_co=0.0,
-            co_nu0_co=0.0,
-            co_F_DRAINE=0.0,
-            co_Y_CO=0.0,
-            co_N_SURF=0.0,
-            co_N_LAY=0,
-            userJac=bool(userJac),
-        )
-
-        y_guess = np.asarray(slab["y"], dtype=np.float64).reshape(ncells, N_Y)
-        theta_h2_arr = np.asarray(slab["fShieldH2"], dtype=np.float64).reshape(shape)
-        theta_co_arr = np.asarray(slab["fShieldCO"], dtype=np.float64).reshape(shape)
-        theta_c_arr = np.ones_like(theta_co_arr, dtype=np.float64)
-
-        y_out = y_guess.reshape(shape + (N_Y,))
-        status = np.zeros(shape, dtype=np.int32)
-
-        xCO = y_out[..., I_CO]
-        xCO_ice = y_out[..., I_CO_ICE]
-        xH2 = y_out[..., I_H2]
-
-        nco_gas = Quantity(xCO * nH_cm3, "cm^-3")
-        nco_ice = Quantity(xCO_ice * nH_cm3, "cm^-3")
-        nH2_out = Quantity(xH2 * nH_cm3, "cm^-3")
-
-        xe = _electron_abundance(y_out)
-        if not const_temp:
-            Cv_slab = _cv_cold(y_out[..., I_H2], xe)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                T_out_slab = y_out[..., I_E] / Cv_slab
-            T_out_slab = np.clip(
-                T_out_slab,
-                float(temperature_cfg["Tgas_floor"]),
-                float(temperature_cfg["Tgas_ceiling"]),
-            )
-        else:
-            T_out_slab = T_flat.reshape(shape)
-        T_status_slab = np.zeros(shape, dtype=np.int32)
-
-        xH_atom = 1.0 - (
-            y_out[..., I_OHX]
-            + y_out[..., I_CHX]
-            + y_out[..., I_HCOP]
-            + 3.0 * y_out[..., I_H3P]
-            + 2.0 * y_out[..., I_H2P]
-            + y_out[..., I_HP]
-            + 2.0 * y_out[..., I_H2]
-        )
-
-        xCtot = np.full(shape, float(Zg0) * float(XC_STD), dtype=np.float64)
-        xC_neutral = xCtot - (
-            y_out[..., I_HCOP]
-            + y_out[..., I_CHX]
-            + y_out[..., I_CO]
-            + y_out[..., I_CO_ICE]
-            + y_out[..., I_CP]
-        )
-
-        nCplus = Quantity(y_out[..., I_CP] * nH_cm3, "cm^-3")
-        nC = Quantity(np.maximum(xC_neutral, 0.0) * nH_cm3, "cm^-3")
-        ne = Quantity(xe * nH_cm3, "cm^-3")
-        nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
-
-        abundances, number_densities = _gow17_species_outputs(
-            y_out,
-            nH_cm3,
-            x_h=xH_atom,
-            x_catom=xC_neutral,
-            x_e=xe,
-            line_h2_opr=cfg.get("line_h2_opr", 3.0),
-        )
-
-        fields = {
-            "co_ice": nco_ice,
-            "Tgas": Quantity(T_out_slab, "K"),
-            "Tgas_minus_Tdust": Quantity(T_out_slab - Tdust_flat.reshape(shape), "K"),
-            "Tgas_status": Quantity(T_status_slab, "dimensionless"),
-            "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
-            "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
-            "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
-            "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
-            "G_C_ion": Quantity(G_C_ion_arr, "dimensionless"),
-            "G_CO_pdes": Quantity(G_CO_pdes_arr, "dimensionless"),
-            "F_CO_pdes_photon": Quantity(F_CO_pdes_photon_arr, "1/(cm^2 s)"),
-            "theta_co": Quantity(theta_co_arr, "dimensionless"),
-            "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
-            "theta_c": Quantity(theta_c_arr, "dimensionless"),
-            "chi_eff": Quantity(G_CO_diss_arr * theta_co_arr, "dimensionless"),
-            "G_CO_diss_actual": Quantity(G_CO_diss_arr * theta_co_arr, "dimensionless"),
-            "G_C_ion_actual": Quantity(G_C_ion_arr * theta_c_arr, "dimensionless"),
-            "G_H2_diss_actual": Quantity(G_H2_diss_arr * theta_h2_arr, "dimensionless"),
-            "F_CO_pdes_external_actual": Quantity(F_CO_pdes_photon_arr, "1/(cm^2 s)"),
-        }
-
-        rad.gow17_y = y_out
-        rad.nco_gas = nco_gas
-        rad.nco_ice = nco_ice
-        rad.theta_co = fields["theta_co"]
-        rad.chi_eff = fields["chi_eff"]
-        rad.nH2 = nH2_out
-        rad.nH_atom = nH_atom
-        rad.nCplus = nCplus
-        rad.nC = nC
-        rad.ne = ne
-        rad.Tgas_gow17 = fields["Tgas"]
-        rad.gas_temperature = rad.Tgas_gow17
-
-        n_fail = 0
-        max_status = 0
-
-        meta = {
-            "model": "gow17",
-            "enable_co_phase": bool(enable_co_phase),
-            "nside": int(nside),
-            "b_kms": float(b_kms),
-            "b_CO_kms_scalar": float(b_kms),
-            "ion_rate_s": float(ion_rate_s),
-            "Zg": float(Zg0),
-            "Zd": float(Zd0),
-            "reltol": float(reltol),
-            "abstol0": float(abstol0),
-            "shielding_max_iter": int(shielding_max_iter),
-            "shielding_reltol": float(shielding_reltol),
-            "n_fail": int(n_fail),
-            "max_status": int(max_status),
-            "fail_idx_head": [],
-            "status_hist": {0: int(ncells), -1: 0},
-        }
-
-        return ChemistryResult(
-            abundances=abundances,
-            number_densities=number_densities,
-            fields=fields,
-            meta=meta,
-        )
-
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
 
@@ -1849,7 +1451,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         (gradv_mode == "nh_weighted_shear+turb")
         or (Leff_CO_max_mode == "geo")
     )
-    if use_healpix_geometry and (not is_effectively_1d(rad.model.mesh, nH_cm3.shape)):
+    if use_healpix_geometry:
         candidate_mask_arr = np.ones(shape, dtype=bool)
         tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
             rad.model.mesh,
@@ -2068,7 +1670,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
         xCtot_flat=xCtot_flat,
         Zd_arr=Zd_arr,
-        Av_flat=Av_flat,
         shape=shape,
         ncells=ncells,
         rad=rad,
@@ -2078,9 +1679,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         b_kms=b_kms,
         b_CO_kms_grid=b_CO_kms_grid,
         nside=nside,
-        chi_is_incident=chi_is_incident,
-        local_chi_factor=local_chi_factor,
-        shielding_outer_1d=shielding_outer_1d,
     )
 
     # Common keyword dict for CO phase parameters passed to batch solvers.

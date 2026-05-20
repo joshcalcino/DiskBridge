@@ -146,6 +146,7 @@ class RadModel:
         self.gas_temperature: Optional[Quantity] = None
         self.chi: Optional[Quantity] = None
         self.uv_products: dict[str, Quantity] = {}
+        self.radiation_mode: Optional[str] = None
         self.nH: Optional[Quantity] = None
         self.theta_co: Optional[Quantity] = None
         self.chi_eff: Optional[Quantity] = None
@@ -190,6 +191,15 @@ class RadModel:
         for name in UV_PRODUCT_MERGED_FIELD_NAMES:
             if name in gas:
                 self.uv_products[name] = gas[name].data
+        if all(name in self.uv_products for name in UV_PRODUCT_MERGED_FIELD_NAMES):
+            if self.chi is None:
+                self.chi = self.uv_products["chi_broad"]
+            self.radiation_mode = "local_uv_products"
+        elif self.chi is None and "chi_broad" in self.uv_products:
+            self.chi = self.uv_products["chi_broad"]
+            self.radiation_mode = "local_chi"
+        elif self.chi is not None:
+            self.radiation_mode = "local_chi"
     
     def _get_input_files(self) -> list[str]:
         """Get list of input files to symlink."""
@@ -841,6 +851,7 @@ class RadModel:
             )
             self.uv_products = products
             self.chi = products["chi_broad"]
+            self.radiation_mode = "local_uv_products"
 
             self.model.gas_register(
                 'chi',
@@ -884,6 +895,7 @@ class RadModel:
             isrf_path=default_isrf_path(),
         )
         self.uv_products = {"chi_broad": self.chi}
+        self.radiation_mode = "local_chi"
         
         self.model.gas_register(
             'chi',
@@ -1287,6 +1299,9 @@ class RadModel:
         self.chi = out.get('chi')
         if out.get('uv_products') is not None:
             self.uv_products = out['uv_products']
+            self.radiation_mode = "local_uv_products"
+        elif self.chi is not None:
+            self.radiation_mode = "local_chi"
         split_radii = list(out.get('split_radii_au', []))
         isotropic_outside = float(split_radii[-1]) if split_radii else None
         self.isotropic_weight_outside_r_au = isotropic_outside
@@ -1327,6 +1342,9 @@ class RadModel:
         self.chi = out.get("chi")
         if out.get("uv_products") is not None:
             self.uv_products = out["uv_products"]
+            self.radiation_mode = "local_uv_products"
+        elif self.chi is not None:
+            self.radiation_mode = "local_chi"
         split_radii = list(out.get("split_radii_au", []))
         isotropic_outside = float(split_radii[-1]) if split_radii else None
         self.isotropic_weight_outside_r_au = isotropic_outside
@@ -1497,6 +1515,37 @@ class RadModel:
             return True
         gas = getattr(self.model, "gas", None)
         return bool(gas is not None and name in gas)
+
+    def set_local_uv_products(self, products: dict[str, Quantity]) -> None:
+        """Register local RADMC-like UV products on this wrapper."""
+        missing = [name for name in UV_PRODUCT_MERGED_FIELD_NAMES if name not in products]
+        if missing:
+            raise KeyError(f"Missing UV product(s): {missing}")
+        self.uv_products = {name: products[name] for name in UV_PRODUCT_MERGED_FIELD_NAMES}
+        self.chi = self.uv_products["chi_broad"]
+        self.radiation_mode = "local_uv_products"
+
+    def set_incident_uv(self, *, chi: Quantity, Av: Quantity) -> None:
+        """Register an incident 1D slab UV field and dust-depth profile."""
+        self.chi = chi
+        self.Av = Av
+        self.uv_products = {}
+        self.radiation_mode = "incident_slab_chi"
+
+    def set_incident_uv_products(
+        self,
+        *,
+        products: dict[str, Quantity],
+        Av: Quantity,
+    ) -> None:
+        """Register incident 1D slab UV products and dust-depth profile."""
+        missing = [name for name in UV_PRODUCT_MERGED_FIELD_NAMES if name not in products]
+        if missing:
+            raise KeyError(f"Missing UV product(s): {missing}")
+        self.uv_products = {name: products[name] for name in UV_PRODUCT_MERGED_FIELD_NAMES}
+        self.chi = self.uv_products["chi_broad"]
+        self.Av = Av
+        self.radiation_mode = "incident_slab_uv_products"
 
     def ensure_uv_product(
         self,
