@@ -685,7 +685,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "ion_rate": str(cfg.ion_rate),
         "Zg": float(cfg.Zg),
         "enable_co_phase": bool(cfg.enable_co_phase),
-        "const_temp": (not bool(cfg.evolve_energy)),
+        "temperature": {"mode": "computed" if bool(cfg.evolve_energy) else "dust"},
         "reltol": float(cfg.reltol),
         "abstol0": float(cfg.abstol0),
         "mxsteps": int(cfg.mxsteps),

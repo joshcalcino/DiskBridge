@@ -1135,12 +1135,11 @@ def run_gow17_internal_3d_healpix_sphere(
 
     gow17_cfg = {
         "mode": "equilibrium",
-        "const_temp": bool(const_temp),
-        "t_end": "2.0e9 yr",
+        "temperature": {"mode": "dust" if bool(const_temp) else "computed"},
+        "tmax": "2.0e9 yr",
         "nside": int(nside),
         "chi0": float(chi0_incident),
         "ion_rate": f"{float(xi_cr)} 1/s",
-        "max_iter": 80,
         "reltol": 1.0e-2,
         "abstol0": 1.0e-9,
         "b_kms": 0.3,
@@ -1428,12 +1427,11 @@ def _run_slab_reference(
 
     gow17_cfg = {
         "mode": "equilibrium",
-        "const_temp": bool(const_temp),
-        "t_end": "2.0e9 yr",
+        "temperature": {"mode": "dust" if bool(const_temp) else "computed"},
+        "tmax": "2.0e9 yr",
         "nside": int(nside),
         "chi0": float(chi0_incident),
         "ion_rate": f"{float(xi_cr)} 1/s",
-        "max_iter": 80,
         "reltol": 1.0e-2,
         "abstol0": 1.0e-9,
         "b_kms": 0.3,

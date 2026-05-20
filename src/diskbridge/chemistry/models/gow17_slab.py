@@ -7,7 +7,6 @@ import numpy as np
 import diskbridge
 import diskbridge._gow17 as _gow17
 from diskbridge._config import resolve_model_config
-from diskbridge._constants import E_BIND_CO, N_LAY, N_SURF, NU0_CO, Y_CO
 from diskbridge._units import Quantity
 from diskbridge.chemistry.models.gow17 import (
     I_CHX,
@@ -30,10 +29,12 @@ from diskbridge.chemistry.models.gow17 import (
     _cv_cold,
     _electron_abundance,
     _gow17_species_outputs,
+    _initial_gas_temperature,
     _maybe_quantity_to_float,
     _model_microturbulence_grid_kms,
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
+    _resolve_co_phase_runtime_params,
     _warn_if_co_phase_settings_ignored,
 )
 from diskbridge.chemistry.types import ChemistryResult
@@ -91,21 +92,10 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     temperature_cfg = _resolve_temperature_config(cfg)
     temperature_mode = str(temperature_cfg["mode"])
     const_temp = bool(temperature_cfg["const_temp"])
-    if temperature_mode == "constant_debug":
-        Tgas = Quantity(
-            np.full(
-                _as_cgs_f64(Tdust, "K").shape,
-                float(temperature_cfg["constant_debug_Tgas"]),
-                dtype=np.float64,
-            ),
-            "K",
-        )
-    elif temperature_mode == "dust":
+    if temperature_mode == "dust":
         Tgas = Tdust
     else:
-        Tgas = rad.ensure_gas_temperature()
-        if Tgas is None:
-            Tgas = Tdust
+        Tgas = _initial_gas_temperature(rad, Tdust, temperature_cfg)
 
     T_K = np.clip(
         _as_cgs_f64(Tgas, "K"),
@@ -130,7 +120,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     NH_min = _maybe_quantity_to_float(cfg.get("NH_min", float(np.min(positive_NH))), "cm^-2")
     NH_total = _maybe_quantity_to_float(cfg.get("NH_total", float(np.max(positive_NH))), "cm^-2")
 
-    enable_co_phase = bool(cfg.get("enable_co_phase", True))
+    enable_co_phase = bool(cfg["enable_co_phase"])
     _warn_if_co_phase_settings_ignored(
         cfg,
         enable_co_phase=enable_co_phase,
@@ -144,20 +134,20 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         v_turb_grid_kms,
     )
 
-    ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
-    Zg = float(cfg.get("Zg", 1.0))
-    Zd = float(cfg.get("Zd", 1.0))
-    reltol = float(cfg.get("reltol", 1e-4))
-    abstol0 = float(cfg.get("abstol0", 1e-15))
-    tolfac = float(cfg.get("tolfac", 10.0))
-    tmin = _maybe_quantity_to_float(cfg.get("tmin", 3.16e10), "s")
-    tmax_val = cfg.get("tmax", cfg.get("t_end", 3.16e14))
-    tmax = _maybe_quantity_to_float(tmax_val, "s")
-    mxsteps = int(cfg.get("mxsteps", 10000))
-    maxord = int(cfg.get("maxord", 5))
-    verbose = bool(cfg.get("verbose", False))
-    userJac = bool(cfg.get("userJac", False))
-    gradv = float(cfg.get("gradv", 1.0e-14))
+    ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
+    Zg = float(cfg["Zg"])
+    Zd = float(cfg["Zd"])
+    reltol = float(cfg["reltol"])
+    abstol0 = float(cfg["abstol0"])
+    tolfac = float(cfg["tolfac"])
+    tmin = _maybe_quantity_to_float(cfg["tmin"], "s")
+    tmax = _maybe_quantity_to_float(cfg["tmax"], "s")
+    mxsteps = int(cfg["mxsteps"])
+    maxord = int(cfg["maxord"])
+    verbose = bool(cfg["verbose"])
+    userJac = bool(cfg["userJac"])
+    gradv = float(cfg["gradv"])
+    co_phase_params = _resolve_co_phase_runtime_params(cfg)
 
     abstol = _build_gow17_abstol(cfg, abstol0)
     abstol[I_E] = float(
@@ -172,13 +162,13 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         G0=2.0 * float(chi0),
         ngrid=int(ncells),
         NH_total=float(NH_total),
-        logNH=bool(cfg.get("logNH", True)),
+        logNH=bool(cfg["logNH"]),
         NH_min=float(NH_min),
-        field_geo=int(cfg.get("field_geo", 0)),
-        isdust=bool(cfg.get("isdust", True)),
-        isfsH2=bool(cfg.get("isfsH2", True)),
-        isfsCO=bool(cfg.get("isfsCO", True)),
-        isfsC=bool(cfg.get("isfsC", True)),
+        field_geo=int(cfg["field_geo"]),
+        isdust=bool(cfg["isdust"]),
+        isfsH2=bool(cfg["isfsH2"]),
+        isfsCO=bool(cfg["isfsCO"]),
+        isfsC=bool(cfg["isfsC"]),
         Zg=float(Zg),
         Zd=float(Zd),
         ion_rate=float(ion_rate_s),
@@ -194,22 +184,22 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         const_temp=bool(const_temp),
         Tgas=float(T0),
         gradv=float(gradv),
-        NCOeff_global=bool(cfg.get("NCOeff_global", True)),
-        bCO_L=bool(cfg.get("bCO_L", True)),
-        fH2gr=float(cfg.get("fH2gr", 1.0)),
-        fHplusgr=float(cfg.get("fHplusgr", 1.0)),
-        fCplusgr=float(cfg.get("fCplusgr", 1.0)),
-        fHeplusgr=float(cfg.get("fHeplusgr", 1.0)),
-        fSplusgr=float(cfg.get("fSplusgr", 1.0)),
-        fSiplusgr=float(cfg.get("fSiplusgr", 1.0)),
-        fCplusCR=float(cfg.get("fCplusCR", 1.0)),
+        NCOeff_global=bool(cfg["NCOeff_global"]),
+        bCO_L=bool(cfg["bCO_L"]),
+        fH2gr=float(cfg["fH2gr"]),
+        fHplusgr=float(cfg["fHplusgr"]),
+        fCplusgr=float(cfg["fCplusgr"]),
+        fHeplusgr=float(cfg["fHeplusgr"]),
+        fSplusgr=float(cfg["fSplusgr"]),
+        fSiplusgr=float(cfg["fSiplusgr"]),
+        fCplusCR=float(cfg["fCplusCR"]),
         co_sigma_d_per_H_ref=0.0,
-        co_E_bind_co=float(E_BIND_CO) if enable_co_phase else 0.0,
-        co_nu0_co=float(NU0_CO) if enable_co_phase else 0.0,
+        co_E_bind_co=(float(co_phase_params["E_bind_CO"]) if enable_co_phase else 0.0),
+        co_nu0_co=(float(co_phase_params["nu0_CO"]) if enable_co_phase else 0.0),
         co_F_DRAINE=float(_co_pdes_draine_flux()) if enable_co_phase else 0.0,
-        co_Y_CO=float(Y_CO) if enable_co_phase else 0.0,
-        co_N_SURF=float(N_SURF) if enable_co_phase else 0.0,
-        co_N_LAY=int(N_LAY) if enable_co_phase else 0,
+        co_Y_CO=(float(co_phase_params["Y_CO"]) if enable_co_phase else 0.0),
+        co_N_SURF=(float(co_phase_params["N_SURF"]) if enable_co_phase else 0.0),
+        co_N_LAY=(int(co_phase_params["N_LAY"]) if enable_co_phase else 0),
         userJac=bool(userJac),
     )
 
@@ -255,7 +245,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         x_h=xH_atom,
         x_catom=xC_neutral,
         x_e=xe,
-        line_h2_opr=cfg.get("line_h2_opr", 3.0),
+        line_h2_opr=cfg["line_h2_opr"],
     )
 
     G_CO = chi_arr * theta_co_arr

@@ -38,9 +38,10 @@ from diskbridge.radmc3d.model import RadModel
 from diskbridge._units import Quantity
 
 
-REF_DIR = Path(__file__).parent.parent / "other_codes" / "pdr" / "out_example_simple"
+REF_DIR = Path(__file__).parent / "reference" / "gow17_fig2_external_pdr"
 SPEC_LIST_REF = ["He+", "OHx", "CHx", "CO", "C+", "HCO+", "H2", "H+", "H3+", "H2+", "S+", "Si+", "O+", "E"]
 IDX_REF = {n: i for i, n in enumerate(SPEC_LIST_REF)}
+EXTERNAL_PDR_RTOL = 1.0e-12
 
 
 def load_reference(nH_index: int = 0):
@@ -120,7 +121,8 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
 
     config = {
         "mode": "equilibrium",
-        "t_end": "2.0e9 yr",
+        "temperature": {"mode": "computed", "initial": "gas_temperature"},
+        "tmax": "6.32e16 s",
         "b_kms": 3.0,
         "chi0": chi0,
         "NH_total": "1.0e22 cm^-2",
@@ -138,17 +140,34 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
         "mxsteps": 5000000,
         "maxord": 3,
         "tolfac": 10.0,
-        "tmin": "1.0e5 yr",
-        "const_temp": False,
+        "tmin": "3.16e12 s",
         "isfsH2": True,
         "isfsCO": True,
         "isfsC": True,
+        "enable_co_phase": False,
         "fHplusgr": 0.6,
         "fHeplusgr": 0.6,
         "fCplusgr": 0.6,
         "fSplusgr": 0.6,
         "fSiplusgr": 0.6,
-        "max_iter": 80,
+        "tolerances": {
+            "abstol_default": 1.0e-9,
+            "abstol_Heplus": 1.0e-15,
+            "abstol_OHx": 1.0e-15,
+            "abstol_CHx": 1.0e-15,
+            "abstol_CO": 1.0e-15,
+            "abstol_CO_ice": 1.0e-9,
+            "abstol_Cplus": 1.0e-15,
+            "abstol_HCOplus": 1.0e-30,
+            "abstol_H2": 1.0e-8,
+            "abstol_Hplus": 1.0e-15,
+            "abstol_H3plus": 1.0e-15,
+            "abstol_H2plus": 1.0e-15,
+            "abstol_Splus": 1.0e-9,
+            "abstol_Siplus": 1.0e-9,
+            "abstol_Oplus": 1.0e-9,
+        },
+        "shielding_max_iter": 80,
     }
 
     res = None
@@ -176,7 +195,7 @@ def diskbridge_nH100(reference_nH100):
     nH = 100.0
     radm, Av_db = build_model(nH, NH, chi0=1.0)
     assert sum(int(n) > 1 for n in radm.ensure_nH().shape) == 1
-    res = run_gow17_slab(radm, nH, chi0=1.0, n_iter=4)
+    res = run_gow17_slab(radm, nH, chi0=1.0, n_iter=1)
 
     Y = np.asarray(radm.gow17_y).reshape(-1, N_Y)
     return Av_db, Y, res
@@ -205,8 +224,8 @@ class TestGOW17Fig2Regression:
             ("HCO+", I_HCOP),
         ],
     )
-    def test_species_match_reference_rtol_1e5(self, species, idx_db, diskbridge_nH100, reference_nH100) -> None:
-        """Match reference slab data within 1e-5 relative error where reference is nonzero."""
+    def test_species_match_external_pdr_reference(self, species, idx_db, diskbridge_nH100, reference_nH100) -> None:
+        """Match the high-precision external/pdr reference in the old 14-species output order."""
         _Av_ref, slab_ref = reference_nH100
         Av_db, Y, _res = diskbridge_nH100
 
@@ -220,7 +239,7 @@ class TestGOW17Fig2Regression:
         nonzero = ref_vals != 0.0
         if np.any(nonzero):
             rel = np.abs(db_vals[nonzero] - ref_vals[nonzero]) / np.abs(ref_vals[nonzero])
-            assert float(np.max(rel)) <= 1e-5
+            assert float(np.max(rel)) <= EXTERNAL_PDR_RTOL
 
         if np.any(~nonzero):
             assert np.all(db_vals[~nonzero] == 0.0)

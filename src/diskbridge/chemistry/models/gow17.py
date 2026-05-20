@@ -12,18 +12,7 @@ import diskbridge
 from diskbridge._units import Quantity
 from diskbridge._config import get_config, resolve_model_config
 from diskbridge._logging import logger
-from diskbridge._constants import (
-    E_BIND_CO,
-    NU0_CO,
-    N_LAY,
-    N_SURF,
-    Y_CO,
-    SIGMA_D_ISM_REF,
-    F_CRUV_CO_PDES_REF,
-    ZETA_CRUV_REF,
-    K_CRDES_CO,
-    M_H,
-)
+from diskbridge._constants import M_H
 from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.model.microturbulence import (
     ensure_microturbulence_field,
@@ -251,56 +240,75 @@ def _warn_if_co_phase_settings_ignored(
 def _resolve_temperature_config(cfg: dict) -> dict:
     """Resolve GOW17 gas-temperature mode and numerical controls."""
     temp_cfg = _nested_cfg(cfg, "temperature")
-    if "mode" in temp_cfg:
-        mode = str(temp_cfg["mode"]).lower()
-    elif "const_temp" in cfg:
-        mode = "constant_debug" if bool(cfg["const_temp"]) else "computed"
-    else:
-        mode = "computed"
+    mode = str(temp_cfg["mode"]).lower()
+    initial = str(temp_cfg["initial"]).lower()
 
-    if mode not in ("computed", "dust", "constant_debug"):
+    if mode not in ("computed", "dust"):
         raise ValueError(
-            "gow17 temperature mode must be 'computed', 'dust', or "
-            f"'constant_debug', got {mode!r}"
+            "gow17 temperature mode must be 'computed' or 'dust', "
+            f"got {mode!r}"
+        )
+    if initial not in ("dust", "gas_temperature"):
+        raise ValueError(
+            "gow17 temperature initial value must be 'dust' or "
+            f"'gas_temperature', got {initial!r}"
         )
 
     return {
         "mode": mode,
-        "const_temp": mode in ("dust", "constant_debug"),
-        "constant_debug_Tgas": _maybe_quantity_to_float(
-            temp_cfg.get("constant_debug_Tgas", "20 K"),
-            "K",
-        ),
+        "initial": initial,
+        "const_temp": mode == "dust",
         "Tgas_floor": _maybe_quantity_to_float(
-            temp_cfg.get("Tgas_floor", "2.7 K"),
+            temp_cfg["Tgas_floor"],
             "K",
         ),
         "Tgas_ceiling": _maybe_quantity_to_float(
-            temp_cfg.get("Tgas_ceiling", "1.0e5 K"),
+            temp_cfg["Tgas_ceiling"],
             "K",
         ),
-        "max_thermal_iterations": int(temp_cfg.get("max_thermal_iterations", 50)),
-        "thermal_rtol": float(temp_cfg.get("thermal_rtol", 1.0e-3)),
+        "max_thermal_iterations": int(temp_cfg["max_thermal_iterations"]),
+        "thermal_rtol": float(temp_cfg["thermal_rtol"]),
         "thermal_atol": _maybe_quantity_to_float(
-            temp_cfg.get("thermal_atol", "1.0e-3 K"),
+            temp_cfg["thermal_atol"],
             "K",
         ),
     }
 
 
+def _initial_gas_temperature(rad, Tdust, temperature_cfg: dict):
+    initial = str(temperature_cfg["initial"])
+    if initial == "dust":
+        return Tdust
+    if initial == "gas_temperature":
+        Tgas = rad.ensure_gas_temperature()
+        if Tgas is None:
+            raise ValueError(
+                "gow17 temperature.initial='gas_temperature' requires a gas "
+                "temperature field"
+            )
+        return Tgas
+    raise ValueError(f"Unknown gow17 temperature.initial={initial!r}")
+
+
 def _build_gow17_abstol(cfg: dict, abstol0: float) -> np.ndarray:
     """Build species-specific absolute tolerances for the native GOW17 solver."""
     tol_cfg = _nested_cfg(cfg, "tolerances")
-    default = float(tol_cfg.get("abstol_default", abstol0))
+    default = float(tol_cfg["abstol_default"])
     abstol = np.full(N_Y, default, dtype=np.float64)
-    ion_tol = float(tol_cfg.get("abstol_e", default))
-    for idx in (I_HEP, I_CP, I_HCOP, I_H3P, I_H2P, I_HP, I_SP, I_SIP, I_OP):
-        abstol[idx] = ion_tol
-    abstol[I_CO] = float(tol_cfg.get("abstol_CO", default))
-    abstol[I_CO_ICE] = float(tol_cfg.get("abstol_CO_ice", default))
-    abstol[I_CP] = float(tol_cfg.get("abstol_Cplus", default))
-    abstol[I_HCOP] = float(tol_cfg.get("abstol_HCOplus", default))
-    abstol[I_H2] = float(tol_cfg.get("abstol_H2", default))
+    abstol[I_HEP] = float(tol_cfg["abstol_Heplus"])
+    abstol[I_OHX] = float(tol_cfg["abstol_OHx"])
+    abstol[I_CHX] = float(tol_cfg["abstol_CHx"])
+    abstol[I_CO] = float(tol_cfg["abstol_CO"])
+    abstol[I_CO_ICE] = float(tol_cfg["abstol_CO_ice"])
+    abstol[I_CP] = float(tol_cfg["abstol_Cplus"])
+    abstol[I_HCOP] = float(tol_cfg["abstol_HCOplus"])
+    abstol[I_H2] = float(tol_cfg["abstol_H2"])
+    abstol[I_HP] = float(tol_cfg["abstol_Hplus"])
+    abstol[I_H3P] = float(tol_cfg["abstol_H3plus"])
+    abstol[I_H2P] = float(tol_cfg["abstol_H2plus"])
+    abstol[I_SP] = float(tol_cfg["abstol_Splus"])
+    abstol[I_SIP] = float(tol_cfg["abstol_Siplus"])
+    abstol[I_OP] = float(tol_cfg["abstol_Oplus"])
     return abstol
 
 
@@ -515,18 +523,18 @@ def _resolve_co_dust_scalings(
     """
     dust_cfg = _nested_cfg(cfg, "dust")
     sigma_ref = _maybe_quantity_to_float(
-        dust_cfg.get("sigma_d_ISM_ref", f"{SIGMA_D_ISM_REF:.16e} cm^2"),
+        dust_cfg["sigma_d_ISM_ref"],
         "cm^2",
     )
     if sigma_ref <= 0.0:
         raise ValueError("gow17 dust sigma_d_ISM_ref must be positive")
 
-    sigma_source = str(dust_cfg.get("sigma_d_CO_per_H_source", "radmc")).lower()
+    sigma_source = str(dust_cfg["sigma_d_CO_per_H_source"]).lower()
     if sigma_source == "radmc":
         sigma_d_CO = np.ascontiguousarray(sigma_d_cm2, dtype=np.float64)
     elif sigma_source == "constant":
         sigma_const = _maybe_quantity_to_float(
-            dust_cfg.get("sigma_d_CO_per_H_constant", f"{SIGMA_D_ISM_REF:.16e} cm^2"),
+            dust_cfg["sigma_d_CO_per_H_constant"],
             "cm^2",
         )
         sigma_d_CO = np.full(ncells, float(sigma_const), dtype=np.float64)
@@ -540,24 +548,19 @@ def _resolve_co_dust_scalings(
         raise ValueError("sigma_d_CO_per_H contains non-finite values")
     sigma_d_CO = np.maximum(sigma_d_CO, 0.0)
 
-    zd_source = str(dust_cfg.get("Zd_gow17_grain_source", "gas_dust_ratio")).lower()
+    zd_source = str(dust_cfg["Zd_gow17_grain_source"]).lower()
     if zd_source == "constant":
         zd = np.full(
             ncells,
-            float(dust_cfg.get("Zd_gow17_grain_constant", 1.0)),
+            float(dust_cfg["Zd_gow17_grain_constant"]),
             dtype=np.float64,
         )
     elif zd_source == "surface_area_relative":
-        zd = np.divide(
-            sigma_d_CO,
-            sigma_ref,
-            out=np.ones(ncells, dtype=np.float64),
-            where=(sigma_ref > 0.0),
-        )
+        zd = sigma_d_CO / sigma_ref
     elif zd_source == "gas_dust_ratio":
         zd = np.full(
             ncells,
-            float(dust_cfg.get("Zd_gow17_grain_constant", 1.0)),
+            float(dust_cfg["Zd_gow17_grain_constant"]),
             dtype=np.float64,
         )
     else:
@@ -594,22 +597,22 @@ def _resolve_co_phase_controls(
         Sticking coefficient, CRUV photon flux, and direct CR desorption rate.
     """
     co_cfg = _nested_cfg(cfg, "co_phase")
-    s_mode = str(co_cfg.get("S_CO_mode", "constant")).lower()
+    s_mode = str(co_cfg["S_CO_mode"]).lower()
     if s_mode != "constant":
         raise ValueError(f"Unsupported S_CO_mode={s_mode!r}")
-    S_CO = float(co_cfg.get("S_CO", 1.0))
+    S_CO = float(co_cfg["S_CO"])
     if S_CO < 0.0:
         raise ValueError("S_CO must be non-negative")
 
-    enable_cruv = bool(co_cfg.get("enable_cruv_pdes", True))
+    enable_cruv = bool(co_cfg["enable_cruv_pdes"])
     if enable_cruv:
         F_ref = _maybe_quantity_to_float(
-            co_cfg.get("F_CRUV_CO_pdes_ref", f"{F_CRUV_CO_PDES_REF:.16e} 1/(cm^2 s)"),
+            co_cfg["F_CRUV_CO_pdes_ref"],
             "1/(cm^2 s)",
         )
-        if bool(co_cfg.get("cruv_scales_with_zeta", True)):
+        if bool(co_cfg["cruv_scales_with_zeta"]):
             zeta_ref = _maybe_quantity_to_float(
-                co_cfg.get("zeta_ref", f"{ZETA_CRUV_REF:.16e} 1/s"),
+                co_cfg["zeta_ref"],
                 "1/s",
             )
             scale = np.divide(
@@ -624,9 +627,9 @@ def _resolve_co_phase_controls(
     else:
         F_cruv = np.zeros(ncells, dtype=np.float64)
 
-    if bool(co_cfg.get("enable_crdes_CO", False)):
+    if bool(co_cfg["enable_crdes_CO"]):
         k_crdes = _maybe_quantity_to_float(
-            co_cfg.get("k_crdes_CO", f"{K_CRDES_CO:.16e} 1/s"),
+            co_cfg["k_crdes_CO"],
             "1/s",
         )
         k_crdes_arr = np.full(ncells, k_crdes, dtype=np.float64)
@@ -639,35 +642,23 @@ def _resolve_co_phase_controls(
 
 
 def _resolve_co_phase_runtime_params(cfg: dict) -> dict[str, float | int]:
-    """Resolve CO phase physical parameters from runtime config.
-
-    Import-time constants remain fallbacks, but sensitivity studies can now pass
-    overrides through ``run_gow17(..., config=...)`` or ``Gow17TimeStepper``.
-    """
+    """Resolve CO phase physical parameters from resolved config."""
     chemistry_cfg = get_config().get("chemistry", {})
     common_cfg = chemistry_cfg.get("common", {}) if isinstance(chemistry_cfg, dict) else {}
     co_cfg = _nested_cfg(cfg, "co_phase")
 
-    def _lookup(names: tuple[str, ...], common_name: str, fallback):
-        for name in names:
-            if name in co_cfg:
-                return co_cfg[name]
-        if isinstance(common_cfg, dict) and common_name in common_cfg:
-            return common_cfg[common_name]
-        return fallback
-
     E_bind_CO = _maybe_quantity_to_float(
-        _lookup(("E_bind_CO", "E_bind_co", "E_bind_co_K"), "E_bind_co", f"{float(E_BIND_CO):.16e} K"),
+        co_cfg.get("E_bind_co", common_cfg["E_bind_co"]),
         "K",
     )
     nu0_CO = _maybe_quantity_to_float(
-        _lookup(("nu0_CO", "nu0_co"), "nu0_co", f"{float(NU0_CO):.16e} 1/s"),
+        co_cfg.get("nu0_co", common_cfg["nu0_co"]),
         "1/s",
     )
-    Y_CO_local = float(_lookup(("Y_CO", "y_CO"), "Y_CO", float(Y_CO)))
-    N_LAY_local = int(_lookup(("N_LAY", "n_lay"), "N_LAY", int(N_LAY)))
+    Y_CO_local = float(co_cfg.get("Y_CO", common_cfg["Y_CO"]))
+    N_LAY_local = int(co_cfg.get("N_LAY", common_cfg["N_LAY"]))
     N_SURF_local = _maybe_quantity_to_float(
-        _lookup(("N_SURF", "n_surf", "N_surf"), "n_surf", f"{float(N_SURF):.16e} 1/cm^2"),
+        co_cfg.get("n_surf", common_cfg["n_surf"]),
         "1/cm^2",
     )
 
@@ -990,18 +981,17 @@ def _compute_co_phase_diagnostics(
     G_C_ion_actual: np.ndarray | None = None,
     G_H2_diss_actual: np.ndarray | None = None,
     enable_co_phase: bool,
-    co_phase_params: dict[str, float | int] | None = None,
+    co_phase_params: dict[str, float | int],
 ) -> dict:
     """Compute solver-consistent CO gas/ice phase-rate diagnostics."""
     shape = y_out.shape[:-1]
     ncells = int(np.prod(shape))
 
-    params = co_phase_params or {}
-    E_bind_CO_local = float(params.get("E_bind_CO", E_BIND_CO))
-    nu0_CO_local = float(params.get("nu0_CO", NU0_CO))
-    Y_CO_local = float(params.get("Y_CO", Y_CO))
-    N_LAY_local = int(params.get("N_LAY", N_LAY))
-    N_SURF_local = float(params.get("N_SURF", N_SURF))
+    E_bind_CO_local = float(co_phase_params["E_bind_CO"])
+    nu0_CO_local = float(co_phase_params["nu0_CO"])
+    Y_CO_local = float(co_phase_params["Y_CO"])
+    N_LAY_local = int(co_phase_params["N_LAY"])
+    N_SURF_local = float(co_phase_params["N_SURF"])
 
     xCO = np.asarray(y_out[..., I_CO], dtype=np.float64).reshape(ncells)
     xCO_ice = np.asarray(y_out[..., I_CO_ICE], dtype=np.float64).reshape(ncells)
@@ -1252,80 +1242,67 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
 
     nside = int(diskbridge.params.nside)
-    ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
+    ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
 
-    Zg = float(cfg.get("Zg", 1.0))
-    Zd_mode = str(cfg.get("Zd_mode", "scalar"))
+    Zg = float(cfg["Zg"])
 
-    enable_co_phase = bool(cfg.get("enable_co_phase", True))
+    enable_co_phase = bool(cfg["enable_co_phase"])
     _warn_if_co_phase_settings_ignored(
         cfg,
         enable_co_phase=enable_co_phase,
         context="gow17",
     )
 
-    fH2gr = float(cfg.get("fH2gr", 1.0))
-    fHplusgr = float(cfg.get("fHplusgr", 1.0))
-    fCplusgr = float(cfg.get("fCplusgr", 1.0))
-    fHeplusgr = float(cfg.get("fHeplusgr", 1.0))
-    fSplusgr = float(cfg.get("fSplusgr", 1.0))
-    fSiplusgr = float(cfg.get("fSiplusgr", 1.0))
-    fCplusCR = float(cfg.get("fCplusCR", 1.0))
+    fH2gr = float(cfg["fH2gr"])
+    fHplusgr = float(cfg["fHplusgr"])
+    fCplusgr = float(cfg["fCplusgr"])
+    fHeplusgr = float(cfg["fHeplusgr"])
+    fSplusgr = float(cfg["fSplusgr"])
+    fSiplusgr = float(cfg["fSiplusgr"])
+    fCplusCR = float(cfg["fCplusCR"])
 
-    gradv_scalar = float(cfg.get("gradv", 1.0e-14))
-    gradv_mode = str(cfg.get("gradv_mode", "scalar"))
-    gradv_q = float(cfg.get("gradv_q", 1.5))
-    gradv_N0 = float(cfg.get("gradv_N0", 1e21))
-    gradv_p = float(cfg.get("gradv_p", 1.0))
-    gradv_f_corr = float(cfg.get("gradv_f_corr", 4.0))
-    gradv_gmin = float(cfg.get("gradv_gmin", 1e-20))
-    gradv_gmax = float(cfg.get("gradv_gmax", 1e-8))
+    gradv_scalar = float(cfg["gradv"])
+    gradv_mode = str(cfg["gradv_mode"])
+    gradv_q = float(cfg["gradv_q"])
+    gradv_N0 = float(cfg["gradv_N0"])
+    gradv_p = float(cfg["gradv_p"])
+    gradv_f_corr = float(cfg["gradv_f_corr"])
+    gradv_gmin = float(cfg["gradv_gmin"])
+    gradv_gmax = float(cfg["gradv_gmax"])
 
-    Leff_CO_max_mode = str(cfg.get("Leff_CO_max_mode", "scalar"))
-    L_geo_reduction = str(cfg.get("L_geo_reduction", "percentile_20"))
-    L_geo_min = float(cfg.get("L_geo_min", 1e10))
-    L_geo_max = float(cfg.get("L_geo_max", 1e20))
-    Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
-    isDust_cooling = bool(cfg.get("isDust_cooling", True))
-    isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
+    Leff_CO_max_mode = str(cfg["Leff_CO_max_mode"])
+    L_geo_reduction = str(cfg["L_geo_reduction"])
+    L_geo_min = float(cfg["L_geo_min"])
+    L_geo_max = float(cfg["L_geo_max"])
+    Leff_CO_max_scalar = float(cfg["Leff_CO_max"])
+    isDust_cooling = bool(cfg["isDust_cooling"])
+    isCoolingCOThin = bool(cfg["isCoolingCOThin"])
     temperature_cfg = _resolve_temperature_config(cfg)
     temperature_mode = str(temperature_cfg["mode"])
     const_temp = bool(temperature_cfg["const_temp"])
-    if temperature_mode == "constant_debug":
-        logger.warning(
-            "gow17: using constant_debug Tgas; this is for debugging only "
-            "and is not a physically valid disc/PDR temperature model."
-        )
 
-    reltol = float(cfg.get("reltol", 1e-4))
-    abstol0 = float(cfg.get("abstol0", 1e-15))
-    tolfac = float(cfg.get("tolfac", 10.0))
-    tmin = _maybe_quantity_to_float(cfg.get("tmin", 3.16e10), "s")
+    reltol = float(cfg["reltol"])
+    abstol0 = float(cfg["abstol0"])
+    tolfac = float(cfg["tolfac"])
+    tmin = _maybe_quantity_to_float(cfg["tmin"], "s")
+    tmax = _maybe_quantity_to_float(cfg["tmax"], "s")
+    mxsteps = int(cfg["mxsteps"])
+    maxord = int(cfg["maxord"])
+    userJac = bool(cfg["userJac"])
+    verbose = bool(cfg["verbose"])
 
-    tmax_val = cfg.get("tmax", None)
-    if tmax_val is None:
-        tmax_val = cfg.get("t_end", 3.16e14)
-    tmax = _maybe_quantity_to_float(tmax_val, "s")
-    mxsteps = int(cfg.get("mxsteps", 10000))
-    maxord = int(cfg.get("maxord", 5))
-    userJac = bool(cfg.get("userJac", False))
-    verbose = bool(cfg.get("verbose", False))
-
-    shielding_max_iter_cfg = cfg.get("shielding_max_iter", None)
-    if shielding_max_iter_cfg is None:
-        shielding_max_iter_cfg = cfg.get("max_iter", 10)
-    shielding_max_iter = int(shielding_max_iter_cfg)
-    shielding_reltol = float(cfg.get("shielding_reltol", 1e-3))
-    shielding_abstol = float(cfg.get("shielding_abstol", 1e-15))
-    tgas_convergence_reltol = float(cfg.get("tgas_convergence_reltol", shielding_reltol))
+    shielding_max_iter = int(cfg["shielding_max_iter"])
+    shielding_reltol = float(cfg["shielding_reltol"])
+    shielding_abstol = float(cfg["shielding_abstol"])
+    tgas_convergence_reltol = float(cfg["tgas_convergence_reltol"])
 
     # -- AstroChem-style coupling config --
-    coupling_mode = str(cfg.get("coupling_mode", "fixed_point"))
-    astrochem_n_updates = int(cfg.get("astrochem_n_updates", 5))
-    astrochem_t_end_yr = float(cfg.get("astrochem_t_end_yr", 1.0e6))
-    astrochem_acceleration = str(cfg.get("astrochem_acceleration", "none")).lower()
-    astrochem_acceleration_start = int(cfg.get("astrochem_acceleration_start", 3))
-    astrochem_acceleration_max_jump = float(cfg.get("astrochem_acceleration_max_jump", 2.0))
+    coupling_mode = str(cfg["coupling_mode"])
+    astrochem_n_updates = int(cfg["astrochem_n_updates"])
+    astrochem_t_end_yr = float(cfg["astrochem_t_end_yr"])
+    astrochem_acceleration = str(cfg["astrochem_acceleration"]).lower()
+    astrochem_acceleration_start = int(cfg["astrochem_acceleration_start"])
+    astrochem_acceleration_max_jump = float(cfg["astrochem_acceleration_max_jump"])
     if astrochem_acceleration not in ("none", "aitken"):
         raise ValueError(
             "astrochem_acceleration must be 'none' or 'aitken', "
@@ -1335,21 +1312,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Tdust = rad.ensure_dust_temperature()
     nH = rad.ensure_nH()
     radiation_mode = _infer_gow17_radiation_mode(rad)
-    if temperature_mode == "constant_debug":
-        Tgas = Quantity(
-            np.full(
-                _as_cgs_f64(Tdust, "K").shape,
-                float(temperature_cfg["constant_debug_Tgas"]),
-                dtype=np.float64,
-            ),
-            "K",
-        )
-    elif temperature_mode == "dust":
+    if temperature_mode == "dust":
         Tgas = Tdust
     else:
-        Tgas = rad.ensure_gas_temperature()
-        if Tgas is None:
-            Tgas = Tdust
+        Tgas = _initial_gas_temperature(rad, Tdust, temperature_cfg)
 
     f_co_pdes_ref = _co_pdes_draine_flux()
     if radiation_mode.uses_uv_products:
@@ -2172,7 +2138,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         x_h=xH_atom,
         x_catom=xC_neutral,
         x_e=xe,
-        line_h2_opr=cfg.get("line_h2_opr", 3.0),
+        line_h2_opr=cfg["line_h2_opr"],
     )
 
     gow17_diag = {
@@ -2405,7 +2371,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     )
     fields.update(rhs_fields)
     gow17_diag.update(rhs_diag)
-    rhs_warn = float(cfg.get("rhs_residual_warn", 1.0e6))
+    rhs_warn = float(cfg["rhs_residual_warn"])
     rhs_max = float(gow17_diag.get("gow17_rhs_residual_max_global", np.nan))
     if np.isfinite(rhs_max) and rhs_max > rhs_warn:
         logger.warning(
@@ -2456,8 +2422,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "co_phase_Y_CO": float(co_phase_params["Y_CO"]),
         "co_phase_N_SURF": float(co_phase_params["N_SURF"]),
         "co_phase_N_LAY": int(co_phase_params["N_LAY"]),
-        "co_phase_cruv_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_cruv_pdes", True)),
-        "co_phase_crdes_enabled": bool(_nested_cfg(cfg, "co_phase").get("enable_crdes_CO", False)),
+        "co_phase_cruv_enabled": bool(_nested_cfg(cfg, "co_phase")["enable_cruv_pdes"]),
+        "co_phase_crdes_enabled": bool(_nested_cfg(cfg, "co_phase")["enable_crdes_CO"]),
         "temperature_mode": temperature_mode,
         "Tgas_floor": float(temperature_cfg["Tgas_floor"]),
         "Tgas_ceiling": float(temperature_cfg["Tgas_ceiling"]),

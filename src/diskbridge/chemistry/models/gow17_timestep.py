@@ -7,13 +7,6 @@ import diskbridge._gow17 as _gow17
 
 from diskbridge._config import resolve_model_config
 from diskbridge._units import Quantity
-from diskbridge._constants import (
-    E_BIND_CO,
-    NU0_CO,
-    N_LAY,
-    N_SURF,
-    Y_CO,
-)
 
 from diskbridge.chemistry.models.gow17 import (
     N_Y,
@@ -48,6 +41,7 @@ from diskbridge.chemistry.models.gow17 import (
     _compute_shielding_and_gph,
     _co_pdes_draine_flux,
     _infer_gow17_radiation_mode,
+    _initial_gas_temperature,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_co_phase_controls,
@@ -93,36 +87,28 @@ class Gow17TimeStepper:
         self.temperature_cfg = _resolve_temperature_config(cfg)
         self.temperature_mode = str(self.temperature_cfg["mode"])
         self.const_temp = bool(self.temperature_cfg["const_temp"])
-        if self.temperature_mode == "constant_debug":
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "Gow17TimeStepper: using constant_debug Tgas; this is for "
-                "debugging only and is not a physically valid "
-                "disc/PDR temperature model."
-            )
-        self.enable_co_phase = bool(cfg.get("enable_co_phase", True))
+        self.enable_co_phase = bool(cfg["enable_co_phase"])
         _warn_if_co_phase_settings_ignored(
             cfg,
             enable_co_phase=self.enable_co_phase,
             context="Gow17TimeStepper",
         )
 
-        self.reltol = float(cfg.get("reltol", 1e-4))
-        self.abstol0 = float(cfg.get("abstol0", 1e-15))
-        self.tolfac = float(cfg.get("tolfac", 10.0))
-        self.mxsteps = int(cfg.get("mxsteps", 10000))
-        self.maxord = int(cfg.get("maxord", 5))
-        self.userJac = bool(cfg.get("userJac", False))
-        self.verbose = bool(cfg.get("verbose", False))
+        self.reltol = float(cfg["reltol"])
+        self.abstol0 = float(cfg["abstol0"])
+        self.tolfac = float(cfg["tolfac"])
+        self.mxsteps = int(cfg["mxsteps"])
+        self.maxord = int(cfg["maxord"])
+        self.userJac = bool(cfg["userJac"])
+        self.verbose = bool(cfg["verbose"])
 
-        self.ion_rate_s = Quantity(cfg.get("ion_rate", "2e-16 s^-1")).to("1/s").magnitude
+        self.ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
 
-        self.Zg = float(cfg.get("Zg", 1.0))
-        self.gradv_scalar = float(cfg.get("gradv", 1.0e-14))
-        self.Leff_CO_max_scalar = float(cfg.get("Leff_CO_max", 3.0e20))
-        self.isDust_cooling = bool(cfg.get("isDust_cooling", True))
-        self.isCoolingCOThin = bool(cfg.get("isCoolingCOThin", False))
+        self.Zg = float(cfg["Zg"])
+        self.gradv_scalar = float(cfg["gradv"])
+        self.Leff_CO_max_scalar = float(cfg["Leff_CO_max"])
+        self.isDust_cooling = bool(cfg["isDust_cooling"])
+        self.isCoolingCOThin = bool(cfg["isCoolingCOThin"])
 
         self.rad = rad
         self.nside = int(diskbridge.params.nside)
@@ -130,21 +116,10 @@ class Gow17TimeStepper:
         nH = rad.ensure_nH()
         chi = rad.ensure_chi()
         Tdust = rad.ensure_dust_temperature()
-        if self.temperature_mode == "constant_debug":
-            Tgas = Quantity(
-                np.full(
-                    _as_cgs_f64(Tdust, "K").shape,
-                    float(self.temperature_cfg["constant_debug_Tgas"]),
-                    dtype=np.float64,
-                ),
-                "K",
-            )
-        elif self.temperature_mode == "dust":
+        if self.temperature_mode == "dust":
             Tgas = Tdust
         else:
-            Tgas = rad.ensure_gas_temperature()
-            if Tgas is None:
-                Tgas = Tdust
+            Tgas = _initial_gas_temperature(rad, Tdust, self.temperature_cfg)
 
         self.shape = _as_cgs_f64(nH, "cm^-3").shape
         self.ncells = int(np.prod(self.shape))
@@ -242,16 +217,13 @@ class Gow17TimeStepper:
             Cv0 = _cv_cold(self.y_state[:, I_H2], xe0)
             self.y_state[:, I_E] = Cv0 * T_flat
 
-        self.eq_tmin_s = _maybe_quantity_to_float(cfg.get("tmin", 3.16e10), "s")
-        tmax_val = cfg.get("tmax", None)
-        if tmax_val is None:
-            tmax_val = cfg.get("t_end", 3.16e14)
-        self.eq_tmax_s = _maybe_quantity_to_float(tmax_val, "s")
-        self.astrochem_n_updates = int(cfg.get("astrochem_n_updates", 5))
-        self.astrochem_t_end_s = float(cfg.get("astrochem_t_end_yr", 1.0e6)) * YR_TO_S
-        self.shielding_max_iter = int(cfg.get("shielding_max_iter", max(self.astrochem_n_updates, 50)))
-        self.shielding_reltol = float(cfg.get("shielding_reltol", 1.0e-3))
-        self.shielding_abstol = float(cfg.get("shielding_abstol", 1.0e-15))
+        self.eq_tmin_s = _maybe_quantity_to_float(cfg["tmin"], "s")
+        self.eq_tmax_s = _maybe_quantity_to_float(cfg["tmax"], "s")
+        self.astrochem_n_updates = int(cfg["astrochem_n_updates"])
+        self.astrochem_t_end_s = float(cfg["astrochem_t_end_yr"]) * YR_TO_S
+        self.shielding_max_iter = int(cfg["shielding_max_iter"])
+        self.shielding_reltol = float(cfg["shielding_reltol"])
+        self.shielding_abstol = float(cfg["shielding_abstol"])
 
     def _project_state(self, y: np.ndarray) -> np.ndarray:
         y_proj = project_gow17_state_to_budgets(
@@ -309,21 +281,14 @@ class Gow17TimeStepper:
 
         Tdust_flat = _as_cgs_f64(rad.ensure_dust_temperature(), "K").reshape(self.ncells)
 
-        if self.temperature_mode == "constant_debug":
-            Tgas = Quantity(
-                np.full(
-                    self.shape,
-                    float(self.temperature_cfg["constant_debug_Tgas"]),
-                    dtype=np.float64,
-                ),
-                "K",
-            )
-        elif self.temperature_mode == "dust":
+        if self.temperature_mode == "dust":
             Tgas = rad.ensure_dust_temperature()
         else:
-            Tgas = rad.ensure_gas_temperature()
-            if Tgas is None:
-                Tgas = rad.ensure_dust_temperature()
+            Tgas = _initial_gas_temperature(
+                rad,
+                rad.ensure_dust_temperature(),
+                self.temperature_cfg,
+            )
         T_flat = np.clip(
             _as_cgs_f64(Tgas, "K"),
             float(self.temperature_cfg["Tgas_floor"]),

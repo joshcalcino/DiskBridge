@@ -113,8 +113,5 @@ def resolve_model_config(
     if overrides is None:
         return dict(section)
     
-    merged = dict(section)
-    merged.update(overrides)
-    return merged
-
+    return _deep_merge(dict(section), overrides)
 
