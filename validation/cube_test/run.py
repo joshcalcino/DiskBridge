@@ -10,10 +10,8 @@ import numpy as np
 
 import diskbridge
 from diskbridge._units import Quantity, units
-from diskbridge._constants import TAU_CO_FORM
 from diskbridge._params import DEFAULT_PARAMS_FILE
 from diskbridge.chemistry.api import run_chemistry
-from diskbridge.chemistry.models.carbon_reduced import run_steady as _run_carbon_reduced_steady
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_uv_direction_weights_healpix
 from diskbridge.chemistry.shielding.dust_uv_tau import prepare_dust_density_fields
 from diskbridge.radmc3d.dustkappa_reader import load_kext_uv_for_bins
@@ -50,9 +48,6 @@ class CubeTestConfig:
     Tdust_K: float = 20.0
 
     chi0: float = 1.0
-
-    # Chemistry network: "carbon_reduced" or "gow17"
-    network: str = "carbon_reduced"
 
     # Shielding
     shielding_iter: int = 5
@@ -332,8 +327,7 @@ def _compute_and_attach_uv_weights(
     Uses dustkappa-derived UV extinction opacities and the external UV field
     strength to build per-direction weights via
     :func:`compute_uv_direction_weights_healpix`.  The weights are stored on
-    ``rad.W_rays`` so that both ``carbon_reduced`` and ``gow17`` chemistry
-    models pick them up automatically.
+    ``rad.W_rays`` so that GOW17 chemistry picks them up automatically.
 
     Parameters
     ----------
@@ -487,7 +481,7 @@ def _write_cube_plots(
     Xco_on: Quantity,
     nco_off: Quantity,
     nco_on: Quantity,
-    network: str = "carbon_reduced",
+    network: str = "gow17",
 ) -> None:
     plt = _setup_matplotlib()
 
@@ -773,129 +767,18 @@ def _compare_midplane(
     plt.close(fig)
 
 
-def _write_convergence_plots(
-    *,
-    out_dir: Path,
-    iteration_history: list[dict],
-    network: str = "carbon_reduced",
-) -> None:
-    """Write per-iteration convergence diagnostics for shielding iterations.
-
-    For each tracked field (theta_co, nco_gas, nco_ice, chi_eff), produces:
-
-    1. A multi-panel figure with one midplane slice per iteration, using a
-       fixed colorbar range across all panels so changes are visually apparent.
-    2. A multi-panel figure showing the relative difference between each pair
-       of consecutive iterations, again with a fixed colorbar range.
-
-    Parameters
-    ----------
-    out_dir : Path
-        Output directory for plots (a ``convergence/`` subfolder is created).
-    iteration_history : list of dict
-        Each element is a snapshot dict with keys ``theta_co``, ``nco_gas``,
-        ``nco_ice``, ``chi_eff`` (3-D numpy arrays in CGS), as produced by
-        ``carbon_reduced.run_steady(..., iteration_history=[])``.
-    network : str
-        Chemistry network name (used in plot titles and filenames).
-    """
-    plt = _setup_matplotlib()
-    conv_dir = Path(out_dir) / "convergence"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-
-    n_iter = len(iteration_history)
-    if n_iter < 2:
-        return
-
-    tiny = float(np.finfo(np.float64).tiny)
-
-    # Fields to plot: (key, display_title, log10, cmap)
-    field_specs = [
-        ("theta_co", "theta_co (CO shielding)", False, "viridis"),
-        ("nco_gas", "nCO_gas [cm^-3]", True, "inferno"),
-        ("nco_ice", "nCO_ice [cm^-3]", True, "inferno"),
-        ("chi_eff", "chi_eff (effective UV)", True, "inferno"),
-    ]
-
-    for key, display_title, use_log, cmap in field_specs:
-        slices = [_midplane_slice(snap[key]) for snap in iteration_history]
-
-        # --- Figure 1: field value at each iteration (fixed colorbar) --------
-        if use_log:
-            imgs = [np.log10(np.maximum(s, tiny)) for s in slices]
-        else:
-            imgs = list(slices)
-
-        vmin = float(np.nanmin([np.nanmin(im) for im in imgs]))
-        vmax = float(np.nanmax([np.nanmax(im) for im in imgs]))
-
-        fig, axs = plt.subplots(1, n_iter, figsize=(4.0 * n_iter, 4.0),
-                                constrained_layout=True)
-        if n_iter == 1:
-            axs = [axs]
-        for i, (ax, im) in enumerate(zip(axs, imgs)):
-            h = ax.imshow(im.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
-            ax.set_title(f"iter {i}")
-            ax.set_xticks([])
-            ax.set_yticks([])
-        fig.colorbar(h, ax=list(axs), fraction=0.02, pad=0.02)
-        prefix = "log10 " if use_log else ""
-        fig.suptitle(f"{network}: {prefix}{display_title} per iteration")
-        fig.savefig(conv_dir / f"{network}_convergence_{key}.png", dpi=150)
-        plt.close(fig)
-
-        # --- Figure 2: relative difference between consecutive iterations ----
-        n_diffs = n_iter - 1
-        diffs = []
-        for i in range(n_diffs):
-            prev = slices[i]
-            curr = slices[i + 1]
-            rel = np.divide(
-                curr - prev,
-                np.maximum(np.abs(prev), tiny),
-                out=np.full_like(prev, np.nan, dtype=float),
-                where=(np.abs(prev) > tiny),
-            )
-            diffs.append(rel)
-
-        all_vals = np.concatenate([d.ravel() for d in diffs])
-        finite = all_vals[np.isfinite(all_vals)]
-        if finite.size > 0:
-            maxabs = float(np.nanmax(np.abs(finite)))
-        else:
-            maxabs = 1.0
-        if maxabs <= 0.0:
-            maxabs = 1.0
-
-        fig, axs = plt.subplots(1, n_diffs, figsize=(4.0 * n_diffs, 4.0),
-                                squeeze=False, constrained_layout=True)
-        axs = axs[0]
-        for i, (ax, d) in enumerate(zip(axs, diffs)):
-            h = ax.imshow(d.T, origin="lower", cmap="RdBu_r",
-                          vmin=-maxabs, vmax=maxabs)
-            ax.set_title(f"iter {i+1} - iter {i}")
-            ax.set_xticks([])
-            ax.set_yticks([])
-        fig.colorbar(h, ax=list(axs), fraction=0.02, pad=0.02,
-                     label="relative difference")
-        fig.suptitle(f"{network}: {display_title} relative change per iteration")
-        fig.savefig(conv_dir / f"{network}_convergence_diff_{key}.png", dpi=150)
-        plt.close(fig)
-
-
 def _write_chemistry_compare_plots(
     *,
     out_dir: Path,
     rad: RadModel,
-    tau_form: Quantity,
     chem_off,
     chem_on,
-    network: str = "carbon_reduced",
+    network: str = "gow17",
 ) -> None:
     """Write midplane comparison plots for shielding-off vs shielding-on.
 
-    Works with both ``carbon_reduced`` and ``gow17`` networks.  Fields that
-    are only available in one network are plotted conditionally.
+    Fields that are only available in a given GOW17 configuration are plotted
+    conditionally.
 
     Parameters
     ----------
@@ -903,8 +786,6 @@ def _write_chemistry_compare_plots(
         Output directory for plots.
     rad : RadModel
         RADMC-3D model wrapper.
-    tau_form : Quantity
-        CO formation timescale array (only used for carbon_reduced diagnostics).
     chem_off, chem_on : ChemistryResult
         Chemistry results with shielding off / on.
     network : str
@@ -927,7 +808,6 @@ def _write_chemistry_compare_plots(
     def mid(a):
         return _midplane_slice(np.asarray(a, dtype=float))
 
-    # -- Common fields (both networks) ----------------------------------------
     nco_off = _get_field(chem_off, "co", "cm^-3")
     nco_on = _get_field(chem_on, "co", "cm^-3")
     nco_ice_off = _get_field(chem_off, "co_ice", "cm^-3")
@@ -982,7 +862,6 @@ def _write_chemistry_compare_plots(
     _add("nH2", "nH2", nH2_off, nH2_on, "log10(cm^-3)", True)
     _add("nHI", "nHI", nHI_off, nHI_on, "log10(cm^-3)", True)
 
-    # -- gow17-specific fields ------------------------------------------------
     theta_h2_off = _get_field(chem_off, "theta_h2", "dimensionless")
     theta_h2_on = _get_field(chem_on, "theta_h2", "dimensionless")
     theta_c_off = _get_field(chem_off, "theta_c", "dimensionless")
@@ -990,7 +869,6 @@ def _write_chemistry_compare_plots(
     _add("theta_h2", "theta_h2 (H2 shielding)", theta_h2_off, theta_h2_on, "dimensionless", False, "viridis")
     _add("theta_c", "theta_c (C shielding)", theta_c_off, theta_c_on, "dimensionless", False, "viridis")
 
-    # -- carbon_reduced-specific fields ---------------------------------------
     k_diss_off = _get_field(chem_off, "k_diss_co", "1/s")
     k_diss_on = _get_field(chem_on, "k_diss_co", "1/s")
     tau_diss_off = _get_field(chem_off, "tau_diss_co", "s")
@@ -1007,19 +885,6 @@ def _write_chemistry_compare_plots(
         R_pd_off = k_diss_off * nco_off
         R_pd_on = k_diss_on * nco_on
         _add("R_pd_diss", "CO photodissociation rate: k_diss*nCO", R_pd_off, R_pd_on, "log10(cm^-3 s^-1)", True)
-
-    if nco_off is not None and nco_ice_off is not None:
-        tau_form_s = np.asarray(tau_form.to("s").magnitude, dtype=float)
-        Xco_tot = float(diskbridge.params.abundance)
-        nco_max = Xco_tot * np.asarray(nH, dtype=float)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            R_form_off = (nco_max - nco_off - nco_ice_off) / np.maximum(tau_form_s, 1e-30)
-            R_form_on = (nco_max - nco_on - nco_ice_on) / np.maximum(tau_form_s, 1e-30)
-            t_form_eff_off = np.where(R_form_off > 0.0, nco_off / R_form_off, np.nan)
-            t_form_eff_on = np.where(R_form_on > 0.0, nco_on / R_form_on, np.nan)
-        _add("R_form", "CO formation rate", R_form_off, R_form_on, "log10(cm^-3 s^-1)", True)
-        _add("t_form_eff", "CO formation timescale", t_form_eff_off, t_form_eff_on, "log10(s)", True)
-        _add("tau_form", "tau_form input", tau_form_s, tau_form_s, "log10(s)", True)
 
     k_pd_surf_off = _get_field(chem_off, "k_pd_surf", "1/s")
     k_pd_surf_on = _get_field(chem_on, "k_pd_surf", "1/s")
@@ -1197,24 +1062,8 @@ def _build_chemistry_config(
     cfg: CubeTestConfig,
     *,
     skip_shielding: bool,
-    tau_form: Quantity,
 ) -> dict:
-    """Build the chemistry config dict appropriate for the selected network.
-
-    Parameters
-    ----------
-    cfg : CubeTestConfig
-        Cube test configuration (contains network, nside, b_kms, shielding_iter).
-    skip_shielding : bool
-        Whether to skip shielding computation.
-    tau_form : Quantity
-        CO formation timescale array (used by carbon_reduced).
-
-    Returns
-    -------
-    dict
-        Config dict suitable for ``run_chemistry(..., config=...)``.
-    """
+    """Build the GOW17 chemistry config dict."""
     base = {
         "skip_shielding": bool(skip_shielding),
         "nside": int(cfg.nside),
@@ -1225,63 +1074,40 @@ def _build_chemistry_config(
     else:
         base["shielding_iter"] = int(cfg.shielding_iter)
 
-    if cfg.network == "carbon_reduced":
-        base["tau_form"] = tau_form
-    elif cfg.network == "gow17":
-        base["shielding_max_iter"] = int(cfg.shielding_iter) if not skip_shielding else 1
+    base["shielding_max_iter"] = int(cfg.shielding_iter) if not skip_shielding else 1
     return base
 
 
-def run_plots_only(out_dir: Path, network: str | None = None) -> None:
+def run_plots_only(out_dir: Path) -> None:
     out_dir = Path(out_dir)
     err_path = out_dir / "error.png"
     if err_path.exists():
         err_path.unlink()
     cfg = _load_cfg_from_inputs(out_dir)
-    if network is not None:
-        cfg = CubeTestConfig(**{**{f.name: getattr(cfg, f.name) for f in fields(CubeTestConfig)}, "network": network})
-    network = str(cfg.network)
-    mesh = _build_cube_mesh(cfg)
+    network = "gow17"
 
     for case_dir, rad, rho, chi in _iter_cases(out_dir, cfg):
         print(f"[{case_dir.name}] Computing UV weights ...")
         _compute_and_attach_uv_weights(rad=rad, cfg=cfg, chi=chi)
 
-        tau_form = Quantity(np.full(mesh.shape, float(TAU_CO_FORM), dtype=float), "s")
-
         print(f"[{case_dir.name}] Running {network} shielding off ...")
         chem_off = run_chemistry(
             rad, model=network,
-            config=_build_chemistry_config(cfg, skip_shielding=True, tau_form=tau_form),
+            config=_build_chemistry_config(cfg, skip_shielding=True),
             write=False,
         )
         print(f"[{case_dir.name}] Running {network} shielding on ...")
-        iteration_history: list[dict] | None = [] if network == "carbon_reduced" else None
-        if network == "carbon_reduced":
-            chem_on = _run_carbon_reduced_steady(
-                rad,
-                _build_chemistry_config(cfg, skip_shielding=False, tau_form=tau_form),
-                iteration_history=iteration_history,
-            )
-        else:
-            chem_on = run_chemistry(
-                rad, model=network,
-                config=_build_chemistry_config(cfg, skip_shielding=False, tau_form=tau_form),
-                write=False,
-            )
-
-        _write_chemistry_compare_plots(
-            out_dir=case_dir, rad=rad, tau_form=tau_form,
-            chem_off=chem_off, chem_on=chem_on, network=network,
+        chem_on = run_chemistry(
+            rad,
+            model=network,
+            config=_build_chemistry_config(cfg, skip_shielding=False),
+            write=False,
         )
 
-        if iteration_history:
-            print(f"[{case_dir.name}] Writing convergence plots ({len(iteration_history)} iterations) ...")
-            _write_convergence_plots(
-                out_dir=case_dir,
-                iteration_history=iteration_history,
-                network=network,
-            )
+        _write_chemistry_compare_plots(
+            out_dir=case_dir, rad=rad,
+            chem_off=chem_off, chem_on=chem_on, network=network,
+        )
 
         chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=float)
         chi_eff_on_arr = np.asarray(
@@ -1304,16 +1130,15 @@ def run_plots_only(out_dir: Path, network: str | None = None) -> None:
         )
 
 
-def run(out_dir: Path, network: str = "carbon_reduced") -> None:
+def run(out_dir: Path) -> None:
     """Run the full cube test: build density, run RADMC-3D, run chemistry, plot.
 
     Parameters
     ----------
     out_dir : Path
         Root output directory.
-    network : str
-        Chemistry network to use: ``"carbon_reduced"`` or ``"gow17"``.
     """
+    network = "gow17"
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1321,7 +1146,7 @@ def run(out_dir: Path, network: str = "carbon_reduced") -> None:
     if err_path.exists():
         err_path.unlink()
 
-    cfg = CubeTestConfig(network=str(network))
+    cfg = CubeTestConfig()
     _write_inputs(out_dir, cfg)
 
     error: str | None = None
@@ -1367,13 +1192,11 @@ def run(out_dir: Path, network: str = "carbon_reduced") -> None:
             print(f"[{case_dir.name}] Computing UV weights ...")
             _compute_and_attach_uv_weights(rad=rad, cfg=cfg, chi=chi)
 
-            tau_form = Quantity(np.full(mesh.shape, float(TAU_CO_FORM), dtype=float), "s")
-
             print(f"[{case_dir.name}] Running {network} shielding off ...")
             chem_off = run_chemistry(
                 rad,
                 model=network,
-                config=_build_chemistry_config(cfg, skip_shielding=True, tau_form=tau_form),
+                config=_build_chemistry_config(cfg, skip_shielding=True),
                 write=False,
             )
             Xco_off = chem_off.abundances["co"]
@@ -1382,20 +1205,12 @@ def run(out_dir: Path, network: str = "carbon_reduced") -> None:
             nco_off = chem_off.number_densities["co"]
 
             print(f"[{case_dir.name}] Running {network} shielding on ...")
-            iteration_history: list[dict] | None = [] if network == "carbon_reduced" else None
-            if network == "carbon_reduced":
-                chem_on = _run_carbon_reduced_steady(
-                    rad,
-                    _build_chemistry_config(cfg, skip_shielding=False, tau_form=tau_form),
-                    iteration_history=iteration_history,
-                )
-            else:
-                chem_on = run_chemistry(
-                    rad,
-                    model=network,
-                    config=_build_chemistry_config(cfg, skip_shielding=False, tau_form=tau_form),
-                    write=False,
-                )
+            chem_on = run_chemistry(
+                rad,
+                model=network,
+                config=_build_chemistry_config(cfg, skip_shielding=False),
+                write=False,
+            )
             Xco_on = chem_on.abundances["co"]
             chi_eff_on = chem_on.fields["chi_eff"]
             theta_co_on = chem_on.fields["theta_co"]
@@ -1404,19 +1219,10 @@ def run(out_dir: Path, network: str = "carbon_reduced") -> None:
             _write_chemistry_compare_plots(
                 out_dir=case_dir,
                 rad=rad,
-                tau_form=tau_form,
                 chem_off=chem_off,
                 chem_on=chem_on,
                 network=network,
             )
-
-            if iteration_history:
-                print(f"[{case_dir.name}] Writing convergence plots ({len(iteration_history)} iterations) ...")
-                _write_convergence_plots(
-                    out_dir=case_dir,
-                    iteration_history=iteration_history,
-                    network=network,
-                )
 
             # Diagnostics
             Xco_off_arr = np.asarray(Xco_off.to("dimensionless").magnitude, dtype=float)
@@ -1531,20 +1337,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="cube_test")
     parser.add_argument("--out-dir", type=str, default=str(Path(__file__).resolve().parent))
     parser.add_argument("--plots-only", action="store_true")
-    parser.add_argument(
-        "--network", type=str, default="carbon_reduced",
-        choices=["carbon_reduced", "gow17"],
-        help="Chemistry network to use (default: carbon_reduced)",
-    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
-    network = str(args.network)
     try:
         if bool(args.plots_only):
-            run_plots_only(out_dir, network=network)
+            run_plots_only(out_dir)
         else:
-            run(out_dir, network=network)
+            run(out_dir)
     except Exception:
         import traceback
         traceback.print_exc()
