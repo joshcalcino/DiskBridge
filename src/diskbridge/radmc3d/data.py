@@ -18,7 +18,50 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
-from diskbridge.radmc3d.fields import read_radmc_binp_field
+
+
+def dtype_from_radmc_precision(path: str | Path, precision: int) -> np.dtype:
+    """Return the NumPy dtype for a RADMC-3D binary precision code."""
+
+    path = Path(path)
+    if precision == 8:
+        return np.dtype(np.float64)
+    if precision == 4:
+        return np.dtype(np.float32)
+    raise ValueError(f"{path.name} has unsupported precision {precision}; expected 4 or 8")
+
+
+def read_radmc_binp_field(path: str | Path, *, components: int) -> tuple[np.ndarray, int]:
+    """Read a scalar/vector RADMC-3D ``.binp`` field as flat float64 values."""
+
+    path = Path(path)
+    components = int(components)
+    if components <= 0:
+        raise ValueError("components must be positive")
+    if path.suffix != ".binp":
+        raise ValueError(f"{path.name} must be a .binp RADMC field file")
+
+    with path.open("rb") as f:
+        header = np.fromfile(f, dtype=np.int64, count=3)
+        if header.size < 3:
+            raise ValueError(f"{path.name} has an incomplete binary header")
+        iformat = int(header[0])
+        precision = int(header[1])
+        ncells = int(header[2])
+        if iformat != 1:
+            raise ValueError(f"{path.name} has unsupported format {iformat}; expected 1")
+        dtype = dtype_from_radmc_precision(path, precision)
+        expected = ncells * components
+        values = np.fromfile(f, dtype=dtype, count=expected).astype(
+            np.float64,
+            copy=False,
+        )
+        if values.size != expected:
+            raise ValueError(
+                f"{path.name} has {values.size} values, expected {expected} "
+                f"({ncells} cells x {components} components)"
+            )
+    return values, ncells
 
 
 class RadData:
@@ -200,6 +243,11 @@ class RadData:
 
     def _read_vector_data(self, fpath: Path) -> np.ndarray:
         return self._readVectorFieldBinary(fpath)
+
+    def read_binary_field(self, fname: str | Path, *, components: int) -> tuple[np.ndarray, int]:
+        """Read a RADMC-3D ``.binp`` field without reshaping it."""
+
+        return read_radmc_binp_field(fname, components=components)
 
     def _reshape_scalar_to_mesh(self, data: np.ndarray) -> np.ndarray:
         nx, ny, nz = self._getMeshShape()

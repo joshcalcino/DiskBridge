@@ -23,14 +23,8 @@ from pathlib import Path
 import numpy as np
 from numba import njit, prange
 
+from diskbridge._constants import C_LIGHT, H_PLANCK, K_B, M_H
 from diskbridge.radmc3d.colliders import LAMDA_COLLIDER_ID_TO_NAME
-
-
-_H_CGS = 6.62606957e-27           # erg s
-_C_CGS = 2.99792458e10            # cm s^-1
-_KB_CGS = 1.380648813e-16         # erg K^-1
-_HC_CGS = _H_CGS * _C_CGS         # erg cm
-_M_P_CGS = 1.6726218e-24          # g (proton mass)
 
 
 @dataclass(frozen=True)
@@ -82,7 +76,7 @@ class MoleculeData:
 
     @property
     def m_mol_g(self) -> float:
-        return float(self.molweight) * _M_P_CGS
+        return float(self.molweight) * M_H
 
     def collider_temperature_bounds(self) -> list[tuple[float, float]]:
         return [(float(t[0]), float(t[-1])) for t in self.collider_tgrid_K]
@@ -115,7 +109,7 @@ def parse_lamda_molecule_file(path: str | Path) -> MoleculeData:
                 raise ValueError(
                     f"Energy levels in {path} are not monotonically increasing"
                 )
-        energy_erg = energy_cm * _HC_CGS
+        energy_erg = energy_cm * H_PLANCK * C_LIGHT
 
         _ = f.readline()
         nlin = int(f.readline().strip())
@@ -299,7 +293,7 @@ def _lte_populations_flat(
         if T[i] <= 0.0:
             out[i, 0] = 1.0
             continue
-        kT = _KB_CGS * T[i]
+        kT = K_B * T[i]
         e0 = energy_erg[0]
         z = 0.0
         for k in range(nlev):
@@ -318,18 +312,18 @@ def _lte_populations_flat(
 def assert_temperature_in_collision_range(
     molecule: MoleculeData,
     Tgas: np.ndarray,
-    candidate_mask: np.ndarray,
+    cell_mask: np.ndarray,
 ) -> None:
     """Strict temperature-bound policy.
 
-    Raises if any candidate cell's temperature lies outside the tabulated
+    Raises if any selected cell's temperature lies outside the tabulated
     temperature range of any required collider.
     """
     T = np.asarray(Tgas, dtype=np.float64)
-    mask = np.asarray(candidate_mask, dtype=bool)
+    mask = np.asarray(cell_mask, dtype=bool)
     if T.shape != mask.shape:
         raise ValueError(
-            f"Tgas shape {T.shape} does not match candidate_mask shape {mask.shape}"
+            f"Tgas shape {T.shape} does not match cell_mask shape {mask.shape}"
         )
     if not np.any(mask):
         return
@@ -342,8 +336,8 @@ def assert_temperature_in_collision_range(
             raise ValueError(
                 f"Temperature out of collision-rate range for collider {name!r} "
                 f"({lo:.3f} K - {hi:.3f} K): "
-                f"{below} candidate cells below, {above} cells above; "
-                f"T range in candidates is "
+                f"{below} selected cells below, {above} cells above; "
+                f"T range in selected cells is "
                 f"[{float(T_cand.min()):.3f}, {float(T_cand.max()):.3f}] K."
             )
 
@@ -354,9 +348,4 @@ __all__ = [
     "stack_collider_tables",
     "lte_populations",
     "assert_temperature_in_collision_range",
-    "_KB_CGS",
-    "_H_CGS",
-    "_C_CGS",
-    "_HC_CGS",
-    "_M_P_CGS",
 ]

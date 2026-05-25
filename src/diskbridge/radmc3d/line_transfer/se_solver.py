@@ -19,11 +19,9 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
+from diskbridge._constants import C_LIGHT, H_PLANCK, K_B
 from .molecular_rates import (
     MoleculeData,
-    _C_CGS,
-    _H_CGS,
-    _KB_CGS,
 )
 
 
@@ -45,7 +43,7 @@ def compute_line_center_opacity(
     n_cand = fracpop.shape[0]
     nlin = iup.shape[0]
     out = np.zeros((n_cand, nlin), dtype=np.float64)
-    pref_const = _C_CGS * _C_CGS * _C_CGS / (8.0 * (np.pi ** 1.5))
+    pref_const = C_LIGHT * C_LIGHT * C_LIGHT / (8.0 * (np.pi ** 1.5))
     for i in prange(n_cand):
         n_sp = n_species_cand[i]
         aL = a_line_cand[i]
@@ -85,7 +83,7 @@ def compute_collisional_rates(
         T = Tgas_cand[c]
         if T <= 0.0:
             continue
-        kT = _KB_CGS * T
+        kT = K_B * T
         for k in range(n_col):
             n_p = collider_dens_cand[c, k]
             if n_p <= 0.0:
@@ -146,7 +144,7 @@ def build_rate_matrix_and_rhs(
     M = np.zeros((n_cand, nlev, nlev), dtype=np.float64)
     b = np.zeros((n_cand, nlev), dtype=np.float64)
 
-    two_h_over_c2 = 2.0 * _H_CGS / (_C_CGS * _C_CGS)
+    two_h_over_c2 = 2.0 * H_PLANCK / (C_LIGHT * C_LIGHT)
 
     for c in prange(n_cand):
         # First, fill the rate matrix M where M[i, j] = R_{j -> i} for i != j,
@@ -158,14 +156,14 @@ def build_rate_matrix_and_rhs(
             nu = freq_hz[m]
             be = beta[c, m]
             # CMB mean intensity, B_nu(T_bg)
-            x = _H_CGS * nu / (_KB_CGS * tbg_K)
+            x = H_PLANCK * nu / (K_B * tbg_K)
             if x > 700.0:
                 Jbg = 0.0
             else:
                 Jbg = two_h_over_c2 * nu * nu * nu / (np.exp(x) - 1.0)
             # Einstein coefficients
             A_ul = aud[m]
-            B_ul = A_ul * (_C_CGS * _C_CGS) / (2.0 * _H_CGS * nu * nu * nu)
+            B_ul = A_ul * (C_LIGHT * C_LIGHT) / (2.0 * H_PLANCK * nu * nu * nu)
             B_lu = B_ul * weight[u] / weight[l]
             R_ul = A_ul * be + B_ul * be * Jbg
             R_lu = B_lu * be * Jbg

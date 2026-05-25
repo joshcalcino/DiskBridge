@@ -141,6 +141,45 @@ class Mesh:
             raise ValueError(f"mesh axis {name!r} has no centers")
         return np.ascontiguousarray(np.asarray(c.to(unit).magnitude, dtype=np.float64))
 
+    def spherical_vector_components_to_cartesian(
+        self,
+        vr,
+        vtheta,
+        vphi,
+        *,
+        axis_order: Tuple[str, ...] | None = None,
+    ):
+        """Convert spherical vector components on this mesh to Cartesian components.
+
+        The input arrays must be ordered like ``axis_order``. If omitted,
+        ``self.axis_names()`` is used. This is basis-vector geometry only; it
+        does not apply any RADMC-3D file ordering or flattening convention.
+        """
+
+        if self.coord_system != "spherical":
+            raise ValueError(
+                "spherical_vector_components_to_cartesian requires a spherical "
+                f"mesh, got {self.coord_system!r}"
+            )
+        axis_order = tuple(axis_order or self.axis_names())
+
+        def _broadcast_axis(values: np.ndarray, axis_name: str) -> np.ndarray:
+            shape = [1] * len(axis_order)
+            shape[axis_order.index(axis_name)] = values.size
+            return values.reshape(shape)
+
+        theta = _broadcast_axis(self.centers_f64("theta", "rad"), "theta")
+        phi = _broadcast_axis(self.centers_f64("phi", "rad"), "phi")
+        sin_t = np.sin(theta)
+        cos_t = np.cos(theta)
+        sin_p = np.sin(phi)
+        cos_p = np.cos(phi)
+
+        vx = vr * sin_t * cos_p + vtheta * cos_t * cos_p - vphi * sin_p
+        vy = vr * sin_t * sin_p + vtheta * cos_t * sin_p + vphi * cos_p
+        vz = vr * cos_t - vtheta * sin_t
+        return vx, vy, vz
+
     def ncell(self, name: str) -> Optional[int]:
         e = self.edges(name)
         return None if e is None else int(e.size - 1)
