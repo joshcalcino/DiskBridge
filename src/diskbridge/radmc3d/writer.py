@@ -64,6 +64,96 @@ class RadWriter:
         
         # Track written files for symlink management
         self.written_files = {}
+
+    @staticmethod
+    def flatten_scalar_to_radmc_order(mesh, arr3d: np.ndarray) -> np.ndarray:
+        """Flatten a native mesh-order scalar field in RADMC-3D cell order."""
+
+        arr = np.asarray(arr3d)
+        if mesh.coord_system == 'spherical':
+            arr = transpose_to_axis_order(
+                arr,
+                from_order=mesh.axis_names(),
+                to_order=('phi', 'theta', 'r'),
+            )
+        elif mesh.coord_system != 'cartesian':
+            raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+        return np.ascontiguousarray(arr).reshape(-1, order='C')
+
+    @staticmethod
+    def write_levelpop_dat(
+        path: str | Path,
+        *,
+        levelpop_cm3_radmc_order: np.ndarray,
+        level_numbers_1based: np.ndarray,
+    ) -> Path:
+        """Write a RADMC-3D ``levelpop_<species>.dat`` file."""
+
+        path = Path(path)
+        pop = np.ascontiguousarray(levelpop_cm3_radmc_order, dtype=np.float64)
+        if pop.ndim != 2:
+            raise ValueError(
+                f"levelpop_cm3_radmc_order must be 2D, got shape {pop.shape}"
+            )
+        n_cells, n_levels = pop.shape
+        levels = np.ascontiguousarray(level_numbers_1based, dtype=np.int64)
+        if levels.ndim != 1 or levels.size != n_levels:
+            raise ValueError(
+                f"level_numbers_1based shape {levels.shape} inconsistent with "
+                f"n_levels={n_levels}"
+            )
+        if not np.all(np.isfinite(pop)):
+            raise ValueError("levelpop_cm3_radmc_order contains non-finite values")
+        if np.any(pop < 0.0):
+            raise ValueError("levelpop_cm3_radmc_order contains negative values")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('w') as f:
+            f.write('1\n')
+            f.write(f'{n_cells}\n')
+            f.write(f'{n_levels}\n')
+            f.write(' '.join(str(int(x)) for x in levels) + '\n')
+            for i in range(n_cells):
+                row = pop[i]
+                f.write(' '.join(f'{x:.7e}' for x in row) + '\n')
+        return path
+
+    def write_levelpop(
+        self,
+        species: str,
+        levelpop_cm3: np.ndarray,
+        output_dir: str | Path = '.',
+        level_numbers_1based: np.ndarray | None = None,
+    ) -> None:
+        """Write native mesh-order level populations to ``levelpop_<species>.dat``."""
+
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
+        pop = np.asarray(levelpop_cm3, dtype=np.float64)
+        if pop.ndim != 4:
+            raise ValueError(f"levelpop_cm3 must have shape (n0, n1, n2, nlev), got {pop.shape}")
+        n_levels = pop.shape[-1]
+        if level_numbers_1based is None:
+            level_numbers_1based = np.arange(1, n_levels + 1, dtype=np.int64)
+
+        pop_radmc_order = np.stack(
+            [
+                self.flatten_scalar_to_radmc_order(mesh, pop[..., k])
+                for k in range(n_levels)
+            ],
+            axis=1,
+        )
+        output_dir = self._get_output_dir(Path(output_dir), 'molecule')
+        species = str(species).lower().strip()
+        fpath = output_dir / f'levelpop_{species}.dat'
+        self.write_levelpop_dat(
+            fpath,
+            levelpop_cm3_radmc_order=pop_radmc_order,
+            level_numbers_1based=level_numbers_1based,
+        )
+        self.written_files[fpath.name] = fpath
+        logger.info(f'Wrote {fpath}')
     
     def _get_output_dir(self, base_dir: Path, file_type: str) -> Path:
         """Get output directory for a file type.

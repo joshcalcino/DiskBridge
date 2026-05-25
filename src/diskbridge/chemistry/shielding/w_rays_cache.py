@@ -105,6 +105,8 @@ def _estimate_w_rays_memory_bytes(
     npix: int,
     nbin: int,
     include_star: bool,
+    keep_debug_arrays: bool = False,
+    keep_closure_diagnostics: bool = False,
 ) -> dict[str, int | float]:
     """Estimate peak memory for building directional HEALPix UV weights.
 
@@ -147,7 +149,16 @@ def _estimate_w_rays_memory_bytes(
             + n_cells * index_bytes  # k_star
         )
 
-    estimated_peak_bytes = dense_ray_peak_bytes + non_ray_bytes
+    retained_debug_ray_map_count = 5 if keep_debug_arrays else 0
+    retained_debug_cell_scalar_count = 7 if keep_debug_arrays else 0
+    retained_closure_cell_scalar_count = 15 if keep_closure_diagnostics else 0
+    retained_diagnostics_bytes = (
+        retained_debug_ray_map_count * ray_map_bytes
+        + retained_debug_cell_scalar_count * cell_scalar_bytes
+        + retained_closure_cell_scalar_count * cell_scalar_bytes
+    )
+
+    estimated_peak_bytes = dense_ray_peak_bytes + non_ray_bytes + retained_diagnostics_bytes
 
     return {
         "ray_map_bytes": ray_map_bytes,
@@ -155,6 +166,10 @@ def _estimate_w_rays_memory_bytes(
         "dust_column_bytes": nbin * ray_map_bytes,
         "uv_working_ray_bytes": 5 * ray_map_bytes,
         "normalization_temp_bytes": 2 * ray_map_bytes,
+        "retained_diagnostics_bytes": retained_diagnostics_bytes,
+        "retained_debug_ray_map_count": retained_debug_ray_map_count,
+        "retained_debug_cell_scalar_count": retained_debug_cell_scalar_count,
+        "retained_closure_cell_scalar_count": retained_closure_cell_scalar_count,
         "dense_ray_map_count": dense_ray_map_count,
         "dense_ray_peak_bytes": dense_ray_peak_bytes,
         "non_ray_bytes": non_ray_bytes,
@@ -248,6 +263,7 @@ def ensure_W_rays(
     chunk_size: int | None = None,
     memory_budget_gib: float | None = None,
     keep_debug_arrays: bool | None = None,
+    keep_closure_diagnostics: bool | None = None,
 ) -> np.ndarray:
     """Compute and cache ``rad.W_rays``; return existing cache on repeat calls.
 
@@ -280,6 +296,9 @@ def ensure_W_rays(
     keep_debug_arrays : bool or None, optional
         Keep full diagnostic ray maps. Defaults to false in
         ``compute_uv_direction_weights_healpix``.
+    keep_closure_diagnostics : bool or None, optional
+        Keep scalar UV closure diagnostics on ``rad`` as
+        ``rad.W_rays_closure_diagnostics``. Defaults to false.
 
     Returns
     -------
@@ -305,12 +324,6 @@ def ensure_W_rays(
         uv_product_fingerprint,
     )
 
-    existing = getattr(rad, "W_rays", None)
-    existing_key = getattr(rad, "W_rays_key", None)
-    if existing is not None and existing_key == key:
-        logger.info("W_rays cache hit (nside=%d); reusing existing array", nside)
-        return existing
-
     # --- Memory estimate ---
     chi_radmc = _ensure_weight_field(rad, uv_product)
     chi_arr = np.asarray(chi_radmc.to("dimensionless").magnitude, dtype=np.float64)
@@ -323,6 +336,25 @@ def ensure_W_rays(
         chunk_size = getattr(diskbridge.params, "w_rays_chunk_size", None)
     if keep_debug_arrays is None:
         keep_debug_arrays = getattr(diskbridge.params, "w_rays_keep_debug_arrays", None)
+    if keep_closure_diagnostics is None:
+        keep_closure_diagnostics = getattr(
+            diskbridge.params,
+            "w_rays_keep_closure_diagnostics",
+            False,
+        )
+    keep_debug_arrays = bool(keep_debug_arrays)
+    keep_closure_diagnostics = bool(keep_closure_diagnostics)
+
+    existing = getattr(rad, "W_rays", None)
+    existing_key = getattr(rad, "W_rays_key", None)
+    existing_closure = getattr(rad, "W_rays_closure_diagnostics", None)
+    if existing is not None and existing_key == key:
+        if (not keep_closure_diagnostics) or existing_closure is not None:
+            logger.info("W_rays cache hit (nside=%d); reusing existing array", nside)
+            return existing
+        logger.info(
+            "W_rays cache hit lacks requested closure diagnostics; recomputing diagnostics"
+        )
     if chunk_size is not None:
         chunk_size = int(chunk_size)
         if chunk_size <= 0:
@@ -342,6 +374,8 @@ def ensure_W_rays(
         npix=npix,
         nbin=nbin,
         include_star=float(star_uv_luminosity_erg_s) > 0.0,
+        keep_debug_arrays=keep_debug_arrays,
+        keep_closure_diagnostics=keep_closure_diagnostics,
     )
     gib = _bytes_to_gib(int(memory["w_rays_final_bytes"]))
     peak_gib = _bytes_to_gib(int(memory["estimated_peak_bytes"]))
@@ -350,7 +384,8 @@ def ensure_W_rays(
         "Allocating W_rays: shape=(%d, %d) float64, nbin=%d => %.2f GiB final; "
         "unchunked estimated build peak %.2f GiB "
         "(dense ray maps=%d, dust columns %.2f GiB, UV maps %.2f GiB, "
-        "normalization temps %.2f GiB, geometry/input %.2f GiB)",
+        "normalization temps %.2f GiB, retained diagnostics %.2f GiB, "
+        "geometry/input %.2f GiB)",
         n_cells,
         npix,
         nbin,
@@ -360,6 +395,7 @@ def ensure_W_rays(
         _bytes_to_gib(int(memory["dust_column_bytes"])),
         _bytes_to_gib(int(memory["uv_working_ray_bytes"])),
         _bytes_to_gib(int(memory["normalization_temp_bytes"])),
+        _bytes_to_gib(int(memory["retained_diagnostics_bytes"])),
         _bytes_to_gib(int(memory["non_ray_bytes"])),
     )
     chunk_memory = _estimate_w_rays_memory_bytes(
@@ -367,9 +403,13 @@ def ensure_W_rays(
         npix=npix,
         nbin=nbin,
         include_star=float(star_uv_luminosity_erg_s) > 0.0,
+        keep_debug_arrays=False,
+        keep_closure_diagnostics=False,
     )
     chunk_peak_gib = _bytes_to_gib(
-        int(memory["w_rays_final_bytes"]) + int(chunk_memory["estimated_peak_bytes"])
+        int(memory["w_rays_final_bytes"])
+        + int(memory["retained_diagnostics_bytes"])
+        + int(chunk_memory["estimated_peak_bytes"])
     )
     logger.info(
         "Chunked W_rays build: chunk_size=%d (%d chunk(s)); estimated peak %.2f GiB "
@@ -394,6 +434,7 @@ def ensure_W_rays(
             chunk_size=resolved_chunk_size,
             memory_budget_gib=memory_budget_gib,
             keep_debug_arrays=keep_debug_arrays,
+            keep_closure_diagnostics=keep_closure_diagnostics,
             isotropic_outside_r_cm=(
                 None
                 if isotropic_outside_r_au is None
@@ -404,11 +445,18 @@ def ensure_W_rays(
         )
     )
 
-    # Discard debug dict to save memory; keep only W_rays.
+    closure_diagnostics = _debug.get("closure_diagnostics")
+
+    # Discard debug dict to save memory; keep only W_rays and optional
+    # lightweight scalar closure diagnostics.
     del _debug, _candidate_idx, _dirs, _cell_centers
 
     rad.W_rays = W_rays
     rad.W_rays_key = key
+    if keep_closure_diagnostics and closure_diagnostics is not None:
+        rad.W_rays_closure_diagnostics = closure_diagnostics
+    elif hasattr(rad, "W_rays_closure_diagnostics"):
+        rad.W_rays_closure_diagnostics = None
 
     logger.info(
         "W_rays computed and cached on rad (nside=%d, %.2f GiB)",

@@ -81,6 +81,7 @@ class Params:
     external_uv_chi: float
 
     nside: int
+    w_rays_keep_closure_diagnostics: bool
 
     # segmented RT
     segmented_tol: float

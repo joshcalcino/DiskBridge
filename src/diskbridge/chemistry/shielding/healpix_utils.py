@@ -1099,7 +1099,9 @@ def integrate_starward_rays_multi(
     """Integrate fields along rays from each cell toward the origin (star).
 
     For spherical meshes, uses an efficient radial sum (exact, no DDA needed).
-    For cartesian meshes, uses per-cell DDA ray marching toward the origin.
+    Cartesian starward integration is intentionally unsupported until the
+    ray marcher has a correct finite stop at the stellar surface or configured
+    inner source radius.
 
     Parameters
     ----------
@@ -1133,8 +1135,12 @@ def integrate_starward_rays_multi(
         return _integrate_starward_radial_spherical(
             fields_stack, edges[0], r_centers, candidate_idx,
         )
-    else:
-        edges = _tracer_edges_float64(tracer, kind)
-        return _integrate_starward_cartesian_dda_multi(
-            cell_centers, fields_stack, *edges, 100000,
-        )
+
+    raise NotImplementedError(
+        "Direct stellar UV attenuation is not supported for Cartesian meshes. "
+        "The previous Cartesian starward DDA path marched toward the origin "
+        "without a correct stop at the star/inner radius, so it is disabled. "
+        "Use a spherical star-centered mesh for direct stellar UV weights, "
+        "or set star_uv_luminosity_erg_s=0.0 to build weights without the "
+        "direct stellar component."
+    )

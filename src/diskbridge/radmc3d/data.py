@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge.radmc3d.fields import read_radmc_binp_field
 
 
 class RadData:
@@ -809,15 +810,5 @@ class RadData:
         np.ndarray
             Data array with shape (ncells * 3,)
         """
-        with open(fname, 'rb') as f:
-            # Read header
-            hdr = np.fromfile(f, dtype=np.int64, count=3)
-            iformat = hdr[0]
-            prec = hdr[1]
-            ncells = hdr[2]
-            
-            # Read data
-            dtype = np.float64 if prec == 8 else np.float32
-            data = np.fromfile(f, dtype=dtype, count=ncells * 3)
-        
+        data, _ = read_radmc_binp_field(fname, components=3)
         return data

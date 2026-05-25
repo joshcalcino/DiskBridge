@@ -200,6 +200,78 @@ def _register_uv_directional_diagnostics(rad: "RadModel") -> list[str]:
     return ["chem_uv_direct_to_isotropic", "chem_uv_max_ray_weight"]
 
 
+def _register_uv_closure_diagnostics(rad: "RadModel") -> list[str]:
+    """Register scalar UV closure diagnostics from optional W_rays metadata.
+
+    Parameters
+    ----------
+    rad : RadModel
+        RADMC-3D wrapper that may contain ``W_rays_closure_diagnostics``.
+
+    Returns
+    -------
+    list[str]
+        Names of diagnostic fields registered on the model.
+    """
+    diagnostics = getattr(rad, "W_rays_closure_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return []
+    fields = diagnostics.get("fields", {})
+    if not isinstance(fields, dict) or not fields:
+        return []
+
+    model = rad.model
+    shape = tuple(int(v) for v in diagnostics.get("shape", model.mesh.shape))
+    if shape != tuple(model.mesh.shape):
+        logger.warning(
+            "Skipping W_rays closure diagnostics with shape %s; model shape is %s",
+            shape,
+            model.mesh.shape,
+        )
+        return []
+
+    registered: list[str] = []
+    descriptions = {
+        "chi_radmc": "scalar UV product used to build directional weights",
+        "chi_ext_dir": "angle-mean direct external UV contribution",
+        "chi_star_dir_att": "attenuated direct stellar UV contribution",
+        "chi_iso": "isotropic residual UV contribution",
+        "chi_direct": "direct external plus direct stellar UV contribution",
+        "chi_reconstructed": "direct plus isotropic reconstructed UV contribution",
+        "closure_residual": "chi_radmc - chi_reconstructed",
+        "direct_excess": "max(chi_direct - chi_radmc, 0)",
+        "direct_to_radmc": "chi_direct / chi_radmc",
+        "f_ext": "fraction of reconstructed UV from direct external component",
+        "f_star": "fraction of reconstructed UV from direct stellar component",
+        "f_iso": "fraction of reconstructed UV from isotropic residual component",
+        "tau_star": "dust UV optical depth along the starward ray",
+        "chi_star_unatt": "unattenuated direct stellar UV contribution",
+        "outer_weight_overridden": "1 where segmented outer weighting replaced the normal weights",
+    }
+
+    for name, values in fields.items():
+        arr = np.asarray(values, dtype=float)
+        if arr.size != int(np.prod(shape)):
+            continue
+        field_name = f"chem_uv_closure_{name}"
+        _register_quantity_field(
+            model,
+            field_name,
+            arr.reshape(shape),
+            quantity=field_name,
+            attrs={
+                "source": "W_rays_closure_diagnostics",
+                "description": descriptions.get(str(name), str(name)),
+                "nside": diagnostics.get("nside"),
+                "npix": diagnostics.get("npix"),
+                "outer_weight_mode": diagnostics.get("outer_weight_mode"),
+                "isotropic_outside_r_cm": diagnostics.get("isotropic_outside_r_cm"),
+            },
+        )
+        registered.append(field_name)
+    return registered
+
+
 def _plot_convergence(result: "ChemistryResult", plots_dir: Path) -> Path | None:
     """Plot GOW17 convergence histories when available.
 
@@ -999,6 +1071,16 @@ def _write_summary(
             "max_weight_min": float(np.nanmin(np.max(W, axis=1))) if W.size else None,
             "max_weight_max": float(np.nanmax(np.max(W, axis=1))) if W.size else None,
         }
+    closure = getattr(rad, "W_rays_closure_diagnostics", None)
+    if isinstance(closure, dict):
+        summary["W_rays_closure_diagnostics"] = {
+            "shape": list(closure.get("shape", [])),
+            "nside": closure.get("nside"),
+            "npix": closure.get("npix"),
+            "outer_weight_mode": closure.get("outer_weight_mode"),
+            "isotropic_outside_r_cm": closure.get("isotropic_outside_r_cm"),
+            "summary": jsonable(closure.get("summary", {})),
+        }
     if segmented_result is not None:
         summary["segmented_rt"] = {
             key: jsonable(value)
@@ -1038,6 +1120,7 @@ def make_chemistry_diagnostic_plots(
 
     _register_derived_abundance_fields(rad)
     _register_uv_directional_diagnostics(rad)
+    _register_uv_closure_diagnostics(rad)
 
     made: list[Path] = []
     convergence = _plot_convergence(result, plots_dir)
@@ -1082,6 +1165,10 @@ def make_chemistry_diagnostic_plots(
                 ("chem_theta_co", "theta_CO"),
                 ("chem_theta_c", "theta_C"),
                 ("chem_uv_direct_to_isotropic", "direct/isotropic UV proxy"),
+                ("chem_uv_closure_direct_to_radmc", "direct/RADMC"),
+                ("chem_uv_closure_f_star", "stellar UV fraction"),
+                ("chem_uv_closure_f_ext", "external UV fraction"),
+                ("chem_uv_closure_f_iso", "isotropic residual fraction"),
             ],
             plots_dir / "radial_profiles_shielding_uv.png",
             "volume-weighted shielding / UV factor",
@@ -1103,6 +1190,13 @@ def make_chemistry_diagnostic_plots(
         ("chem_theta_co", True, "cividis", 8.0),
         ("chem_theta_c", True, "cividis", 8.0),
         ("chem_uv_direct_to_isotropic", True, "plasma", 4.0),
+        ("chem_uv_closure_direct_to_radmc", True, "magma", 4.0),
+        ("chem_uv_closure_direct_excess", True, "magma", 8.0),
+        ("chem_uv_closure_closure_residual", False, "coolwarm", None),
+        ("chem_uv_closure_f_star", False, "plasma", None),
+        ("chem_uv_closure_f_ext", False, "viridis", None),
+        ("chem_uv_closure_f_iso", False, "cividis", None),
+        ("chem_uv_closure_outer_weight_overridden", False, "gray", None),
         ("abundance_h2", True, "viridis", 8.0),
         ("abundance_h", True, "viridis", 8.0),
         ("abundance_co", True, "viridis", 10.0),

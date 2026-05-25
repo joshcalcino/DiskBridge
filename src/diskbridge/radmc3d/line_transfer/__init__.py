@@ -1,10 +1,16 @@
-"""Helpers for staging RADMC-3D non-LTE line-transfer smoke runs."""
+"""Helpers for staging RADMC-3D line-transfer runs (LTE, non-LTE, and external)."""
 
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import write_lines_inp
 from diskbridge.radmc3d.colliders import assert_lamda_collision_order, read_lamda_collision_order
-from .preflight import run_line_preflight
-from .staging import prepare_nonlte_line_run
+from .validation import validate_line_run
+from .staging import prepare_external_population_line_run, prepare_nonlte_line_run
+from .external_populations import (
+    HealpixSEConfig,
+    solve_and_write_healpix_levelpop,
+)
+from .external_validation import validate_external_population_run
+from .molecular_rates import MoleculeData, parse_lamda_molecule_file
 
 __all__ = [
     "NonLTELineTransferConfig",
@@ -12,6 +18,12 @@ __all__ = [
     "prepare_nonlte_line_run",
     "assert_lamda_collision_order",
     "read_lamda_collision_order",
-    "run_line_preflight",
+    "validate_line_run",
     "write_lines_inp",
+    "HealpixSEConfig",
+    "prepare_external_population_line_run",
+    "solve_and_write_healpix_levelpop",
+    "validate_external_population_run",
+    "MoleculeData",
+    "parse_lamda_molecule_file",
 ]

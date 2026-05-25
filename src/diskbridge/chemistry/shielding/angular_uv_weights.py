@@ -352,6 +352,7 @@ def compute_uv_direction_weights_healpix(
     chunk_size: int | None = None,
     memory_budget_gib: float | None = None,
     keep_debug_arrays: bool | None = None,
+    keep_closure_diagnostics: bool | None = None,
     isotropic_outside_r_cm: float | None = None,
     outer_weight_mode: str = "tau",
     cache_dir: Path | str | None = None,
@@ -397,6 +398,10 @@ def compute_uv_direction_weights_healpix(
     keep_debug_arrays : bool or None, optional
         Keep full-size diagnostic arrays in the returned debug dict. By
         default this is disabled for normal runs.
+    keep_closure_diagnostics : bool or None, optional
+        Keep scalar per-cell UV closure diagnostics in the returned debug dict.
+        This is much smaller than ``keep_debug_arrays`` and is disabled by
+        default.
     isotropic_outside_r_cm : float or None, optional
         If set, replace weights outside this radius using ``outer_weight_mode``.
     outer_weight_mode : {"tau", "uniform"}, optional
@@ -447,7 +452,10 @@ def compute_uv_direction_weights_healpix(
 
     if n_candidates == 0:
         W_rays = np.full((0, npix), 1.0 / npix, dtype=np.float64)
-        return W_rays, candidate_idx, dirs, cell_centers, {"keep_debug_arrays": False}
+        return W_rays, candidate_idx, dirs, cell_centers, {
+            "keep_debug_arrays": False,
+            "keep_closure_diagnostics": False,
+        }
 
     # -- 2. Integrate dust density along HEALPix rays (external tau) ----------
     dust_fields: dict[str, np.ndarray] = {}
@@ -456,6 +464,8 @@ def compute_uv_direction_weights_healpix(
 
     if keep_debug_arrays is None:
         keep_debug_arrays = False
+    if keep_closure_diagnostics is None:
+        keep_closure_diagnostics = False
 
     if chunk_size is None:
         chunk_size = _chunk_size_from_memory_budget(
@@ -501,6 +511,27 @@ def compute_uv_direction_weights_healpix(
             "k_star",
         ):
             debug_chunks[name] = []
+
+    closure_chunks: dict[str, list[np.ndarray]] = {}
+    if keep_closure_diagnostics:
+        for name in (
+            "chi_radmc",
+            "chi_ext_dir",
+            "chi_star_dir_att",
+            "chi_iso",
+            "chi_direct",
+            "chi_reconstructed",
+            "closure_residual",
+            "direct_excess",
+            "direct_to_radmc",
+            "f_ext",
+            "f_star",
+            "f_iso",
+            "tau_star",
+            "chi_star_unatt",
+            "outer_weight_overridden",
+        ):
+            closure_chunks[name] = []
 
     chi_iso_medians: list[float] = []
     max_chi_star_unatt = 0.0
@@ -589,6 +620,48 @@ def compute_uv_direction_weights_healpix(
         chi_iso = np.maximum(chi_cand - chi_ext_dir - chi_star_dir_att, 0.0)
         chi_iso_medians.append(float(np.median(chi_iso)))
 
+        if keep_closure_diagnostics:
+            chi_direct = chi_ext_dir + chi_star_dir_att
+            chi_reconstructed = chi_direct + chi_iso
+            closure_residual = chi_cand - chi_reconstructed
+            direct_excess = np.maximum(chi_direct - chi_cand, 0.0)
+            direct_to_radmc = np.divide(
+                chi_direct,
+                chi_cand,
+                out=np.full_like(chi_direct, np.nan, dtype=np.float64),
+                where=chi_cand > 0.0,
+            )
+            component_total = np.maximum(
+                chi_reconstructed,
+                np.finfo(np.float64).tiny,
+            )
+            f_ext = chi_ext_dir / component_total
+            f_star = chi_star_dir_att / component_total
+            f_iso = chi_iso / component_total
+            if isotropic_outside_r_cm is not None:
+                radii_cm = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
+                outer_weight_overridden = (
+                    radii_cm >= float(isotropic_outside_r_cm)
+                ).astype(np.float64)
+            else:
+                outer_weight_overridden = np.zeros(n_chunk, dtype=np.float64)
+
+            closure_chunks["chi_radmc"].append(chi_cand.copy())
+            closure_chunks["chi_ext_dir"].append(chi_ext_dir.copy())
+            closure_chunks["chi_star_dir_att"].append(chi_star_dir_att.copy())
+            closure_chunks["chi_iso"].append(chi_iso.copy())
+            closure_chunks["chi_direct"].append(chi_direct.copy())
+            closure_chunks["chi_reconstructed"].append(chi_reconstructed.copy())
+            closure_chunks["closure_residual"].append(closure_residual.copy())
+            closure_chunks["direct_excess"].append(direct_excess.copy())
+            closure_chunks["direct_to_radmc"].append(direct_to_radmc.copy())
+            closure_chunks["f_ext"].append(f_ext.copy())
+            closure_chunks["f_star"].append(f_star.copy())
+            closure_chunks["f_iso"].append(f_iso.copy())
+            closure_chunks["tau_star"].append(tau_star.copy())
+            closure_chunks["chi_star_unatt"].append(chi_star_unatt.copy())
+            closure_chunks["outer_weight_overridden"].append(outer_weight_overridden)
+
         sum_uv_contrib = (
             uv_ext_contrib.sum(axis=1)
             + float(npix) * chi_iso
@@ -642,6 +715,7 @@ def compute_uv_direction_weights_healpix(
 
     debug: dict = {
         "keep_debug_arrays": bool(keep_debug_arrays),
+        "keep_closure_diagnostics": bool(keep_closure_diagnostics),
         "chunk_size": int(chunk_size),
         "n_chunks": int(n_chunks),
         "median_chi_iso": float(np.median(chi_iso_medians)) if chi_iso_medians else 0.0,
@@ -652,6 +726,47 @@ def compute_uv_direction_weights_healpix(
             for name, parts in debug_chunks.items()
             if parts
         })
+    if keep_closure_diagnostics:
+        closure = {
+            name: np.concatenate(parts, axis=0)
+            for name, parts in closure_chunks.items()
+            if parts
+        }
+        if closure:
+            direct_to_radmc_finite = closure["direct_to_radmc"][
+                np.isfinite(closure["direct_to_radmc"])
+            ]
+            max_direct_to_radmc = (
+                float(np.max(direct_to_radmc_finite))
+                if direct_to_radmc_finite.size
+                else float("nan")
+            )
+            debug["closure_diagnostics"] = {
+                "shape": tuple(int(v) for v in chi_arr.shape),
+                "nside": int(nside),
+                "npix": int(npix),
+                "uv_product_weighting": str(star_uv_weighting).lower(),
+                "outer_weight_mode": str(outer_weight_mode),
+                "isotropic_outside_r_cm": (
+                    None
+                    if isotropic_outside_r_cm is None
+                    else float(isotropic_outside_r_cm)
+                ),
+                "fields": closure,
+                "summary": {
+                    "max_direct_excess": float(np.nanmax(closure["direct_excess"])),
+                    "max_direct_to_radmc": max_direct_to_radmc,
+                    "max_abs_closure_residual": float(
+                        np.nanmax(np.abs(closure["closure_residual"]))
+                    ),
+                    "median_f_ext": float(np.nanmedian(closure["f_ext"])),
+                    "median_f_star": float(np.nanmedian(closure["f_star"])),
+                    "median_f_iso": float(np.nanmedian(closure["f_iso"])),
+                    "outer_weight_overridden_fraction": float(
+                        np.nanmean(closure["outer_weight_overridden"])
+                    ),
+                },
+            }
 
     if dust_fields_stack is not None:
         logger.info(

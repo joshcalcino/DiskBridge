@@ -62,6 +62,7 @@ uv_n_wavelengths = 10              # Number of wavelengths in the uv grid
 external_uv      = F               # include external uv photons 
 external_uv_chi  = 1.0             # uv field strength in Draine units 
  nside            = 4
+w_rays_keep_closure_diagnostics = F # opt-in scalar UV closure diagnostics for W_rays
  
 # Segmented RT (two-run outer/inner workflow)
 segmented_tol              = 0.01  # fractional tolerance for T and chi asymptote (R_split criterion)

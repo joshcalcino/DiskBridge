@@ -77,6 +77,14 @@ from .diagnostics import (
     make_dust_component_diagnostic_plots,
     make_segmented_rt_diagnostic_plots,
 )
+from .nonlte import (
+    make_external_nonlte_diagnostic_plots,
+    plot_channel_maps,
+    plot_integrated_spectrum,
+    plot_line_comparison,
+    plot_moment_maps,
+    plot_solver_history,
+)
 
 # Unit conversion utilities
 from .units import (

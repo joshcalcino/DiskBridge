@@ -32,25 +32,8 @@ def normalize_collider_name(name: str) -> str:
     return _COLLIDER_ALIASES.get(key, key)
 
 
-def write_lines_inp(path: str | Path, species_config: SpeciesLineConfig) -> Path:
-    """Write a single-species RADMC-3D ``lines.inp`` file."""
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    species = str(species_config.species).strip().lower()
-    colliders = [normalize_collider_name(c) for c in species_config.colliders]
-    lines = [
-        "2",
-        "1",
-        f"{species}    leiden    0    0    {len(colliders)}",
-        *colliders,
-    ]
-    path.write_text("\n".join(lines) + "\n")
-    return path
-
-
-def expected_lines_inp_content(species_config: SpeciesLineConfig) -> str:
-    """Return the exact ``lines.inp`` content expected for preflight."""
+def lines_inp_content(species_config: SpeciesLineConfig) -> str:
+    """Return the single-species RADMC-3D ``lines.inp`` content."""
 
     species = str(species_config.species).strip().lower()
     colliders = [normalize_collider_name(c) for c in species_config.colliders]
@@ -61,3 +44,15 @@ def expected_lines_inp_content(species_config: SpeciesLineConfig) -> str:
         *colliders,
     ]
     return "\n".join(lines) + "\n"
+
+
+def write_lines_inp(path: str | Path, species_config: SpeciesLineConfig) -> Path:
+    """Write a single-species RADMC-3D ``lines.inp`` file."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(lines_inp_content(species_config))
+    return path
+
+
+expected_lines_inp_content = lines_inp_content

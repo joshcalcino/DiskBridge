@@ -209,6 +209,7 @@ class RadModel:
             'dust_density.binp',
             'gas_velocity.binp',
             'gas_temperature.*',
+            'levelpop_*.dat',
             'radmc3d.inp', 'external_source.inp',
             'numberdens_*.binp',
         ]

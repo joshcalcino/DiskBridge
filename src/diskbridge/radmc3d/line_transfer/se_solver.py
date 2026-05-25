@@ -1,0 +1,291 @@
+"""Statistical-equilibrium solver for non-LTE populations under HEALPix
+escape-probability closure.
+
+For each cell:
+
+    M f = b,    sum f = 1,    f >= 0,
+
+where ``M`` is the rate matrix built from radiative transitions (with escape
+probability ``beta`` and CMB background) plus collisions. The last row of
+``M`` is replaced by the normalization constraint.
+
+Compute-heavy assembly (alpha0, collision rates, rate-matrix construction) is
+Numba-parallelized over cells. The linear solve uses
+``np.linalg.solve`` on the stacked matrices.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from numba import njit, prange
+
+from .molecular_rates import (
+    MoleculeData,
+    _C_CGS,
+    _H_CGS,
+    _KB_CGS,
+)
+
+
+@njit(parallel=True, cache=True)
+def compute_line_center_opacity(
+    fracpop: np.ndarray,        # (Ncand, nlev)
+    n_species_cand: np.ndarray, # (Ncand,)
+    a_line_cand: np.ndarray,    # (Ncand,)
+    iup: np.ndarray,            # (nlin,) int64
+    ilow: np.ndarray,           # (nlin,) int64
+    aud: np.ndarray,            # (nlin,)
+    freq_hz: np.ndarray,        # (nlin,)
+    weight: np.ndarray,         # (nlev,)
+) -> np.ndarray:
+    """Line-center opacity per candidate cell per line, in cm^-1.
+
+    Returns shape (Ncand, nlin).
+    """
+    n_cand = fracpop.shape[0]
+    nlin = iup.shape[0]
+    out = np.zeros((n_cand, nlin), dtype=np.float64)
+    pref_const = _C_CGS * _C_CGS * _C_CGS / (8.0 * (np.pi ** 1.5))
+    for i in prange(n_cand):
+        n_sp = n_species_cand[i]
+        aL = a_line_cand[i]
+        if n_sp <= 0.0 or aL <= 0.0:
+            continue
+        inv_aL = 1.0 / aL
+        for m in range(nlin):
+            u = iup[m]
+            l = ilow[m]
+            ratio = weight[u] / weight[l]
+            delta = ratio * fracpop[i, l] - fracpop[i, u]
+            nu = freq_hz[m]
+            coeff = pref_const * aud[m] / (nu * nu * nu) * inv_aL
+            out[i, m] = coeff * n_sp * delta
+    return out
+
+
+@njit(parallel=True, cache=True)
+def compute_collisional_rates(
+    Tgas_cand: np.ndarray,         # (Ncand,)
+    collider_dens_cand: np.ndarray, # (Ncand, n_colliders)
+    tgrids: np.ndarray,            # (n_colliders, max_nT)
+    ntemps: np.ndarray,            # (n_colliders,) int64
+    tables: np.ndarray,            # (n_colliders, max_nT, nlev, nlev)
+    weight: np.ndarray,            # (nlev,)
+    energy_erg: np.ndarray,        # (nlev,)
+) -> np.ndarray:
+    """Per-cell collisional rate matrix ``C[c, i, j]`` (s^-1).
+
+    Downward rates from interpolated tables, upward rates by detailed balance.
+    """
+    n_cand = Tgas_cand.shape[0]
+    n_col = tables.shape[0]
+    nlev = weight.shape[0]
+    C = np.zeros((n_cand, nlev, nlev), dtype=np.float64)
+    for c in prange(n_cand):
+        T = Tgas_cand[c]
+        if T <= 0.0:
+            continue
+        kT = _KB_CGS * T
+        for k in range(n_col):
+            n_p = collider_dens_cand[c, k]
+            if n_p <= 0.0:
+                continue
+            nt = ntemps[k]
+            if T <= tgrids[k, 0]:
+                it = 0
+                eps = 0.0
+            elif T >= tgrids[k, nt - 1]:
+                it = nt - 2
+                eps = 1.0
+            else:
+                it = 0
+                for j in range(nt - 1):
+                    if tgrids[k, j] <= T and T < tgrids[k, j + 1]:
+                        it = j
+                        break
+                eps = (T - tgrids[k, it]) / (tgrids[k, it + 1] - tgrids[k, it])
+            for u in range(1, nlev):
+                for l in range(u):
+                    gamma = (1.0 - eps) * tables[k, it, u, l] + eps * tables[k, it + 1, u, l]
+                    C[c, u, l] += n_p * gamma
+        for u in range(1, nlev):
+            for l in range(u):
+                C_ul = C[c, u, l]
+                if C_ul <= 0.0:
+                    continue
+                ratio = weight[u] / weight[l]
+                C[c, l, u] = C_ul * ratio * np.exp(-(energy_erg[u] - energy_erg[l]) / kT)
+    return C
+
+
+@njit(parallel=True, cache=True)
+def build_rate_matrix_and_rhs(
+    beta: np.ndarray,         # (Ncand, nlin)
+    C: np.ndarray,            # (Ncand, nlev, nlev)
+    iup: np.ndarray,          # (nlin,) int64
+    ilow: np.ndarray,         # (nlin,) int64
+    aud: np.ndarray,          # (nlin,)
+    freq_hz: np.ndarray,      # (nlin,)
+    weight: np.ndarray,       # (nlev,)
+    tbg_K: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Construct ``M f = b`` per candidate cell.
+
+    The last row of ``M`` is replaced with the normalization constraint and
+    ``b`` is set to zero except the last entry which is 1.
+
+    Returns
+    -------
+    M : ndarray, shape (Ncand, nlev, nlev)
+    b : ndarray, shape (Ncand, nlev)
+    """
+    n_cand = beta.shape[0]
+    nlin = beta.shape[1]
+    nlev = C.shape[1]
+
+    M = np.zeros((n_cand, nlev, nlev), dtype=np.float64)
+    b = np.zeros((n_cand, nlev), dtype=np.float64)
+
+    two_h_over_c2 = 2.0 * _H_CGS / (_C_CGS * _C_CGS)
+
+    for c in prange(n_cand):
+        # First, fill the rate matrix M where M[i, j] = R_{j -> i} for i != j,
+        # M[i, i] = -sum_{j != i} R_{i -> j}.
+        # Radiative contributions (one per radiative transition).
+        for m in range(nlin):
+            u = iup[m]
+            l = ilow[m]
+            nu = freq_hz[m]
+            be = beta[c, m]
+            # CMB mean intensity, B_nu(T_bg)
+            x = _H_CGS * nu / (_KB_CGS * tbg_K)
+            if x > 700.0:
+                Jbg = 0.0
+            else:
+                Jbg = two_h_over_c2 * nu * nu * nu / (np.exp(x) - 1.0)
+            # Einstein coefficients
+            A_ul = aud[m]
+            B_ul = A_ul * (_C_CGS * _C_CGS) / (2.0 * _H_CGS * nu * nu * nu)
+            B_lu = B_ul * weight[u] / weight[l]
+            R_ul = A_ul * be + B_ul * be * Jbg
+            R_lu = B_lu * be * Jbg
+            # off-diagonals
+            M[c, l, u] += R_ul   # rate into l from u
+            M[c, u, l] += R_lu   # rate into u from l
+            # accumulate sinks into the diagonal
+            M[c, u, u] -= R_ul
+            M[c, l, l] -= R_lu
+
+        # Collisional contributions. C[i, j] is the rate from i to j (s^-1).
+        # M[j, i] += C[i, j]   (rate into j from i)
+        # M[i, i] -= sum_j C[i, j]   (total sink from i)
+        for i in range(nlev):
+            sink = 0.0
+            for j in range(nlev):
+                if i == j:
+                    continue
+                C_ij = C[c, i, j]
+                sink += C_ij
+                M[c, j, i] += C_ij
+            M[c, i, i] -= sink
+
+        # Replace last row with normalization.
+        for j in range(nlev):
+            M[c, nlev - 1, j] = 1.0
+        b[c, nlev - 1] = 1.0
+
+    return M, b
+
+
+def solve_statistical_equilibrium(
+    *,
+    molecule: MoleculeData,
+    Tgas_cand: np.ndarray,
+    n_species_cand: np.ndarray,
+    a_line_cand: np.ndarray,
+    collider_dens_cand: np.ndarray,
+    beta: np.ndarray,
+    tbg_K: float,
+    tgrids: np.ndarray,
+    ntemps: np.ndarray,
+    tables: np.ndarray,
+    chunk_size: int | None = None,
+    pop_floor: float = -1.0e-14,
+) -> np.ndarray:
+    """Solve SE for all candidate cells.
+
+    Returns
+    -------
+    fracpop : ndarray, shape (Ncand, nlev)
+    """
+    n_cand = beta.shape[0]
+    nlev = molecule.nlev
+    if n_cand == 0:
+        return np.zeros((0, nlev), dtype=np.float64)
+    if chunk_size is None:
+        chunk_size = n_cand
+    chunk_size = int(chunk_size)
+    if chunk_size <= 0:
+        chunk_size = n_cand
+
+    fracpop = np.empty((n_cand, nlev), dtype=np.float64)
+
+    for start in range(0, n_cand, chunk_size):
+        end = min(start + chunk_size, n_cand)
+        sl = slice(start, end)
+        C_chunk = compute_collisional_rates(
+            np.ascontiguousarray(Tgas_cand[sl]),
+            np.ascontiguousarray(collider_dens_cand[sl]),
+            tgrids,
+            ntemps,
+            tables,
+            molecule.weight,
+            molecule.energy_erg,
+        )
+        M_chunk, b_chunk = build_rate_matrix_and_rhs(
+            np.ascontiguousarray(beta[sl]),
+            C_chunk,
+            molecule.iup,
+            molecule.ilow,
+            molecule.aud,
+            molecule.freq_hz,
+            molecule.weight,
+            float(tbg_K),
+        )
+        try:
+            f_chunk = np.linalg.solve(M_chunk, b_chunk[..., None])[..., 0]
+        except np.linalg.LinAlgError as exc:
+            raise RuntimeError(
+                f"Statistical-equilibrium solve failed for chunk "
+                f"[{start}:{end}]: {exc}"
+            ) from exc
+
+        # Clean roundoff and renormalize.
+        min_val = float(np.min(f_chunk))
+        if min_val < pop_floor:
+            n_bad = int(np.count_nonzero(f_chunk < pop_floor))
+            raise RuntimeError(
+                f"Negative populations beyond roundoff tolerance: "
+                f"{n_bad} entries below {pop_floor} (min {min_val:.3e})."
+            )
+        f_chunk = np.where(f_chunk < 0.0, 0.0, f_chunk)
+        sums = f_chunk.sum(axis=1, keepdims=True)
+        sums = np.where(sums <= 0.0, 1.0, sums)
+        f_chunk = f_chunk / sums
+        fracpop[sl] = f_chunk
+
+    return fracpop
+
+
+def convergence_error(f_new: np.ndarray, f_old: np.ndarray, floor: float = 1.0e-20) -> float:
+    denom = np.maximum.reduce([np.abs(f_new), np.abs(f_old), np.full_like(f_new, floor)])
+    return float(np.max(np.abs(f_new - f_old) / denom))
+
+
+__all__ = [
+    "compute_line_center_opacity",
+    "compute_collisional_rates",
+    "build_rate_matrix_and_rhs",
+    "solve_statistical_equilibrium",
+    "convergence_error",
+]

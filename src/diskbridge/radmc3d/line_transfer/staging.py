@@ -8,7 +8,7 @@ import numpy as np
 
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import normalize_collider_name, write_lines_inp
-from .preflight import run_line_preflight, write_line_radmc3d_inp
+from .validation import validate_line_run, write_line_radmc3d_inp
 from diskbridge.radmc3d.colliders import (
     gow17_lamda_colliders,
     install_validated_molecule_file,
@@ -158,9 +158,7 @@ def prepare_nonlte_line_run(
         "dust_density.binp",
         "dustopac.inp",
         "gas_velocity.binp",
-        "gas_velocity.inp",
         "gas_temperature.binp",
-        "gas_temperature.inp",
         "microturbulence.binp",
         "stars.inp",
         "external_source.inp",
@@ -189,17 +187,6 @@ def prepare_nonlte_line_run(
                 tmax=float(config.line_tgas_max_K),
             )
             staged["gas_temperature.binp"] = str(work_inputs / "gas_temperature.binp")
-        else:
-            tgas_ascii_src = _first_existing(
-                [
-                    chemistry_inputs / "gas_temperature.inp",
-                    source_inputs / "gas_temperature.inp",
-                ]
-            )
-            if tgas_ascii_src is not None:
-                staged["gas_temperature.inp"] = str(
-                    _link_or_copy(tgas_ascii_src, work_inputs / "gas_temperature.inp", copy_mode=copy_mode)
-                )
 
     for opac in sorted(source_inputs.glob("dustkappa_*.inp")):
         staged[opac.name] = str(_link_or_copy(opac, work_inputs / opac.name, copy_mode=copy_mode))
@@ -220,9 +207,7 @@ def prepare_nonlte_line_run(
     _stage_required_one(
         [
             chemistry_inputs / f"numberdens_{species}.binp",
-            chemistry_inputs / f"numberdens_{species}.inp",
             source_inputs / f"numberdens_{species}.binp",
-            source_inputs / f"numberdens_{species}.inp",
         ],
         work_inputs,
         label=f"numberdens_{species}",
@@ -232,9 +217,7 @@ def prepare_nonlte_line_run(
         _stage_required_one(
             [
                 chemistry_inputs / f"numberdens_{collider}.binp",
-                chemistry_inputs / f"numberdens_{collider}.inp",
                 source_inputs / f"numberdens_{collider}.binp",
-                source_inputs / f"numberdens_{collider}.inp",
             ],
             work_inputs,
             label=f"numberdens_{collider}",
@@ -277,5 +260,161 @@ def prepare_nonlte_line_run(
     (work / "line_rt_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
-    run_line_preflight(work, config, species_config)
+    validate_line_run(work, config, species_config)
+    return work
+
+
+def prepare_external_population_line_run(
+    *,
+    source_inputs_dir: str | Path,
+    chemistry_inputs_dir: str | Path | None = None,
+    work_dir: str | Path,
+    species: str,
+    levelpop_file: str | Path,
+    molecule_file: str | Path | None = None,
+    copy_mode: str = "symlink",
+    exist_ok: bool = False,
+    incl_dust: int = 1,
+    itempdecoup: int = 1,
+    rto_style: int = 3,
+) -> Path:
+    """Stage a single-species RADMC-3D ``lines_mode = 50`` run."""
+
+    species = str(species).lower().strip()
+    source_inputs = Path(source_inputs_dir)
+    if not source_inputs.exists():
+        raise FileNotFoundError(f"source_inputs_dir does not exist: {source_inputs}")
+    chemistry_inputs = (
+        Path(chemistry_inputs_dir) if chemistry_inputs_dir is not None else source_inputs
+    )
+    if not chemistry_inputs.exists():
+        raise FileNotFoundError(
+            f"chemistry_inputs_dir does not exist: {chemistry_inputs}"
+        )
+    levelpop_file = Path(levelpop_file)
+    if not levelpop_file.exists():
+        raise FileNotFoundError(f"levelpop file does not exist: {levelpop_file}")
+
+    work = Path(work_dir)
+    if work.exists() and not exist_ok:
+        raise FileExistsError(f"work_dir already exists: {work}")
+    work_inputs = work / "radmc3d_inputs"
+    work_outputs = work / "radmc3d_outputs"
+    work_inputs.mkdir(parents=True, exist_ok=True)
+    work_outputs.mkdir(parents=True, exist_ok=True)
+
+    staged: dict[str, str] = {}
+    for name in ("amr_grid.inp", "wavelength_micron.inp"):
+        dst = _stage_required_one(
+            [source_inputs / name],
+            work_inputs,
+            label=name,
+            copy_mode=copy_mode,
+        )
+        staged[name] = str(dst)
+
+    staged.update(
+        _stage_optional(
+            source_inputs,
+            work_inputs,
+            ["dust_density.binp", "dustopac.inp", "stars.inp", "external_source.inp"],
+            copy_mode=copy_mode,
+        )
+    )
+    for opac in sorted(source_inputs.glob("dustkappa_*.inp")):
+        staged[opac.name] = str(
+            _link_or_copy(opac, work_inputs / opac.name, copy_mode=copy_mode)
+        )
+
+    source_run = (
+        source_inputs.parent if source_inputs.name == "radmc3d_inputs" else source_inputs
+    )
+    source_outputs = source_run / "radmc3d_outputs"
+    dust_temp = _first_existing(
+        [
+            source_outputs / "temperature" / "dust_temperature.bdat",
+            source_outputs / "dust_temperature.bdat",
+            source_inputs / "dust_temperature.bdat",
+            source_run / "dust_temperature.bdat",
+        ]
+    )
+    if dust_temp is not None:
+        staged[dust_temp.name] = str(
+            _link_or_copy(
+                dust_temp,
+                work_outputs / "dust_temperature.bdat",
+                copy_mode=copy_mode,
+            )
+        )
+
+    for name in (
+        f"numberdens_{species}.binp",
+        "gas_temperature.binp",
+        "gas_velocity.binp",
+        "microturbulence.binp",
+    ):
+        dst = _stage_required_one(
+            [chemistry_inputs / name, source_inputs / name],
+            work_inputs,
+            label=name,
+            copy_mode=copy_mode,
+        )
+        staged[name] = str(dst)
+
+    if molecule_file is None:
+        molecule_dst = install_validated_molecule_file(
+            species=species,
+            moldata_dir=_REPO_ROOT / "data" / "moldata",
+            inputs_dir=work_inputs,
+        )
+    else:
+        molecule_src = Path(molecule_file)
+        if not molecule_src.exists():
+            raise FileNotFoundError(f"molecule_file does not exist: {molecule_src}")
+        molecule_dst = _link_or_copy(
+            molecule_src,
+            work_inputs / f"molecule_{species}.inp",
+            copy_mode=copy_mode,
+        )
+    staged[molecule_dst.name] = str(molecule_dst)
+
+    levelpop_dst = _link_or_copy(
+        levelpop_file,
+        work_inputs / f"levelpop_{species}.dat",
+        copy_mode=copy_mode,
+    )
+    staged[levelpop_dst.name] = str(levelpop_dst)
+
+    radmc3d_src = source_inputs / "radmc3d.inp"
+    if radmc3d_src.exists():
+        _link_or_copy(radmc3d_src, work_inputs / "radmc3d.inp", copy_mode="copy")
+    line_config = SpeciesLineConfig(species=species, line_mode=50, colliders=[])
+    write_line_radmc3d_inp(
+        work_inputs / "radmc3d.inp",
+        line_mode=50,
+        config=NonLTELineTransferConfig(
+            use_gow17_tgas=True,
+            incl_dust=incl_dust,
+            itempdecoup=itempdecoup,
+            rto_style=rto_style,
+        ),
+    )
+    write_lines_inp(work_inputs / "lines.inp", line_config)
+
+    manifest = {
+        "species": species,
+        "line_mode": 50,
+        "solver": "external_healpix_escape_probability",
+        "source_inputs_dir": str(source_inputs),
+        "chemistry_inputs_dir": str(chemistry_inputs),
+        "staged_inputs_dir": str(work_inputs),
+        "copy_mode": copy_mode,
+        "input_files": staged,
+        "levelpop_file": str(levelpop_dst),
+        "molecule_file": str(molecule_dst),
+    }
+    (work / "external_levelpop_staging.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
     return work

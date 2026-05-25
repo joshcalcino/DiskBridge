@@ -21,7 +21,7 @@ from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 from .run import ensure_temperature_symlink
 from .colliders import gow17_lamda_colliders, install_validated_molecule_file
-from .line_transfer.preflight import ensure_gas_temperature_for_nonlte
+from .line_transfer.validation import ensure_gas_temperature_for_nonlte
 from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
 import diskbridge
 from .molecule import RadMolecule
@@ -30,6 +30,11 @@ from .molecule import RadMolecule
 C_LIGHT = diskbridge.units('c').to('cm/s').magnitude
 PC = diskbridge.units('pc').to('cm').magnitude
 AU = diskbridge.units('au').to('cm').magnitude
+
+
+def _line_mode_uses_gas_temperature(line_mode: int) -> bool:
+    """Return whether RADMC-3D line transfer must read gas_temperature.*."""
+    return abs(int(line_mode)) in {3, 4, 50}
 
 
 class RadImage:
@@ -138,6 +143,7 @@ class RadImage:
             'gas_velocity.binp',
             'microturbulence.binp',
             'gas_temperature.*',
+            'levelpop_*.dat',
             'numberdens_*.binp',
             'radmc3d.inp', 'lines.inp', 'molecule_*.inp',
             'external_source.inp'
@@ -1323,7 +1329,7 @@ class RadImage:
                     with open(inp_file, 'r') as f:
                         content = f.read()
 
-        use_line_gas_temperature = abs(line_mode) in {3, 4}
+        use_line_gas_temperature = _line_mode_uses_gas_temperature(line_mode)
         if use_line_gas_temperature:
             ensure_gas_temperature_for_nonlte(
                 self.model_dir,
@@ -1413,8 +1419,7 @@ class RadImage:
         missing = []
         for collider in colliders:
             binary = self.inputs_dir / f"numberdens_{collider}.binp"
-            ascii_ = self.inputs_dir / f"numberdens_{collider}.inp"
-            if not binary.exists() and not ascii_.exists():
+            if not binary.exists():
                 missing.append(collider)
         if missing:
             raise RuntimeError(
