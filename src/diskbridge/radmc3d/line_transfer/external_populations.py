@@ -57,6 +57,8 @@ class HealpixSEConfig:
     memory_budget_gib: float = 8.0
     max_ray_steps: int = 200_000
     relaxation: float = 1.0
+    escape_chunk_size: int = 50_000
+    allow_unconverged: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,9 @@ def _velocity_xyz_cm_s(rad) -> np.ndarray:
     vr = _gas_field(rad, "vr", unit="cm/s")
     vtheta = _gas_field(rad, "vtheta", unit="cm/s")
     vphi = _gas_field(rad, "vphi", unit="cm/s")
+    # Line transfer integrates in Cartesian ray directions; the Mesh owns the
+    # spherical basis conversion so this module only assembles the required
+    # velocity field.
     vx, vy, vz = mesh.spherical_vector_components_to_cartesian(
         vr,
         vtheta,
@@ -369,11 +374,13 @@ def solve_and_write_healpix_levelpop(
     final_err = np.inf
     final_beta_range = (1.0, 1.0)
     last_iter = 0
+    converged = False
 
     n0, n1, n2 = n_species.shape
 
     for iteration in range(1, int(config.maxiter) + 1):
         t0 = time.perf_counter()
+        logger.info("  iter %3d/%d: computing line-center opacity", iteration, config.maxiter)
         alpha0_cand = compute_line_center_opacity(
             f,
             n_species_cand,
@@ -398,10 +405,18 @@ def solve_and_write_healpix_levelpop(
             )
             alpha0_cand = np.where(alpha0_cand < 0.0, 0.0, alpha0_cand)
 
+        logger.info("  iter %3d/%d: scattering opacity to full grid", iteration, config.maxiter)
         alpha0_full = _scatter_alpha0_to_full(
             alpha0_cand, cell_idx, molecule.nlin, n0, n1, n2,
         )
 
+        logger.info(
+            "  iter %3d/%d: computing HEALPix escape probabilities "
+            "(chunk_size=%d)",
+            iteration,
+            config.maxiter,
+            int(config.escape_chunk_size),
+        )
         beta = compute_escape_probabilities_healpix(
             mesh=mesh,
             tracer=tracer,
@@ -412,8 +427,10 @@ def solve_and_write_healpix_levelpop(
             velocity_xyz=velocity_xyz,
             a_line=a_line,
             max_ray_steps=int(config.max_ray_steps),
+            chunk_size=int(config.escape_chunk_size),
         )
 
+        logger.info("  iter %3d/%d: solving statistical equilibrium", iteration, config.maxiter)
         f_new = solve_statistical_equilibrium(
             molecule=molecule,
             Tgas_cand=Tgas_cand,
@@ -461,11 +478,24 @@ def solve_and_write_healpix_levelpop(
         final_beta_range = (beta_min, beta_max)
         last_iter = iteration
         if err < float(config.convcrit):
+            converged = True
             break
     else:
-        raise RuntimeError(
-            f"HEALPix SE for {species} did not converge in {config.maxiter} "
-            f"iterations (final err={final_err:.3e}, convcrit={config.convcrit:.3e})"
+        if not bool(config.allow_unconverged):
+            raise RuntimeError(
+                f"HEALPix SE for {species} did not converge in {config.maxiter} "
+                f"iterations (final err={final_err:.3e}, convcrit={config.convcrit:.3e})"
+            )
+        # Diagnostic laptop runs deliberately stop after a few iterations to
+        # inspect error trends. Still write the manifest/levelpop, but mark the
+        # populations as unconverged so they cannot be mistaken for production.
+        logger.warning(
+            "HEALPix SE for %s stopped unconverged after %d iterations "
+            "(final err=%.3e, convcrit=%.3e)",
+            species,
+            config.maxiter,
+            final_err,
+            config.convcrit,
         )
 
     # Build full level-population grid and write file.
@@ -509,6 +539,7 @@ def solve_and_write_healpix_levelpop(
         nsp_range=(float(np.min(n_species_cand)), float(np.max(n_species_cand))),
         beta_range=final_beta_range,
         iteration_history=history,
+        converged=converged,
     )
 
     logger.info(f"Wrote {levelpop_path} ({n_total} cells, {molecule.nlev} levels)")
@@ -541,6 +572,7 @@ def _write_manifest(
     nsp_range: tuple[float, float],
     beta_range: tuple[float, float],
     iteration_history: list[dict],
+    converged: bool,
 ) -> None:
     payload = {
         "species": species,
@@ -549,6 +581,9 @@ def _write_manifest(
         "nside": int(config.nside),
         "maxiter": int(config.maxiter),
         "convcrit": float(config.convcrit),
+        "escape_chunk_size": int(config.escape_chunk_size),
+        "allow_unconverged": bool(config.allow_unconverged),
+        "converged": bool(converged),
         "iterations": int(iterations),
         "final_convergence_error": float(final_err),
         "tbg_K": float(config.tbg_K),

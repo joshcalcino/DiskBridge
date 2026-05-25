@@ -168,6 +168,9 @@ class Mesh:
             shape[axis_order.index(axis_name)] = values.size
             return values.reshape(shape)
 
+        # The mesh owns the coordinate basis. Keeping this conversion here
+        # prevents RADMC writers, readers, and solvers from each carrying their
+        # own copy of the same spherical unit-vector algebra.
         theta = _broadcast_axis(self.centers_f64("theta", "rad"), "theta")
         phi = _broadcast_axis(self.centers_f64("phi", "rad"), "phi")
         sin_t = np.sin(theta)

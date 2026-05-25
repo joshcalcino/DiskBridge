@@ -16,10 +16,12 @@ segment length to the next face.
 from __future__ import annotations
 
 from typing import Tuple
+import time
 
 import numpy as np
 from numba import njit, prange
 
+from diskbridge._logging import logger
 from diskbridge.chemistry.shielding.healpix_utils import (
     _t_to_phi_boundary,
     _t_to_radius_boundary,
@@ -467,6 +469,13 @@ def compute_escape_probabilities_healpix(
     out = np.empty((n_cand, nlin), dtype=np.float64)
     for start in range(0, n_cand, int(chunk_size)):
         end = min(start + int(chunk_size), n_cand)
+        t0 = time.perf_counter()
+        logger.info(
+            "HEALPix escape beta chunk: cells %d:%d / %d",
+            start,
+            end,
+            n_cand,
+        )
         out[start:end] = _dispatch_compute_beta(
             mesh=mesh,
             tracer=tracer,
@@ -477,6 +486,13 @@ def compute_escape_probabilities_healpix(
             velocity_xyz=velocity_xyz,
             a_line=a_line,
             max_ray_steps=int(max_ray_steps),
+        )
+        logger.info(
+            "HEALPix escape beta chunk done: cells %d:%d / %d (%.2f s)",
+            start,
+            end,
+            n_cand,
+            time.perf_counter() - t0,
         )
     return out
 

@@ -8,7 +8,11 @@ import numpy as np
 from diskbridge._units import Quantity, units
 from diskbridge._logging import logger
 from diskbridge.model.field import Field
-from diskbridge.model.coords import spherical_grids, cylindrical_from_spherical
+from diskbridge.model.coords import (
+    spherical_grids,
+    cylindrical_from_spherical,
+    cartesian_from_spherical,
+)
 from diskbridge.model.disk import scale_height
 from .core import SubModel
 
@@ -32,8 +36,8 @@ def _compute_disk_orientation(
     rho: Quantity,
     dV: Quantity,
     r_grid: Quantity,
-    theta_grid_mag: np.ndarray,
-    phi_grid_mag: np.ndarray,
+    theta_grid: Quantity,
+    phi_grid: Quantity,
     vr: Quantity,
     vphi: Quantity,
     vtheta: Quantity,
@@ -45,30 +49,14 @@ def _compute_disk_orientation(
     if r_max_for_axis is not None:
         core_mask &= (r_grid <= r_max_for_axis)
 
-    sin_t = np.sin(theta_grid_mag)
-    cos_t = np.cos(theta_grid_mag)
-    cos_p = np.cos(phi_grid_mag)
-    sin_p = np.sin(phi_grid_mag)
-
-    er_x = sin_t * cos_p
-    er_y = sin_t * sin_p
-    er_z = cos_t
-
-    et_x = cos_t * cos_p
-    et_y = cos_t * sin_p
-    et_z = -sin_t
-
-    ep_x = -sin_p
-    ep_y = cos_p
-    ep_z = 0.0
-
-    x = r_grid * er_x
-    y = r_grid * er_y
-    z = r_grid * er_z
-
-    vx = vr * er_x + vtheta * et_x + vphi * ep_x
-    vy = vr * er_y + vtheta * et_y + vphi * ep_y
-    vz = vr * er_z + vtheta * et_z + vphi * ep_z
+    x, y, z = cartesian_from_spherical(r_grid, phi_grid, theta_grid)
+    # Reuse the mesh-owned spherical basis conversion so disk masking and
+    # line-transfer diagnostics cannot silently diverge in velocity geometry.
+    vx, vy, vz = model.mesh.spherical_vector_components_to_cartesian(
+        vr,
+        vtheta,
+        vphi,
+    )
 
     w = (rho * dV) * core_mask
     if not np.any(core_mask):
@@ -92,38 +80,21 @@ def _compute_disk_orientation(
 
 
 def _transform_to_disk_frame(
+    mesh,
     r_grid: Quantity,
-    theta_grid_mag: np.ndarray,
-    phi_grid_mag: np.ndarray,
+    theta_grid: Quantity,
+    phi_grid: Quantity,
     vr: Quantity,
     vphi: Quantity,
     vtheta: Quantity,
     k_hat: np.ndarray,
 ) -> DiskFrameData:
-    sin_t = np.sin(theta_grid_mag)
-    cos_t = np.cos(theta_grid_mag)
-    cos_p = np.cos(phi_grid_mag)
-    sin_p = np.sin(phi_grid_mag)
-
-    er_x = sin_t * cos_p
-    er_y = sin_t * sin_p
-    er_z = cos_t
-
-    et_x = cos_t * cos_p
-    et_y = cos_t * sin_p
-    et_z = -sin_t
-
-    ep_x = -sin_p
-    ep_y = cos_p
-    ep_z = 0.0
-
-    x = r_grid * er_x
-    y = r_grid * er_y
-    z = r_grid * er_z
-
-    vx = vr * er_x + vtheta * et_x + vphi * ep_x
-    vy = vr * er_y + vtheta * et_y + vphi * ep_y
-    vz = vr * er_z + vtheta * et_z + vphi * ep_z
+    x, y, z = cartesian_from_spherical(r_grid, phi_grid, theta_grid)
+    vx, vy, vz = mesh.spherical_vector_components_to_cartesian(
+        vr,
+        vtheta,
+        vphi,
+    )
 
     z_d = x * k_hat[0] + y * k_hat[1] + z * k_hat[2]
     rx = x - z_d * k_hat[0]
@@ -480,24 +451,22 @@ def set_mask_from_joos_disk(
     vphi = model.gas["vphi"].data.to_base_units()
     vtheta = model.gas["vtheta"].data.to_base_units()
 
-    r_grid_mag, theta_grid_mag, phi_grid_mag = np.meshgrid(
-        r_c.to_base_units().magnitude,
-        theta_c.to("radian").magnitude,
-        phi_c.to("radian").magnitude,
-        indexing="ij",
+    r_grid, theta_grid, phi_grid = spherical_grids(
+        r_c.to_base_units(),
+        theta_c.to("radian"),
+        phi_c.to("radian"),
     )
-    r_grid = r_grid_mag * r_c.to_base_units().units
 
     if rho_core_min is None:
         rho_core_min = 10.0 * rho_disk_min
 
     k_hat = _compute_disk_orientation(
-        model, rho, dV, r_grid, theta_grid_mag, phi_grid_mag,
+        model, rho, dV, r_grid, theta_grid, phi_grid,
         vr, vphi, vtheta, rho_core_min, rho_disk_min, r_max_for_axis
     )
 
     disk_frame = _transform_to_disk_frame(
-        r_grid, theta_grid_mag, phi_grid_mag, vr, vphi, vtheta, k_hat
+        mesh, r_grid, theta_grid, phi_grid, vr, vphi, vtheta, k_hat
     )
 
     Pth = _compute_thermal_pressure(model, rho)
