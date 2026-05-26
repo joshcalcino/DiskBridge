@@ -247,7 +247,6 @@ def compute_beta_spherical(
 
     rmin = r_edges[0]
     rmax = r_edges[-1]
-    two_pi = 2.0 * np.pi
     inv_npix = 1.0 / float(n_dirs)
 
     for c in prange(n_cand):
@@ -284,18 +283,12 @@ def compute_beta_spherical(
                 for m in range(nlin):
                     beta_sum[m] += 1.0
                 continue
-            mu = z / r
-            if mu > 1.0:
-                mu = 1.0
-            elif mu < -1.0:
-                mu = -1.0
-            theta = np.arccos(mu)
-            phi = np.arctan2(y, x)
-            if phi < 0.0:
-                phi += two_pi
-            ir = np.searchsorted(r_edges, r, side="right") - 1
-            it = np.searchsorted(theta_edges, theta, side="right") - 1
-            ip = np.searchsorted(phi_edges, phi, side="right") - 1
+            # The caller already knows the containing cell. Recomputing it from
+            # atan2() can be wrong for meshes whose phi edges are [-pi, pi],
+            # which would make negative-phi starting cells escape immediately.
+            ir = ir0
+            it = it0
+            ip = ip0
             if ir < 0 or ir >= nr or it < 0 or it >= nt or ip < 0 or ip >= nphi:
                 for m in range(nlin):
                     beta_sum[m] += 1.0

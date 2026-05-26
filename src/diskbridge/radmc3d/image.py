@@ -21,7 +21,8 @@ from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
 from .run import ensure_temperature_symlink
 from .colliders import gow17_lamda_colliders, install_validated_molecule_file
-from .line_transfer.validation import ensure_gas_temperature_for_nonlte
+from .line_transfer.validation import ensure_gas_temperature_for_nonlte, parse_radmc3d_inp
+from .line_transfer.external_validation import validate_external_population_run
 from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
 import diskbridge
 from .molecule import RadMolecule
@@ -1224,6 +1225,11 @@ class RadImage:
             Molecule name (e.g., 'co')
         """
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
+        if self._has_external_population_inputs(molecule):
+            logger.info(
+                "Preserving staged external-population molecule file for %s", molecule
+            )
+            return
         moldata_dir = REPO_ROOT / "data" / "moldata"
         install_validated_molecule_file(
             species=molecule,
@@ -1285,11 +1291,49 @@ class RadImage:
             output_dir=str(self.model_dir),
         )
         logger.info("Created microturbulence.binp")
+
+    def _has_external_population_inputs(self, molecule: str) -> bool:
+        species = str(molecule).lower().strip()
+        return (
+            (self.inputs_dir / f"levelpop_{species}.dat").exists()
+            and (self.inputs_dir / f"external_levelpop_manifest_{species}.json").exists()
+        )
+
+    def _external_population_species(self) -> list[str]:
+        species: list[str] = []
+        for path in self.inputs_dir.glob("levelpop_*.dat"):
+            name = path.name
+            species_name = name[len("levelpop_"):-len(".dat")]
+            manifest = self.inputs_dir / f"external_levelpop_manifest_{species_name}.json"
+            if manifest.exists():
+                species.append(species_name)
+        return sorted(species)
     
     def _ensure_radmc3d_inp_configured(self) -> None:
         """Ensure radmc3d.inp is properly configured for line transfer."""
         # Use radmc3d_inputs/radmc3d.inp
         inp_file = self.inputs_dir / 'radmc3d.inp'
+        external_species = self._external_population_species()
+        if external_species:
+            if not inp_file.exists():
+                raise RuntimeError(
+                    "External-population rendering requires an existing radmc3d.inp "
+                    "with lines_mode = 50."
+                )
+            settings = parse_radmc3d_inp(inp_file)
+            if int(settings.get("lines_mode", "0")) != 50:
+                raise RuntimeError(
+                    "Refusing to overwrite staged external-population radmc3d.inp: "
+                    f"lines_mode is {settings.get('lines_mode')!r}, expected 50."
+                )
+            if str(settings.get("tgas_eq_tdust", "0")).strip() != "0":
+                raise RuntimeError(
+                    "Refusing to render external populations with tgas_eq_tdust != 0."
+                )
+            for species in external_species:
+                validate_external_population_run(self.inputs_dir, species=species)
+            logger.info("Preserving staged external-population radmc3d.inp")
+            return
         line_params = diskbridge.canonicalize_line_params(self.params)
         line_modes = {int(mode) for mode in line_params["line_mode"]}
         if len(line_modes) != 1:
@@ -1438,6 +1482,10 @@ class RadImage:
         """
         # Create inputs_dir if it doesn't exist
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
+        if self._has_external_population_inputs(molecule):
+            validate_external_population_run(self.inputs_dir, species=molecule)
+            logger.info("Preserving staged external-population lines.inp for %s", molecule)
+            return
 
         setup = self._line_setup_for_molecule(molecule)
         colliders = setup["colliders"] if abs(setup["line_mode"]) in {3, 4} else []

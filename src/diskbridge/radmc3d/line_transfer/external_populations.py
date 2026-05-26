@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import json
 import time
 
@@ -25,6 +26,8 @@ from numba import njit, prange
 
 from diskbridge._constants import K_B, M_H
 from diskbridge._logging import logger
+from diskbridge._units import units
+from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.colliders import gow17_lamda_colliders
 from diskbridge.radmc3d.writer import RadWriter
 from diskbridge.chemistry.shielding.healpix_columns import (
@@ -40,8 +43,9 @@ from .molecular_rates import (
     stack_collider_tables,
 )
 from .se_solver import (
+    compute_collisional_rates,
     compute_line_center_opacity,
-    convergence_error,
+    population_change_diagnostics,
     solve_statistical_equilibrium,
 )
 
@@ -59,6 +63,11 @@ class HealpixSEConfig:
     relaxation: float = 1.0
     escape_chunk_size: int = 50_000
     allow_unconverged: bool = False
+    species_density_floor_cm3: float = 0.0
+    overwrite: bool = True
+    checkpoint_interval: int = 1
+    checkpoint_levelpop: bool = False
+    resume_from_checkpoint: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +123,26 @@ def _collider_density_cm3(result, name: str, opr: float | None = None) -> np.nda
     )
 
 
-def _velocity_xyz_cm_s(rad) -> np.ndarray:
+def _radmc_transfer_mesh(mesh):
+    """Return the spherical geometry convention used by RADMC-3D input files.
+
+    Fresh hydro loads should already be canonicalized to phi=0..2pi. The
+    fallback here preserves compatibility with older saved snapshots.
+    """
+
+    if mesh.coord_system != "spherical":
+        return mesh
+    return Mesh.spherical(
+        r=Axis(edges=mesh.edges("r")),
+        theta=Axis(edges=mesh.edges("theta")),
+        phi=Axis(edges=RadWriter.radmc_spherical_phi_edges_rad(mesh) * units("radian")),
+    )
+
+
+def _velocity_xyz_cm_s(rad, *, basis_mesh=None) -> np.ndarray:
     """Build a Cartesian velocity field ``v_xyz[n0, n1, n2, 3]`` in cm/s."""
     mesh = rad.model.mesh
+    basis_mesh = basis_mesh or mesh
     gas = rad.model.gas
 
     if mesh.coord_system == "cartesian":
@@ -145,7 +171,9 @@ def _velocity_xyz_cm_s(rad) -> np.ndarray:
     # Line transfer integrates in Cartesian ray directions; the Mesh owns the
     # spherical basis conversion so this module only assembles the required
     # velocity field.
-    vx, vy, vz = mesh.spherical_vector_components_to_cartesian(
+    # The external escape-probability solve must use the same spherical basis
+    # that RADMC-3D sees in amr_grid.inp.
+    vx, vy, vz = basis_mesh.spherical_vector_components_to_cartesian(
         vr,
         vtheta,
         vphi,
@@ -177,6 +205,522 @@ def _build_a_line(Tgas: np.ndarray, a_turb: np.ndarray, molweight: float) -> np.
     m_mol = molweight * M_H
     thermal_sq = 2.0 * K_B * Tgas / m_mol
     return np.sqrt(np.maximum(a_turb * a_turb + thermal_sq, 0.0))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sha256_array(values: np.ndarray) -> str:
+    arr = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(str(arr.dtype).encode("ascii"))
+    digest.update(np.asarray(arr.shape, dtype=np.int64).tobytes())
+    digest.update(arr.tobytes())
+    return digest.hexdigest()
+
+
+def _range_pair(values: np.ndarray) -> list[float]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return [0.0, 0.0]
+    return [float(np.min(arr)), float(np.max(arr))]
+
+
+def _beta_diagnostics(beta: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(beta, dtype=np.float64)
+    if arr.size == 0:
+        return {
+            "beta_min": 1.0,
+            "beta_p01": 1.0,
+            "beta_p10": 1.0,
+            "beta_median": 1.0,
+            "beta_p90": 1.0,
+            "beta_max": 1.0,
+        }
+    qs = np.percentile(arr, [1.0, 10.0, 50.0, 90.0])
+    return {
+        "beta_min": float(np.min(arr)),
+        "beta_p01": float(qs[0]),
+        "beta_p10": float(qs[1]),
+        "beta_median": float(qs[2]),
+        "beta_p90": float(qs[3]),
+        "beta_max": float(np.max(arr)),
+    }
+
+
+def _velocity_range_diagnostics(velocity_xyz: np.ndarray) -> dict[str, list[float]]:
+    speed = np.linalg.norm(velocity_xyz, axis=-1)
+    return {
+        "vx": _range_pair(velocity_xyz[..., 0]),
+        "vy": _range_pair(velocity_xyz[..., 1]),
+        "vz": _range_pair(velocity_xyz[..., 2]),
+        "speed": _range_pair(speed),
+    }
+
+
+def _gas_velocity_binp_sha256(rad) -> str:
+    mesh = rad.model.mesh
+    gas = rad.model.gas
+    if mesh.coord_system == "spherical":
+        names = ("vr", "vtheta", "vphi")
+    elif mesh.coord_system == "cartesian":
+        names = ("vx", "vy", "vz")
+    else:
+        raise ValueError(f"Unsupported coordinate system: {mesh.coord_system!r}")
+    components = tuple(
+        _gas_field(rad, name, unit="cm/s")
+        for name in names
+    )
+    return RadWriter.gas_velocity_binp_sha256(mesh, components)
+
+
+def _mesh_edge_hashes(mesh) -> dict[str, str]:
+    units_by_axis = {
+        "r": "cm",
+        "theta": "rad",
+        "phi": "rad",
+        "x": "cm",
+        "y": "cm",
+        "z": "cm",
+    }
+    return {
+        name: _sha256_array(mesh.edges_f64(name, units_by_axis[name]))
+        for name in mesh.axis_names()
+    }
+
+
+def _checkpoint_paths(output_dir: Path, species: str, iteration: int | None = None) -> dict[str, Path]:
+    root = output_dir / "checkpoints"
+    paths = {
+        "root": root,
+        "latest": root / f"checkpoint_latest_{species}.json",
+    }
+    if iteration is not None:
+        tag = f"iter{int(iteration):04d}"
+        paths.update({
+            "fracpop": root / f"fracpop_{species}.{tag}.npz",
+            "manifest": root / f"checkpoint_manifest_{species}.{tag}.json",
+            "levelpop": root / f"levelpop_{species}.{tag}.dat",
+        })
+    return paths
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def _checkpoint_fingerprint(
+    *,
+    species: str,
+    config: HealpixSEConfig,
+    molecule: MoleculeData,
+    molecule_sha256: str,
+    gas_velocity_sha256: str,
+    transfer_mesh,
+    n_species: np.ndarray,
+    Tgas: np.ndarray,
+    a_turb: np.ndarray,
+    cell_idx: np.ndarray,
+    collider_dens_cand: np.ndarray,
+) -> dict:
+    return {
+        "version": 1,
+        "species": species,
+        "solver": "healpix_escape_probability_statistical_equilibrium",
+        "nside": int(config.nside),
+        "tbg_K": float(config.tbg_K),
+        "relaxation": float(config.relaxation),
+        "max_ray_steps": int(config.max_ray_steps),
+        "species_density_floor_cm3": float(config.species_density_floor_cm3),
+        "molecule_sha256": molecule_sha256,
+        "gas_velocity_sha256": gas_velocity_sha256,
+        "n_levels": int(molecule.nlev),
+        "n_lines": int(molecule.nlin),
+        "mesh_coord_system": transfer_mesh.coord_system,
+        "mesh_shape": [int(x) for x in n_species.shape],
+        "mesh_edge_hashes": _mesh_edge_hashes(transfer_mesh),
+        "species_density_sha256": _sha256_array(n_species),
+        "temperature_sha256": _sha256_array(Tgas),
+        "microturbulence_sha256": _sha256_array(a_turb),
+        "candidate_idx_sha256": _sha256_array(cell_idx),
+        "collider_density_candidate_sha256": _sha256_array(collider_dens_cand),
+    }
+
+
+def _flat_levelpop_radmc_order(
+    *,
+    mesh,
+    molecule: MoleculeData,
+    fracpop_cand: np.ndarray,
+    n_species_cand: np.ndarray,
+    cell_idx: np.ndarray,
+    n_species: np.ndarray,
+) -> np.ndarray:
+    n0, n1, n2 = n_species.shape
+    levelpop_full = _scatter_levelpop_to_full(
+        fracpop_cand, n_species_cand, cell_idx, molecule.nlev, n0, n1, n2,
+    )
+    flat_per_level = np.stack(
+        [RadWriter.flatten_scalar_to_radmc_order(mesh, levelpop_full[..., k])
+         for k in range(molecule.nlev)],
+        axis=1,
+    )
+    n_species_flat = RadWriter.flatten_scalar_to_radmc_order(mesh, n_species)
+    sum_levels = flat_per_level.sum(axis=1)
+    diff = np.abs(sum_levels - n_species_flat)
+    tol = 1.0e-8 * np.maximum(n_species_flat, 1.0)
+    bad = int(np.count_nonzero(diff > tol))
+    if bad:
+        raise RuntimeError(
+            f"Population sum mismatch in {bad} cells "
+            f"(max diff {float(diff.max()):.3e})"
+        )
+    return flat_per_level
+
+
+def _write_iteration_checkpoint(
+    *,
+    output_dir: Path,
+    species: str,
+    iteration: int,
+    fracpop: np.ndarray,
+    fingerprint: dict,
+    history: list[dict],
+    maser_diagnostics: dict,
+    final_err: float,
+    final_beta_range: tuple[float, float],
+    converged: bool,
+    write_levelpop: bool,
+    mesh,
+    molecule: MoleculeData,
+    n_species_cand: np.ndarray,
+    cell_idx: np.ndarray,
+    n_species: np.ndarray,
+) -> None:
+    paths = _checkpoint_paths(output_dir, species, iteration)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    fracpop_tmp = paths["fracpop"].with_name(paths["fracpop"].name + ".tmp")
+    with fracpop_tmp.open("wb") as fobj:
+        # This compact checkpoint is the resume source. It stores fractional
+        # populations, not multiplied level populations, so zero-density cells
+        # do not need to be materialized at every iteration.
+        np.savez(
+            fobj,
+            fracpop=np.ascontiguousarray(fracpop, dtype=np.float64),
+            iteration=np.asarray([int(iteration)], dtype=np.int64),
+            final_err=np.asarray([float(final_err)], dtype=np.float64),
+            beta_range=np.asarray(final_beta_range, dtype=np.float64),
+        )
+    fracpop_tmp.replace(paths["fracpop"])
+
+    levelpop_path = None
+    if write_levelpop:
+        flat_per_level = _flat_levelpop_radmc_order(
+            mesh=mesh,
+            molecule=molecule,
+            fracpop_cand=fracpop,
+            n_species_cand=n_species_cand,
+            cell_idx=cell_idx,
+            n_species=n_species,
+        )
+        levelpop_tmp = paths["levelpop"].with_name(paths["levelpop"].name + ".tmp")
+        RadWriter.write_levelpop_dat(
+            levelpop_tmp,
+            levelpop_cm3_radmc_order=flat_per_level,
+            level_numbers_1based=np.arange(1, molecule.nlev + 1, dtype=np.int64),
+        )
+        levelpop_tmp.replace(paths["levelpop"])
+        levelpop_path = str(paths["levelpop"])
+
+    payload = {
+        "checkpoint_type": "healpix_se_iteration",
+        "species": species,
+        "iteration": int(iteration),
+        "fracpop_file": str(paths["fracpop"]),
+        "levelpop_file": levelpop_path,
+        "fingerprint": fingerprint,
+        "history": history,
+        "maser_suppression": maser_diagnostics,
+        "final_convergence_error": float(final_err),
+        "beta_range": [float(final_beta_range[0]), float(final_beta_range[1])],
+        "converged": bool(converged),
+    }
+    _write_json_atomic(paths["manifest"], payload)
+    _write_json_atomic(paths["latest"], payload)
+
+
+def _load_latest_checkpoint(
+    *,
+    output_dir: Path,
+    species: str,
+    fingerprint: dict,
+    expected_shape: tuple[int, int],
+) -> dict | None:
+    paths = _checkpoint_paths(output_dir, species)
+    manifest_path = paths["latest"]
+    if not manifest_path.exists():
+        candidates = sorted(paths["root"].glob(f"checkpoint_manifest_{species}.iter*.json"))
+        if not candidates:
+            return None
+        manifest_path = candidates[-1]
+    payload = json.loads(manifest_path.read_text())
+    if payload.get("fingerprint") != fingerprint:
+        raise ValueError(
+            f"Checkpoint {manifest_path} does not match the current inputs; "
+            "delete it or run without resume_from_checkpoint."
+        )
+    fracpop_path = Path(payload["fracpop_file"])
+    if not fracpop_path.exists():
+        raise FileNotFoundError(f"Checkpoint fractional populations are missing: {fracpop_path}")
+    with np.load(fracpop_path) as data:
+        fracpop = np.ascontiguousarray(data["fracpop"], dtype=np.float64)
+    if fracpop.shape != expected_shape:
+        raise ValueError(
+            f"Checkpoint {fracpop_path} has fracpop shape {fracpop.shape}; "
+            f"expected {expected_shape}"
+        )
+    return {
+        "fracpop": fracpop,
+        "iteration": int(payload["iteration"]),
+        "history": list(payload.get("history", [])),
+        "maser_diagnostics": payload.get("maser_suppression", _empty_maser_diagnostics()),
+        "final_err": float(payload.get("final_convergence_error", np.inf)),
+        "final_beta_range": tuple(float(x) for x in payload.get("beta_range", [1.0, 1.0])),
+    }
+
+
+def _selected_cell_diagnostics(
+    *,
+    molecule: MoleculeData,
+    cell_idx: np.ndarray,
+    Tgas_cand: np.ndarray,
+    n_species_cand: np.ndarray,
+    collider_dens_cand: np.ndarray,
+    collider_names: list[str],
+    beta: np.ndarray,
+    alpha0_raw: np.ndarray,
+    fracpop: np.ndarray,
+    tgrids: np.ndarray,
+    ntemps: np.ndarray,
+    tables: np.ndarray,
+) -> list[dict]:
+    """Return compact per-cell diagnostics for interpreting failed solves."""
+
+    n_cell = int(cell_idx.shape[0])
+    if n_cell == 0:
+        return []
+    candidates: list[tuple[str, int]] = [
+        ("highest_species_density_cell", int(np.argmax(n_species_cand))),
+        ("lowest_species_density_cell", int(np.argmin(n_species_cand))),
+        ("lowest_beta_cell", int(np.argmin(np.min(beta, axis=1)))),
+        ("highest_opacity_cell", int(np.argmax(np.max(alpha0_raw, axis=1)))),
+    ]
+    positive = n_species_cand[n_species_cand > 0.0]
+    if positive.size:
+        median_value = float(np.median(positive))
+        candidates.append((
+            "median_species_density_cell",
+            int(np.argmin(np.abs(n_species_cand - median_value))),
+        ))
+
+    seen: set[int] = set()
+    selected: list[tuple[str, int]] = []
+    for label, idx in candidates:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        selected.append((label, idx))
+
+    selected_idx = np.asarray([idx for _label, idx in selected], dtype=np.int64)
+    C = compute_collisional_rates(
+        np.ascontiguousarray(Tgas_cand[selected_idx]),
+        np.ascontiguousarray(collider_dens_cand[selected_idx]),
+        tgrids,
+        ntemps,
+        tables,
+        molecule.weight,
+        molecule.energy_erg,
+    )
+    lte = lte_populations(molecule, Tgas_cand[selected_idx])
+
+    n_report_lines = min(5, molecule.nlin)
+    n_report_levels = min(8, molecule.nlev)
+    out: list[dict] = []
+    for local, (label, idx) in enumerate(selected):
+        collider_ranges = {
+            name: float(collider_dens_cand[idx, k])
+            for k, name in enumerate(collider_names)
+        }
+        cul_over_aul = []
+        for m in range(n_report_lines):
+            u = int(molecule.iup[m])
+            l = int(molecule.ilow[m])
+            aul = float(molecule.aud[m])
+            cul = float(C[local, u, l])
+            cul_over_aul.append({
+                "line_index": int(m),
+                "radmc_line_number": int(m + 1),
+                "upper_level": int(u + 1),
+                "lower_level": int(l + 1),
+                "C_ul_s-1": cul,
+                "A_ul_s-1": aul,
+                "C_ul_over_A_ul": cul / aul if aul > 0.0 else None,
+            })
+        out.append({
+            "label": label,
+            "candidate_index": int(idx),
+            "grid_index": [int(x) for x in cell_idx[idx].tolist()],
+            "Tgas_K": float(Tgas_cand[idx]),
+            "n_species_cm3": float(n_species_cand[idx]),
+            "collider_densities_cm3": collider_ranges,
+            "beta_first_lines": [float(x) for x in beta[idx, :n_report_lines].tolist()],
+            "alpha0_raw_first_lines_cm1": [
+                float(x) for x in alpha0_raw[idx, :n_report_lines].tolist()
+            ],
+            "lte_fractions_first_levels": [
+                float(x) for x in lte[local, :n_report_levels].tolist()
+            ],
+            "final_fractions_first_levels": [
+                float(x) for x in fracpop[idx, :n_report_levels].tolist()
+            ],
+            "C_ul_over_A_ul_first_lines": cul_over_aul,
+        })
+    return out
+
+
+def _empty_maser_diagnostics() -> dict:
+    return {
+        "policy": "radmc3d_compatible_suppress_negative_opacity",
+        "applied": False,
+        "warning": (
+            "Population inversions are written unchanged. Negative opacity is "
+            "set to zero only for DiskBridge escape-probability updates; "
+            "RADMC-3D suppresses negative opacity again during final ray tracing. "
+            "This output does not include maser amplification."
+        ),
+        "total_negative_opacity_entries": 0,
+        "max_negative_opacity_cells_in_iteration": 0,
+        "min_negative_alpha0_cm1": None,
+        "iterations": [],
+        "transitions": [],
+    }
+
+
+def _iteration_maser_diagnostics(
+    *,
+    molecule: MoleculeData,
+    fracpop: np.ndarray,
+    alpha0_raw: np.ndarray,
+    iteration: int,
+) -> dict:
+    negative = alpha0_raw < 0.0
+    negative_entries = int(np.count_nonzero(negative))
+    negative_cells = int(np.count_nonzero(np.any(negative, axis=1)))
+    min_alpha = (
+        float(np.min(alpha0_raw[negative]))
+        if negative_entries
+        else float(np.min(alpha0_raw))
+    )
+    transitions = []
+    if negative_entries:
+        for line_index in range(molecule.nlin):
+            line_negative = negative[:, line_index]
+            n_line_cells = int(np.count_nonzero(line_negative))
+            if n_line_cells == 0:
+                continue
+            upper = int(molecule.iup[line_index])
+            lower = int(molecule.ilow[line_index])
+            opacity_factor = (
+                molecule.weight[upper] / molecule.weight[lower] * fracpop[:, lower]
+                - fracpop[:, upper]
+            )
+            transitions.append({
+                "line_index": int(line_index),
+                "radmc_line_number": int(line_index + 1),
+                "upper_level": int(upper + 1),
+                "lower_level": int(lower + 1),
+                "n_cells": n_line_cells,
+                "min_opacity_factor": float(np.min(opacity_factor[line_negative])),
+                "min_alpha0_cm1": float(np.min(alpha0_raw[line_negative, line_index])),
+            })
+    return {
+        "iteration": int(iteration),
+        "applied": bool(negative_entries),
+        "negative_opacity_entries": negative_entries,
+        "negative_opacity_cells": negative_cells,
+        "negative_opacity_min_cm1": min_alpha,
+        "transitions": transitions,
+    }
+
+
+def _update_maser_diagnostics(aggregate: dict, iteration_diag: dict) -> None:
+    aggregate["iterations"].append(iteration_diag)
+    if not iteration_diag["applied"]:
+        return
+    if not aggregate["applied"]:
+        logger.warning(
+            "Population inversion / negative line opacity detected. "
+            "RADMC-3D-compatible behavior is being used: negative optical "
+            "depths are set to zero in the escape-probability solve. "
+            "RADMC-3D will also suppress negative opacity during final ray "
+            "tracing. This output does not include maser amplification."
+        )
+    aggregate["applied"] = True
+    aggregate["total_negative_opacity_entries"] += int(
+        iteration_diag["negative_opacity_entries"]
+    )
+    aggregate["max_negative_opacity_cells_in_iteration"] = max(
+        int(aggregate["max_negative_opacity_cells_in_iteration"]),
+        int(iteration_diag["negative_opacity_cells"]),
+    )
+    min_alpha = float(iteration_diag["negative_opacity_min_cm1"])
+    current = aggregate["min_negative_alpha0_cm1"]
+    aggregate["min_negative_alpha0_cm1"] = (
+        min_alpha if current is None else min(float(current), min_alpha)
+    )
+
+    by_line = {
+        int(row["line_index"]): row
+        for row in aggregate["transitions"]
+    }
+    for transition in iteration_diag["transitions"]:
+        line_index = int(transition["line_index"])
+        if line_index not in by_line:
+            by_line[line_index] = {
+                "line_index": line_index,
+                "radmc_line_number": int(transition["radmc_line_number"]),
+                "upper_level": int(transition["upper_level"]),
+                "lower_level": int(transition["lower_level"]),
+                "total_negative_entries": 0,
+                "max_negative_cells_in_iteration": 0,
+                "min_opacity_factor": float("inf"),
+                "min_alpha0_cm1": float("inf"),
+            }
+        row = by_line[line_index]
+        row["total_negative_entries"] += int(transition["n_cells"])
+        row["max_negative_cells_in_iteration"] = max(
+            int(row["max_negative_cells_in_iteration"]),
+            int(transition["n_cells"]),
+        )
+        row["min_opacity_factor"] = min(
+            float(row["min_opacity_factor"]),
+            float(transition["min_opacity_factor"]),
+        )
+        row["min_alpha0_cm1"] = min(
+            float(row["min_alpha0_cm1"]),
+            float(transition["min_alpha0_cm1"]),
+        )
+    aggregate["transitions"] = [
+        by_line[key] for key in sorted(by_line)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +842,24 @@ def solve_and_write_healpix_levelpop(
     output_dir.mkdir(parents=True, exist_ok=True)
     levelpop_path = output_dir / f"levelpop_{species}.dat"
     manifest_path = output_dir / f"external_levelpop_manifest_{species}.json"
+    levelpop_tmp = output_dir / f"levelpop_{species}.dat.tmp"
+    manifest_tmp = output_dir / f"external_levelpop_manifest_{species}.json.tmp"
+    for tmp in (levelpop_tmp, manifest_tmp):
+        if tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+    if not bool(config.overwrite) and (levelpop_path.exists() or manifest_path.exists()):
+        raise FileExistsError(
+            f"External level-population output already exists for {species} in {output_dir}; "
+            "set overwrite=True to replace it."
+        )
+    for stale in (levelpop_path, manifest_path):
+        if bool(config.overwrite) and (stale.exists() or stale.is_symlink()):
+            # Remove stale products before the solve so a failed production run
+            # cannot leave RADMC-3D pointed at an older levelpop/manifest pair.
+            stale.unlink()
 
     molecule = parse_lamda_molecule_file(molecule_file)
+    molecule_sha256 = _sha256_file(Path(molecule_file))
 
     expected_colliders = gow17_lamda_colliders(species)
     actual_colliders = list(molecule.collider_names)
@@ -312,13 +872,16 @@ def solve_and_write_healpix_levelpop(
     mesh = rad.model.mesh
     if mesh is None:
         raise ValueError("RadModel has no mesh defined")
+    transfer_mesh = _radmc_transfer_mesh(mesh)
 
     # Gas fields (native mesh order).
     Tgas = _gas_field(rad, "gas_temperature", unit="K")
     a_turb = _microturbulence_cm_s(rad)
     a_line = _build_a_line(Tgas, a_turb, molecule.molweight)
     n_species = _species_density_cm3(chemistry_result, species)
-    velocity_xyz = _velocity_xyz_cm_s(rad)
+    velocity_xyz = _velocity_xyz_cm_s(rad, basis_mesh=transfer_mesh)
+    velocity_range = _velocity_range_diagnostics(velocity_xyz)
+    gas_velocity_sha256 = _gas_velocity_binp_sha256(rad)
 
     if n_species.shape != Tgas.shape or n_species.shape != a_turb.shape:
         raise ValueError(
@@ -330,24 +893,83 @@ def solve_and_write_healpix_levelpop(
     collider_full: list[np.ndarray] = []
     for name in expected_colliders:
         collider_full.append(_collider_density_cm3(chemistry_result, name))
+    collider_density_ranges = {
+        name: _range_pair(values)
+        for name, values in zip(expected_colliders, collider_full, strict=True)
+    }
 
     if not np.all(np.isfinite(n_species)):
         raise ValueError(f"number density for {species} contains non-finite values")
-    # RADMC-3D reads the complete numberdens_<species>.binp array. Keep the
-    # external solver on that same full grid without density-based pruning.
-    cell_mask = np.ones(n_species.shape, dtype=bool)
+    if np.any(n_species < 0.0):
+        raise ValueError(f"number density for {species} contains negative values")
+    density_floor = float(config.species_density_floor_cm3)
+    if density_floor < 0.0:
+        raise ValueError(
+            f"species_density_floor_cm3 must be non-negative, got {density_floor}"
+        )
+    # By default this skips only exact zero-species cells. If a chemistry model
+    # deliberately uses a numerical abundance floor everywhere, callers can set
+    # an explicit floor and the manifest records that choice.
+    cell_mask = n_species > density_floor
 
     assert_temperature_in_collision_range(molecule, Tgas, cell_mask)
 
     tracer, dirs, cell_idx, cell_centers = _build_tracer_and_geometry(
-        mesh, config.nside, cell_mask,
+        transfer_mesh, config.nside, cell_mask,
     )
     n_cell = cell_idx.shape[0]
+    n_total_cells = int(np.prod(n_species.shape))
+    n_zero_species_cells = n_total_cells - n_cell
     logger.info(
         f"HEALPix SE for {species}: nside={config.nside}, n_cells={n_cell}, "
-        f"nlev={molecule.nlev}, nlin={molecule.nlin}, "
+        f"zero_species_cells={n_zero_species_cells}, nlev={molecule.nlev}, nlin={molecule.nlin}, "
         f"colliders={list(molecule.collider_names)}"
     )
+    cell_counts = {
+        "total_grid_cells": n_total_cells,
+        "species_candidate_cells": int(n_cell),
+        "species_zero_cells": int(n_zero_species_cells),
+        "solved_nonzero_species_cells": int(n_cell),
+        "zero_or_below_floor_species_cells": int(n_zero_species_cells),
+    }
+    if n_cell == 0:
+        logger.warning(
+            "No cells have nonzero %s density; writing all-zero level populations",
+            species,
+        )
+        _write_levelpop_all_zero(
+            mesh=mesh,
+            molecule=molecule,
+            n_cells_shape=n_species.shape,
+            path=levelpop_tmp,
+        )
+        levelpop_tmp.replace(levelpop_path)
+        _write_manifest(
+            manifest_path=manifest_tmp,
+            species=species,
+            config=config,
+            molecule=molecule,
+            molecule_file=Path(molecule_file),
+            molecule_sha256=molecule_sha256,
+            levelpop_path=levelpop_path,
+            iterations=0,
+            final_err=0.0,
+            tgas_range=(float(np.min(Tgas)), float(np.max(Tgas))),
+            aturb_range=(float(np.min(a_turb)), float(np.max(a_turb))),
+            nsp_range=(float(np.min(n_species)), float(np.max(n_species))),
+            velocity_range=velocity_range,
+            gas_velocity_sha256=gas_velocity_sha256,
+            beta_range=(1.0, 1.0),
+            iteration_history=[],
+            converged=True,
+            cell_counts=cell_counts,
+            collider_density_ranges=collider_density_ranges,
+            maser_diagnostics=_empty_maser_diagnostics(),
+            selected_cell_diagnostics=[],
+            resumed_from_checkpoint_iteration=None,
+        )
+        manifest_tmp.replace(manifest_path)
+        return levelpop_path
 
     # Selected-cell views.
     idx0 = cell_idx[:, 0]
@@ -366,22 +988,69 @@ def solve_and_write_healpix_levelpop(
     bytes_per_cell = 8.0 * molecule.nlev * molecule.nlev
     budget = max(int(config.memory_budget_gib * (1 << 30) / max(bytes_per_cell, 1.0)), 1)
     se_chunk = min(n_cell, budget)
+    checkpoint_interval = int(config.checkpoint_interval)
+    if checkpoint_interval < 0:
+        raise ValueError(
+            f"checkpoint_interval must be non-negative, got {checkpoint_interval}"
+        )
 
     # LTE initialization.
     f = lte_populations(molecule, Tgas_cand)
+    checkpoint_fingerprint = _checkpoint_fingerprint(
+        species=species,
+        config=config,
+        molecule=molecule,
+        molecule_sha256=molecule_sha256,
+        gas_velocity_sha256=gas_velocity_sha256,
+        transfer_mesh=transfer_mesh,
+        n_species=n_species,
+        Tgas=Tgas,
+        a_turb=a_turb,
+        cell_idx=cell_idx,
+        collider_dens_cand=collider_dens_cand,
+    )
 
     history: list[dict] = []
     final_err = np.inf
     final_beta_range = (1.0, 1.0)
     last_iter = 0
     converged = False
+    maser_diagnostics = _empty_maser_diagnostics()
+    resumed_from_checkpoint_iteration: int | None = None
+    if bool(config.resume_from_checkpoint):
+        loaded = _load_latest_checkpoint(
+            output_dir=output_dir,
+            species=species,
+            fingerprint=checkpoint_fingerprint,
+            expected_shape=(n_cell, molecule.nlev),
+        )
+        if loaded is None:
+            logger.info("No HEALPix SE checkpoint found for %s; starting from LTE", species)
+        else:
+            f = loaded["fracpop"]
+            history = loaded["history"]
+            maser_diagnostics = loaded["maser_diagnostics"]
+            final_err = loaded["final_err"]
+            final_beta_range = loaded["final_beta_range"]
+            last_iter = loaded["iteration"]
+            resumed_from_checkpoint_iteration = int(last_iter)
+            logger.info(
+                "Resuming HEALPix SE for %s from checkpoint iteration %d",
+                species,
+                last_iter,
+            )
+            if last_iter >= int(config.maxiter):
+                raise ValueError(
+                    f"Latest checkpoint for {species} is already at iteration "
+                    f"{last_iter}; increase maxiter above {last_iter} to continue."
+                )
 
     n0, n1, n2 = n_species.shape
 
-    for iteration in range(1, int(config.maxiter) + 1):
+    for iteration in range(last_iter + 1, int(config.maxiter) + 1):
         t0 = time.perf_counter()
         logger.info("  iter %3d/%d: computing line-center opacity", iteration, config.maxiter)
-        alpha0_cand = compute_line_center_opacity(
+        alpha0_raw = compute_line_center_opacity(
             f,
             n_species_cand,
             a_line_cand,
@@ -391,23 +1060,28 @@ def solve_and_write_healpix_levelpop(
             molecule.freq_hz,
             molecule.weight,
         )
-        # RADMC-3D's LVG path does not abort on masering cells; it removes the
-        # negative opacity contribution from the transfer update. Match that
-        # convention here and record the event in the iteration history.
-        negative_opacity_entries = int(np.count_nonzero(alpha0_cand < 0.0))
-        negative_opacity_cells = int(np.count_nonzero(np.any(alpha0_cand < 0.0, axis=1)))
-        min_alpha = float(np.min(alpha0_cand))
-        if negative_opacity_entries:
+        iteration_maser = _iteration_maser_diagnostics(
+            molecule=molecule,
+            fracpop=f,
+            alpha0_raw=alpha0_raw,
+            iteration=iteration,
+        )
+        _update_maser_diagnostics(maser_diagnostics, iteration_maser)
+        if iteration_maser["applied"]:
             logger.warning(
                 f"  iter {iteration:3d}: detected negative line-center opacity in "
-                f"{negative_opacity_cells} cells ({negative_opacity_entries} line entries); "
-                "setting those opacity entries to zero for the escape-probability update"
+                f"{iteration_maser['negative_opacity_cells']} cells "
+                f"({iteration_maser['negative_opacity_entries']} line entries); "
+                "setting those opacity entries to zero for the RADMC-3D-compatible "
+                "escape-probability update"
             )
-            alpha0_cand = np.where(alpha0_cand < 0.0, 0.0, alpha0_cand)
+        # Keep the populations unchanged. Only suppress negative opacity in the
+        # transfer update, matching RADMC-3D's no-maser-amplification behavior.
+        alpha0_used = np.where(alpha0_raw < 0.0, 0.0, alpha0_raw)
 
         logger.info("  iter %3d/%d: scattering opacity to full grid", iteration, config.maxiter)
         alpha0_full = _scatter_alpha0_to_full(
-            alpha0_cand, cell_idx, molecule.nlin, n0, n1, n2,
+            alpha0_used, cell_idx, molecule.nlin, n0, n1, n2,
         )
 
         logger.info(
@@ -418,7 +1092,7 @@ def solve_and_write_healpix_levelpop(
             int(config.escape_chunk_size),
         )
         beta = compute_escape_probabilities_healpix(
-            mesh=mesh,
+            mesh=transfer_mesh,
             tracer=tracer,
             candidate_idx=cell_idx,
             cell_centers=cell_centers,
@@ -455,30 +1129,64 @@ def solve_and_write_healpix_levelpop(
         sums = np.where(sums <= 0.0, 1.0, sums)
         f_next = f_next / sums
 
-        err = convergence_error(f_next, f)
-        beta_min = float(np.min(beta))
-        beta_max = float(np.max(beta))
+        pop_diag = population_change_diagnostics(f_next, f)
+        err = float(pop_diag["population_convergence_error"])
+        beta_diag = _beta_diagnostics(beta)
+        beta_min = float(beta_diag["beta_min"])
+        beta_max = float(beta_diag["beta_max"])
         elapsed = time.perf_counter() - t0
         logger.info(
             f"  iter {iteration:3d}/{config.maxiter}: err={err:.3e}  "
+            f"tv={pop_diag['population_tv_change_max']:.3e}  "
+            f"rel_imp={pop_diag['population_rel_important_max']:.3e}  "
+            f"rel_all={pop_diag['population_rel_all_levels_max']:.3e}  "
             f"beta=[{beta_min:.3e}, {beta_max:.3e}]  ({elapsed:.2f} s)"
         )
-        history.append({
+        iteration_row = {
             "iteration": int(iteration),
             "err": float(err),
-            "beta_min": beta_min,
-            "beta_max": beta_max,
             "elapsed_s": float(elapsed),
-            "negative_opacity_cells": negative_opacity_cells,
-            "negative_opacity_entries": negative_opacity_entries,
-            "negative_opacity_min_cm1": min_alpha,
-        })
+            "negative_opacity_cells": int(iteration_maser["negative_opacity_cells"]),
+            "negative_opacity_entries": int(iteration_maser["negative_opacity_entries"]),
+            "negative_opacity_min_cm1": float(iteration_maser["negative_opacity_min_cm1"]),
+        }
+        iteration_row.update(pop_diag)
+        iteration_row.update(beta_diag)
+        history.append(iteration_row)
         f = f_next
         final_err = err
         final_beta_range = (beta_min, beta_max)
         last_iter = iteration
         if err < float(config.convcrit):
             converged = True
+        should_checkpoint = (
+            checkpoint_interval > 0
+            and (
+                iteration % checkpoint_interval == 0
+                or iteration == int(config.maxiter)
+                or converged
+            )
+        )
+        if should_checkpoint:
+            _write_iteration_checkpoint(
+                output_dir=output_dir,
+                species=species,
+                iteration=iteration,
+                fracpop=f,
+                fingerprint=checkpoint_fingerprint,
+                history=history,
+                maser_diagnostics=maser_diagnostics,
+                final_err=final_err,
+                final_beta_range=final_beta_range,
+                converged=converged,
+                write_levelpop=bool(config.checkpoint_levelpop),
+                mesh=mesh,
+                molecule=molecule,
+                n_species_cand=n_species_cand,
+                cell_idx=cell_idx,
+                n_species=n_species,
+            )
+        if converged:
             break
     else:
         if not bool(config.allow_unconverged):
@@ -498,49 +1206,74 @@ def solve_and_write_healpix_levelpop(
             config.convcrit,
         )
 
-    # Build full level-population grid and write file.
-    levelpop_full = _scatter_levelpop_to_full(
-        f, n_species_cand, cell_idx, molecule.nlev, n0, n1, n2,
+    alpha0_final_raw = compute_line_center_opacity(
+        f,
+        n_species_cand,
+        a_line_cand,
+        molecule.iup,
+        molecule.ilow,
+        molecule.aud,
+        molecule.freq_hz,
+        molecule.weight,
     )
-    flat_per_level = np.stack(
-        [RadWriter.flatten_scalar_to_radmc_order(mesh, levelpop_full[..., k])
-         for k in range(molecule.nlev)],
-        axis=1,
+    selected_cell_diagnostics = _selected_cell_diagnostics(
+        molecule=molecule,
+        cell_idx=cell_idx,
+        Tgas_cand=Tgas_cand,
+        n_species_cand=n_species_cand,
+        collider_dens_cand=collider_dens_cand,
+        collider_names=list(expected_colliders),
+        beta=beta,
+        alpha0_raw=alpha0_final_raw,
+        fracpop=f,
+        tgrids=tgrids,
+        ntemps=ntemps,
+        tables=tables,
+    )
+
+    # Build full level-population grid and write file.
+    flat_per_level = _flat_levelpop_radmc_order(
+        mesh=mesh,
+        molecule=molecule,
+        fracpop_cand=f,
+        n_species_cand=n_species_cand,
+        cell_idx=cell_idx,
+        n_species=n_species,
     )
     n_total = flat_per_level.shape[0]
-    n_species_flat = RadWriter.flatten_scalar_to_radmc_order(mesh, n_species)
-    sum_levels = flat_per_level.sum(axis=1)
-    diff = np.abs(sum_levels - n_species_flat)
-    tol = 1.0e-8 * np.maximum(n_species_flat, 1.0)
-    bad = int(np.count_nonzero(diff > tol))
-    if bad:
-        raise RuntimeError(
-            f"Population sum mismatch in {bad} cells "
-            f"(max diff {float(diff.max()):.3e})"
-        )
 
     RadWriter.write_levelpop_dat(
-        levelpop_path,
+        levelpop_tmp,
         levelpop_cm3_radmc_order=flat_per_level,
         level_numbers_1based=np.arange(1, molecule.nlev + 1, dtype=np.int64),
     )
+    levelpop_tmp.replace(levelpop_path)
 
     _write_manifest(
-        manifest_path=manifest_path,
+        manifest_path=manifest_tmp,
         species=species,
         config=config,
         molecule=molecule,
         molecule_file=Path(molecule_file),
+        molecule_sha256=molecule_sha256,
         levelpop_path=levelpop_path,
         iterations=last_iter,
         final_err=final_err,
         tgas_range=(float(np.min(Tgas)), float(np.max(Tgas))),
         aturb_range=(float(np.min(a_turb)), float(np.max(a_turb))),
-        nsp_range=(float(np.min(n_species_cand)), float(np.max(n_species_cand))),
+        nsp_range=(float(np.min(n_species)), float(np.max(n_species))),
+        velocity_range=velocity_range,
+        gas_velocity_sha256=gas_velocity_sha256,
         beta_range=final_beta_range,
         iteration_history=history,
         converged=converged,
+        cell_counts=cell_counts,
+        collider_density_ranges=collider_density_ranges,
+        maser_diagnostics=maser_diagnostics,
+        selected_cell_diagnostics=selected_cell_diagnostics,
+        resumed_from_checkpoint_iteration=resumed_from_checkpoint_iteration,
     )
+    manifest_tmp.replace(manifest_path)
 
     logger.info(f"Wrote {levelpop_path} ({n_total} cells, {molecule.nlev} levels)")
     return levelpop_path
@@ -564,15 +1297,23 @@ def _write_manifest(
     config: HealpixSEConfig,
     molecule: MoleculeData,
     molecule_file: Path,
+    molecule_sha256: str,
     levelpop_path: Path,
     iterations: int,
     final_err: float,
     tgas_range: tuple[float, float],
     aturb_range: tuple[float, float],
     nsp_range: tuple[float, float],
+    velocity_range: dict[str, list[float]],
+    gas_velocity_sha256: str,
     beta_range: tuple[float, float],
     iteration_history: list[dict],
     converged: bool,
+    cell_counts: dict[str, int],
+    collider_density_ranges: dict[str, list[float]],
+    maser_diagnostics: dict,
+    selected_cell_diagnostics: list[dict],
+    resumed_from_checkpoint_iteration: int | None,
 ) -> None:
     payload = {
         "species": species,
@@ -583,21 +1324,48 @@ def _write_manifest(
         "convcrit": float(config.convcrit),
         "escape_chunk_size": int(config.escape_chunk_size),
         "allow_unconverged": bool(config.allow_unconverged),
+        "species_density_floor_cm3": float(config.species_density_floor_cm3),
+        "overwrite": bool(config.overwrite),
+        "checkpoint_interval": int(config.checkpoint_interval),
+        "checkpoint_levelpop": bool(config.checkpoint_levelpop),
+        "resume_from_checkpoint": bool(config.resume_from_checkpoint),
+        "resumed_from_checkpoint_iteration": (
+            None
+            if resumed_from_checkpoint_iteration is None
+            else int(resumed_from_checkpoint_iteration)
+        ),
         "converged": bool(converged),
         "iterations": int(iterations),
         "final_convergence_error": float(final_err),
         "tbg_K": float(config.tbg_K),
         "relaxation": float(config.relaxation),
         "molecule_file": str(molecule_file),
+        "molecule_sha256": molecule_sha256,
+        "gas_velocity_sha256": gas_velocity_sha256,
         "n_levels": int(molecule.nlev),
         "n_lines": int(molecule.nlin),
+        "cell_counts": {
+            key: int(value) for key, value in cell_counts.items()
+        },
         "colliders": list(molecule.collider_names),
+        "collider_density_ranges_cm3": collider_density_ranges,
         "temperature_range_K": [float(tgas_range[0]), float(tgas_range[1])],
         "microturbulence_range_cm_s": [float(aturb_range[0]), float(aturb_range[1])],
         "species_density_range_cm3": [float(nsp_range[0]), float(nsp_range[1])],
+        "velocity_range_cm_s": velocity_range,
         "beta_range": [float(beta_range[0]), float(beta_range[1])],
         "levelpop_file": str(levelpop_path),
         "iteration_history": iteration_history,
+        "selected_cell_diagnostics": selected_cell_diagnostics,
+        "maser_suppression": maser_diagnostics,
+        "maser_suppression_applied": bool(maser_diagnostics["applied"]),
+        "negative_opacity_entries": int(
+            maser_diagnostics["total_negative_opacity_entries"]
+        ),
+        "negative_opacity_cells": int(
+            maser_diagnostics["max_negative_opacity_cells_in_iteration"]
+        ),
+        "negative_opacity_transitions": maser_diagnostics["transitions"],
     }
     manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
 import shutil
 
@@ -9,6 +10,7 @@ import numpy as np
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import normalize_collider_name, write_lines_inp
 from .validation import validate_line_run, write_line_radmc3d_inp
+from .external_validation import validate_external_population_run
 from diskbridge.radmc3d.colliders import (
     gow17_lamda_colliders,
     install_validated_molecule_file,
@@ -16,6 +18,21 @@ from diskbridge.radmc3d.colliders import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _resolve_manifest_path(path_value: str, *, base_dir: Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute() or path.exists():
+        return path
+    return base_dir / path
 
 
 def _link_or_copy(src: Path, dst: Path, *, copy_mode: str) -> Path:
@@ -274,6 +291,7 @@ def prepare_external_population_line_run(
     molecule_file: str | Path | None = None,
     copy_mode: str = "symlink",
     exist_ok: bool = False,
+    allow_unconverged: bool = False,
     incl_dust: int = 1,
     itempdecoup: int = 1,
     rto_style: int = 3,
@@ -294,6 +312,36 @@ def prepare_external_population_line_run(
     levelpop_file = Path(levelpop_file)
     if not levelpop_file.exists():
         raise FileNotFoundError(f"levelpop file does not exist: {levelpop_file}")
+    solver_manifest_file = levelpop_file.with_name(
+        f"external_levelpop_manifest_{species}.json"
+    )
+    if not solver_manifest_file.exists():
+        raise FileNotFoundError(
+            f"Missing solver manifest next to levelpop file: {solver_manifest_file}"
+        )
+    solver_manifest = json.loads(solver_manifest_file.read_text())
+    if solver_manifest.get("species") != species:
+        raise ValueError(
+            f"Solver manifest species {solver_manifest.get('species')!r} does not "
+            f"match requested species {species!r}"
+        )
+    if not bool(solver_manifest.get("converged", False)) and not bool(allow_unconverged):
+        raise ValueError(
+            f"Refusing to stage unconverged external populations from {solver_manifest_file}"
+        )
+    if int(solver_manifest.get("line_mode", 0)) != 50:
+        raise ValueError("External-population solver manifest must declare line_mode = 50")
+    manifest_levelpop = solver_manifest.get("levelpop_file")
+    if manifest_levelpop:
+        expected_levelpop = _resolve_manifest_path(
+            str(manifest_levelpop),
+            base_dir=solver_manifest_file.parent,
+        )
+        if expected_levelpop.resolve() != levelpop_file.resolve():
+            raise ValueError(
+                "levelpop_file does not match the solver manifest: "
+                f"{levelpop_file} != {expected_levelpop}"
+            )
 
     work = Path(work_dir)
     if work.exists() and not exist_ok:
@@ -360,22 +408,44 @@ def prepare_external_population_line_run(
             copy_mode=copy_mode,
         )
         staged[name] = str(dst)
+    expected_gas_velocity_sha256 = solver_manifest.get("gas_velocity_sha256")
+    if expected_gas_velocity_sha256:
+        staged_gas_velocity_sha256 = _sha256_file(work_inputs / "gas_velocity.binp")
+        if staged_gas_velocity_sha256 != expected_gas_velocity_sha256:
+            raise ValueError(
+                "Staged gas_velocity.binp does not match the velocity field used "
+                "by the external population solver."
+            )
+    else:
+        staged_gas_velocity_sha256 = _sha256_file(work_inputs / "gas_velocity.binp")
 
     if molecule_file is None:
-        molecule_dst = install_validated_molecule_file(
-            species=species,
-            moldata_dir=_REPO_ROOT / "data" / "moldata",
-            inputs_dir=work_inputs,
+        manifest_molecule = solver_manifest.get("molecule_file")
+        if not manifest_molecule:
+            raise ValueError(
+                "Solver manifest does not record molecule_file; cannot safely stage "
+                "external populations."
+            )
+        molecule_src = _resolve_manifest_path(
+            str(manifest_molecule),
+            base_dir=solver_manifest_file.parent,
         )
     else:
         molecule_src = Path(molecule_file)
-        if not molecule_src.exists():
-            raise FileNotFoundError(f"molecule_file does not exist: {molecule_src}")
-        molecule_dst = _link_or_copy(
-            molecule_src,
-            work_inputs / f"molecule_{species}.inp",
-            copy_mode=copy_mode,
+    if not molecule_src.exists():
+        raise FileNotFoundError(f"molecule_file does not exist: {molecule_src}")
+    molecule_sha256 = _sha256_file(molecule_src)
+    expected_molecule_sha256 = solver_manifest.get("molecule_sha256")
+    if expected_molecule_sha256 and molecule_sha256 != expected_molecule_sha256:
+        raise ValueError(
+            "Staged molecule file does not match the molecule used by the external "
+            "population solver."
         )
+    molecule_dst = _link_or_copy(
+        molecule_src,
+        work_inputs / f"molecule_{species}.inp",
+        copy_mode=copy_mode,
+    )
     staged[molecule_dst.name] = str(molecule_dst)
 
     levelpop_dst = _link_or_copy(
@@ -384,6 +454,12 @@ def prepare_external_population_line_run(
         copy_mode=copy_mode,
     )
     staged[levelpop_dst.name] = str(levelpop_dst)
+    solver_manifest_dst = _link_or_copy(
+        solver_manifest_file,
+        work_inputs / f"external_levelpop_manifest_{species}.json",
+        copy_mode=copy_mode,
+    )
+    staged[solver_manifest_dst.name] = str(solver_manifest_dst)
 
     radmc3d_src = source_inputs / "radmc3d.inp"
     if radmc3d_src.exists():
@@ -412,7 +488,17 @@ def prepare_external_population_line_run(
         "input_files": staged,
         "levelpop_file": str(levelpop_dst),
         "molecule_file": str(molecule_dst),
+        "molecule_sha256": molecule_sha256,
+        "gas_velocity_sha256": staged_gas_velocity_sha256,
+        "solver_manifest_file": str(solver_manifest_file),
+        "solver_manifest": solver_manifest,
     }
+    validation = validate_external_population_run(
+        work,
+        species=species,
+        allow_unconverged=allow_unconverged,
+    )
+    manifest["validation"] = validation
     (work / "external_levelpop_staging.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )

@@ -255,7 +255,22 @@ class RadData:
 
     def _reshape_vector_to_mesh(self, data: np.ndarray) -> np.ndarray:
         nx, ny, nz = self._getMeshShape()
-        return data.reshape((nx, ny, nz, 3), order='F')
+        # RADMC-3D vector binp files are cell-major triples:
+        #   (v1_cell0, v2_cell0, v3_cell0), (v1_cell1, ...)
+        # The component axis is not part of the Fortran cell ordering, so each
+        # component must be reshaped back to the mesh separately.
+        values = np.asarray(data)
+        ncells = nx * ny * nz
+        if values.size != 3 * ncells:
+            raise ValueError(
+                f"Vector field has {values.size} values, expected {3 * ncells} "
+                f"({ncells} cells x 3 components)"
+            )
+        by_cell = values.reshape((ncells, 3), order='C')
+        return np.stack(
+            [by_cell[:, i].reshape((nx, ny, nz), order='F') for i in range(3)],
+            axis=-1,
+        )
 
     def _select_dust_species(self, data: np.ndarray, ispec: int, field_name: str) -> np.ndarray:
         if data.ndim == 2:

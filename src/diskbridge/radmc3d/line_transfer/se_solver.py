@@ -275,9 +275,70 @@ def solve_statistical_equilibrium(
     return fracpop
 
 
-def convergence_error(f_new: np.ndarray, f_old: np.ndarray, floor: float = 1.0e-20) -> float:
-    denom = np.maximum.reduce([np.abs(f_new), np.abs(f_old), np.full_like(f_new, floor)])
-    return float(np.max(np.abs(f_new - f_old) / denom))
+def population_change_diagnostics(
+    f_new: np.ndarray,
+    f_old: np.ndarray,
+    *,
+    level_floor: float = 1.0e-12,
+    all_level_floor: float = 1.0e-20,
+) -> dict[str, float]:
+    """Measure population changes without letting empty high levels dominate.
+
+    The stopping criterion is based on total population variation per cell plus
+    the relative change in meaningfully populated levels. The all-level relative
+    maximum is still reported because it is useful for diagnosing numerical
+    floor noise, but it is not a physically useful convergence gate.
+    """
+
+    f_new = np.asarray(f_new, dtype=np.float64)
+    f_old = np.asarray(f_old, dtype=np.float64)
+    if f_new.shape != f_old.shape:
+        raise ValueError(
+            f"Population arrays must have matching shapes, got {f_new.shape} and {f_old.shape}"
+        )
+    if f_new.size == 0:
+        return {
+            "population_tv_change_max": 0.0,
+            "population_abs_change_max": 0.0,
+            "population_rel_important_max": 0.0,
+            "population_rel_all_levels_max": 0.0,
+            "population_convergence_error": 0.0,
+        }
+
+    absdiff = np.abs(f_new - f_old)
+    tv = 0.5 * np.sum(absdiff, axis=1)
+    scale = np.maximum(np.abs(f_new), np.abs(f_old))
+    active = scale > float(level_floor)
+
+    rel_important = (
+        float(np.max(absdiff[active] / scale[active]))
+        if np.any(active)
+        else 0.0
+    )
+    denom_all = np.maximum(scale, float(all_level_floor))
+    rel_all = float(np.max(absdiff / denom_all))
+    tv_max = float(np.max(tv)) if tv.size else 0.0
+    abs_max = float(np.max(absdiff))
+    return {
+        "population_tv_change_max": tv_max,
+        "population_abs_change_max": abs_max,
+        "population_rel_important_max": rel_important,
+        "population_rel_all_levels_max": rel_all,
+        "population_convergence_error": max(tv_max, rel_important),
+    }
+
+
+def convergence_error(
+    f_new: np.ndarray,
+    f_old: np.ndarray,
+    *,
+    level_floor: float = 1.0e-12,
+) -> float:
+    return population_change_diagnostics(
+        f_new,
+        f_old,
+        level_floor=level_floor,
+    )["population_convergence_error"]
 
 
 __all__ = [
@@ -286,4 +347,5 @@ __all__ = [
     "build_rate_matrix_and_rhs",
     "solve_statistical_equilibrium",
     "convergence_error",
+    "population_change_diagnostics",
 ]

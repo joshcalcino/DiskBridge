@@ -8,6 +8,7 @@ from Pint Quantities to CGS units.
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, List, Tuple
 from pathlib import Path
+import hashlib
 import numpy as np
 
 if TYPE_CHECKING:
@@ -66,6 +67,31 @@ class RadWriter:
         self.written_files = {}
 
     @staticmethod
+    def radmc_spherical_phi_edges_rad(mesh) -> np.ndarray:
+        """Return the phi edges DiskBridge writes to RADMC-3D spherical grids."""
+
+        if mesh.coord_system != 'spherical':
+            raise ValueError(
+                f"radmc_spherical_phi_edges_rad requires a spherical mesh, got {mesh.coord_system}"
+            )
+        edges = mesh.edges_f64("phi", "rad")
+        tol = 1.0e-10
+        if edges[0] >= -tol and edges[-1] <= 2.0 * np.pi + tol:
+            out = np.array(edges, copy=True)
+            out[0] = max(out[0], 0.0)
+            out[-1] = min(out[-1], 2.0 * np.pi)
+            return out
+        # Compatibility for older saved FARGO snapshots. New readers should
+        # canonicalize phi at load time so this fallback is not normally used.
+        nphi = int(mesh.ncell("phi") or 0)
+        return np.linspace(0.0, 2.0 * np.pi, nphi + 1)
+
+    @staticmethod
+    def radmc_spherical_phi_centers_rad(mesh) -> np.ndarray:
+        edges = RadWriter.radmc_spherical_phi_edges_rad(mesh)
+        return 0.5 * (edges[:-1] + edges[1:])
+
+    @staticmethod
     def flatten_scalar_to_radmc_order(mesh, arr3d: np.ndarray) -> np.ndarray:
         """Flatten a native mesh-order scalar field in RADMC-3D cell order."""
 
@@ -79,6 +105,26 @@ class RadWriter:
         elif mesh.coord_system != 'cartesian':
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
         return np.ascontiguousarray(arr).reshape(-1, order='C')
+
+    @staticmethod
+    def flatten_vector_to_radmc_order(mesh, components: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+        """Return interleaved RADMC-3D vector rows, shape ``(ncells, 3)``."""
+
+        flats = [
+            RadWriter.flatten_scalar_to_radmc_order(mesh, np.asarray(component))
+            for component in components
+        ]
+        return np.ascontiguousarray(np.stack(flats, axis=1), dtype=np.float64)
+
+    @staticmethod
+    def gas_velocity_binp_sha256(mesh, components: tuple[np.ndarray, np.ndarray, np.ndarray]) -> str:
+        """Hash the exact binary payload written by ``write_gas_velocity``."""
+
+        vectors = RadWriter.flatten_vector_to_radmc_order(mesh, components)
+        digest = hashlib.sha256()
+        digest.update(np.asarray([1, 8, vectors.shape[0]], dtype=np.int64).tobytes())
+        digest.update(np.ascontiguousarray(vectors, dtype=np.float64).tobytes())
+        return digest.hexdigest()
 
     @staticmethod
     def write_levelpop_dat(
@@ -115,7 +161,7 @@ class RadWriter:
             f.write(' '.join(str(int(x)) for x in levels) + '\n')
             for i in range(n_cells):
                 row = pop[i]
-                f.write(' '.join(f'{x:.7e}' for x in row) + '\n')
+                f.write(' '.join(f'{x:.16e}' for x in row) + '\n')
         return path
 
     def write_levelpop(
@@ -235,11 +281,11 @@ class RadWriter:
                     # Convert to base units and drop units so we write pure numbers
                     edges_cgs = edges.to_base_units().magnitude
                     
-                    # RADMC-3D expects phi from 0 to 2*pi
-                    # FARGO uses -pi to +pi, so we create a uniform grid for RADMC-3D
+                    # RADMC-3D requires spherical phi in [0, 2*pi]. Hydro
+                    # readers should canonicalize meshes to this convention at
+                    # load time; the helper keeps old saved snapshots readable.
                     if name == 'phi':
-                        nphi = len(edges_cgs)
-                        edges_cgs = np.linspace(0.0, 2.0 * np.pi, nphi)
+                        edges_cgs = self.radmc_spherical_phi_edges_rad(mesh)
                     
                     for val in edges_cgs:
                         f.write(f'{val:13.6e} ')
@@ -1344,14 +1390,24 @@ class RadWriter:
             output_dir = vr
             vr = None
 
+        mesh = self.model.mesh
+        if mesh is None:
+            raise ValueError('Model has no mesh defined')
+
         if vr is None and vtheta is None and vphi is None:
             if self.model.gas is None:
                 raise ValueError(
                     "Model has no gas submodel; cannot infer gas velocity fields"
                 )
+            if mesh.coord_system == "spherical":
+                component_names = ("vr", "vtheta", "vphi")
+            elif mesh.coord_system == "cartesian":
+                component_names = ("vx", "vy", "vz")
+            else:
+                raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
             missing = [
                 name
-                for name in ("vr", "vtheta", "vphi")
+                for name in component_names
                 if name not in self.model.gas
             ]
             if missing:
@@ -1359,12 +1415,12 @@ class RadWriter:
                     "Cannot infer gas velocity fields from model.gas; missing "
                     + ", ".join(repr(name) for name in missing)
                 )
-            vr = self.model.gas["vr"].data
-            vtheta = self.model.gas["vtheta"].data
-            vphi = self.model.gas["vphi"].data
+            vr = self.model.gas[component_names[0]].data
+            vtheta = self.model.gas[component_names[1]].data
+            vphi = self.model.gas[component_names[2]].data
         elif vr is None or vtheta is None or vphi is None:
             raise ValueError(
-                "Provide all three velocity components (vr, vtheta, vphi), "
+                "Provide all three velocity components, "
                 "or omit all of them to use model.gas fields"
             )
 
@@ -1376,35 +1432,11 @@ class RadWriter:
         vtheta_cgs = vtheta.to('cm/s').magnitude
         vphi_cgs = vphi.to('cm/s').magnitude
         
-        # Transpose from DiskBridge order to RADMC-3D order
-        # This matches the approach used in write_dust_density
-        mesh = self.model.mesh
-        if mesh is None:
-            raise ValueError('Model has no mesh defined')
-        if mesh.coord_system == 'spherical':
-            vr_cgs = transpose_to_axis_order(
-                np.asarray(vr_cgs),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-            vtheta_cgs = transpose_to_axis_order(
-                np.asarray(vtheta_cgs),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-            vphi_cgs = transpose_to_axis_order(
-                np.asarray(vphi_cgs),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-        elif mesh.coord_system != 'cartesian':
-            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
-        
-        # Flatten in C order (row-major) to match RADMC-3D cell ordering
-        vr_flat = vr_cgs.flatten()
-        vtheta_flat = vtheta_cgs.flatten()
-        vphi_flat = vphi_cgs.flatten()
-        ncells = vr_flat.size
+        vectors = self.flatten_vector_to_radmc_order(
+            mesh,
+            (np.asarray(vr_cgs), np.asarray(vtheta_cgs), np.asarray(vphi_cgs)),
+        )
+        ncells = vectors.shape[0]
         
         if binary:
             fpath = output_dir / 'gas_velocity.binp'
@@ -1416,10 +1448,7 @@ class RadWriter:
                 np.array([8], dtype=np.int64).tofile(f)  # Precision (8 bytes for float64)
                 np.array([ncells], dtype=np.int64).tofile(f)  # Number of cells
                 
-                # Write velocities (vr, vtheta, vphi for each cell)
-                for i in range(ncells):
-                    np.array([vr_flat[i], vtheta_flat[i], vphi_flat[i]], 
-                            dtype=np.float64).tofile(f)
+                vectors.tofile(f)
         else:
             fpath = output_dir / 'gas_velocity.inp'
             logger.info(f"Writing gas velocity (ASCII) to {fpath}: {ncells} cells")
@@ -1428,7 +1457,9 @@ class RadWriter:
                 f.write('1\n')  # Format number
                 f.write(f'{ncells}\n')
                 for i in range(ncells):
-                    f.write(f'{vr_flat[i]:.6e} {vtheta_flat[i]:.6e} {vphi_flat[i]:.6e}\n')
+                    f.write(
+                        f'{vectors[i, 0]:.6e} {vectors[i, 1]:.6e} {vectors[i, 2]:.6e}\n'
+                    )
         
         # Track the written file
         self.written_files[fpath.name] = fpath

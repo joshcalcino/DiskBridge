@@ -7,6 +7,7 @@ import numpy as np
 
 from ..mesh import Mesh, Axis
 from ..field import Field
+from ..periodic import reindex_periodic_axis_to_start
 from diskbridge._units import Quantity 
 from diskbridge._logging import logger
 from diskbridge import units
@@ -244,9 +245,21 @@ def _detect_dimensionality(
     return DimensionInfo(is_3d=is_3d, nrad=0, nsec=0, ncol=nz if is_3d else 1)
 
 
+def _canonicalize_phi_edges(pedge: Quantity) -> tuple[Quantity, np.ndarray]:
+    """Return phi edges/cell order in DiskBridge's canonical 0..2pi convention."""
+
+    reindexed = reindex_periodic_axis_to_start(
+        pedge,
+        start=0.0,
+        period=2.0 * np.pi,
+        atol=1.0e-8,
+    )
+    return reindexed.edges, reindexed.index_order
+
+
 def _load_edges_2d(
     directory: Path, variables: Dict[str, Any], unit_dict: Dict[str, Quantity]
-) -> Tuple[Quantity, Quantity, int, int]:
+) -> Tuple[Quantity, Quantity, int, int, np.ndarray]:
     dims = _read_dims(directory)
     if dims is None:
         nrad = int(variables.get("NY", 0))
@@ -271,12 +284,13 @@ def _load_edges_2d(
     
     redge = redge * unit_dict['unit_length']
     pedge = _build_pedge(nsec) * units('radian')
-    return redge, pedge, nrad, nsec
+    pedge, phi_order = _canonicalize_phi_edges(pedge)
+    return redge, pedge, nrad, nsec, phi_order
 
 
 def _load_edges_3d(
     directory: Path, variables: Dict[str, Any], unit_dict: Dict[str, Quantity], nz: int
-) -> Tuple[Quantity, Quantity, Quantity, int, int, int]:
+) -> Tuple[Quantity, Quantity, Quantity, int, int, int, np.ndarray]:
     px = directory / "domain_x.dat"
     py = directory / "domain_y.dat"
     pz = directory / "domain_z.dat"
@@ -354,8 +368,9 @@ def _load_edges_3d(
     
     redge = redge[3:-3]
     tedge = tedge[3:-3]
+    pedge, phi_order = _canonicalize_phi_edges(pedge)
     
-    return redge, pedge, tedge, nrad, nsec, ncol
+    return redge, pedge, tedge, nrad, nsec, ncol, phi_order
 
 
 def _load_fields(
@@ -366,6 +381,7 @@ def _load_fields(
     nsec: int,
     ncol: int,
     unit_dict: Dict[str, Quantity],
+    phi_order: np.ndarray,
 ) -> Dict[str, Field]:
     gas_fields: Dict[str, Field] = {}
     
@@ -387,13 +403,16 @@ def _load_fields(
                 else:
                     raise
             
-            arr = np.roll(arr, shift=int(nsec//2), axis=2)
+            # Reindex cells to match the canonical phi edges returned by
+            # _canonicalize_phi_edges(). For FARGO's usual -pi..pi grid this is
+            # the old half-domain roll, but the explicit order keeps the mesh
+            # and field convention tied together.
+            arr = np.take(arr, phi_order, axis=2)
             arr = np.transpose(arr, (1, 2, 0))
             axes = ("r", "phi", "theta")
         else:
             arr = arr.reshape(nrad, nsec)
-            if (directory / "variables.par").exists():
-                arr = np.roll(arr, shift=int(nsec//2), axis=1)
+            arr = np.take(arr, phi_order, axis=1)
             axes = ("r", "phi")
         arr = arr * units
         return Field(
@@ -450,6 +469,12 @@ def _apply_frame_corrections(
     else:
         r_grid = r_centers[:, np.newaxis]
     
+    # Note: this branch is only exercised for simulations with OMEGAFRAME != 0.
+    # For 3D spherical outputs the inertial-frame correction should be checked
+    # against the hydro-code convention: an angular frame speed usually adds
+    # Omega_frame * R_cyl = Omega_frame * r * sin(theta), not Omega_frame * r.
+    # The current Leon tests have OMEGAFRAME=0, so this is not part of the
+    # external non-LTE channel-map issue being debugged there.
     vphi_corrected_mag = vphi_mag + r_grid * omegaframe
     vphi_corrected = Quantity(vphi_corrected_mag, unit_dict['unit_velocity'])
     
@@ -627,12 +652,14 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
     dim_info = _detect_dimensionality(directory, variables)
     
     if not dim_info.is_3d:
-        redge, pedge, nrad, nsec = _load_edges_2d(directory, variables, unit_dict)
+        redge, pedge, nrad, nsec, phi_order = _load_edges_2d(
+            directory, variables, unit_dict
+        )
         mesh = Mesh.polar(r=Axis(edges=redge), phi=Axis(edges=pedge))
         coord_system = "polar"
         ncol = 1
     else:
-        redge, pedge, tedge, nrad, nsec, ncol = _load_edges_3d(
+        redge, pedge, tedge, nrad, nsec, ncol, phi_order = _load_edges_3d(
             directory, variables, unit_dict, dim_info.ncol
         )
         mesh = Mesh.spherical(r=Axis(edges=redge), 
@@ -641,7 +668,7 @@ def read_fargo_snapshot(directory: Path, file_n: int, file_units: str = "code") 
         coord_system = "spherical"
 
     gas_fields = _load_fields(
-        directory, file_n, dim_info.is_3d, nrad, nsec, ncol, unit_dict
+        directory, file_n, dim_info.is_3d, nrad, nsec, ncol, unit_dict, phi_order
     )
     
     _apply_frame_corrections(gas_fields, variables, redge, dim_info.is_3d, unit_dict)
