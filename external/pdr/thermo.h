@@ -154,13 +154,13 @@ class Thermo {
                               const double GISRF);
     /* Cooling of gas by dust coupling. Assume a constant dust temperature Td.
      * Auguments:
-     * Zd: dust metalicity compared to solar neighbourhood.
+     * Zgd: gas-dust thermal coupling compared to solar neighbourhood.
      * nH: hydrogen number density. Here implicitly assume all in H2, which
      * Tg: gas temperature
      * Td: dust temperature
      * Return:
      * Cooling rate for dust in erg H^-1 s^-1 */
-    static double CoolingDustTd(const double Zd, const double nH,  const double Tg,
+    static double CoolingDustTd(const double Zgd, const double nH,  const double Tg,
                                 const double Td);
     /* Cooling by reconbination of e on PAHs.
      * From WD2001 Eq(45).

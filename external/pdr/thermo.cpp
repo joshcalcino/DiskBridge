@@ -475,10 +475,12 @@ double Thermo::CoolingDust(const double Zd, const double nH, const double Tg,
   }
 }
 
-double Thermo::CoolingDustTd(const double Zd, const double nH,  const double Tg,
+double Thermo::CoolingDustTd(const double Zgd, const double nH,  const double Tg,
                             const double Td) {
-  const double L1 = alpha_GD_ * nH * sqrt(Tg) * (Tg - Td);
-  return L1;
+  if (Zgd <= 0.0 || nH <= 0.0 || Tg <= 0.0) {
+    return 0.0;
+  }
+  return alpha_GD_ * Zgd * nH * sqrt(Tg) * (Tg - Td);
 }
 
 double Thermo::CoolingRec(const double Zd, const double T, const double ne,

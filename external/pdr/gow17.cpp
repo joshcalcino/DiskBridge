@@ -308,6 +308,7 @@ gow17::gow17()
 	/*Default values of physical parameters*/
   Zg_ = 1.;
   Zd_ = 1.;
+  Zgd_ = 1.;
   Tdust_ = 10.;
 
   co_sigma_d_CO_per_H_ = 0.0;
@@ -834,6 +835,11 @@ void gow17::SetZd(const double Zd) {
 	return;
 }
 
+void gow17::SetZgd(const double Zgd) {
+  Zgd_ = Zgd;
+  return;
+}
+
 void gow17::SetZg(const double Zg) {
 	Zg_ = Zg;
   xC_ = Zg_ * xC_std_;
@@ -1091,7 +1097,7 @@ double gow17::dEdt_(const double *y, const bool is_store_rates) {
   //const double GDust = Thermo::CoolingDust(Zd_,  nH_, T, (*GISRF_));
   double GDust;
   if (isDust_cooling_) {
-    GDust = Thermo::CoolingDustTd(Zd_,  nH_, T, Tdust_);
+    GDust = Thermo::CoolingDustTd(Zgd_,  nH_, T, Tdust_);
   } else {
     GDust = 0.;
   }

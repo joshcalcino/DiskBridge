@@ -625,6 +625,91 @@ class RadModel:
         )
         return sigma_q
 
+    def _dust_temperature_bins_for_coupling(self, target: Tuple[str, ...], nbin: int) -> np.ndarray:
+        """Return dust temperatures as ``(nbin, *mesh_shape)`` in K."""
+        if self.dust_temperature is not None:
+            temp = np.asarray(self.dust_temperature.to('K').magnitude, dtype=np.float64)
+            if temp.shape == tuple(np.asarray(self.ensure_nH().magnitude).shape):
+                return np.broadcast_to(temp, (nbin,) + temp.shape).copy()
+            if temp.ndim == len(target) + 1 and temp.shape[0] >= nbin:
+                return np.ascontiguousarray(temp[:nbin], dtype=np.float64)
+
+        try:
+            fpath = self.data._resolve_data_file(
+                fname=None,
+                basename='dust_temperature',
+                missing_message="No dust_temperature file found",
+            )
+        except FileNotFoundError:
+            temp_q = self.ensure_dust_temperature()
+            temp = np.asarray(temp_q.to('K').magnitude, dtype=np.float64)
+            if temp.shape != tuple(np.asarray(self.ensure_nH().magnitude).shape):
+                raise
+            return np.broadcast_to(temp, (nbin,) + temp.shape).copy()
+
+        raw = self.data._read_scalar_data(fpath)
+        if raw.ndim == 1:
+            temps = [self.data._reshape_scalar_to_mesh(raw)]
+        elif raw.ndim == 2:
+            temps = [self.data._reshape_scalar_to_mesh(raw[i, :]) for i in range(raw.shape[0])]
+        else:
+            raise ValueError(f"Unexpected dust temperature data shape: {raw.shape}")
+        temp_arr = np.asarray(temps, dtype=np.float64)
+        if temp_arr.shape[0] == 1:
+            return np.broadcast_to(temp_arr[0], (nbin,) + temp_arr.shape[1:]).copy()
+        if temp_arr.shape[0] < nbin:
+            raise ValueError(
+                f"dust_temperature has {temp_arr.shape[0]} species, but dust model has {nbin} bins"
+            )
+        return np.ascontiguousarray(temp_arr[:nbin], dtype=np.float64)
+
+    def compute_gas_dust_surface_area_coupling(self) -> tuple[Quantity, Quantity]:
+        """Compute total projected dust area per H and surface-area-weighted Tdust."""
+        if self.model.dust is None:
+            raise RuntimeError("Model has no dust submodel; cannot compute gas-dust coupling")
+
+        target = self._chem_axis_order()
+        nH = self.ensure_nH().to('cm^-3')
+        nH_cm3 = np.asarray(nH.magnitude, dtype=np.float64)
+        nbin = int(self.model.dust.nbin)
+        temp_bins = self._dust_temperature_bins_for_coupling(target, nbin)
+
+        sigma_total = np.zeros_like(nH_cm3, dtype=np.float64)
+        weighted_temp = np.zeros_like(nH_cm3, dtype=np.float64)
+
+        for i in range(nbin):
+            bin_obj = self.model.dust[f'bin_{i}']
+            dust_density_field = bin_obj['density']
+            rho_d_i = field_data_as_order(dust_density_field, target).to('g/cm^3')
+            a_i = bin_obj.size.to('cm').magnitude
+            rho_s = bin_obj.density_material.to('g/cm^3').magnitude
+
+            if float(a_i) <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive grain size a={a_i}")
+            if float(rho_s) <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive material density rho_s={rho_s}")
+
+            rho = np.asarray(rho_d_i.magnitude, dtype=np.float64)
+            area_density = (3.0 * rho) / (4.0 * float(a_i) * float(rho_s))
+            sigma_i = np.divide(
+                area_density,
+                nH_cm3,
+                out=np.zeros_like(area_density, dtype=np.float64),
+                where=(nH_cm3 > 0.0),
+            )
+            sigma_i = np.where(np.isfinite(sigma_i) & (sigma_i > 0.0), sigma_i, 0.0)
+            sigma_total += sigma_i
+            weighted_temp += sigma_i * temp_bins[i]
+
+        Tdust_gd = np.divide(
+            weighted_temp,
+            sigma_total,
+            out=np.full_like(weighted_temp, 10.0, dtype=np.float64),
+            where=(sigma_total > 0.0),
+        )
+        Tdust_gd = np.where(np.isfinite(Tdust_gd), Tdust_gd, 10.0)
+        return Quantity(sigma_total, 'cm^2'), Quantity(Tdust_gd, 'K')
+
     def ensure_sigma_d_per_H(self, force: bool = False) -> Quantity:
         target = self._chem_axis_order()
 

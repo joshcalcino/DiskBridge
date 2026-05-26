@@ -91,6 +91,7 @@ GOW17_STATE_SPECIES = {
 }
 
 KB_CGS = 1.380649e-16
+ALPHA_GD_CGS = 3.2e-34
 _YR_TO_S = float(Quantity("1 yr").to("s").magnitude)
 
 _KPH_BASE = np.asarray(
@@ -491,9 +492,13 @@ def _actual_solver_uv_fields(
     Gph_arr = np.asarray(Gph, dtype=np.float64)
     F_arr = np.asarray(F_CO_pdes_external, dtype=np.float64)
     return {
-        "G_CO_diss_actual": Gph_arr[:, IPH_CO].reshape(shape),
         "G_C_ion_actual": Gph_arr[:, IPH_C].reshape(shape),
+        "G_CH_diss_actual": Gph_arr[:, IPH_CH].reshape(shape),
+        "G_CO_diss_actual": Gph_arr[:, IPH_CO].reshape(shape),
+        "G_OH_diss_actual": Gph_arr[:, IPH_OH].reshape(shape),
         "G_H2_diss_actual": Gph_arr[:, IPH_H2].reshape(shape),
+        "G_S_ion_actual": Gph_arr[:, IPH_S].reshape(shape),
+        "G_Si_ion_actual": Gph_arr[:, IPH_SI].reshape(shape),
         "F_CO_pdes_external_actual": F_arr.reshape(shape),
     }
 
@@ -548,30 +553,109 @@ def _resolve_co_dust_scalings(
         raise ValueError("sigma_d_CO_per_H contains non-finite values")
     sigma_d_CO = np.maximum(sigma_d_CO, 0.0)
 
-    zd_source = str(dust_cfg["Zd_gow17_grain_source"]).lower()
-    if zd_source == "constant":
-        zd = np.full(
-            ncells,
-            float(dust_cfg["Zd_gow17_grain_constant"]),
-            dtype=np.float64,
-        )
-    elif zd_source == "surface_area_relative":
-        zd = sigma_d_CO / sigma_ref
-    elif zd_source == "gas_dust_ratio":
-        zd = np.full(
-            ncells,
-            float(dust_cfg["Zd_gow17_grain_constant"]),
-            dtype=np.float64,
-        )
-    else:
-        raise ValueError(
-            "Zd_gow17_grain_source must be 'gas_dust_ratio', 'constant', "
-            f"or 'surface_area_relative', got {zd_source!r}"
-        )
+    for key in ("Zd_gow17_grain_source", "Zd_gow17_grain_constant", "allow_median_sigma_ref"):
+        if key in dust_cfg:
+            raise ValueError(
+                f"gow17 dust option {key!r} is no longer supported; use top-level Zd "
+                "for GOW17 grain chemistry/heating and [chemistry.gow17.dust_cooling] "
+                "for gas-dust thermal coupling"
+            )
+
+    zd = _broadcast_scalar_or_array(float(cfg["Zd"]), ncells)
 
     if not np.all(np.isfinite(zd)):
         raise ValueError("Zd_gow17_grain contains non-finite values")
     return sigma_d_CO, np.maximum(zd, 0.0), float(sigma_ref)
+
+
+def _resolve_dust_cooling_controls(
+    *,
+    cfg: dict,
+    rad: "RadModel",
+    ncells: int,
+) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, float]:
+    """Resolve the only allowed gas-dust thermal coupling modes."""
+    dust_cooling_cfg = _nested_cfg(cfg, "dust_cooling")
+    mode = str(dust_cooling_cfg["mode"]).lower()
+    if mode not in ("surface_area", "gow17_original"):
+        raise ValueError(
+            "gow17 dust_cooling.mode must be 'surface_area' or 'gow17_original', "
+            f"got {mode!r}"
+        )
+    for legacy in ("gas_dust_ratio", "surface_area_relative", "allow_median_sigma_ref"):
+        if legacy in dust_cooling_cfg:
+            raise ValueError(
+                f"gow17 dust_cooling option {legacy!r} is no longer supported; "
+                "allowed modes are 'surface_area' and 'gow17_original'"
+            )
+
+    sigma_ref = _maybe_quantity_to_float(
+        dust_cooling_cfg["sigma_d_H_ref"],
+        "cm^2",
+    )
+    if sigma_ref <= 0.0:
+        raise ValueError("gow17 dust_cooling sigma_d_H_ref must be positive")
+
+    if mode == "surface_area":
+        sigma_q, Tdust_q = rad.compute_gas_dust_surface_area_coupling()
+        sigma_total = np.ascontiguousarray(sigma_q.to("cm^2").magnitude, dtype=np.float64).reshape(ncells)
+        Tdust_gd = np.ascontiguousarray(Tdust_q.to("K").magnitude, dtype=np.float64).reshape(ncells)
+        if not np.all(np.isfinite(sigma_total)):
+            raise ValueError("sigma_d_per_H_total contains non-finite values")
+        if not np.all(np.isfinite(Tdust_gd)):
+            raise ValueError("Tdust_gd_surface_weighted contains non-finite values")
+        sigma_total = np.maximum(sigma_total, 0.0)
+        Zgd = np.divide(
+            sigma_total,
+            sigma_ref,
+            out=np.zeros(ncells, dtype=np.float64),
+            where=(sigma_ref > 0.0),
+        )
+        Tdust_gd = np.where(sigma_total > 0.0, Tdust_gd, 10.0)
+    else:
+        zgd_const = float(dust_cooling_cfg["gow17_original_Zd"])
+        if zgd_const < 0.0:
+            raise ValueError("gow17_original_Zd must be non-negative")
+        sigma_total = np.zeros(ncells, dtype=np.float64)
+        Zgd = np.full(
+            ncells,
+            zgd_const,
+            dtype=np.float64,
+        )
+        Tdust_gd = np.full(
+            ncells,
+            _maybe_quantity_to_float(dust_cooling_cfg["gow17_original_Tdust"], "K"),
+            dtype=np.float64,
+        )
+
+    if not np.all(np.isfinite(Zgd)):
+        raise ValueError("Zgd contains non-finite values")
+    if not np.all(np.isfinite(Tdust_gd)):
+        raise ValueError("gas-dust coupling Tdust contains non-finite values")
+    return mode, np.maximum(Zgd, 0.0), Tdust_gd, sigma_total, float(sigma_ref)
+
+
+def _gas_dust_exchange(
+    *,
+    Zgd: np.ndarray,
+    nH_cm3: np.ndarray,
+    Tgas_K: np.ndarray,
+    Tdust_K: np.ndarray,
+) -> np.ndarray:
+    Zgd_arr = np.asarray(Zgd, dtype=np.float64)
+    nH_arr = np.asarray(nH_cm3, dtype=np.float64)
+    Tgas_arr = np.asarray(Tgas_K, dtype=np.float64)
+    Tdust_arr = np.asarray(Tdust_K, dtype=np.float64)
+    out = np.zeros_like(Tgas_arr, dtype=np.float64)
+    valid = (Zgd_arr > 0.0) & (nH_arr > 0.0) & (Tgas_arr > 0.0)
+    out[valid] = (
+        ALPHA_GD_CGS
+        * Zgd_arr[valid]
+        * nH_arr[valid]
+        * np.sqrt(Tgas_arr[valid])
+        * (Tgas_arr[valid] - Tdust_arr[valid])
+    )
+    return out
 
 
 def _resolve_co_phase_controls(
@@ -852,6 +936,7 @@ def _compute_rhs_residual_diagnostics(
     Tgas_flat: np.ndarray,
     Tdust_flat: np.ndarray,
     Zd_arr: np.ndarray,
+    Zgd_arr: np.ndarray,
     Zg_arr: np.ndarray,
     ion_rate_arr: np.ndarray,
     GPE: np.ndarray,
@@ -892,6 +977,7 @@ def _compute_rhs_residual_diagnostics(
             Tgas=np.ascontiguousarray(Tgas_flat, dtype=np.float64),
             Tdust=np.ascontiguousarray(Tdust_flat, dtype=np.float64),
             Zd=np.ascontiguousarray(Zd_arr, dtype=np.float64),
+            Zgd=np.ascontiguousarray(Zgd_arr, dtype=np.float64),
             Zg=np.ascontiguousarray(Zg_arr, dtype=np.float64),
             ion_rate=np.ascontiguousarray(ion_rate_arr, dtype=np.float64),
             GPE=np.ascontiguousarray(GPE, dtype=np.float64),
@@ -1275,7 +1361,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     L_geo_min = float(cfg["L_geo_min"])
     L_geo_max = float(cfg["L_geo_max"])
     Leff_CO_max_scalar = float(cfg["Leff_CO_max"])
-    isDust_cooling = bool(cfg["isDust_cooling"])
+    if "isDust_cooling" in cfg:
+        raise ValueError("gow17 isDust_cooling is no longer supported; use dust_cooling.mode")
+    isDust_cooling = True
     isCoolingCOThin = bool(cfg["isCoolingCOThin"])
     temperature_cfg = _resolve_temperature_config(cfg)
     temperature_mode = str(temperature_cfg["mode"])
@@ -1361,7 +1449,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     shape = nH_cm3.shape
     ncells = nH_cm3.size
 
-    Tdust_K = _as_cgs_f64(Tdust, "K")
     ensure_microturbulence_field(rad.model, diskbridge.params)
     v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
     b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
@@ -1376,7 +1463,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     nH_flat = nH_cm3.reshape(ncells)
     T_flat = T_K.reshape(ncells)
-    Tdust_flat = Tdust_K.reshape(ncells)
     chi_dust_flat = chi_dust_arr.reshape(ncells)
     G_CO_diss_flat = G_CO_diss_arr.reshape(ncells)
     G_H2_diss_flat = G_H2_diss_arr.reshape(ncells)
@@ -1387,6 +1473,17 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
 
+    (
+        dust_cooling_mode,
+        Zgd_arr,
+        Tdust_flat,
+        sigma_d_per_H_total,
+        sigma_d_H_ref,
+    ) = _resolve_dust_cooling_controls(
+        cfg=cfg,
+        rad=rad,
+        ncells=ncells,
+    )
 
     sigma_d = rad.ensure_sigma_d_per_H()
     sigma_d_cm2 = _as_cgs_f64(sigma_d, "cm^2").reshape(ncells)
@@ -1691,6 +1788,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
@@ -1792,6 +1890,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
@@ -1882,6 +1981,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     Tgas=T_flat,
                     Tdust=Tdust_flat,
                     Zd=Zd_arr,
+                    Zgd=Zgd_arr,
                     Zg=Zg_arr,
                     ion_rate=ion_rate_arr,
                     GPE=GPE,
@@ -2010,6 +2110,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
                 GPE=GPE,
@@ -2144,6 +2245,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     gow17_diag = {
         "coupling_mode": coupling_mode,
         "enable_co_phase": bool(enable_co_phase),
+        "dust_cooling_mode": dust_cooling_mode,
+        "dust_cooling_mode_id_map": {1: "surface_area", 2: "gow17_original"},
+        "sigma_d_H_ref": float(sigma_d_H_ref),
         "shielding_iter": n_shielding_iter,
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
@@ -2249,6 +2353,13 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         T_out = _state_temperature(y_out.reshape(ncells, N_Y)).reshape(shape)
     else:
         T_out = T_flat.reshape(shape)
+    gas_dust_exchange = _gas_dust_exchange(
+        Zgd=Zgd_arr.reshape(shape),
+        nH_cm3=nH_cm3,
+        Tgas_K=T_out,
+        Tdust_K=Tdust_flat.reshape(shape),
+    )
+    dust_cooling_mode_id = 1 if dust_cooling_mode == "surface_area" else 2
     T_status = np.zeros(shape, dtype=np.int32)
     bad_T = (
         (~np.isfinite(T_out))
@@ -2270,6 +2381,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "Tgas": Quantity(T_out, "K"),
         "Tgas_minus_Tdust": Quantity(T_out - Tdust_flat.reshape(shape), "K"),
         "Tgas_status": Quantity(T_status, "dimensionless"),
+        "sigma_d_per_H_total": Quantity(sigma_d_per_H_total.reshape(shape), "cm^2"),
+        "Zgd_surface": Quantity(Zgd_arr.reshape(shape), "dimensionless"),
+        "Tdust_gd_surface_weighted": Quantity(Tdust_flat.reshape(shape), "K"),
+        "gas_dust_exchange_signed": Quantity(gas_dust_exchange, "erg/s"),
+        "gas_to_dust_cooling": Quantity(np.maximum(gas_dust_exchange, 0.0), "erg/s"),
+        "dust_to_gas_heating": Quantity(np.maximum(-gas_dust_exchange, 0.0), "erg/s"),
+        "dust_cooling_mode": Quantity(
+            np.full(shape, dust_cooling_mode_id, dtype=np.float64),
+            "dimensionless",
+        ),
         "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
         "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
         "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
@@ -2345,6 +2466,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tgas_flat=T_out.reshape(ncells),
         Tdust_flat=Tdust_flat,
         Zd_arr=Zd_arr,
+        Zgd_arr=Zgd_arr,
         Zg_arr=Zg_arr,
         ion_rate_arr=ion_rate_arr,
         GPE=GPE,
@@ -2416,6 +2538,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "Zg": float(Zg),
         "Zd": float(Zd),
         "sigma_d_ISM_ref": float(sigma_d_ISM_ref),
+        "dust_cooling_mode": dust_cooling_mode,
+        "sigma_d_H_ref": float(sigma_d_H_ref),
         "S_CO": float(S_CO),
         "co_phase_E_bind_CO": float(co_phase_params["E_bind_CO"]),
         "co_phase_nu0_CO": float(co_phase_params["nu0_CO"]),

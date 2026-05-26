@@ -172,6 +172,7 @@ static py::dict solve_batch_equilibrium(
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zgd,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
     const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
@@ -226,6 +227,9 @@ static py::dict solve_batch_equilibrium(
     if (Zd.ndim() != 1 || Zd.size() != Ncells) {
         throw std::invalid_argument("Zd must be 1D with length Ncells");
     }
+    if (Zgd.ndim() != 1 || Zgd.size() != Ncells) {
+        throw std::invalid_argument("Zgd must be 1D with length Ncells");
+    }
     if (Zg.ndim() != 1 || Zg.size() != Ncells) {
         throw std::invalid_argument("Zg must be 1D with length Ncells");
     }
@@ -265,6 +269,7 @@ static py::dict solve_batch_equilibrium(
     const double *Tgas_ptr = Tgas.data();
     const double *Tdust_ptr = Tdust.data();
     const double *Zd_ptr = Zd.data();
+    const double *Zgd_ptr = Zgd.data();
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
     const double *GPE_ptr = GPE.data();
@@ -303,6 +308,7 @@ static py::dict solve_batch_equilibrium(
         ode.SetIonRate(ion_rate_ptr[i]);
         ode.SetZg(Zg_ptr[i]);
         ode.SetZd(Zd_ptr[i]);
+        ode.SetZgd(Zgd_ptr[i]);
 
         ode.SetfH2gr(fH2gr);
         ode.SetfHplusgr(fHplusgr);
@@ -435,6 +441,7 @@ static py::dict solve_batch_time(
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zgd,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
     const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
@@ -487,6 +494,9 @@ static py::dict solve_batch_time(
     if (Zd.ndim() != 1 || Zd.size() != Ncells) {
         throw std::invalid_argument("Zd must be 1D with length Ncells");
     }
+    if (Zgd.ndim() != 1 || Zgd.size() != Ncells) {
+        throw std::invalid_argument("Zgd must be 1D with length Ncells");
+    }
     if (Zg.ndim() != 1 || Zg.size() != Ncells) {
         throw std::invalid_argument("Zg must be 1D with length Ncells");
     }
@@ -529,6 +539,7 @@ static py::dict solve_batch_time(
     const double *Tgas_ptr = Tgas.data();
     const double *Tdust_ptr = Tdust.data();
     const double *Zd_ptr = Zd.data();
+    const double *Zgd_ptr = Zgd.data();
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
     const double *GPE_ptr = GPE.data();
@@ -565,6 +576,7 @@ static py::dict solve_batch_time(
         ode.SetIonRate(ion_rate_ptr[i]);
         ode.SetZg(Zg_ptr[i]);
         ode.SetZd(Zd_ptr[i]);
+        ode.SetZgd(Zgd_ptr[i]);
 
         ode.SetfH2gr(fH2gr);
         ode.SetfHplusgr(fHplusgr);
@@ -668,6 +680,7 @@ static py::dict eval_rhs_batch(
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tgas,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Tdust,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zd,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> Zgd,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Zg,
     const py::array_t<double, py::array::c_style | py::array::forcecast> ion_rate,
     const py::array_t<double, py::array::c_style | py::array::forcecast> GPE,
@@ -711,6 +724,9 @@ static py::dict eval_rhs_batch(
     if (Zd.ndim() != 1 || Zd.size() != Ncells) {
         throw std::invalid_argument("Zd must be 1D with length Ncells");
     }
+    if (Zgd.ndim() != 1 || Zgd.size() != Ncells) {
+        throw std::invalid_argument("Zgd must be 1D with length Ncells");
+    }
     if (Zg.ndim() != 1 || Zg.size() != Ncells) {
         throw std::invalid_argument("Zg must be 1D with length Ncells");
     }
@@ -747,6 +763,7 @@ static py::dict eval_rhs_batch(
     const double *Tgas_ptr = Tgas.data();
     const double *Tdust_ptr = Tdust.data();
     const double *Zd_ptr = Zd.data();
+    const double *Zgd_ptr = Zgd.data();
     const double *Zg_ptr = Zg.data();
     const double *ion_rate_ptr = ion_rate.data();
     const double *GPE_ptr = GPE.data();
@@ -795,6 +812,7 @@ static py::dict eval_rhs_batch(
             ode.SetIonRate(ion_rate_ptr[i]);
             ode.SetZg(Zg_ptr[i]);
             ode.SetZd(Zd_ptr[i]);
+            ode.SetZgd(Zgd_ptr[i]);
             ode.SetfH2gr(fH2gr);
             ode.SetfHplusgr(fHplusgr);
             ode.SetfCplusgr(fCplusgr);
@@ -956,6 +974,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("Tgas"),
         py::arg("Tdust"),
         py::arg("Zd"),
+        py::arg("Zgd"),
         py::arg("Zg"),
         py::arg("ion_rate"),
         py::arg("GPE"),
@@ -1000,6 +1019,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("Tgas"),
         py::arg("Tdust"),
         py::arg("Zd"),
+        py::arg("Zgd"),
         py::arg("Zg"),
         py::arg("ion_rate"),
         py::arg("GPE"),
@@ -1043,6 +1063,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("Tgas"),
         py::arg("Tdust"),
         py::arg("Zd"),
+        py::arg("Zgd"),
         py::arg("Zg"),
         py::arg("ion_rate"),
         py::arg("GPE"),

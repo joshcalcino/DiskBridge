@@ -38,6 +38,25 @@ def default_abstol() -> np.ndarray:
     return abstol
 
 
+def set_energy_temperature(y: np.ndarray, Tgas: np.ndarray) -> np.ndarray:
+    """Set GOW17 internal energy for requested gas temperatures."""
+    xH2 = y[:, _gow17.I_H2]
+    xe = (
+        y[:, _gow17.I_HEP]
+        + y[:, _gow17.I_CP]
+        + y[:, _gow17.I_HCOP]
+        + y[:, _gow17.I_H3P]
+        + y[:, _gow17.I_H2P]
+        + y[:, _gow17.I_HP]
+        + y[:, _gow17.I_SP]
+        + y[:, _gow17.I_SIP]
+        + y[:, _gow17.I_OP]
+    )
+    cv = 1.5 * 1.380649e-16 * ((1.0 - 2.0 * xH2) + xH2 + _gow17.XHE + xe)
+    y[:, _gow17.I_E] = cv * Tgas
+    return y
+
+
 class TestBatchSolverBasic:
     """Basic functionality tests for solve_batch_equilibrium."""
 
@@ -64,6 +83,7 @@ class TestBatchSolverBasic:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE,
@@ -127,6 +147,7 @@ class TestBatchSolverBasic:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE,
@@ -201,6 +222,7 @@ class TestNoDoubleAttenuation:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE,
@@ -246,6 +268,7 @@ class TestNoDoubleAttenuation:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE_half,
@@ -323,6 +346,7 @@ class TestRadiationFieldScaling:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE_low,
@@ -368,6 +392,7 @@ class TestRadiationFieldScaling:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE_high,
@@ -445,6 +470,7 @@ class TestThermoEvolution:
             Tgas=Tgas,
             Tdust=Tdust,
             Zd=Zd,
+            Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
             GPE=GPE,
@@ -497,6 +523,108 @@ class TestThermoEvolution:
 
         assert np.all(T_out > 0), f"Temperature should be positive, got {T_out}"
         assert np.all(T_out < 1e6), f"Temperature unreasonably high: {T_out}"
+
+
+class TestGasDustCooling:
+    """Tests for the dedicated gas-dust coupling scalar."""
+
+    def test_zgd_scales_only_gas_dust_exchange(self):
+        ncells = 2
+        Tgas = np.full(ncells, 40.0, dtype=np.float64)
+        y = set_energy_temperature(default_y0(ncells), Tgas)
+        nH = np.full(ncells, 1.0e8, dtype=np.float64)
+        Zd = np.full(ncells, 3.0, dtype=np.float64)
+        Zgd = np.array([1.0, 2.0], dtype=np.float64)
+        Zg = np.ones(ncells, dtype=np.float64)
+        GPE = np.full(ncells, 0.5, dtype=np.float64)
+        Gph = np.full((ncells, N_PH), 0.5, dtype=np.float64)
+        zeros = np.zeros(ncells, dtype=np.float64)
+
+        result = _gow17.eval_rhs_batch(
+            y=y,
+            nH=nH,
+            Tgas=Tgas,
+            Tdust=np.full(ncells, 10.0, dtype=np.float64),
+            Zd=Zd,
+            Zgd=Zgd,
+            Zg=Zg,
+            ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
+            GPE=GPE,
+            F_CO_pdes_photon=zeros,
+            Gph=Gph,
+            sigma_d_CO_per_H=np.full(ncells, 1.0e-21, dtype=np.float64),
+            const_temp=False,
+            gradv=np.full(ncells, 1.0e-14, dtype=np.float64),
+            Leff_CO_max=np.full(ncells, 3.0e20, dtype=np.float64),
+            isDust_cooling=True,
+            fH2gr=1.0,
+            fHplusgr=1.0,
+            fCplusgr=1.0,
+            fHeplusgr=1.0,
+            fSplusgr=1.0,
+            fSiplusgr=1.0,
+            fCplusCR=1.0,
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
+            co_S_CO=1.0,
+            co_F_CRUV_CO_pdes=zeros,
+            co_k_crdes_CO=zeros,
+        )
+
+        thermo = np.asarray(result["thermo_rates"], dtype=np.float64)
+        assert np.all(result["status"] == 0)
+        assert thermo[1, 11] == pytest.approx(2.0 * thermo[0, 11])
+        assert thermo[1, 1] == pytest.approx(thermo[0, 1])
+        assert thermo[1, 2] == pytest.approx(thermo[0, 2])
+        assert thermo[1, 12] == pytest.approx(thermo[0, 12])
+
+    def test_gas_dust_exchange_sign_and_zero_zgd(self):
+        ncells = 3
+        Tgas = np.array([40.0, 5.0, 40.0], dtype=np.float64)
+        y = set_energy_temperature(default_y0(ncells), Tgas)
+        zeros = np.zeros(ncells, dtype=np.float64)
+
+        result = _gow17.eval_rhs_batch(
+            y=y,
+            nH=np.full(ncells, 1.0e8, dtype=np.float64),
+            Tgas=Tgas,
+            Tdust=np.full(ncells, 10.0, dtype=np.float64),
+            Zd=np.ones(ncells, dtype=np.float64),
+            Zgd=np.array([1.0, 1.0, 0.0], dtype=np.float64),
+            Zg=np.ones(ncells, dtype=np.float64),
+            ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
+            GPE=np.ones(ncells, dtype=np.float64),
+            F_CO_pdes_photon=zeros,
+            Gph=np.ones((ncells, N_PH), dtype=np.float64),
+            sigma_d_CO_per_H=np.full(ncells, 1.0e-21, dtype=np.float64),
+            const_temp=False,
+            gradv=np.full(ncells, 1.0e-14, dtype=np.float64),
+            Leff_CO_max=np.full(ncells, 3.0e20, dtype=np.float64),
+            isDust_cooling=True,
+            fH2gr=1.0,
+            fHplusgr=1.0,
+            fCplusgr=1.0,
+            fHeplusgr=1.0,
+            fSplusgr=1.0,
+            fSiplusgr=1.0,
+            fCplusCR=1.0,
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
+            co_S_CO=1.0,
+            co_F_CRUV_CO_pdes=zeros,
+            co_k_crdes_CO=zeros,
+        )
+
+        gdust = np.asarray(result["thermo_rates"], dtype=np.float64)[:, 11]
+        assert gdust[0] > 0.0
+        assert gdust[1] < 0.0
+        assert gdust[2] == 0.0
 
 
 class TestModuleConstants:

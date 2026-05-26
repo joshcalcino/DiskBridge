@@ -64,9 +64,10 @@ class gow17 : public Ode {
     static double xO_std() { return xO_std_; }
 		void SetnH(const double nH);
 		void SetbCO(const double bCO);
-		void SetNCO(const double NCO);
-		void SetNH(const double NH);
+    void SetNCO(const double NCO);
+    void SetNH(const double NH);
     void SetZd(const double Zd);
+    void SetZgd(const double Zgd);
     void SetZg(const double Zg);
     void SetTdust(const double Tdust);
 
@@ -150,6 +151,7 @@ class gow17 : public Ode {
 		 * NL99, see DESPOTIC NL99 implementation.*/
     double Zg_; /*gas metallicity*/
     double Zd_; /*dust abundance relative to solar neighbourhood*/
+    double Zgd_; /*gas-dust thermal coupling relative to solar neighbourhood*/
     double Tdust_; /*dust temperature in K for gas-dust thermal coupling*/
     double xC_; /* total C aboundance per H*/
     double xO_; /* total O aboundance per H*/

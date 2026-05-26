@@ -44,6 +44,7 @@ from diskbridge.chemistry.models.gow17 import (
     _initial_gas_temperature,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
+    _resolve_dust_cooling_controls,
     _resolve_co_phase_controls,
     _resolve_co_phase_runtime_params,
     _resolve_shielding_linewidth,
@@ -107,7 +108,9 @@ class Gow17TimeStepper:
         self.Zg = float(cfg["Zg"])
         self.gradv_scalar = float(cfg["gradv"])
         self.Leff_CO_max_scalar = float(cfg["Leff_CO_max"])
-        self.isDust_cooling = bool(cfg["isDust_cooling"])
+        if "isDust_cooling" in cfg:
+            raise ValueError("Gow17TimeStepper: isDust_cooling is no longer supported; use dust_cooling.mode")
+        self.isDust_cooling = True
         self.isCoolingCOThin = bool(cfg["isCoolingCOThin"])
 
         self.rad = rad
@@ -157,6 +160,17 @@ class Gow17TimeStepper:
         self.sigma_d_CO_per_H, self.Zd_arr, self.sigma_d_ISM_ref = _resolve_co_dust_scalings(
             cfg=cfg,
             sigma_d_cm2=sigma_d_cm2,
+            ncells=self.ncells,
+        )
+        (
+            self.dust_cooling_mode,
+            self.Zgd_arr,
+            self.Tdust_gd_flat,
+            self.sigma_d_per_H_total,
+            self.sigma_d_H_ref,
+        ) = _resolve_dust_cooling_controls(
+            cfg=cfg,
+            rad=rad,
             ncells=self.ncells,
         )
         self.S_CO, self.F_CRUV_CO_pdes_arr, self.k_crdes_CO_arr = _resolve_co_phase_controls(
@@ -279,7 +293,18 @@ class Gow17TimeStepper:
                 "1/(cm^2 s)",
             ).reshape(self.ncells)
 
-        Tdust_flat = _as_cgs_f64(rad.ensure_dust_temperature(), "K").reshape(self.ncells)
+        (
+            self.dust_cooling_mode,
+            self.Zgd_arr,
+            self.Tdust_gd_flat,
+            self.sigma_d_per_H_total,
+            self.sigma_d_H_ref,
+        ) = _resolve_dust_cooling_controls(
+            cfg=self.cfg,
+            rad=rad,
+            ncells=self.ncells,
+        )
+        Tdust_flat = self.Tdust_gd_flat
 
         if self.temperature_mode == "dust":
             Tgas = rad.ensure_dust_temperature()
@@ -492,6 +517,7 @@ class Gow17TimeStepper:
             Tgas=T_flat,
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
+            Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
             GPE=GPE,
@@ -580,6 +606,7 @@ class Gow17TimeStepper:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=self.Zd_arr,
+                Zgd=self.Zgd_arr,
                 Zg=self.Zg_arr,
                 ion_rate=self.ion_rate_arr,
                 GPE=GPE,
@@ -633,6 +660,7 @@ class Gow17TimeStepper:
             Tgas=T_flat,
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
+            Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
             GPE=GPE,

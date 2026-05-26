@@ -147,7 +147,6 @@ co_pdes = "photon"
 [chemistry.gow17]
 enable_co_phase = true
 rhs_residual_warn = 1.0e6
-isDust_cooling = true
 isCoolingCOThin = false
 ion_rate = "2.0e-16 1/s"
 Zg = 1.0
@@ -230,10 +229,13 @@ abstol_Oplus = 1.0e-22
 [chemistry.gow17.dust]
 sigma_d_CO_per_H_source = "radmc"
 sigma_d_CO_per_H_constant = "1.0e-21 cm^2"
-Zd_gow17_grain_source = "gas_dust_ratio"
-Zd_gow17_grain_constant = 1.0
 sigma_d_ISM_ref = "1.0e-21 cm^2"
-allow_median_sigma_ref = false
+
+[chemistry.gow17.dust_cooling]
+mode = "surface_area"
+sigma_d_H_ref = "1.0e-21 cm^2"
+gow17_original_Zd = 1.0
+gow17_original_Tdust = "10 K"
 
 [chemistry.gow17.co_phase]
 S_CO = 1.0
