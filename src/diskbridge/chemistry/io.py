@@ -9,6 +9,69 @@ if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
 from diskbridge._units import Quantity
+from diskbridge.model.field import Field
+
+
+def attach_chemistry_result_to_model(rad: 'RadModel', result) -> None:
+    """Attach chemistry outputs to ``rad.model.gas`` as realized Fields."""
+
+    model = getattr(rad, 'model', None)
+    if model is None or getattr(model, 'gas', None) is None or getattr(model, 'mesh', None) is None:
+        return
+
+    axis_order = model.mesh.axis_names()
+    if hasattr(rad, '_chem_axis_order'):
+        axis_order = rad._chem_axis_order()
+
+    tgas = getattr(rad, 'Tgas_gow17', None)
+    if tgas is None:
+        tgas = getattr(rad, 'gas_temperature', None)
+    if tgas is None and hasattr(rad, 'ensure_gas_temperature'):
+        tgas = rad.ensure_gas_temperature()
+
+    if tgas is not None:
+        model.gas_register(
+            'gas_temperature',
+            Field(
+                quantity='gas_temperature',
+                data=tgas,
+                axis_order=axis_order,
+                attrs={'source': 'rad'},
+            ),
+        )
+
+    for sp, x in result.abundances.items():
+        model.gas_register(
+            f'abundance_{sp}',
+            Field(
+                quantity=f'abundance_{sp}',
+                data=x,
+                axis_order=axis_order,
+                attrs={'source': 'chemistry', 'kind': 'abundance', 'species': sp},
+            ),
+        )
+
+    for sp, n in result.number_densities.items():
+        model.gas_register(
+            f'number_density_{sp}',
+            Field(
+                quantity=f'number_density_{sp}',
+                data=n,
+                axis_order=axis_order,
+                attrs={'source': 'chemistry', 'kind': 'number_density', 'species': sp},
+            ),
+        )
+
+    for name, q in result.fields.items():
+        model.gas_register(
+            f'chem_{name}',
+            Field(
+                quantity=f'chem_{name}',
+                data=q,
+                axis_order=axis_order,
+                attrs={'source': 'chemistry', 'kind': 'diagnostic', 'name': name},
+            ),
+        )
 
 
 def add_default_line_colliders_from_gow17(

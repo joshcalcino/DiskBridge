@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+import shutil
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +21,7 @@ from diskbridge.model.microturbulence import (
     ensure_microturbulence_field,
     microturbulence_spatially_constant,
 )
+from diskbridge.chemistry.io import attach_chemistry_result_to_model
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.healpix_columns import (
     _prepare_healpix_geometry,
@@ -108,6 +112,17 @@ class _Gow17RadiationMode:
     name: str
     uses_uv_products: bool
     directional_uv_product: str
+
+
+@dataclass(frozen=True)
+class _Gow17CheckpointState:
+    y: np.ndarray
+    theta_h2: np.ndarray
+    theta_co: np.ndarray
+    theta_c: np.ndarray
+    status: np.ndarray
+    completed_updates: int
+    histories: dict
 
 
 def _infer_gow17_radiation_mode(rad: "RadModel") -> _Gow17RadiationMode:
@@ -465,6 +480,315 @@ def _nested_cfg(cfg: dict, key: str) -> dict:
     """
     val = cfg.get(key, {})
     return val if isinstance(val, dict) else {}
+
+
+def _gow17_checkpoint_config(rad: "RadModel", cfg: dict) -> dict:
+    cp = _nested_cfg(cfg, "checkpoint")
+    mode = str(cp.get("mode", "latest")).lower()
+    if mode != "latest":
+        raise ValueError("gow17 checkpoint.mode currently supports only 'latest'")
+
+    path_raw = cp.get("path", cp.get("directory", "checkpoint"))
+    path = Path(str(path_raw))
+    if not path.is_absolute():
+        path = Path(str(cfg.get("_output_dir", rad.model_dir))) / path
+
+    every = int(cp.get("every", 1))
+    if every <= 0:
+        raise ValueError("gow17 checkpoint.every must be positive")
+
+    return {
+        "enabled": bool(cp.get("enabled", False)),
+        "resume": bool(cp.get("resume", True)),
+        "path": path,
+        "every": every,
+        "include_dust": bool(cp.get("include_dust", True)),
+    }
+
+
+def _gow17_checkpoint_histories(
+    *,
+    d_h2_hist,
+    d_co_hist,
+    d_tgas_hist,
+    d_h2_median_hist,
+    d_co_median_hist,
+    d_tgas_median_hist,
+    well_converged_cells_hist,
+    well_converged_fraction_hist,
+    bad_status_hist,
+    astrochem_acceleration_cells_hist,
+    astrochem_acceleration_entries_hist,
+    projection_corrections_hist,
+    equilibrium_solver_diag_hist,
+    time_solver_diag_hist,
+) -> dict:
+    return {
+        "d_h2_hist": list(d_h2_hist),
+        "d_co_hist": list(d_co_hist),
+        "d_tgas_hist": list(d_tgas_hist),
+        "d_h2_median_hist": list(d_h2_median_hist),
+        "d_co_median_hist": list(d_co_median_hist),
+        "d_tgas_median_hist": list(d_tgas_median_hist),
+        "well_converged_cells_hist": list(well_converged_cells_hist),
+        "well_converged_fraction_hist": list(well_converged_fraction_hist),
+        "bad_status_hist": list(bad_status_hist),
+        "astrochem_acceleration_cells_hist": list(astrochem_acceleration_cells_hist),
+        "astrochem_acceleration_entries_hist": list(astrochem_acceleration_entries_hist),
+        "projection_corrections_hist": list(projection_corrections_hist),
+        "equilibrium_solver_diag_hist": {
+            key: list(value) for key, value in equilibrium_solver_diag_hist.items()
+        },
+        "time_solver_diag_hist": {
+            key: list(value) for key, value in time_solver_diag_hist.items()
+        },
+    }
+
+
+def _restore_gow17_checkpoint_histories(histories: dict, locals_by_name: dict) -> None:
+    for key in (
+        "d_h2_hist",
+        "d_co_hist",
+        "d_tgas_hist",
+        "d_h2_median_hist",
+        "d_co_median_hist",
+        "d_tgas_median_hist",
+        "well_converged_cells_hist",
+        "well_converged_fraction_hist",
+        "bad_status_hist",
+        "astrochem_acceleration_cells_hist",
+        "astrochem_acceleration_entries_hist",
+        "projection_corrections_hist",
+    ):
+        locals_by_name[key][:] = list(histories.get(key, []))
+
+    for parent in ("equilibrium_solver_diag_hist", "time_solver_diag_hist"):
+        saved = histories.get(parent, {})
+        current = locals_by_name[parent]
+        for key in current:
+            current[key][:] = list(saved.get(key, []))
+
+
+def _gow17_derived_species(
+    y_grid: np.ndarray,
+    nH_cm3: np.ndarray,
+    xCtot: np.ndarray,
+    *,
+    line_h2_opr: float,
+) -> tuple[dict[str, Quantity], dict[str, Quantity]]:
+    xe = _electron_abundance(y_grid)
+    x_h = 1.0 - (
+        y_grid[..., I_OHX]
+        + y_grid[..., I_CHX]
+        + y_grid[..., I_HCOP]
+        + 3.0 * y_grid[..., I_H3P]
+        + 2.0 * y_grid[..., I_H2P]
+        + y_grid[..., I_HP]
+        + 2.0 * y_grid[..., I_H2]
+    )
+    x_catom = xCtot - (
+        y_grid[..., I_HCOP]
+        + y_grid[..., I_CHX]
+        + y_grid[..., I_CO]
+        + y_grid[..., I_CO_ICE]
+        + y_grid[..., I_CP]
+    )
+    return _gow17_species_outputs(
+        y_grid,
+        nH_cm3,
+        x_h=x_h,
+        x_catom=x_catom,
+        x_e=xe,
+        line_h2_opr=line_h2_opr,
+    )
+
+
+def _gow17_checkpoint_result(
+    *,
+    y_flat: np.ndarray,
+    nH_cm3: np.ndarray,
+    xCtot: np.ndarray,
+    shape: tuple[int, ...],
+    T_out: np.ndarray,
+    theta_h2_flat: np.ndarray,
+    theta_co_flat: np.ndarray,
+    theta_c_flat: np.ndarray,
+    Gph: np.ndarray,
+    GISRF: np.ndarray,
+    status_acc: np.ndarray,
+    line_h2_opr: float,
+) -> ChemistryResult:
+    y_grid = y_flat.reshape(shape + (N_Y,))
+    abundances, number_densities = _gow17_derived_species(
+        y_grid,
+        nH_cm3,
+        xCtot,
+        line_h2_opr=line_h2_opr,
+    )
+    actual_uv = _actual_solver_uv_fields(Gph=Gph, F_CO_pdes_external=GISRF, shape=shape)
+    fields = {
+        "Tgas": Quantity(T_out.reshape(shape), "K"),
+        "status": Quantity(status_acc.reshape(shape).astype(np.float64), "dimensionless"),
+        "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
+        "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
+        "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
+        "chi_eff": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
+        "G_CO_diss_actual": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
+        "G_C_ion_actual": Quantity(actual_uv["G_C_ion_actual"], "dimensionless"),
+        "G_H2_diss_actual": Quantity(actual_uv["G_H2_diss_actual"], "dimensionless"),
+        "F_CO_pdes_external_actual": Quantity(
+            actual_uv["F_CO_pdes_external_actual"],
+            "1/(cm^2 s)",
+        ),
+    }
+    return ChemistryResult(
+        abundances=abundances,
+        number_densities=number_densities,
+        fields=fields,
+    )
+
+
+def _write_gow17_checkpoint(
+    rad: "RadModel",
+    cp_cfg: dict,
+    result: ChemistryResult,
+    *,
+    y_grid: np.ndarray,
+    T_out: np.ndarray,
+    completed_updates: int,
+    total_updates: int,
+    t_target_yr: float | None,
+    histories: dict,
+) -> None:
+    if not cp_cfg["enabled"]:
+        return
+
+    checkpoint_dir = Path(cp_cfg["path"])
+    tmp_dir = checkpoint_dir.with_name(f"{checkpoint_dir.name}.tmp")
+    old_dir = checkpoint_dir.with_name(f"{checkpoint_dir.name}.old")
+
+    rad.gow17_y = y_grid
+    rad.Tgas_gow17 = Quantity(T_out, "K")
+    rad.gas_temperature = rad.Tgas_gow17
+    attach_chemistry_result_to_model(rad, result)
+
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    rad.model.save_hdf5(
+        tmp_dir / "model_snapshot.h5",
+        include_dust=bool(cp_cfg["include_dust"]),
+        overwrite=True,
+    )
+    metadata = {
+        "checkpoint_type": "gow17_latest",
+        "completed_updates": int(completed_updates),
+        "total_updates": int(total_updates),
+        "t_target_yr": None if t_target_yr is None else float(t_target_yr),
+        "histories": histories,
+    }
+    (tmp_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    )
+
+    if old_dir.exists():
+        shutil.rmtree(old_dir)
+    if checkpoint_dir.exists():
+        checkpoint_dir.rename(old_dir)
+    tmp_dir.rename(checkpoint_dir)
+    if old_dir.exists():
+        shutil.rmtree(old_dir)
+    logger.info("gow17 checkpoint: wrote %s", checkpoint_dir / "model_snapshot.h5")
+
+
+def _load_gow17_checkpoint(
+    rad: "RadModel",
+    cp_cfg: dict,
+    *,
+    shape: tuple[int, ...],
+    ncells: int,
+    total_updates: int,
+    const_temp: bool,
+    enable_co_phase: bool,
+) -> _Gow17CheckpointState | None:
+    if not (cp_cfg["enabled"] and cp_cfg["resume"]):
+        return None
+
+    checkpoint_dir = Path(cp_cfg["path"])
+    snapshot = checkpoint_dir / "model_snapshot.h5"
+    metadata_path = checkpoint_dir / "metadata.json"
+    if not (snapshot.exists() and metadata_path.exists()):
+        return None
+
+    from diskbridge.model.io_hdf5 import load_model_hdf5
+
+    checkpoint_model = load_model_hdf5(snapshot)
+    if tuple(checkpoint_model.mesh.shape) != tuple(shape):
+        raise ValueError(
+            "gow17 checkpoint mesh shape does not match active model: "
+            f"{tuple(checkpoint_model.mesh.shape)} != {tuple(shape)}"
+        )
+
+    fields = checkpoint_model.gas
+    y = np.zeros((ncells, N_Y), dtype=np.float64)
+    for species, idx in GOW17_STATE_SPECIES.items():
+        field_name = f"abundance_{species}"
+        if field_name not in fields:
+            raise KeyError(f"gow17 checkpoint is missing gas field {field_name!r}")
+        y[:, idx] = np.asarray(
+            fields[field_name].data.to("dimensionless").magnitude,
+            dtype=np.float64,
+        ).reshape(ncells)
+
+    if not enable_co_phase:
+        y[:, I_CO_ICE] = 0.0
+    if not const_temp:
+        if "gas_temperature" not in fields:
+            raise KeyError("gow17 checkpoint is missing gas field 'gas_temperature'")
+        T_restore = np.asarray(
+            fields["gas_temperature"].data.to("K").magnitude,
+            dtype=np.float64,
+        ).reshape(ncells)
+        y[:, I_E] = _cv_cold(y[:, I_H2], _electron_abundance(y)) * T_restore
+
+    def _field_or_ones(name: str) -> np.ndarray:
+        field_name = f"chem_{name}"
+        if field_name not in fields:
+            return np.ones(ncells, dtype=np.float64)
+        return np.asarray(
+            fields[field_name].data.to("dimensionless").magnitude,
+            dtype=np.float64,
+        ).reshape(ncells)
+
+    status = np.zeros(ncells, dtype=np.int32)
+    if "chem_status" in fields:
+        status = np.asarray(
+            fields["chem_status"].data.to("dimensionless").magnitude,
+            dtype=np.int32,
+        ).reshape(ncells)
+
+    metadata = json.loads(metadata_path.read_text())
+    saved_total = int(metadata.get("total_updates", total_updates))
+    if saved_total != int(total_updates):
+        raise ValueError(
+            "gow17 checkpoint total_updates does not match active config: "
+            f"{saved_total} != {int(total_updates)}. Delete the checkpoint or use matching config."
+        )
+    completed_updates = int(metadata.get("completed_updates", 0))
+    logger.info(
+        "gow17 checkpoint: resuming from %s after %d completed update(s)",
+        snapshot,
+        completed_updates,
+    )
+    return _Gow17CheckpointState(
+        y=np.ascontiguousarray(y, dtype=np.float64),
+        theta_h2=_field_or_ones("theta_h2"),
+        theta_co=_field_or_ones("theta_co"),
+        theta_c=_field_or_ones("theta_c"),
+        status=status,
+        completed_updates=completed_updates,
+        histories=dict(metadata.get("histories", {})),
+    )
 
 def _co_pdes_draine_flux() -> float:
     """Return configured Draine CO photodesorption photon flux."""
@@ -1326,6 +1650,7 @@ def _compute_shielding_and_gph(
 
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
+    checkpoint_cfg = _gow17_checkpoint_config(rad, cfg)
 
     nside = int(diskbridge.params.nside)
     ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
@@ -1959,8 +2284,48 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 if astrochem_acceleration == "aitken"
                 else None
             )
+            checkpoint_start = 0
+            loaded_checkpoint = _load_gow17_checkpoint(
+                rad,
+                checkpoint_cfg,
+                shape=shape,
+                ncells=ncells,
+                total_updates=N,
+                const_temp=const_temp,
+                enable_co_phase=enable_co_phase,
+            )
+            if loaded_checkpoint is not None:
+                y_state[:, :] = _project(loaded_checkpoint.y)
+                y_guess[:, :] = y_state
+                theta_h2_flat = loaded_checkpoint.theta_h2
+                theta_co_flat = loaded_checkpoint.theta_co
+                theta_c_flat = loaded_checkpoint.theta_c
+                status_acc = loaded_checkpoint.status
+                checkpoint_start = min(max(int(loaded_checkpoint.completed_updates), 0), N)
+                _restore_gow17_checkpoint_histories(
+                    loaded_checkpoint.histories,
+                    {
+                        "d_h2_hist": d_h2_hist,
+                        "d_co_hist": d_co_hist,
+                        "d_tgas_hist": d_tgas_hist,
+                        "d_h2_median_hist": d_h2_median_hist,
+                        "d_co_median_hist": d_co_median_hist,
+                        "d_tgas_median_hist": d_tgas_median_hist,
+                        "well_converged_cells_hist": well_converged_cells_hist,
+                        "well_converged_fraction_hist": well_converged_fraction_hist,
+                        "bad_status_hist": bad_status_hist,
+                        "astrochem_acceleration_cells_hist": astrochem_acceleration_cells_hist,
+                        "astrochem_acceleration_entries_hist": astrochem_acceleration_entries_hist,
+                        "projection_corrections_hist": projection_corrections_hist,
+                        "equilibrium_solver_diag_hist": equilibrium_solver_diag_hist,
+                        "time_solver_diag_hist": time_solver_diag_hist,
+                    },
+                )
+                if astrochem_acceleration == "aitken":
+                    accel_prev2 = None
+                    accel_prev1 = {idx: y_state[:, idx].copy() for idx in accel_species}
 
-            for k_step in range(N):
+            for k_step in range(checkpoint_start, N):
                 y_state[:, :] = _project(y_state)
                 xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
                 xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
@@ -2092,6 +2457,56 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                         d_h2, d_co,
                         bad_status_hist[-1],
                         acceleration_cells,
+                    )
+
+                if (
+                    checkpoint_cfg["enabled"]
+                    and (((k_step + 1) % int(checkpoint_cfg["every"]) == 0) or (k_step + 1 == N))
+                ):
+                    T_checkpoint = (
+                        _state_temperature(y_state).reshape(shape)
+                        if not const_temp
+                        else T_flat.reshape(shape)
+                    )
+                    checkpoint_result = _gow17_checkpoint_result(
+                        y_flat=y_state,
+                        nH_cm3=nH_cm3,
+                        xCtot=xCtot_flat.reshape(shape),
+                        shape=shape,
+                        T_out=T_checkpoint,
+                        theta_h2_flat=theta_h2_flat,
+                        theta_co_flat=theta_co_flat,
+                        theta_c_flat=theta_c_flat,
+                        Gph=Gph,
+                        GISRF=GISRF,
+                        status_acc=status_acc,
+                        line_h2_opr=cfg["line_h2_opr"],
+                    )
+                    _write_gow17_checkpoint(
+                        rad,
+                        checkpoint_cfg,
+                        checkpoint_result,
+                        y_grid=y_state.reshape(shape + (N_Y,)),
+                        T_out=T_checkpoint,
+                        completed_updates=k_step + 1,
+                        total_updates=N,
+                        t_target_yr=float(t_targets[k_step] / _YR_TO_S),
+                        histories=_gow17_checkpoint_histories(
+                            d_h2_hist=d_h2_hist,
+                            d_co_hist=d_co_hist,
+                            d_tgas_hist=d_tgas_hist,
+                            d_h2_median_hist=d_h2_median_hist,
+                            d_co_median_hist=d_co_median_hist,
+                            d_tgas_median_hist=d_tgas_median_hist,
+                            well_converged_cells_hist=well_converged_cells_hist,
+                            well_converged_fraction_hist=well_converged_fraction_hist,
+                            bad_status_hist=bad_status_hist,
+                            astrochem_acceleration_cells_hist=astrochem_acceleration_cells_hist,
+                            astrochem_acceleration_entries_hist=astrochem_acceleration_entries_hist,
+                            projection_corrections_hist=projection_corrections_hist,
+                            equilibrium_solver_diag_hist=equilibrium_solver_diag_hist,
+                            time_solver_diag_hist=time_solver_diag_hist,
+                        ),
                     )
 
             # After N macro-updates: recompute columns + shielding from final y_state.

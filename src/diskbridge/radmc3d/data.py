@@ -20,6 +20,23 @@ from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 
 
+def read_amr_grid_cell_count(path: str | Path) -> int:
+    """Return the regular-grid cell count declared by ``amr_grid.inp``."""
+
+    path = Path(path)
+    lines = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    if len(lines) < 6:
+        raise ValueError(f"{path} is too short to contain RADMC-3D grid dimensions")
+    dims = lines[5].split()
+    if len(dims) < 3:
+        raise ValueError(f"{path} does not contain three RADMC-3D grid dimensions")
+    try:
+        nx, ny, nz = (int(float(value)) for value in dims[:3])
+    except ValueError as exc:
+        raise ValueError(f"{path} has invalid RADMC-3D grid dimensions: {lines[5]!r}") from exc
+    return int(nx * ny * nz)
+
+
 def dtype_from_radmc_precision(path: str | Path, precision: int) -> np.dtype:
     """Return the NumPy dtype for a RADMC-3D binary precision code."""
 
@@ -220,6 +237,29 @@ class RadData:
             return (nx, ny, nz)
         else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
+
+    def _expected_ncells(self) -> int:
+        nx, ny, nz = self._getMeshShape()
+        return int(nx * ny * nz)
+
+    def _validate_cell_count(self, fpath: Path, actual_ncells: int) -> None:
+        """Refuse to read RADMC products from a different grid."""
+
+        actual_ncells = int(actual_ncells)
+        expected = self._expected_ncells()
+        if actual_ncells != expected:
+            raise ValueError(
+                f"RADMC-3D grid mismatch for {fpath}: file has {actual_ncells} cells, "
+                f"model mesh expects {expected}. Regenerate stale cached products."
+            )
+
+        amr = self.model_dir / "radmc3d_inputs" / "amr_grid.inp"
+        amr_ncells = read_amr_grid_cell_count(amr) if amr.exists() else expected
+        if amr_ncells != expected:
+            raise ValueError(
+                f"RADMC-3D grid mismatch: model mesh expects {expected} cells, "
+                f"but {amr} expects {amr_ncells}."
+            )
 
     def _resolve_data_file(
         self,
@@ -744,6 +784,7 @@ class RadData:
                 prec = int(hdr4[1])
                 nrcells = int(hdr4[2])
                 nwav = int(hdr4[3])
+                self._validate_cell_count(path, nrcells)
                 freq_hz = np.fromfile(f, dtype=np.float64, count=nwav) * units('Hz')
                 dtype = np.float64 if prec == 8 else np.float32
                 j_flat = np.fromfile(f, dtype=dtype, count=nwav * nrcells).astype(np.float64, copy=False)
@@ -754,6 +795,7 @@ class RadData:
             _ = int(f.readline().strip())
             nrcells = int(f.readline().strip())
             nwav = int(f.readline().strip())
+            self._validate_cell_count(path, nrcells)
             freq_vals = self._read_n_floats_from_text(f, nwav)
             freq_hz = freq_vals * units('Hz')
             j_vals = self._read_n_floats_from_text(f, nwav * nrcells)
@@ -833,6 +875,11 @@ class RadData:
             iformat = hdr3[0]
             prec = hdr3[1]  # 8 for double, 4 for single
             ncells = hdr3[2]
+            if iformat != 1:
+                raise ValueError(
+                    f"Binary scalar field {fname} has unsupported format {iformat}; expected 1"
+                )
+            self._validate_cell_count(fname, int(ncells))
             
             total_bytes = fname.stat().st_size
             header_bytes_min = 3 * 8
@@ -855,7 +902,10 @@ class RadData:
             
             if nspec > 1:
                 if data.size != ncells * nspec:
-                    raise ValueError(f"Binary scalar field {fname} has size {data.size}, expected {ncells * nspec}")
+                    raise ValueError(
+                        f"Binary scalar field {fname} has size {data.size}, "
+                        f"expected {ncells * nspec}"
+                    )
                 data = data.reshape((nspec, ncells))
         
         return data
@@ -873,5 +923,6 @@ class RadData:
         np.ndarray
             Data array with shape (ncells * 3,)
         """
-        data, _ = read_radmc_binp_field(fname, components=3)
+        data, ncells = read_radmc_binp_field(fname, components=3)
+        self._validate_cell_count(fname, ncells)
         return data

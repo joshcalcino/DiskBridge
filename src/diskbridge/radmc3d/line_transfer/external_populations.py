@@ -368,6 +368,15 @@ def _flat_levelpop_radmc_order(
     levelpop_full = _scatter_levelpop_to_full(
         fracpop_cand, n_species_cand, cell_idx, molecule.nlev, n0, n1, n2,
     )
+    level_sums = levelpop_full.sum(axis=-1)
+    positive = n_species > 0.0
+    populated = level_sums > 0.0
+    scale = positive & populated
+    if np.any(scale):
+        levelpop_full[scale, :] *= (n_species[scale] / level_sums[scale])[:, None]
+    empty_positive = positive & ~populated
+    if np.any(empty_positive):
+        levelpop_full[empty_positive, 0] = n_species[empty_positive]
     flat_per_level = np.stack(
         [RadWriter.flatten_scalar_to_radmc_order(mesh, levelpop_full[..., k])
          for k in range(molecule.nlev)],

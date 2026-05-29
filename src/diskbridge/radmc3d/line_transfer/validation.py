@@ -8,7 +8,7 @@ import numpy as np
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import expected_lines_inp_content, normalize_collider_name
 from diskbridge.radmc3d.colliders import assert_lamda_collision_order, gow17_lamda_colliders
-from diskbridge.radmc3d.data import read_radmc_binp_field
+from diskbridge.radmc3d.data import read_amr_grid_cell_count, read_radmc_binp_field
 
 
 def _inputs_dir(work_dir: Path) -> Path:
@@ -113,14 +113,7 @@ def ensure_gas_temperature_for_nonlte(
 def _grid_cell_count(amr_grid: Path) -> int | None:
     if not amr_grid.exists():
         return None
-    lines = [line.strip() for line in amr_grid.read_text().splitlines() if line.strip()]
-    if len(lines) < 6:
-        return None
-    parts = lines[5].split()
-    if len(parts) < 3:
-        return None
-    dims = [int(float(x)) for x in parts[:3]]
-    return int(dims[0] * dims[1] * dims[2])
+    return read_amr_grid_cell_count(amr_grid)
 
 
 def check_radmc_binp_file(

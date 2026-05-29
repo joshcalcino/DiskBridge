@@ -15,10 +15,10 @@ from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
 from diskbridge.chemistry.io import (
     add_default_line_colliders_from_gow17,
+    attach_chemistry_result_to_model,
     write_gas_temperature,
     write_many,
 )
-from diskbridge.model.field import Field
 from diskbridge.model.microturbulence import ensure_microturbulence_field
 from diskbridge.radmc3d.cache import should_use_cache, stable_json_hash, write_cache_context
 from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES, file_sha256
@@ -52,6 +52,11 @@ def _file_hashes(root: Path, patterns: tuple[str, ...]) -> dict[str, str]:
 
 def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
     """Build the explicit dependency context for GOW17 chemistry."""
+    config = {
+        key: value
+        for key, value in dict(config).items()
+        if key not in {"checkpoint", "_output_dir"}
+    }
     model = rad.model
     if model.gas is None:
         raise ValueError("GOW17 cache context requires model.gas")
@@ -205,83 +210,7 @@ def load_chemistry_outputs(
 
 
 def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) -> None:
-    """Attach chemistry outputs to the in-memory Model.
-
-    Contract (no new arguments): whenever chemistry runs, the per-cell products are
-    stored on `rad.model.gas` as realized `Field`s so they can be persisted via
-    `model.save_hdf5()`.
-
-    Naming convention:
-      * number density [cm^-3]:  number_density_<species>
-      * abundance fraction [-]:  abundance_<species>
-      * extra diagnostics:       chem_<name>
-
-    Temperature:
-      * If `rad.gas_temperature` exists (either
-        read from file or set by a thermal solver), we ensure it is registered as
-        `gas_temperature`.
-    """
-
-    model = getattr(rad, 'model', None)
-    if model is None or getattr(model, 'gas', None) is None or getattr(model, 'mesh', None) is None:
-        return
-
-    axis_order = model.mesh.axis_names()
-    if hasattr(rad, '_chem_axis_order'):
-        axis_order = rad._chem_axis_order()
-
-    tgas = None
-    if hasattr(rad, 'ensure_gas_temperature'):
-        tgas = rad.ensure_gas_temperature()
-    if tgas is None:
-        tgas = getattr(rad, 'gas_temperature', None)
-    tgas_gow17 = getattr(rad, 'Tgas_gow17', None)
-    if tgas_gow17 is not None:
-        tgas = tgas_gow17
-
-    if tgas is not None:
-        model.gas_register(
-            'gas_temperature',
-            Field(
-                quantity='gas_temperature',
-                data=tgas,
-                axis_order=axis_order,
-                attrs={'source': 'rad'},
-            ),
-        )
-
-    for sp, x in result.abundances.items():
-        model.gas_register(
-            f'abundance_{sp}',
-            Field(
-                quantity=f'abundance_{sp}',
-                data=x,
-                axis_order=axis_order,
-                attrs={'source': 'chemistry', 'kind': 'abundance', 'species': sp},
-            ),
-        )
-
-    for sp, n in result.number_densities.items():
-        model.gas_register(
-            f'number_density_{sp}',
-            Field(
-                quantity=f'number_density_{sp}',
-                data=n,
-                axis_order=axis_order,
-                attrs={'source': 'chemistry', 'kind': 'number_density', 'species': sp},
-            ),
-        )
-
-    for name, q in result.fields.items():
-        model.gas_register(
-            f'chem_{name}',
-            Field(
-                quantity=f'chem_{name}',
-                data=q,
-                axis_order=axis_order,
-                attrs={'source': 'chemistry', 'kind': 'diagnostic', 'name': name},
-            ),
-        )
+    attach_chemistry_result_to_model(rad, result)
 
 
 def _gow17_validation_summary(meta: dict) -> dict:
@@ -418,7 +347,9 @@ def run_chemistry(
                     f"Unknown chemistry model: {model!r}. "
                     f"Available models: {available}"
                 )
-            result = model_fn(rad, config)
+            model_config = dict(config)
+            model_config.setdefault("_output_dir", str(output_path))
+            result = model_fn(rad, model_config)
 
     if model_lower in {"gow17", "gow17_slab"}:
         result = add_default_line_colliders_from_gow17(

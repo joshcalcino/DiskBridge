@@ -169,9 +169,13 @@ def _setup_binning(
 
     if r_max is not None:
         r_max_base = r_max.to_base_units()
-        r_edges_native = r_edges_native[r_edges_native <= r_max_base]
-        if len(r_edges_native) < 2:
+        r_centers_native = mesh.centers("r")
+        if r_centers_native is None:
+            raise ValueError("Mesh is missing radial centers")
+        keep = np.where(r_centers_native.to_base_units() <= r_max_base)[0]
+        if keep.size == 0:
             raise ValueError("r_max is too small; no radial bins remain")
+        r_edges_native = r_edges_native[: int(keep[-1]) + 2]
 
     nR_native = len(r_edges_native) - 1
     if nR_native < 1:

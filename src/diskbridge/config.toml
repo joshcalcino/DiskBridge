@@ -237,6 +237,14 @@ sigma_d_H_ref = "1.0e-21 cm^2"
 gow17_original_Zd = 1.0
 gow17_original_Tdust = "10 K"
 
+[chemistry.gow17.checkpoint]
+enabled = false
+resume = true
+mode = "latest"
+directory = "checkpoint"
+every = 1
+include_dust = true
+
 [chemistry.gow17.co_phase]
 S_CO = 1.0
 S_CO_mode = "constant"
