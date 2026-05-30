@@ -84,6 +84,7 @@ class TestBatchSolverBasic:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -149,6 +150,7 @@ class TestBatchSolverBasic:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -225,6 +227,7 @@ class TestNoDoubleAttenuation:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -272,6 +275,7 @@ class TestNoDoubleAttenuation:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -351,6 +355,7 @@ class TestRadiationFieldScaling:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -398,6 +403,7 @@ class TestRadiationFieldScaling:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -477,6 +483,7 @@ class TestThermoEvolution:
             Tdust=Tdust,
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zd,
             Zg=Zg,
             ion_rate=ion_rate,
@@ -554,6 +561,7 @@ class TestGasDustCooling:
             Tdust=np.full(ncells, 10.0, dtype=np.float64),
             Zd=Zd,
             Dpah=Zd,
+            Dh2gr=Zd,
             Zgd=Zgd,
             Zg=Zg,
             ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
@@ -602,6 +610,7 @@ class TestGasDustCooling:
             Tdust=np.full(ncells, 10.0, dtype=np.float64),
             Zd=np.ones(ncells, dtype=np.float64),
             Dpah=np.ones(ncells, dtype=np.float64),
+            Dh2gr=np.ones(ncells, dtype=np.float64),
             Zgd=np.array([1.0, 1.0, 0.0], dtype=np.float64),
             Zg=np.ones(ncells, dtype=np.float64),
             ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
@@ -650,6 +659,7 @@ class TestPahScaling:
             Tdust=np.full(ncells, 10.0, dtype=np.float64),
             Zd=np.ones(ncells, dtype=np.float64),
             Dpah=np.array([1.0, 0.01], dtype=np.float64),
+            Dh2gr=np.ones(ncells, dtype=np.float64),
             Zgd=np.ones(ncells, dtype=np.float64),
             Zg=np.ones(ncells, dtype=np.float64),
             ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
@@ -684,6 +694,56 @@ class TestPahScaling:
         assert thermo[0, 12] > 0.0
         assert thermo[1, 1] == pytest.approx(0.01 * thermo[0, 1])
         assert thermo[1, 12] == pytest.approx(0.01 * thermo[0, 12])
+
+
+class TestH2GrainScaling:
+    def test_dh2gr_scales_h2_formation_heating(self):
+        ncells = 3
+        Tgas = np.full(ncells, 60.0, dtype=np.float64)
+        y = set_energy_temperature(default_y0(ncells), Tgas)
+        zeros = np.zeros(ncells, dtype=np.float64)
+
+        result = _gow17.eval_rhs_batch(
+            y=y,
+            nH=np.full(ncells, 1.0e4, dtype=np.float64),
+            Tgas=Tgas,
+            Tdust=np.full(ncells, 10.0, dtype=np.float64),
+            Zd=np.ones(ncells, dtype=np.float64),
+            Dpah=np.ones(ncells, dtype=np.float64),
+            Dh2gr=np.array([0.0, 0.5, 2.0], dtype=np.float64),
+            Zgd=np.ones(ncells, dtype=np.float64),
+            Zg=np.ones(ncells, dtype=np.float64),
+            ion_rate=np.full(ncells, 2.0e-16, dtype=np.float64),
+            GPE=np.ones(ncells, dtype=np.float64),
+            F_CO_pdes_photon=zeros,
+            Gph=np.ones((ncells, N_PH), dtype=np.float64),
+            sigma_d_CO_per_H=np.full(ncells, 1.0e-21, dtype=np.float64),
+            const_temp=False,
+            gradv=np.full(ncells, 1.0e-14, dtype=np.float64),
+            Leff_CO_max=np.full(ncells, 3.0e20, dtype=np.float64),
+            isDust_cooling=False,
+            fH2gr=1.0,
+            fHplusgr=1.0,
+            fCplusgr=1.0,
+            fHeplusgr=1.0,
+            fSplusgr=1.0,
+            fSiplusgr=1.0,
+            fCplusCR=1.0,
+            co_E_bind_co=float(E_BIND_CO),
+            co_nu0_co=float(NU0_CO),
+            co_Y_CO=float(Y_CO),
+            co_N_SURF=float(N_SURF),
+            co_N_LAY=int(N_LAY),
+            co_S_CO=1.0,
+            co_F_CRUV_CO_pdes=zeros,
+            co_k_crdes_CO=zeros,
+        )
+
+        thermo = np.asarray(result["thermo_rates"], dtype=np.float64)
+        assert np.all(result["status"] == 0)
+        assert thermo[0, 2] == pytest.approx(0.0)
+        assert thermo[1, 2] > 0.0
+        assert thermo[2, 2] == pytest.approx(4.0 * thermo[1, 2])
 
 
 class TestModuleConstants:

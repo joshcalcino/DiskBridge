@@ -46,6 +46,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_co_dust_scalings,
     _resolve_dust_cooling_controls,
     _resolve_pah_scaling,
+    _resolve_h2_grain_scaling,
     _resolve_co_phase_controls,
     _resolve_co_phase_runtime_params,
     _resolve_shielding_linewidth,
@@ -103,6 +104,7 @@ class Gow17TimeStepper:
         self.maxord = int(cfg["maxord"])
         self.userJac = bool(cfg["userJac"])
         self.verbose = bool(cfg["verbose"])
+        self.fH2gr = float(cfg["fH2gr"])
 
         self.ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
 
@@ -169,6 +171,21 @@ class Gow17TimeStepper:
             Zd_arr=self.Zd_arr,
             ncells=self.ncells,
         )
+        (
+            self.Dh2gr_arr,
+            self.sigma_H2gr_per_H,
+            self.sigma_H2gr_ref,
+            self.h2gr_meta,
+        ) = _resolve_h2_grain_scaling(
+            rad=rad,
+            Zd_arr=self.Zd_arr,
+            ncells=self.ncells,
+        )
+        if self.h2gr_meta["h2gr_uses_ordinary_dust"] and abs(self.fH2gr - 1.0) > 1.0e-12:
+            raise ValueError(
+                "fH2gr must remain 1.0 when H2 grain formation is derived from "
+                "ordinary dust surface area"
+            )
         (
             self.dust_cooling_mode,
             self.Zgd_arr,
@@ -525,6 +542,7 @@ class Gow17TimeStepper:
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
             Dpah=self.D_pah_arr,
+            Dh2gr=self.Dh2gr_arr,
             Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
@@ -546,7 +564,7 @@ class Gow17TimeStepper:
             Leff_CO_max=self.Leff_CO_max_arr,
             isDust_cooling=self.isDust_cooling,
             isCoolingCOThin=self.isCoolingCOThin,
-            fH2gr=float(1.0),
+            fH2gr=self.fH2gr,
             fHplusgr=float(1.0),
             fCplusgr=float(1.0),
             fHeplusgr=float(1.0),
@@ -615,6 +633,7 @@ class Gow17TimeStepper:
                 Tdust=Tdust_flat,
                 Zd=self.Zd_arr,
                 Dpah=self.D_pah_arr,
+                Dh2gr=self.Dh2gr_arr,
                 Zgd=self.Zgd_arr,
                 Zg=self.Zg_arr,
                 ion_rate=self.ion_rate_arr,
@@ -636,7 +655,7 @@ class Gow17TimeStepper:
                 Leff_CO_max=self.Leff_CO_max_arr,
                 isDust_cooling=self.isDust_cooling,
                 isCoolingCOThin=self.isCoolingCOThin,
-                fH2gr=float(1.0),
+                fH2gr=self.fH2gr,
                 fHplusgr=float(1.0),
                 fCplusgr=float(1.0),
                 fHeplusgr=float(1.0),
@@ -670,6 +689,7 @@ class Gow17TimeStepper:
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
             Dpah=self.D_pah_arr,
+            Dh2gr=self.Dh2gr_arr,
             Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
@@ -693,7 +713,7 @@ class Gow17TimeStepper:
             Leff_CO_max=self.Leff_CO_max_arr,
             isDust_cooling=self.isDust_cooling,
             isCoolingCOThin=self.isCoolingCOThin,
-            fH2gr=float(1.0),
+            fH2gr=self.fH2gr,
             fHplusgr=float(1.0),
             fCplusgr=float(1.0),
             fHeplusgr=float(1.0),

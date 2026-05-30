@@ -710,6 +710,47 @@ class RadModel:
         Tdust_gd = np.where(np.isfinite(Tdust_gd), Tdust_gd, 10.0)
         return Quantity(sigma_total, 'cm^2'), Quantity(Tdust_gd, 'K')
 
+    def compute_h2_formation_surface_area(self) -> Quantity:
+        """Projected ordinary-grain area per H for H2 formation."""
+        if self.model.dust is None or int(self.model.dust.nbin) == 0:
+            raise RuntimeError("No ordinary dust bins available for H2 surface area")
+
+        target = self._chem_axis_order()
+        nH = self.ensure_nH().to('cm^-3')
+        nH_cm3 = np.asarray(nH.magnitude, dtype=np.float64)
+        sigma_total = np.zeros_like(nH_cm3, dtype=np.float64)
+
+        for i in range(int(self.model.dust.nbin)):
+            bin_obj = self.model.dust[f'bin_{i}']
+            if getattr(bin_obj, "role", "ordinary_dust") == "pah":
+                continue
+            rho_d_i = field_data_as_order(
+                bin_obj['density'], target
+            ).to('g/cm^3')
+            a_i = float(bin_obj.size.to('cm').magnitude)
+            rho_s = float(bin_obj.density_material.to('g/cm^3').magnitude)
+            if a_i <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive size")
+            if rho_s <= 0.0:
+                raise ValueError(f"Dust bin {i} has non-positive material density")
+
+            rho = np.asarray(rho_d_i.magnitude, dtype=np.float64)
+            area_density = 3.0 * rho / (4.0 * a_i * rho_s)
+            sigma_i = np.divide(
+                area_density,
+                nH_cm3,
+                out=np.zeros_like(area_density, dtype=np.float64),
+                where=(nH_cm3 > 0.0),
+            )
+            sigma_i = np.where(
+                np.isfinite(sigma_i) & (sigma_i > 0.0),
+                sigma_i,
+                0.0,
+            )
+            sigma_total += sigma_i
+
+        return Quantity(sigma_total, 'cm^2')
+
     def ensure_sigma_d_per_H(self, force: bool = False) -> Quantity:
         target = self._chem_axis_order()
 

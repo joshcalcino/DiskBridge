@@ -777,6 +777,45 @@ class Dust(SubModel):
                 attrs=attrs,
             ),
         )
+
+    def h2_formation_reference_area_per_H(self) -> Quantity:
+        """ISM-reference projected ordinary-grain area per H."""
+        if not self._components:
+            raise RuntimeError("No dust components available")
+
+        candidates = []
+        for comp in self._components:
+            attrs = getattr(comp.mask, "attrs", {}) if comp.mask is not None else {}
+            if attrs.get("complement_of") == "disk_mask":
+                candidates.append(comp)
+
+        if len(candidates) == 1:
+            comp = candidates[0]
+        elif len(candidates) == 0 and len(self._components) == 1:
+            comp = self._components[0]
+        else:
+            raise RuntimeError(
+                "Cannot identify a unique ISM dust reference component for H2 formation"
+            )
+
+        mu_H = 1.4
+        m_H_g = float(m_H.to("g").magnitude)
+        sigma = 0.0
+        for i in range(comp.distribution.nbin):
+            a_i = float(comp.distribution.bin_centers[i].to("cm").magnitude)
+            rho_s = float(comp.distribution.grain_density.to("g/cm^3").magnitude)
+            f_i = float(comp.distribution.mass_fractions[i])
+            sigma += (
+                3.0
+                * float(comp.dust_to_gas_ratio)
+                * f_i
+                * mu_H
+                * m_H_g
+                / (4.0 * a_i * rho_s)
+            )
+        if not np.isfinite(sigma) or sigma <= 0.0:
+            raise RuntimeError("Invalid ISM H2 formation surface reference")
+        return Quantity(sigma, "cm^2")
         
     def _compute_dust_scale_height(
         self,

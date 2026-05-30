@@ -309,6 +309,8 @@ gow17::gow17()
   Zg_ = 1.;
   Zd_ = 1.;
   Dpah_ = 1.;
+  Dh2gr_ = 1.;
+  Dh2gr_user_set_ = false;
   Zgd_ = 1.;
   Tdust_ = 10.;
 
@@ -720,7 +722,7 @@ void gow17::ChemInit_(const double *y) {
 	/* Grain assisted recombination of H and H2*/
 	/*	 (0) *H + *H + gr -> H2 + gr , constant rate from Wolfire2008 and
    *	 Hollenbach 2012*/
-	kgr_[0] = 3.0e-17 * nH_ * Zd_ * fH2gr_;
+	kgr_[0] = 3.0e-17 * nH_ * Dh2gr_ * fH2gr_;
 	/*	 (1) H+ + *e + gr -> *H + gr
    *	 (2) C+ + *e + gr -> *C + gr
    *   (3) He+ + *e + gr -> *He + gr
@@ -833,6 +835,9 @@ void gow17::SetbCO(const double bCO) {
 
 void gow17::SetZd(const double Zd) {
 	Zd_ = Zd;
+  if (!Dh2gr_user_set_) {
+    Dh2gr_ = Zd_;
+  }
 	return;
 }
 
@@ -842,6 +847,16 @@ void gow17::SetDpah(const double Dpah) {
   } else {
     Dpah_ = 0.0;
   }
+  return;
+}
+
+void gow17::SetDh2gr(const double Dh2gr) {
+  if (std::isfinite(Dh2gr) && Dh2gr > 0.0) {
+    Dh2gr_ = Dh2gr;
+  } else {
+    Dh2gr_ = 0.0;
+  }
+  Dh2gr_user_set_ = true;
   return;
 }
 

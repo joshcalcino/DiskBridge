@@ -985,6 +985,46 @@ def _resolve_pah_scaling(
     return D_pah, rho_pah_flat, meta
 
 
+def _resolve_h2_grain_scaling(
+    *,
+    rad: "RadModel",
+    Zd_arr: np.ndarray,
+    ncells: int,
+) -> tuple[np.ndarray, np.ndarray | None, float | None, dict]:
+    """Resolve D_H2gr from ordinary-grain projected area, or fallback to Zd."""
+    model = rad.model
+    if model.dust is None or int(model.dust.nbin) == 0:
+        D = np.ascontiguousarray(Zd_arr, dtype=np.float64)
+        return D, None, None, {
+            "h2gr_source": "gow17_original_Zd",
+            "h2gr_uses_ordinary_dust": False,
+            "sigma_H2gr_ref_cm2": None,
+        }
+
+    sigma_q = rad.compute_h2_formation_surface_area()
+    sigma_arr = np.ascontiguousarray(
+        sigma_q.to("cm^2").magnitude,
+        dtype=np.float64,
+    ).reshape(ncells)
+    sigma_ref_q = model.dust.h2_formation_reference_area_per_H()
+    sigma_ref = float(sigma_ref_q.to("cm^2").magnitude)
+    if not np.isfinite(sigma_ref) or sigma_ref <= 0.0:
+        raise ValueError("Invalid sigma_H2gr_ref")
+
+    D = np.divide(
+        sigma_arr,
+        sigma_ref,
+        out=np.zeros(ncells, dtype=np.float64),
+        where=(sigma_ref > 0.0),
+    )
+    D = np.where(np.isfinite(D) & (D >= 0.0), D, 0.0)
+    return np.ascontiguousarray(D, dtype=np.float64), sigma_arr, sigma_ref, {
+        "h2gr_source": "ordinary_dust_surface_area",
+        "h2gr_uses_ordinary_dust": True,
+        "sigma_H2gr_ref_cm2": sigma_ref,
+    }
+
+
 def _resolve_dust_cooling_controls(
     *,
     cfg: dict,
@@ -1354,6 +1394,7 @@ def _compute_rhs_residual_diagnostics(
     Tdust_flat: np.ndarray,
     Zd_arr: np.ndarray,
     D_pah_arr: np.ndarray,
+    Dh2gr_arr: np.ndarray,
     Zgd_arr: np.ndarray,
     Zg_arr: np.ndarray,
     ion_rate_arr: np.ndarray,
@@ -1396,6 +1437,7 @@ def _compute_rhs_residual_diagnostics(
             Tdust=np.ascontiguousarray(Tdust_flat, dtype=np.float64),
             Zd=np.ascontiguousarray(Zd_arr, dtype=np.float64),
             Dpah=np.ascontiguousarray(D_pah_arr, dtype=np.float64),
+            Dh2gr=np.ascontiguousarray(Dh2gr_arr, dtype=np.float64),
             Zgd=np.ascontiguousarray(Zgd_arr, dtype=np.float64),
             Zg=np.ascontiguousarray(Zg_arr, dtype=np.float64),
             ion_rate=np.ascontiguousarray(ion_rate_arr, dtype=np.float64),
@@ -1918,6 +1960,18 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Zd_arr=Zd_arr,
         ncells=ncells,
     )
+    Dh2gr_arr, sigma_H2gr_per_H, sigma_H2gr_ref, h2gr_meta = (
+        _resolve_h2_grain_scaling(
+            rad=rad,
+            Zd_arr=Zd_arr,
+            ncells=ncells,
+        )
+    )
+    if h2gr_meta["h2gr_uses_ordinary_dust"] and abs(float(fH2gr) - 1.0) > 1.0e-12:
+        raise ValueError(
+            "fH2gr must remain 1.0 when H2 grain formation is derived from "
+            "ordinary dust surface area"
+        )
     S_CO, F_CRUV_CO_pdes_arr, k_crdes_CO_arr = _resolve_co_phase_controls(
         cfg=cfg,
         ion_rate_arr=ion_rate_arr,
@@ -2215,6 +2269,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
                 Dpah=D_pah_arr,
+                Dh2gr=Dh2gr_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2318,6 +2373,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
                 Dpah=D_pah_arr,
+                Dh2gr=Dh2gr_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2450,6 +2506,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     Tdust=Tdust_flat,
                     Zd=Zd_arr,
                     Dpah=D_pah_arr,
+                    Dh2gr=Dh2gr_arr,
                     Zgd=Zgd_arr,
                     Zg=Zg_arr,
                     ion_rate=ion_rate_arr,
@@ -2630,6 +2687,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
                 Dpah=D_pah_arr,
+                Dh2gr=Dh2gr_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2873,6 +2931,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         1: "explicit_pah_component",
     }
     gow17_diag.update(pah_meta)
+    gow17_diag["h2gr_source_id_map"] = {
+        0: "gow17_original_Zd",
+        1: "ordinary_dust_surface_area",
+    }
+    gow17_diag.update(h2gr_meta)
 
     if not const_temp:
         T_out = _state_temperature(y_out.reshape(ncells, N_Y)).reshape(shape)
@@ -2886,6 +2949,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     )
     dust_cooling_mode_id = 1 if dust_cooling_mode == "surface_area" else 2
     pah_source_id = 1 if pah_meta["pah_uses_explicit_component"] else 0
+    h2gr_source_id = (
+        1 if h2gr_meta["h2gr_source"] == "ordinary_dust_surface_area" else 0
+    )
     T_status = np.zeros(shape, dtype=np.int32)
     bad_T = (
         (~np.isfinite(T_out))
@@ -2915,6 +2981,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ),
         "pah_source_id": Quantity(
             np.full(shape, pah_source_id, dtype=np.float64),
+            "dimensionless",
+        ),
+        "h2gr_surface_rel_ism": Quantity(
+            Dh2gr_arr.reshape(shape),
+            "dimensionless",
+        ),
+        "h2gr_source_id": Quantity(
+            np.full(shape, h2gr_source_id, dtype=np.float64),
             "dimensionless",
         ),
         "Tdust_gd_surface_weighted": Quantity(Tdust_flat.reshape(shape), "K"),
@@ -2948,6 +3022,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         fields["pah_density"] = Quantity(
             rho_pah_flat.reshape(shape),
             "g/cm^3",
+        )
+    if sigma_H2gr_per_H is not None:
+        fields["sigma_H2gr_per_H"] = Quantity(
+            sigma_H2gr_per_H.reshape(shape),
+            "cm^2",
         )
     fields.update(
         _compute_co_phase_diagnostics(
@@ -3006,6 +3085,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tdust_flat=Tdust_flat,
         Zd_arr=Zd_arr,
         D_pah_arr=D_pah_arr,
+        Dh2gr_arr=Dh2gr_arr,
         Zgd_arr=Zgd_arr,
         Zg_arr=Zg_arr,
         ion_rate_arr=ion_rate_arr,

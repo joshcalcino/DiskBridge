@@ -68,6 +68,7 @@ class gow17 : public Ode {
     void SetNH(const double NH);
     void SetZd(const double Zd);
     void SetDpah(const double Dpah);
+    void SetDh2gr(const double Dh2gr);
     void SetZgd(const double Zgd);
     void SetZg(const double Zg);
     void SetTdust(const double Tdust);
@@ -332,6 +333,8 @@ class gow17 : public Ode {
     double *Gph_;
     /* scale formation rate on grains.*/
     double Dpah_; /* PAH abundance relative to standard ISM PAH abundance */
+    double Dh2gr_; /* ordinary-grain H2 formation surface relative to ISM */
+    bool Dh2gr_user_set_;
     double fH2gr_;
     double fHplusgr_;
     double fCplusgr_;
