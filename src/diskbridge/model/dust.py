@@ -25,6 +25,14 @@ k_B = units('k_B')  # Boltzmann constant
 m_H = units('m_H')  # Hydrogen mass
 G = units('G')      # Gravitational constant
 
+PAH_N_C_DEFAULT = 54
+PAH_N_H_DEFAULT = 18
+PAH_X_ISM_DEFAULT = 3.0e-7 * (50.0 / PAH_N_C_DEFAULT)
+AMU_G = 1.66053906660e-24
+PAH_MASS_G_DEFAULT = (
+    PAH_N_C_DEFAULT * 12.011 + PAH_N_H_DEFAULT * 1.008
+) * AMU_G
+
 
 def _current_params():
     import diskbridge
@@ -688,6 +696,87 @@ class Dust(SubModel):
                 complement=True,
                 mode="proportional",
             )
+
+    def add_pah_to_disk(
+        self,
+        *,
+        f_pah_disk: float = 0.01,
+        include_ism: bool = True,
+        disk_weight_field: str = "disk_weight",
+        disk_mask_field: str = "disk_mask",
+    ) -> None:
+        """Construct PAH abundance fields from the disk/ISM material split.
+
+        PAHs are registered as gas-side chemistry/material fields, not as
+        ordinary dust bins, so they do not contribute to dust surface-area
+        moments used for gas-dust coupling or CO freeze-out.
+        """
+        if self.parent.gas is None:
+            raise KeyError("Model has no gas submodel")
+        if "density" not in self.parent.gas:
+            raise KeyError("Need gas['density'] to construct PAH abundance")
+        if f_pah_disk < 0.0:
+            raise ValueError("f_pah_disk must be non-negative")
+
+        if disk_weight_field in self.parent.gas:
+            w_field = self.parent.gas[disk_weight_field]
+        elif disk_mask_field in self.parent.gas:
+            w_field = self.parent.gas[disk_mask_field]
+        else:
+            raise KeyError("Need disk_weight or disk_mask to construct disk PAH field")
+
+        target = self.parent.mesh.axis_names()  # type: ignore[union-attr]
+        from .utils import field_data_as_order
+
+        rho_gas = field_data_as_order(
+            self.parent.gas["density"], target
+        ).to("g/cm^3")
+        w_disk_q = field_data_as_order(w_field, target).to("dimensionless")
+        w_disk = np.clip(np.asarray(w_disk_q.magnitude, dtype=float), 0.0, 1.0)
+        w_ism = 1.0 - w_disk
+
+        # Match the nH convention used by the RADMC/GOW17 bridge.
+        nH = rho_gas / (1.4 * m_H)
+        if include_ism:
+            D_pah = w_ism + f_pah_disk * w_disk
+        else:
+            D_pah = f_pah_disk * w_disk
+        D_pah = np.where(np.isfinite(D_pah) & (D_pah >= 0.0), D_pah, 0.0)
+        rho_pah = (
+            nH
+            * Quantity(PAH_X_ISM_DEFAULT, "dimensionless")
+            * Quantity(PAH_MASS_G_DEFAULT, "g")
+            * Quantity(D_pah, "dimensionless")
+        ).to("g/cm^3")
+        attrs = {
+            "role": "pah",
+            "pah_model": "C54H18",
+            "N_C": PAH_N_C_DEFAULT,
+            "N_H": PAH_N_H_DEFAULT,
+            "x_PAH_ISM": PAH_X_ISM_DEFAULT,
+            "m_PAH_g": PAH_MASS_G_DEFAULT,
+            "f_PAH_disk": float(f_pah_disk),
+            "include_ism": bool(include_ism),
+            "source": "disk_mask_mixture",
+        }
+        self.parent.gas_register(
+            "pah_abundance_rel_ism",
+            Field(
+                quantity="pah_abundance_rel_ism",
+                data=Quantity(D_pah, "dimensionless"),
+                axis_order=target,
+                attrs=attrs,
+            ),
+        )
+        self.parent.gas_register(
+            "pah_density",
+            Field(
+                quantity="pah_density",
+                data=rho_pah,
+                axis_order=target,
+                attrs=attrs,
+            ),
+        )
         
     def _compute_dust_scale_height(
         self,

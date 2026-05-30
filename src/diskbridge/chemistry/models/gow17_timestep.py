@@ -45,6 +45,7 @@ from diskbridge.chemistry.models.gow17 import (
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
     _resolve_dust_cooling_controls,
+    _resolve_pah_scaling,
     _resolve_co_phase_controls,
     _resolve_co_phase_runtime_params,
     _resolve_shielding_linewidth,
@@ -160,6 +161,12 @@ class Gow17TimeStepper:
         self.sigma_d_CO_per_H, self.Zd_arr, self.sigma_d_ISM_ref = _resolve_co_dust_scalings(
             cfg=cfg,
             sigma_d_cm2=sigma_d_cm2,
+            ncells=self.ncells,
+        )
+        self.D_pah_arr, self.rho_pah_flat, self.pah_meta = _resolve_pah_scaling(
+            rad=rad,
+            nH_flat=self.nH_flat,
+            Zd_arr=self.Zd_arr,
             ncells=self.ncells,
         )
         (
@@ -517,6 +524,7 @@ class Gow17TimeStepper:
             Tgas=T_flat,
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
+            Dpah=self.D_pah_arr,
             Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,
@@ -606,6 +614,7 @@ class Gow17TimeStepper:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=self.Zd_arr,
+                Dpah=self.D_pah_arr,
                 Zgd=self.Zgd_arr,
                 Zg=self.Zg_arr,
                 ion_rate=self.ion_rate_arr,
@@ -660,6 +669,7 @@ class Gow17TimeStepper:
             Tgas=T_flat,
             Tdust=Tdust_flat,
             Zd=self.Zd_arr,
+            Dpah=self.D_pah_arr,
             Zgd=self.Zgd_arr,
             Zg=self.Zg_arr,
             ion_rate=self.ion_rate_arr,

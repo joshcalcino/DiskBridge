@@ -39,6 +39,7 @@ from diskbridge.chemistry.validation import (
     gow17_budget_diagnostics,
     project_gow17_state_to_budgets,
 )
+from diskbridge.model.utils import field_data_as_order
 from diskbridge.radmc3d.uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
     draine_reference_for_product,
@@ -97,6 +98,12 @@ GOW17_STATE_SPECIES = {
 KB_CGS = 1.380649e-16
 ALPHA_GD_CGS = 3.2e-34
 _YR_TO_S = float(Quantity("1 yr").to("s").magnitude)
+PAH_N_C_DEFAULT = 54
+PAH_N_H_DEFAULT = 18
+PAH_X_ISM_DEFAULT = 3.0e-7 * (50.0 / PAH_N_C_DEFAULT)
+PAH_MASS_G_DEFAULT = (
+    PAH_N_C_DEFAULT * 12.011 + PAH_N_H_DEFAULT * 1.008
+) * 1.66053906660e-24
 
 _KPH_BASE = np.asarray(
     [3.5e-10, 9.1e-10, 2.4e-10, 3.8e-10, 5.7e-11, 6.0e-10, 4.5e-9],
@@ -892,6 +899,92 @@ def _resolve_co_dust_scalings(
     return sigma_d_CO, np.maximum(zd, 0.0), float(sigma_ref)
 
 
+def _maybe_model_field(rad: "RadModel", name: str):
+    model = rad.model
+    if model.gas is not None and name in model.gas:
+        return model.gas[name], f"gas.{name}"
+    if model.dust is not None and name in model.dust:
+        return model.dust[name], f"dust.{name}"
+    return None, None
+
+
+def _resolve_pah_scaling(
+    *,
+    rad: "RadModel",
+    nH_flat: np.ndarray,
+    Zd_arr: np.ndarray,
+    ncells: int,
+) -> tuple[np.ndarray, np.ndarray | None, dict]:
+    """Return D_PAH per cell, falling back to original GOW17 Zd behavior."""
+    target = rad._chem_axis_order()
+    abundance_field, abundance_source = _maybe_model_field(
+        rad, "pah_abundance_rel_ism"
+    )
+    density_field, density_source = _maybe_model_field(rad, "pah_density")
+
+    D_from_abundance = None
+    D_from_density = None
+    rho_pah_flat = None
+    if abundance_field is not None:
+        D_from_abundance = np.ascontiguousarray(
+            field_data_as_order(abundance_field, target)
+            .to("dimensionless")
+            .magnitude,
+            dtype=np.float64,
+        ).reshape(ncells)
+    if density_field is not None:
+        rho_pah_flat = np.ascontiguousarray(
+            field_data_as_order(density_field, target)
+            .to("g/cm^3")
+            .magnitude,
+            dtype=np.float64,
+        ).reshape(ncells)
+        denom = nH_flat * PAH_X_ISM_DEFAULT * PAH_MASS_G_DEFAULT
+        D_from_density = np.divide(
+            rho_pah_flat,
+            denom,
+            out=np.zeros(ncells, dtype=np.float64),
+            where=(denom > 0.0),
+        )
+
+    if D_from_abundance is not None and D_from_density is not None:
+        ok = np.isfinite(D_from_abundance) & np.isfinite(D_from_density)
+        if np.any(ok):
+            rel_err = np.max(
+                np.abs(D_from_abundance[ok] - D_from_density[ok])
+                / np.maximum(1.0, np.abs(D_from_abundance[ok]))
+            )
+            if rel_err > 1.0e-6:
+                raise ValueError(
+                    "pah_abundance_rel_ism and pah_density are inconsistent "
+                    f"(max relative mismatch {rel_err:.3e})"
+                )
+        D_pah = D_from_abundance
+        source = f"{abundance_source}+{density_source}"
+    elif D_from_abundance is not None:
+        D_pah = D_from_abundance
+        source = abundance_source
+    elif D_from_density is not None:
+        D_pah = D_from_density
+        source = density_source
+    else:
+        D_pah = np.ascontiguousarray(Zd_arr, dtype=np.float64)
+        source = "gow17_original_Zd"
+
+    if not np.all(np.isfinite(D_pah)):
+        raise ValueError("D_PAH contains non-finite values")
+    D_pah = np.maximum(np.ascontiguousarray(D_pah, dtype=np.float64), 0.0)
+    meta = {
+        "pah_source": source,
+        "pah_uses_explicit_component": source != "gow17_original_Zd",
+        "pah_N_C": PAH_N_C_DEFAULT,
+        "pah_N_H": PAH_N_H_DEFAULT,
+        "pah_x_ISM": PAH_X_ISM_DEFAULT,
+        "pah_mass_g": PAH_MASS_G_DEFAULT,
+    }
+    return D_pah, rho_pah_flat, meta
+
+
 def _resolve_dust_cooling_controls(
     *,
     cfg: dict,
@@ -1260,6 +1353,7 @@ def _compute_rhs_residual_diagnostics(
     Tgas_flat: np.ndarray,
     Tdust_flat: np.ndarray,
     Zd_arr: np.ndarray,
+    D_pah_arr: np.ndarray,
     Zgd_arr: np.ndarray,
     Zg_arr: np.ndarray,
     ion_rate_arr: np.ndarray,
@@ -1301,6 +1395,7 @@ def _compute_rhs_residual_diagnostics(
             Tgas=np.ascontiguousarray(Tgas_flat, dtype=np.float64),
             Tdust=np.ascontiguousarray(Tdust_flat, dtype=np.float64),
             Zd=np.ascontiguousarray(Zd_arr, dtype=np.float64),
+            Dpah=np.ascontiguousarray(D_pah_arr, dtype=np.float64),
             Zgd=np.ascontiguousarray(Zgd_arr, dtype=np.float64),
             Zg=np.ascontiguousarray(Zg_arr, dtype=np.float64),
             ion_rate=np.ascontiguousarray(ion_rate_arr, dtype=np.float64),
@@ -1817,6 +1912,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         sigma_d_cm2=sigma_d_cm2,
         ncells=ncells,
     )
+    D_pah_arr, rho_pah_flat, pah_meta = _resolve_pah_scaling(
+        rad=rad,
+        nH_flat=nH_flat,
+        Zd_arr=Zd_arr,
+        ncells=ncells,
+    )
     S_CO, F_CRUV_CO_pdes_arr, k_crdes_CO_arr = _resolve_co_phase_controls(
         cfg=cfg,
         ion_rate_arr=ion_rate_arr,
@@ -2113,6 +2214,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Dpah=D_pah_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2215,6 +2317,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Dpah=D_pah_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2346,6 +2449,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     Tgas=T_flat,
                     Tdust=Tdust_flat,
                     Zd=Zd_arr,
+                    Dpah=D_pah_arr,
                     Zgd=Zgd_arr,
                     Zg=Zg_arr,
                     ion_rate=ion_rate_arr,
@@ -2525,6 +2629,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
                 Zd=Zd_arr,
+                Dpah=D_pah_arr,
                 Zgd=Zgd_arr,
                 Zg=Zg_arr,
                 ion_rate=ion_rate_arr,
@@ -2763,6 +2868,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             time_solver_diag["time_negative_abundance_corrections_total"],
         )
     gow17_diag.update(budget_diag)
+    gow17_diag["pah_source_id_map"] = {
+        0: "gow17_original_Zd",
+        1: "explicit_pah_component",
+    }
+    gow17_diag.update(pah_meta)
 
     if not const_temp:
         T_out = _state_temperature(y_out.reshape(ncells, N_Y)).reshape(shape)
@@ -2775,6 +2885,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tdust_K=Tdust_flat.reshape(shape),
     )
     dust_cooling_mode_id = 1 if dust_cooling_mode == "surface_area" else 2
+    pah_source_id = 1 if pah_meta["pah_uses_explicit_component"] else 0
     T_status = np.zeros(shape, dtype=np.int32)
     bad_T = (
         (~np.isfinite(T_out))
@@ -2798,6 +2909,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "Tgas_status": Quantity(T_status, "dimensionless"),
         "sigma_d_per_H_total": Quantity(sigma_d_per_H_total.reshape(shape), "cm^2"),
         "Zgd_surface": Quantity(Zgd_arr.reshape(shape), "dimensionless"),
+        "pah_abundance_rel_ism": Quantity(
+            D_pah_arr.reshape(shape),
+            "dimensionless",
+        ),
+        "pah_source_id": Quantity(
+            np.full(shape, pah_source_id, dtype=np.float64),
+            "dimensionless",
+        ),
         "Tdust_gd_surface_weighted": Quantity(Tdust_flat.reshape(shape), "K"),
         "gas_dust_exchange_signed": Quantity(gas_dust_exchange, "erg/s"),
         "gas_to_dust_cooling": Quantity(np.maximum(gas_dust_exchange, 0.0), "erg/s"),
@@ -2825,6 +2944,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "1/(cm^2 s)",
         ),
     }
+    if rho_pah_flat is not None:
+        fields["pah_density"] = Quantity(
+            rho_pah_flat.reshape(shape),
+            "g/cm^3",
+        )
     fields.update(
         _compute_co_phase_diagnostics(
             y_out=y_out,
@@ -2881,6 +3005,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         Tgas_flat=T_out.reshape(ncells),
         Tdust_flat=Tdust_flat,
         Zd_arr=Zd_arr,
+        D_pah_arr=D_pah_arr,
         Zgd_arr=Zgd_arr,
         Zg_arr=Zg_arr,
         ion_rate_arr=ion_rate_arr,

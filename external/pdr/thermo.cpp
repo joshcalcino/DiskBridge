@@ -1,4 +1,5 @@
 #include "thermo.h"
+#include <cmath>
 #include <stdio.h>
 
 Thermo::Thermo(){}
@@ -176,13 +177,19 @@ double Thermo::HeatingCr(const double xe, const double nH,
 
 double Thermo::HeatingPE(const double G, const double Zd, const double T,
                          const double ne){
-  const double x = 1.7 * G * sqrt(T)/ne + 50.;
-  const double fac = ( CPE_[0] + CPE_[1]*pow(T, CPE_[4]) ) /
+  if (!(G > 0.0) || !(Zd > 0.0) || !(T > 0.0)) {
+    return 0.0;
+  }
+  const double ne_eff = (std::isfinite(ne) && ne > 1.0e-30) ? ne : 1.0e-30;
+  const double T_eff = std::isfinite(T) ? T : 2.7;
+  const double G_eff = std::isfinite(G) ? G : 0.0;
+  const double x = 1.7 * G_eff * sqrt(T_eff) / ne_eff + 50.;
+  const double fac = ( CPE_[0] + CPE_[1]*pow(T_eff, CPE_[4]) ) /
     (
      1. + CPE_[2]*pow(x, CPE_[5]) * ( 1. + CPE_[3]*pow(x, CPE_[6]) )
      );
-  const double heating = 1.7e-26 * G * Zd * fac;
-  return heating;
+  const double heating = 1.7e-26 * G_eff * Zd * fac;
+  return std::isfinite(heating) && heating > 0.0 ? heating : 0.0;
 }
 
 double Thermo::Cooling2Level_(const double q01, const double q10,
@@ -485,11 +492,18 @@ double Thermo::CoolingDustTd(const double Zgd, const double nH,  const double Tg
 
 double Thermo::CoolingRec(const double Zd, const double T, const double ne,
                           const double G) {
-  const double x = 1.7 * G * sqrt(T)/ne + 50.;
+  if (!(Zd > 0.0) || !(T > 0.0) || !(ne > 0.0)) {
+    return 0.0;
+  }
+  const double ne_eff = (std::isfinite(ne) && ne > 1.0e-30) ? ne : 1.0e-30;
+  const double T_eff = std::isfinite(T) ? T : 2.7;
+  const double G_eff = (std::isfinite(G) && G > 0.0) ? G : 0.0;
+  const double x = 1.7 * G_eff * sqrt(T_eff) / ne_eff + 50.;
   const double lnx = log(x);
-  const double cooling = 1.0e-28 * ne * pow(T, DPE_[0] + DPE_[1]/lnx)
+  const double cooling = 1.0e-28 * ne_eff * pow(T_eff, DPE_[0] + DPE_[1]/lnx)
                           * exp( DPE_[2] + (DPE_[3] - DPE_[4]*lnx)*lnx );
-  return cooling * Zd;
+  const double out = cooling * Zd;
+  return std::isfinite(out) && out > 0.0 ? out : 0.0;
 }
 
 double Thermo::CoolingH2diss(const double xHI, const double xH2,

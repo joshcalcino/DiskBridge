@@ -67,6 +67,7 @@ class gow17 : public Ode {
     void SetNCO(const double NCO);
     void SetNH(const double NH);
     void SetZd(const double Zd);
+    void SetDpah(const double Dpah);
     void SetZgd(const double Zgd);
     void SetZg(const double Zg);
     void SetTdust(const double Tdust);
@@ -330,6 +331,7 @@ class gow17 : public Ode {
     double *FCO_pdes_photon_;
     double *Gph_;
     /* scale formation rate on grains.*/
+    double Dpah_; /* PAH abundance relative to standard ISM PAH abundance */
     double fH2gr_;
     double fHplusgr_;
     double fCplusgr_;

@@ -308,6 +308,7 @@ gow17::gow17()
 	/*Default values of physical parameters*/
   Zg_ = 1.;
   Zd_ = 1.;
+  Dpah_ = 1.;
   Zgd_ = 1.;
   Tdust_ = 10.;
 
@@ -742,35 +743,35 @@ void gow17::ChemInit_(const double *y) {
 								   (1.0 + cHp_[3] * pow(T_rate, cHp_[4])
 										             *pow( psi, -cHp_[5]-cHp_[6]*log_T_rate )
 									 )
-								) * nH_ * Zd_ * fHplusgr_;
+								) * nH_ * Dpah_ * fHplusgr_;
 	kgr_[2] = 1.0e-14 * cCp_[0] /
 		           (
 			           1.0 + cCp_[1]*pow(psi, cCp_[2]) *
 								   (1.0 + cCp_[3] * pow(T_rate, cCp_[4])
 										             *pow( psi, -cCp_[5]-cCp_[6]*log_T_rate )
 									 )
-								) * nH_ * Zd_ * fCplusgr_;
+								) * nH_ * Dpah_ * fCplusgr_;
 	kgr_[3] = 1.0e-14 * cHep_[0] /
 		           (
 			           1.0 + cHep_[1]*pow(psi, cHep_[2]) *
 								   (1.0 + cHep_[3] * pow(T_rate, cHep_[4])
 										             *pow( psi, -cHep_[5]-cHep_[6]*log_T_rate )
 									 )
-								) * nH_ * Zd_ * fHeplusgr_;
+								) * nH_ * Dpah_ * fHeplusgr_;
 	kgr_[4] = 1.0e-14 * cSp_[0] /
 		           (
 			           1.0 + cSp_[1]*pow(psi, cSp_[2]) *
 								   (1.0 + cSp_[3] * pow(T_rate, cSp_[4])
 										             *pow( psi, -cSp_[5]-cSp_[6]*log_T_rate )
 									 )
-								) * nH_ * Zd_ * fSplusgr_;
+								) * nH_ * Dpah_ * fSplusgr_;
 	kgr_[5] = 1.0e-14 * cSip_[0] /
 		           (
 			           1.0 + cSip_[1]*pow(psi, cSip_[2]) *
 								   (1.0 + cSip_[3] * pow(T_rate, cSip_[4])
 										             *pow( psi, -cSip_[5]-cSip_[6]*log_T_rate )
 									 )
-								) * nH_ * Zd_ * fSiplusgr_;
+								) * nH_ * Dpah_ * fSiplusgr_;
 
 #ifdef DISKBRIDGE_GOW17_DEBUG_RATES
   for (int i = 0; i < n_2body_; ++i) {
@@ -833,6 +834,15 @@ void gow17::SetbCO(const double bCO) {
 void gow17::SetZd(const double Zd) {
 	Zd_ = Zd;
 	return;
+}
+
+void gow17::SetDpah(const double Dpah) {
+  if (std::isfinite(Dpah) && Dpah > 0.0) {
+    Dpah_ = Dpah;
+  } else {
+    Dpah_ = 0.0;
+  }
+  return;
 }
 
 void gow17::SetZgd(const double Zgd) {
@@ -1031,7 +1041,8 @@ double gow17::dEdt_(const double *y, const bool is_store_rates) {
   const double LCR = Thermo::HeatingCr(y[ie_],  nH_,
 										        y[iH_],  y[iH2_], ion_rate_);
   /*photo electric effect on dust*/
-  const double LPE = Thermo::HeatingPE((*GPE_), Zd_, T, nH_*y[ie_]);
+  const double GPE_val = (GPE_ != NULL) ? (*GPE_) : 0.0;
+  const double LPE = Thermo::HeatingPE(GPE_val, Dpah_, T, nH_*y[ie_]);
   /*H2 formation on dust grains*/
   const double k_xH2_photo = kph_[iph_H2_] ;
   double LH2gr;
@@ -1102,7 +1113,7 @@ double gow17::dEdt_(const double *y, const bool is_store_rates) {
     GDust = 0.;
   }
   /* reconbination of e on PAHs */
-  const double GRec = Thermo::CoolingRec(Zd_,  T,  nH_*y[ie_], (*GPE_));
+  const double GRec = Thermo::CoolingRec(Dpah_,  T,  nH_*y[ie_], GPE_val);
   /* collisional dissociation of H2 */
   const double GH2diss = Thermo::CoolingH2diss(y[iH_],  y[iH2_], k2body_[i2body_H2_H],
                                                k2body_[i2body_H2_H2]);
