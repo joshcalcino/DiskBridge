@@ -420,7 +420,7 @@ class DustOpacityCalculator:
             # Header
             f.write("# Opacity file for RADMC-3D\n")
             f.write("# Columns: lambda[micron]  kabs[cm^2/g]  kscat[cm^2/g]  g\n")
-            f.write("1\n")  # Format number
+            f.write("3\n")  # Format 3: lambda, kabs, kscat, Henyey-Greenstein g
             f.write(f"{len(opac['wav'])}\n")  # Number of wavelengths
             
             # Data

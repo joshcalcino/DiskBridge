@@ -1,7 +1,7 @@
 """
 Reader and UV-band averaging for RADMC-3D dustkappa opacity files.
 
-This module reads ``dustkappa_*.inp`` files (format 1) written by
+This module reads ``dustkappa_*.inp`` files written by
 DiskBridge's :class:`DustOpacityCalculator` and computes band-averaged
 extinction opacities for use in LOS UV optical depth calculations.
 
@@ -53,12 +53,12 @@ _KEXT_CACHE: dict[Tuple[str, float, float, float, str, str], float] = {}
 def read_dustkappa(
     path: str | Path,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Parse a RADMC-3D ``dustkappa_*.inp`` file (format 1).
+    """Parse a RADMC-3D ``dustkappa_*.inp`` file.
 
     The file format written by DiskBridge is::
 
         # comment lines
-        1                          <-- format number (must be 1)
+        3                          <-- format number
         N                          <-- number of wavelength points
         lambda[um]  kabs  kscat  g <-- N data rows
 
@@ -83,7 +83,7 @@ def read_dustkappa(
     FileNotFoundError
         If *path* does not exist.
     ValueError
-        If the format number is not 1 or the file is malformed.
+        If the format number is unsupported or the file is malformed.
     """
     path = Path(path)
     if not path.exists():
@@ -100,9 +100,9 @@ def read_dustkappa(
         else:
             raise ValueError(f"Empty or comment-only dustkappa file: {path}")
 
-        if fmt != 1:
+        if fmt not in (1, 2, 3):
             raise ValueError(
-                f"Only dustkappa format 1 is supported, got {fmt} in {path}"
+                f"Only dustkappa formats 1, 2, and 3 are supported, got {fmt} in {path}"
             )
 
         # Read number of wavelengths
@@ -127,15 +127,26 @@ def read_dustkappa(
             if not stripped or stripped.startswith("#"):
                 continue
             parts = stripped.split()
-            if len(parts) < 4:
+            min_cols = {1: 2, 2: 3, 3: 4}[fmt]
+            if len(parts) < min_cols:
                 raise ValueError(
-                    f"Expected 4 columns in dustkappa data row, got {len(parts)} "
+                    f"Expected at least {min_cols} columns in dustkappa data row, got {len(parts)} "
                     f"at line: {stripped!r}"
                 )
             lam_um[count] = float(parts[0])
             kabs[count] = float(parts[1])
-            kscat[count] = float(parts[2])
-            g[count] = float(parts[3])
+            if fmt == 1:
+                # Legacy DiskBridge files incorrectly used format 1 with four
+                # columns.  Preserve parsing of those files for diagnostics,
+                # but standard RADMC-3D format-1 files are absorption-only.
+                kscat[count] = float(parts[2]) if len(parts) >= 3 else 0.0
+                g[count] = float(parts[3]) if len(parts) >= 4 else 0.0
+            elif fmt == 2:
+                kscat[count] = float(parts[2])
+                g[count] = 0.0
+            else:
+                kscat[count] = float(parts[2])
+                g[count] = float(parts[3])
             count += 1
             if count >= nlam:
                 break

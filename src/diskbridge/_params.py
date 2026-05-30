@@ -76,6 +76,7 @@ class Params:
     uv_min: Quantity
     uv_max: Quantity
     uv_n_wavelengths: int
+    co_E_bind_co: Quantity
 
     external_uv: bool
     external_uv_chi: float
@@ -153,6 +154,7 @@ PARAM_UNITS = {
     'microturbulence': 'km/s',
     'uv_min': 'nm',
     'uv_max': 'nm',
+    'co_E_bind_co': 'K',
     'rstar': 'solar_radius',
     'teff': 'K',
     'mstar': 'solar_mass',

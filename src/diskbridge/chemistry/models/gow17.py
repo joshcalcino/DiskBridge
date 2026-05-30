@@ -2153,6 +2153,17 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     xOtot_flat = Zg_arr * float(XO_STD)
 
     status_acc = np.zeros(ncells, dtype=np.int32)
+    status_final = np.zeros(ncells, dtype=np.int32)
+    recovery_source = np.zeros(ncells, dtype=np.int32)
+    recovery_diag = {
+        "initial_failed": 0,
+        "subset_retry_success": 0,
+        "molecular_retry_candidates": 0,
+        "molecular_retry_success": 0,
+        "neighbor_retry_candidates": 0,
+        "neighbor_retry_success": 0,
+        "final_failed": 0,
+    }
 
     d_h2_hist = []
     d_co_hist = []
@@ -2188,12 +2199,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             T_state = y[:, I_E] / Cv
         return np.clip(T_state, float(temperature_cfg["Tgas_floor"]), float(temperature_cfg["Tgas_ceiling"]))
 
-    def _project(y: np.ndarray) -> np.ndarray:
+    def _project(y: np.ndarray, indices: np.ndarray | None = None) -> np.ndarray:
         y_arr = np.asarray(y, dtype=np.float64)
+        if indices is None:
+            xC_proj = xCtot_flat
+            xO_proj = xOtot_flat
+        else:
+            idx = np.asarray(indices, dtype=np.int64)
+            xC_proj = xCtot_flat[idx]
+            xO_proj = xOtot_flat[idx]
         y_proj = project_gow17_state_to_budgets(
             y_arr,
-            xCtot=xCtot_flat,
-            xOtot=xOtot_flat,
+            xCtot=xC_proj,
+            xOtot=xO_proj,
         )
         if not enable_co_phase:
             y_proj[:, I_CO_ICE] = 0.0
@@ -2244,6 +2262,221 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             else _zero_cell
         ),
     )
+
+    def _co_phase_subset(indices: np.ndarray) -> dict:
+        out = dict(_co_phase_kw)
+        out["co_F_CRUV_CO_pdes"] = np.ascontiguousarray(
+            np.asarray(_co_phase_kw["co_F_CRUV_CO_pdes"], dtype=np.float64)[indices],
+            dtype=np.float64,
+        )
+        out["co_k_crdes_CO"] = np.ascontiguousarray(
+            np.asarray(_co_phase_kw["co_k_crdes_CO"], dtype=np.float64)[indices],
+            dtype=np.float64,
+        )
+        return out
+
+    def _solve_equilibrium_subset(indices: np.ndarray, y0_subset: np.ndarray) -> dict:
+        idx = np.asarray(indices, dtype=np.int64)
+        if idx.ndim != 1:
+            raise ValueError("GOW17 retry indices must be one-dimensional")
+        y0_arr = np.ascontiguousarray(np.asarray(y0_subset, dtype=np.float64))
+        if y0_arr.shape != (idx.size, N_Y):
+            raise ValueError(
+                f"GOW17 retry y0 must have shape {(idx.size, N_Y)}, got {y0_arr.shape}"
+            )
+        sigma_solver = sigma_d_CO_per_H if enable_co_phase else _zero_cell
+        return _gow17.solve_batch_equilibrium(
+            y0=y0_arr,
+            nH=np.ascontiguousarray(nH_flat[idx], dtype=np.float64),
+            Tgas=np.ascontiguousarray(T_flat[idx], dtype=np.float64),
+            Tdust=np.ascontiguousarray(Tdust_flat[idx], dtype=np.float64),
+            Zd=np.ascontiguousarray(Zd_arr[idx], dtype=np.float64),
+            Dpah=np.ascontiguousarray(D_pah_arr[idx], dtype=np.float64),
+            Dh2gr=np.ascontiguousarray(Dh2gr_arr[idx], dtype=np.float64),
+            Zgd=np.ascontiguousarray(Zgd_arr[idx], dtype=np.float64),
+            Zg=np.ascontiguousarray(Zg_arr[idx], dtype=np.float64),
+            ion_rate=np.ascontiguousarray(ion_rate_arr[idx], dtype=np.float64),
+            GPE=np.ascontiguousarray(GPE[idx], dtype=np.float64),
+            F_CO_pdes_photon=np.ascontiguousarray(GISRF[idx], dtype=np.float64),
+            Gph=np.ascontiguousarray(Gph[idx, :], dtype=np.float64),
+            sigma_d_CO_per_H=np.ascontiguousarray(sigma_solver[idx], dtype=np.float64),
+            reltol=reltol,
+            abstol=abstol,
+            mxsteps=mxsteps,
+            maxord=maxord,
+            tolfac=tolfac,
+            tmin=tmin,
+            tmax=tmax,
+            const_temp=const_temp,
+            gradv=np.ascontiguousarray(gradv_arr[idx], dtype=np.float64),
+            Leff_CO_max=np.ascontiguousarray(Leff_CO_max_arr[idx], dtype=np.float64),
+            isDust_cooling=isDust_cooling,
+            isCoolingCOThin=isCoolingCOThin,
+            fH2gr=fH2gr,
+            fHplusgr=fHplusgr,
+            fCplusgr=fCplusgr,
+            fHeplusgr=fHeplusgr,
+            fSplusgr=fSplusgr,
+            fSiplusgr=fSiplusgr,
+            fCplusCR=fCplusCR,
+            **_co_phase_subset(idx),
+            userJac=userJac,
+            verbose=verbose,
+        )
+
+    def _cold_molecular_guess(indices: np.ndarray) -> np.ndarray:
+        idx = np.asarray(indices, dtype=np.int64)
+        y = np.zeros((idx.size, N_Y), dtype=np.float64)
+        xC_local = np.maximum(xCtot_flat[idx], 0.0)
+        y[:, I_H2] = 0.5 - 1.0e-12
+        if enable_co_phase:
+            y[:, I_CO] = np.minimum(1.0e-20, xC_local * 1.0e-8)
+            y[:, I_CO_ICE] = np.maximum(xC_local - y[:, I_CO], 0.0)
+        else:
+            y[:, I_CO] = 0.999 * xC_local
+            y[:, I_CO_ICE] = 0.0
+        y[:, I_CP] = np.minimum(1.0e-20, xC_local * 1.0e-8)
+        y[:, I_H3P] = 1.0e-16
+        T_seed = Tdust_flat[idx] if not const_temp else T_flat[idx]
+        xe = _electron_abundance(y)
+        y[:, I_E] = _cv_cold(y[:, I_H2], xe) * T_seed
+        return _project(y, indices=idx)
+
+    def _apply_successful_retry(
+        indices: np.ndarray,
+        result: dict,
+        *,
+        source_id: int,
+    ) -> int:
+        idx = np.asarray(indices, dtype=np.int64)
+        retry_status = np.asarray(result["status"], dtype=np.int32)
+        retry_y = _project(result["y"], indices=idx)
+        ok = retry_status == 0
+        if np.any(ok):
+            ok_idx = idx[ok]
+            y_guess[ok_idx, :] = retry_y[ok, :]
+            status_final[ok_idx] = 0
+            recovery_source[ok_idx] = int(source_id)
+        if np.any(~ok):
+            status_final[idx[~ok]] = retry_status[~ok]
+        return int(np.sum(ok))
+
+    def _neighbor_seed_guess(indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        idx = np.asarray(indices, dtype=np.int64)
+        status_grid = status_final.reshape(shape)
+        y_grid = y_guess.reshape(shape + (N_Y,))
+        seeds = []
+        seed_idx = []
+        offsets = np.array(
+            np.meshgrid(*[[-1, 0, 1] for _ in shape], indexing="ij"),
+            dtype=np.int64,
+        ).reshape(len(shape), -1).T
+        offsets = offsets[np.any(offsets != 0, axis=1)]
+
+        for flat in idx:
+            coord = np.array(np.unravel_index(int(flat), shape), dtype=np.int64)
+            vals = []
+            for off in offsets:
+                nb = coord + off
+                if np.any(nb < 0) or np.any(nb >= np.asarray(shape, dtype=np.int64)):
+                    continue
+                nb_tuple = tuple(int(v) for v in nb)
+                if int(status_grid[nb_tuple]) == 0:
+                    vals.append(y_grid[nb_tuple])
+            if vals:
+                seed_idx.append(int(flat))
+                seeds.append(np.median(np.asarray(vals, dtype=np.float64), axis=0))
+
+        if not seeds:
+            return np.empty(0, dtype=np.int64), np.empty((0, N_Y), dtype=np.float64)
+        out_idx = np.asarray(seed_idx, dtype=np.int64)
+        out_y = _project(np.asarray(seeds, dtype=np.float64), indices=out_idx)
+        return out_idx, out_y
+
+    def _recover_final_failed_cells() -> None:
+        failed = np.flatnonzero(status_final != 0)
+        recovery_diag["initial_failed"] = int(failed.size)
+        if failed.size == 0:
+            return
+
+        retry = _solve_equilibrium_subset(
+            failed,
+            _project(y_guess[failed, :], indices=failed),
+        )
+        _append_equilibrium_solver_diagnostics(equilibrium_solver_diag_hist, retry)
+        status_acc[failed] = _accumulate_solver_status(status_acc[failed], retry["status"])
+        recovery_diag["subset_retry_success"] = _apply_successful_retry(
+            failed,
+            retry,
+            source_id=1,
+        )
+
+        remaining = np.flatnonzero(status_final != 0)
+        if remaining.size == 0:
+            return
+
+        T_current = T_flat if const_temp else _state_temperature(y_guess)
+        molecular_temperature = (
+            np.minimum(T_current[remaining], Tdust_flat[remaining]) <= 150.0
+        )
+        dense = nH_flat[remaining] >= 1.0e6
+        shielded = (
+            np.maximum.reduce(
+                [
+                    np.abs(Gph[remaining, IPH_CO]),
+                    np.abs(Gph[remaining, IPH_H2]),
+                    np.abs(Gph[remaining, IPH_C]),
+                ]
+            )
+            <= 1.0e-6
+        )
+        molecular_idx = remaining[molecular_temperature & dense & shielded]
+        recovery_diag["molecular_retry_candidates"] = int(molecular_idx.size)
+        if molecular_idx.size == 0:
+            recovery_diag["final_failed"] = int(np.sum(status_final != 0))
+            return
+
+        cold_retry = _solve_equilibrium_subset(
+            molecular_idx,
+            _cold_molecular_guess(molecular_idx),
+        )
+        _append_equilibrium_solver_diagnostics(equilibrium_solver_diag_hist, cold_retry)
+        status_acc[molecular_idx] = _accumulate_solver_status(
+            status_acc[molecular_idx],
+            cold_retry["status"],
+        )
+        recovery_diag["molecular_retry_success"] = _apply_successful_retry(
+            molecular_idx,
+            cold_retry,
+            source_id=2,
+        )
+        recovery_diag["final_failed"] = int(np.sum(status_final != 0))
+
+        remaining = np.flatnonzero(status_final != 0)
+        if remaining.size == 0:
+            return
+
+        neighbor_idx, neighbor_y0 = _neighbor_seed_guess(remaining)
+        recovery_diag["neighbor_retry_candidates"] = int(neighbor_idx.size)
+        if neighbor_idx.size == 0:
+            recovery_diag["final_failed"] = int(np.sum(status_final != 0))
+            return
+
+        neighbor_retry = _solve_equilibrium_subset(neighbor_idx, neighbor_y0)
+        _append_equilibrium_solver_diagnostics(
+            equilibrium_solver_diag_hist,
+            neighbor_retry,
+        )
+        status_acc[neighbor_idx] = _accumulate_solver_status(
+            status_acc[neighbor_idx],
+            neighbor_retry["status"],
+        )
+        recovery_diag["neighbor_retry_success"] = _apply_successful_retry(
+            neighbor_idx,
+            neighbor_retry,
+            source_id=3,
+        )
+        recovery_diag["final_failed"] = int(np.sum(status_final != 0))
 
     if coupling_mode == "fixed_point":
         # ====================================================================
@@ -2308,6 +2541,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             status_step = result["status"]
 
             status_acc = _accumulate_solver_status(status_acc, status_step)
+            status_final[:] = np.asarray(status_step, dtype=np.int32)
             y_guess[:, :] = y_new
             y_guess[:, :] = _project(y_guess)
 
@@ -2409,7 +2643,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
             _append_equilibrium_solver_diagnostics(equilibrium_solver_diag_hist, result)
             y_guess[:, :] = _project(result["y"])
-            status_acc = _accumulate_solver_status(status_acc, result["status"])
+            status_step = np.asarray(result["status"], dtype=np.int32)
+            status_acc = _accumulate_solver_status(status_acc, status_step)
+            status_final[:] = status_step
 
         else:
             # N >= 1: pseudo-time integration with N macro-updates.
@@ -2723,7 +2959,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
             _append_equilibrium_solver_diagnostics(equilibrium_solver_diag_hist, result)
             y_guess[:, :] = _project(result["y"])
-            status_acc = _accumulate_solver_status(status_acc, result["status"])
+            status_step = np.asarray(result["status"], dtype=np.int32)
+            status_acc = _accumulate_solver_status(status_acc, status_step)
+            status_final[:] = status_step
 
     else:
         raise ValueError(
@@ -2734,8 +2972,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     n_shielding_iter = len(d_h2_hist)
 
     y_guess[:, :] = _project(y_guess)
+    _recover_final_failed_cells()
+    y_guess[:, :] = _project(y_guess)
     y_out = y_guess.reshape(shape + (N_Y,))
-    status = status_acc.reshape(shape)
+    status = status_final.reshape(shape)
 
     y_out = project_gow17_state_to_budgets(
         y_out,
@@ -2796,6 +3036,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         rtol=float(reltol),
         logger=logger,
     )
+    accumulated_status_hist = {}
+    if status_acc.size:
+        for code, count in zip(*np.unique(status_acc, return_counts=True)):
+            accumulated_status_hist[int(code)] = int(count)
 
     if np.any(status != 0):
         bad = int(np.sum(status != 0))
@@ -2845,6 +3089,30 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "thermal_atol": float(temperature_cfg["thermal_atol"]),
         "well_converged_includes_tgas": bool(not const_temp),
         "well_converged_ncells": int(ncells),
+        "final_recovery": {
+            "initial_failed": int(recovery_diag["initial_failed"]),
+            "subset_retry_success": int(recovery_diag["subset_retry_success"]),
+            "molecular_retry_candidates": int(
+                recovery_diag["molecular_retry_candidates"]
+            ),
+            "molecular_retry_success": int(recovery_diag["molecular_retry_success"]),
+            "neighbor_retry_candidates": int(
+                recovery_diag["neighbor_retry_candidates"]
+            ),
+            "neighbor_retry_success": int(recovery_diag["neighbor_retry_success"]),
+            "final_failed": int(recovery_diag["final_failed"]),
+            "source_counts": {
+                int(code): int(count)
+                for code, count in zip(*np.unique(recovery_source, return_counts=True))
+            },
+            "source_id_map": {
+                0: "normal_final_solve",
+                1: "failed_cell_subset_retry",
+                2: "shielded_molecular_retry",
+                3: "neighbor_seeded_retry",
+            },
+        },
+        "accumulated_status_hist": accumulated_status_hist,
         "astrochem_acceleration": astrochem_acceleration,
         "astrochem_acceleration_start": int(astrochem_acceleration_start),
         "astrochem_acceleration_max_jump": float(astrochem_acceleration_max_jump),
@@ -2971,6 +3239,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     fields = {
         "co_ice": nco_ice,
         "Tgas": Quantity(T_out, "K"),
+        "status": Quantity(status.astype(np.float64), "dimensionless"),
         "Tgas_minus_Tdust": Quantity(T_out - Tdust_flat.reshape(shape), "K"),
         "Tgas_status": Quantity(T_status, "dimensionless"),
         "sigma_d_per_H_total": Quantity(sigma_d_per_H_total.reshape(shape), "cm^2"),

@@ -35,7 +35,7 @@ AU = diskbridge.units('au').to('cm').magnitude
 
 def _line_mode_uses_gas_temperature(line_mode: int) -> bool:
     """Return whether RADMC-3D line transfer must read gas_temperature.*."""
-    return abs(int(line_mode)) in {3, 4, 50}
+    return abs(int(line_mode)) in {1, 3, 4, 50}
 
 
 class RadImage:
@@ -1381,12 +1381,18 @@ class RadImage:
                 use_gow17_tgas=True,
             )
 
+        rto_style = "3"
+        if self.model is not None and getattr(self.model, "mesh", None) is not None:
+            mesh_shape = getattr(self.model.mesh, "shape", ())
+            if len(mesh_shape) >= 3 and int(mesh_shape[-1]) <= 1:
+                rto_style = "1"
+
         settings = {
             "incl_lines": "1",
             "lines_mode": str(line_mode),
             "tgas_eq_tdust": "0" if use_line_gas_temperature else "1",
             "itempdecoup": "1",
-            "rto_style": "3",
+            "rto_style": rto_style,
         }
         lines = content.splitlines()
         seen = set()
