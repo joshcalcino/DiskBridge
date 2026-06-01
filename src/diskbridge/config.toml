@@ -248,6 +248,7 @@ include_dust = true
 [chemistry.gow17.co_phase]
 S_CO = 1.0
 S_CO_mode = "constant"
+shield_pdes_1d = false
 enable_cruv_pdes = true
 F_CRUV_CO_pdes_ref = "1.0e4 1/(cm^2 s)"
 zeta_ref = "1.0e-17 1/s"

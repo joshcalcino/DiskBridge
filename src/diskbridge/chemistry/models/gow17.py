@@ -517,9 +517,11 @@ def _gow17_checkpoint_histories(
     *,
     d_h2_hist,
     d_co_hist,
+    d_coice_hist,
     d_tgas_hist,
     d_h2_median_hist,
     d_co_median_hist,
+    d_coice_median_hist,
     d_tgas_median_hist,
     well_converged_cells_hist,
     well_converged_fraction_hist,
@@ -533,9 +535,11 @@ def _gow17_checkpoint_histories(
     return {
         "d_h2_hist": list(d_h2_hist),
         "d_co_hist": list(d_co_hist),
+        "d_coice_hist": list(d_coice_hist),
         "d_tgas_hist": list(d_tgas_hist),
         "d_h2_median_hist": list(d_h2_median_hist),
         "d_co_median_hist": list(d_co_median_hist),
+        "d_coice_median_hist": list(d_coice_median_hist),
         "d_tgas_median_hist": list(d_tgas_median_hist),
         "well_converged_cells_hist": list(well_converged_cells_hist),
         "well_converged_fraction_hist": list(well_converged_fraction_hist),
@@ -556,9 +560,11 @@ def _restore_gow17_checkpoint_histories(histories: dict, locals_by_name: dict) -
     for key in (
         "d_h2_hist",
         "d_co_hist",
+        "d_coice_hist",
         "d_tgas_hist",
         "d_h2_median_hist",
         "d_co_median_hist",
+        "d_coice_median_hist",
         "d_tgas_median_hist",
         "well_converged_cells_hist",
         "well_converged_fraction_hist",
@@ -620,6 +626,7 @@ def _gow17_checkpoint_result(
     theta_h2_flat: np.ndarray,
     theta_co_flat: np.ndarray,
     theta_c_flat: np.ndarray,
+    theta_CO_pdes_flat: np.ndarray,
     Gph: np.ndarray,
     GISRF: np.ndarray,
     status_acc: np.ndarray,
@@ -639,6 +646,10 @@ def _gow17_checkpoint_result(
         "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
         "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
+        "theta_CO_pdes": Quantity(
+            theta_CO_pdes_flat.reshape(shape),
+            "dimensionless",
+        ),
         "chi_eff": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_CO_diss_actual": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_C_ion_actual": Quantity(actual_uv["G_C_ion_actual"], "dimensionless"),
@@ -832,6 +843,65 @@ def _actual_solver_uv_fields(
         "G_Si_ion_actual": Gph_arr[:, IPH_SI].reshape(shape),
         "F_CO_pdes_external_actual": F_arr.reshape(shape),
     }
+
+
+def _shield_co_pdes_external_flux(
+    F_CO_pdes_external_unshielded: np.ndarray,
+    theta_CO_pdes: np.ndarray,
+    *,
+    ncells: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return effective CO photodesorption shielding and shielded external flux."""
+    F_raw = np.asarray(F_CO_pdes_external_unshielded, dtype=np.float64)
+    theta = np.asarray(theta_CO_pdes, dtype=np.float64)
+
+    if F_raw.ndim == 1:
+        F_flat = F_raw.reshape(ncells)
+        theta_flat = theta.reshape(ncells)
+        return (
+            np.ascontiguousarray(theta_flat, dtype=np.float64),
+            np.ascontiguousarray(F_flat * theta_flat, dtype=np.float64),
+        )
+
+    if F_raw.ndim != 2:
+        raise ValueError(
+            "F_CO_pdes_external_unshielded must be 1D or 2D "
+            f"after flattening, got ndim={F_raw.ndim}"
+        )
+
+    F_bands = F_raw
+    if F_bands.shape[-1] != ncells and F_bands.shape[0] == ncells:
+        F_bands = F_bands.T
+    if F_bands.shape[-1] != ncells:
+        raise ValueError(
+            "CO photodesorption band flux array must have one axis of length "
+            f"ncells={ncells}, got shape={F_raw.shape}"
+        )
+
+    if theta.ndim == 1:
+        theta_bands = np.broadcast_to(theta.reshape(1, ncells), F_bands.shape)
+    else:
+        theta_bands = theta
+        if theta_bands.shape[-1] != ncells and theta_bands.shape[0] == ncells:
+            theta_bands = theta_bands.T
+        if theta_bands.shape != F_bands.shape:
+            raise ValueError(
+                "CO photodesorption shielding band array must match flux bands; "
+                f"got theta={theta.shape}, flux={F_raw.shape}"
+            )
+
+    F_shielded = np.sum(F_bands * theta_bands, axis=0)
+    F_sum = np.sum(F_bands, axis=0)
+    theta_eff = np.divide(
+        F_shielded,
+        F_sum,
+        out=np.ones(ncells, dtype=np.float64),
+        where=(F_sum != 0.0),
+    )
+    return (
+        np.ascontiguousarray(theta_eff, dtype=np.float64),
+        np.ascontiguousarray(F_shielded, dtype=np.float64),
+    )
 
 
 def _resolve_co_dust_scalings(
@@ -1547,7 +1617,7 @@ def _compute_co_phase_diagnostics(
     Tgas_flat = np.asarray(Tgas_K, dtype=np.float64).reshape(ncells)
     Tdust_flat = np.asarray(Tdust_K, dtype=np.float64).reshape(ncells)
     sigma_flat = np.asarray(sigma_d_CO_per_H, dtype=np.float64).reshape(ncells)
-    F_star = np.asarray(F_CO_pdes_photon, dtype=np.float64).reshape(ncells)
+    F_ext_shielded = np.asarray(F_CO_pdes_photon, dtype=np.float64).reshape(ncells)
     F_cruv = np.asarray(F_CRUV_CO_pdes, dtype=np.float64).reshape(ncells)
     k_crdes = np.asarray(k_crdes_CO, dtype=np.float64).reshape(ncells)
     Gco_actual = np.asarray(G_CO_diss_actual, dtype=np.float64).reshape(ncells)
@@ -1590,7 +1660,7 @@ def _compute_co_phase_diagnostics(
         out=np.zeros(ncells, dtype=np.float64),
         where=(n_ice > 0.0),
     )
-    F_total = np.maximum(F_star, 0.0) + np.maximum(F_cruv, 0.0)
+    F_total = np.maximum(F_ext_shielded, 0.0) + np.maximum(F_cruv, 0.0)
     if int(N_LAY_local) > 0 and float(N_SURF_local) > 0.0:
         k_pd_surface = F_total * float(Y_CO_local) / (
             4.0 * float(N_SURF_local) * int(N_LAY_local)
@@ -1644,7 +1714,7 @@ def _compute_co_phase_diagnostics(
         "sigma_d_CO_per_H": Quantity(sigma_flat.reshape(shape), "cm^2"),
         "CO_sticking": Quantity(np.full(shape, float(S_CO), dtype=np.float64), "dimensionless"),
         "F_CRUV_CO_pdes": Quantity(F_cruv.reshape(shape), "1/(cm^2 s)"),
-        "F_CO_pdes_external_actual": Quantity(F_star.reshape(shape), "1/(cm^2 s)"),
+        "F_CO_pdes_external_actual": Quantity(F_ext_shielded.reshape(shape), "1/(cm^2 s)"),
         "F_CO_pdes_photon_total": Quantity(F_total.reshape(shape), "1/(cm^2 s)"),
         "F_CO_pdes_total_actual": Quantity(F_total.reshape(shape), "1/(cm^2 s)"),
         "G_CO_diss_actual": Quantity(Gco_actual.reshape(shape), "dimensionless"),
@@ -1701,9 +1771,9 @@ def _compute_shielding_and_gph(
 
     Returns
     -------
-    theta_h2_flat, theta_co_flat, theta_c_flat : np.ndarray
+    theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat : np.ndarray
         Shielding factors, shape ``(ncells,)``.
-    Gph, GPE, GISRF : np.ndarray
+    Gph, GPE, F_CO_pdes_ext_shielded : np.ndarray
         Radiation field arrays ready for the batch solver.
     """
     xCO = y_flat[:, I_CO]
@@ -1768,21 +1838,35 @@ def _compute_shielding_and_gph(
     GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
     if F_CO_pdes_photon_flat is None:
         f_co_pdes_ref = _co_pdes_draine_flux()
-        GISRF = np.ascontiguousarray(
+        F_CO_pdes_ext_unshielded = np.ascontiguousarray(
             G_CO_pdes_flat * f_co_pdes_ref,
             dtype=np.float64,
         )
     else:
-        GISRF = np.ascontiguousarray(
+        F_CO_pdes_ext_unshielded = np.ascontiguousarray(
             F_CO_pdes_photon_flat,
             dtype=np.float64,
         )
+
+    theta_CO_pdes_flat, F_CO_pdes_ext_shielded = _shield_co_pdes_external_flux(
+        F_CO_pdes_ext_unshielded,
+        theta_co_flat,
+        ncells=ncells,
+    )
 
     Gph[:, IPH_C] *= theta_c_flat
     Gph[:, IPH_CO] *= theta_co_flat
     Gph[:, IPH_H2] *= theta_h2_flat
 
-    return theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF
+    return (
+        theta_h2_flat,
+        theta_co_flat,
+        theta_c_flat,
+        theta_CO_pdes_flat,
+        Gph,
+        GPE,
+        F_CO_pdes_ext_shielded,
+    )
 
 
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
@@ -2148,6 +2232,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_h2_arr = np.ones(ncells, dtype=np.float64)
     theta_co_arr = np.ones(ncells, dtype=np.float64)
     theta_c_arr = np.ones(ncells, dtype=np.float64)
+    theta_CO_pdes_arr = np.ones(ncells, dtype=np.float64)
 
     xCtot_flat = Zg_arr * float(XC_STD)
     xOtot_flat = Zg_arr * float(XO_STD)
@@ -2167,9 +2252,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     d_h2_hist = []
     d_co_hist = []
+    d_coice_hist = []
     d_tgas_hist = []
     d_h2_median_hist = []
     d_co_median_hist = []
+    d_coice_median_hist = []
     d_tgas_median_hist = []
     well_converged_cells_hist = []
     well_converged_fraction_hist = []
@@ -2485,10 +2572,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         for it in range(shielding_max_iter):
             y_guess[:, :] = _project(y_guess)
             xCO_old = np.ascontiguousarray(y_guess[:, I_CO].copy(), dtype=np.float64)
+            xCO_ice_old = np.ascontiguousarray(y_guess[:, I_CO_ICE].copy(), dtype=np.float64)
             xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
             Tgas_old = _state_temperature(y_guess) if not const_temp else None
 
-            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
                     **_shielding_kw,
@@ -2546,12 +2634,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             y_guess[:, :] = _project(y_guess)
 
             xCO_new = y_guess[:, I_CO]
+            xCO_ice_new = y_guess[:, I_CO_ICE]
             xH2_new = y_guess[:, I_H2]
 
             denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
             denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
+            denom_coice = np.maximum(np.abs(xCO_ice_new), shielding_abstol)
             rel_h2 = np.abs(xH2_new - xH2_old) / denom_h2
             rel_co = np.abs(xCO_new - xCO_old) / denom_co
+            rel_coice = np.abs(xCO_ice_new - xCO_ice_old) / denom_coice
             rel_tgas = None
             if Tgas_old is not None:
                 Tgas_new = _state_temperature(y_guess)
@@ -2559,19 +2650,25 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 rel_tgas = np.abs(Tgas_new - Tgas_old) / denom_tgas
             d_h2 = np.max(rel_h2)
             d_co = np.max(rel_co)
+            d_coice = np.max(rel_coice) if enable_co_phase else 0.0
             d_h2_hist.append(float(d_h2))
             d_co_hist.append(float(d_co))
+            d_coice_hist.append(float(d_coice))
             d_h2_median_hist.append(float(np.median(rel_h2)))
             d_co_median_hist.append(float(np.median(rel_co)))
+            d_coice_median_hist.append(float(np.median(rel_coice)) if enable_co_phase else 0.0)
             if rel_tgas is not None:
                 d_tgas_hist.append(float(np.max(rel_tgas)))
                 d_tgas_median_hist.append(float(np.median(rel_tgas)))
-            well_converged = np.maximum(rel_h2, rel_co) <= shielding_reltol
+            rel_shield = np.maximum(rel_h2, rel_co)
+            if enable_co_phase:
+                rel_shield = np.maximum(rel_shield, rel_coice)
+            well_converged = rel_shield <= shielding_reltol
             if rel_tgas is not None:
                 well_converged &= rel_tgas <= tgas_convergence_reltol
             well_converged_cells_hist.append(int(np.sum(well_converged)))
             well_converged_fraction_hist.append(float(np.mean(well_converged)))
-            converged = max(d_h2, d_co) <= shielding_reltol
+            converged = max(d_h2, d_co, d_coice) <= shielding_reltol
             if rel_tgas is not None:
                 converged = converged and d_tgas_hist[-1] <= tgas_convergence_reltol
             if converged:
@@ -2593,7 +2690,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             # N=0: compute shielding once from y_guess, then go straight
             # to the final equilibrium solve (no pseudo-time integration).
             y_guess[:, :] = _project(y_guess)
-            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
                     **_shielding_kw,
@@ -2672,6 +2769,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat = np.ones(ncells, dtype=np.float64)
             theta_co_flat = np.ones(ncells, dtype=np.float64)
             theta_c_flat = np.ones(ncells, dtype=np.float64)
+            theta_CO_pdes_flat = np.ones(ncells, dtype=np.float64)
             accel_species = [I_H2, I_CO] + ([I_CO_ICE] if enable_co_phase else [])
             accel_prev2: dict[int, np.ndarray] | None = None
             accel_prev1: dict[int, np.ndarray] | None = (
@@ -2702,9 +2800,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     {
                         "d_h2_hist": d_h2_hist,
                         "d_co_hist": d_co_hist,
+                        "d_coice_hist": d_coice_hist,
                         "d_tgas_hist": d_tgas_hist,
                         "d_h2_median_hist": d_h2_median_hist,
                         "d_co_median_hist": d_co_median_hist,
+                        "d_coice_median_hist": d_coice_median_hist,
                         "d_tgas_median_hist": d_tgas_median_hist,
                         "well_converged_cells_hist": well_converged_cells_hist,
                         "well_converged_fraction_hist": well_converged_fraction_hist,
@@ -2723,11 +2823,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             for k_step in range(checkpoint_start, N):
                 y_state[:, :] = _project(y_state)
                 xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
+                xCO_ice_old = np.ascontiguousarray(y_state[:, I_CO_ICE].copy(), dtype=np.float64)
                 xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
                 Tgas_old = _state_temperature(y_state) if not const_temp else None
 
                 # Step 1+2: compute columns and shielding from current y_state.
-                theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+                theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
                     _compute_shielding_and_gph(
                         y_flat=y_state,
                         **_shielding_kw,
@@ -2804,12 +2905,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
                 # Step 4: convergence diagnostics.
                 xCO_new = y_state[:, I_CO]
+                xCO_ice_new = y_state[:, I_CO_ICE]
                 xH2_new = y_state[:, I_H2]
 
                 denom_h2 = np.maximum(np.abs(xH2_new), shielding_abstol)
                 denom_co = np.maximum(np.abs(xCO_new), shielding_abstol)
+                denom_coice = np.maximum(np.abs(xCO_ice_new), shielding_abstol)
                 rel_h2 = np.abs(xH2_new - xH2_old) / denom_h2
                 rel_co = np.abs(xCO_new - xCO_old) / denom_co
+                rel_coice = np.abs(xCO_ice_new - xCO_ice_old) / denom_coice
                 rel_tgas = None
                 if Tgas_old is not None:
                     Tgas_new = _state_temperature(y_state)
@@ -2817,14 +2921,20 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     rel_tgas = np.abs(Tgas_new - Tgas_old) / denom_tgas
                 d_h2 = float(np.max(rel_h2))
                 d_co = float(np.max(rel_co))
+                d_coice = float(np.max(rel_coice)) if enable_co_phase else 0.0
                 d_h2_hist.append(d_h2)
                 d_co_hist.append(d_co)
+                d_coice_hist.append(d_coice)
                 d_h2_median_hist.append(float(np.median(rel_h2)))
                 d_co_median_hist.append(float(np.median(rel_co)))
+                d_coice_median_hist.append(float(np.median(rel_coice)) if enable_co_phase else 0.0)
                 if rel_tgas is not None:
                     d_tgas_hist.append(float(np.max(rel_tgas)))
                     d_tgas_median_hist.append(float(np.median(rel_tgas)))
-                well_converged = np.maximum(rel_h2, rel_co) <= shielding_reltol
+                rel_shield = np.maximum(rel_h2, rel_co)
+                if enable_co_phase:
+                    rel_shield = np.maximum(rel_shield, rel_coice)
+                well_converged = rel_shield <= shielding_reltol
                 if rel_tgas is not None:
                     well_converged &= rel_tgas <= tgas_convergence_reltol
                 well_converged_cells_hist.append(int(np.sum(well_converged)))
@@ -2874,6 +2984,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                         theta_h2_flat=theta_h2_flat,
                         theta_co_flat=theta_co_flat,
                         theta_c_flat=theta_c_flat,
+                        theta_CO_pdes_flat=theta_CO_pdes_flat,
                         Gph=Gph,
                         GISRF=GISRF,
                         status_acc=status_acc,
@@ -2891,9 +3002,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                         histories=_gow17_checkpoint_histories(
                             d_h2_hist=d_h2_hist,
                             d_co_hist=d_co_hist,
+                            d_coice_hist=d_coice_hist,
                             d_tgas_hist=d_tgas_hist,
                             d_h2_median_hist=d_h2_median_hist,
                             d_co_median_hist=d_co_median_hist,
+                            d_coice_median_hist=d_coice_median_hist,
                             d_tgas_median_hist=d_tgas_median_hist,
                             well_converged_cells_hist=well_converged_cells_hist,
                             well_converged_fraction_hist=well_converged_fraction_hist,
@@ -2908,7 +3021,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
             # After N macro-updates: recompute columns + shielding from final y_state.
             y_state[:, :] = _project(y_state)
-            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_state,
                     **_shielding_kw,
@@ -3073,9 +3186,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "shielding_iter": n_shielding_iter,
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
+        "d_coice_hist": np.asarray(d_coice_hist, dtype=np.float64),
         "d_tgas_hist": np.asarray(d_tgas_hist, dtype=np.float64),
         "d_h2_median_hist": np.asarray(d_h2_median_hist, dtype=np.float64),
         "d_co_median_hist": np.asarray(d_co_median_hist, dtype=np.float64),
+        "d_coice_median_hist": np.asarray(d_coice_median_hist, dtype=np.float64),
         "d_tgas_median_hist": np.asarray(d_tgas_median_hist, dtype=np.float64),
         "well_converged_cells_hist": np.asarray(well_converged_cells_hist, dtype=np.int64),
         "well_converged_fraction_hist": np.asarray(well_converged_fraction_hist, dtype=np.float64),
@@ -3088,6 +3203,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "thermal_rtol": float(temperature_cfg["thermal_rtol"]),
         "thermal_atol": float(temperature_cfg["thermal_atol"]),
         "well_converged_includes_tgas": bool(not const_temp),
+        "well_converged_includes_coice": bool(enable_co_phase),
         "well_converged_ncells": int(ncells),
         "final_recovery": {
             "initial_failed": int(recovery_diag["initial_failed"]),
@@ -3278,10 +3394,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
         "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
+        "theta_CO_pdes": Quantity(theta_CO_pdes_flat.reshape(shape), "dimensionless"),
         "chi_eff": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_CO_diss_actual": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_C_ion_actual": Quantity(actual_uv["G_C_ion_actual"], "dimensionless"),
         "G_H2_diss_actual": Quantity(actual_uv["G_H2_diss_actual"], "dimensionless"),
+        "F_CO_pdes_external_unshielded": Quantity(
+            F_CO_pdes_photon_arr,
+            "1/(cm^2 s)",
+        ),
         "F_CO_pdes_external_actual": Quantity(
             actual_uv["F_CO_pdes_external_actual"],
             "1/(cm^2 s)",

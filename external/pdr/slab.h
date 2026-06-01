@@ -21,6 +21,7 @@ class Slab {
 		void CopyfShieldH2mol(double *out) const;
 		void CopyfShieldCOmol(double *out) const;
 		void CopyGPE(double *out) const;
+		void SetCOPhotodesorptionFluxControls(double F_DRAINE, bool shield_pdes);
 		/*Solve the chemistry to equalibrium*/
 		void SolveEq(const double tolfac, const double tmin, const double tmax, 
 								 const bool verbose, FILE *pf_rates=NULL);
@@ -73,6 +74,8 @@ class Slab {
     /*field geometry: 
      * 0: beamed, 1: IsotropicApprox, 2: Isotropic*/
     int field_geo_;
+    double co_F_DRAINE_;
+    bool shield_pdes_;
 };
 
 #endif /*SLAB_H_*/

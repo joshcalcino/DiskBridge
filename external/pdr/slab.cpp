@@ -13,7 +13,9 @@ Slab::Slab(gow17 &ode, CvodeDense &solver,
    G0_(G0),
    logNH_(logNH),
    NH_min_(NH_min),
-   field_geo_(0)
+   field_geo_(0),
+   co_F_DRAINE_(0.0),
+   shield_pdes_(false)
 {
   prad_ = new RadField(ngrid, G0_, Zd);
 	y_ = new double* [ngrid];
@@ -91,6 +93,11 @@ void Slab::CopyGPE(double *out) const {
 	}
 }
 
+void Slab::SetCOPhotodesorptionFluxControls(double F_DRAINE, bool shield_pdes) {
+  co_F_DRAINE_ = F_DRAINE;
+  shield_pdes_ = shield_pdes;
+}
+
 void Slab::WriteAbd(FILE *pf) {
 	for (int i=0; i<ngrid_; i++) {
 		for (int j=0; j<dimen_; j++) {
@@ -155,11 +162,15 @@ void Slab::SolveEq(const double tolfac, const double tmin,
       printf("field_geo_ = %d, not recogonized, use beamed geometery.\n",
              field_geo_);
     }
-    /*assign radiation field to chemistry*/
-    ode_.SetRadField(prad_->GPE + i, *(prad_->Gph + i), prad_->GISRF + i);
     /*get sheilding factor*/
 		fShieldH2mol_[i] = prad_->GetfShieldH2mol();
 		fShieldCOmol_[i] = prad_->GetfShieldCOmol();
+    /*assign radiation field to chemistry*/
+    double FCO_pdes_photon = prad_->GISRF[i] * co_F_DRAINE_;
+    if (shield_pdes_) {
+      FCO_pdes_photon *= fShieldCOmol_[i];
+    }
+    ode_.SetRadField(prad_->GPE + i, *(prad_->Gph + i), &FCO_pdes_photon);
     /*solve to equalibrium*/
 		solver_.SolveEq(tolfac, tmax, verbose, tmin);
 		ode_.CopyAbd(y_[i]);

@@ -362,7 +362,7 @@ class Gow17TimeStepper:
             self.shielding_linewidth_meta,
         )
 
-        theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
+        theta_h2, theta_co, theta_c, theta_CO_pdes, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,
             nH_flat=self.nH_flat,
             chi_dust_flat=chi_dust_flat,
@@ -383,7 +383,19 @@ class Gow17TimeStepper:
             b_CO_kms_grid=self.b_CO_kms_grid,
             nside=self.nside,
         )
-        return chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF
+        return (
+            chi_dust_arr,
+            Tdust_flat,
+            T_flat,
+            theta_h2,
+            theta_co,
+            theta_c,
+            theta_CO_pdes,
+            Gph,
+            GPE,
+            GISRF,
+            F_CO_pdes_photon_flat,
+        )
 
     def _commit_solution(
         self,
@@ -393,9 +405,11 @@ class Gow17TimeStepper:
         theta_h2: np.ndarray,
         theta_co: np.ndarray,
         theta_c: np.ndarray,
+        theta_CO_pdes: np.ndarray,
         chi_dust_arr: np.ndarray,
         Gph: np.ndarray,
         GISRF: np.ndarray,
+        F_CO_pdes_external_unshielded: np.ndarray,
     ) -> dict:
         rad = self.rad
 
@@ -446,10 +460,12 @@ class Gow17TimeStepper:
         theta_co_arr = np.asarray(theta_co, dtype=np.float64).reshape(self.shape)
         theta_h2_arr = np.asarray(theta_h2, dtype=np.float64).reshape(self.shape)
         theta_c_arr = np.asarray(theta_c, dtype=np.float64).reshape(self.shape)
+        theta_CO_pdes_arr = np.asarray(theta_CO_pdes, dtype=np.float64).reshape(self.shape)
 
         rad.theta_co = Quantity(theta_co_arr, "dimensionless")
         rad.theta_h2 = Quantity(theta_h2_arr, "dimensionless")
         rad.theta_c = Quantity(theta_c_arr, "dimensionless")
+        rad.theta_CO_pdes = Quantity(theta_CO_pdes_arr, "dimensionless")
         actual_uv = _actual_solver_uv_fields(
             Gph=Gph,
             F_CO_pdes_external=GISRF,
@@ -460,6 +476,21 @@ class Gow17TimeStepper:
         rad.G_H2_diss_actual = Quantity(actual_uv["G_H2_diss_actual"], "dimensionless")
         rad.F_CO_pdes_external_actual = Quantity(
             actual_uv["F_CO_pdes_external_actual"],
+            "1/(cm^2 s)",
+        )
+        rad.F_CO_pdes_external_unshielded = Quantity(
+            np.asarray(F_CO_pdes_external_unshielded, dtype=np.float64).reshape(self.shape),
+            "1/(cm^2 s)",
+        )
+        rad.F_CO_pdes_photon_total = Quantity(
+            (
+                np.asarray(GISRF, dtype=np.float64)
+                + (
+                    np.asarray(self.F_CRUV_CO_pdes_arr, dtype=np.float64)
+                    if self.enable_co_phase
+                    else np.zeros(self.ncells, dtype=np.float64)
+                )
+            ).reshape(self.shape),
             "1/(cm^2 s)",
         )
         rad.chi_eff = rad.G_CO_diss_actual
@@ -482,6 +513,7 @@ class Gow17TimeStepper:
             "theta_co": theta_co_arr,
             "theta_h2": theta_h2_arr,
             "theta_c": theta_c_arr,
+            "theta_CO_pdes": theta_CO_pdes_arr,
             "b_CO_kms": self.b_CO_kms_arr.reshape(self.shape),
             "shielding_linewidth": dict(self.shielding_linewidth_meta),
             "co_phase_params": dict(self.co_phase_params),
@@ -533,7 +565,19 @@ class Gow17TimeStepper:
           - rad.dust_temperature (K)
           - rad.gas_temperature (K) if const_temp=True (or initial guess)
         """
-        chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment()
+        (
+            chi_dust_arr,
+            Tdust_flat,
+            T_flat,
+            theta_h2,
+            theta_co,
+            theta_c,
+            theta_CO_pdes,
+            Gph,
+            GPE,
+            GISRF,
+            F_CO_pdes_external_unshielded,
+        ) = self._prepare_environment()
 
         result = _gow17.solve_batch_time(
             y0=self._project_state(self.y_state),
@@ -582,9 +626,11 @@ class Gow17TimeStepper:
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
+            theta_CO_pdes=theta_CO_pdes,
             chi_dust_arr=chi_dust_arr,
             Gph=Gph,
             GISRF=GISRF,
+            F_CO_pdes_external_unshielded=F_CO_pdes_external_unshielded,
         )
 
     def solve_equilibrium(self) -> dict:
@@ -622,10 +668,21 @@ class Gow17TimeStepper:
 
         for k_step in range(max_iter):
             xCO_old = np.ascontiguousarray(y_state[:, I_CO].copy(), dtype=np.float64)
+            xCO_ice_old = np.ascontiguousarray(y_state[:, I_CO_ICE].copy(), dtype=np.float64)
             xH2_old = np.ascontiguousarray(y_state[:, I_H2].copy(), dtype=np.float64)
-            _, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment(
-                y_state=y_state,
-            )
+            (
+                _,
+                Tdust_flat,
+                T_flat,
+                theta_h2,
+                theta_co,
+                theta_c,
+                theta_CO_pdes,
+                Gph,
+                GPE,
+                GISRF,
+                F_CO_pdes_external_unshielded,
+            ) = self._prepare_environment(y_state=y_state)
             result_time = _gow17.solve_batch_time(
                     y0=self._project_state(y_state),
                 nH=self.nH_flat,
@@ -671,17 +728,34 @@ class Gow17TimeStepper:
             )
 
             xCO_new = y_state[:, I_CO]
+            xCO_ice_new = y_state[:, I_CO_ICE]
             xH2_new = y_state[:, I_H2]
             denom_h2 = np.maximum(np.abs(xH2_new), self.shielding_abstol)
             denom_co = np.maximum(np.abs(xCO_new), self.shielding_abstol)
+            denom_coice = np.maximum(np.abs(xCO_ice_new), self.shielding_abstol)
             d_h2 = float(np.max(np.abs(xH2_new - xH2_old) / denom_h2))
             d_co = float(np.max(np.abs(xCO_new - xCO_old) / denom_co))
-            if (k_step + 1) >= N and max(d_h2, d_co) <= self.shielding_reltol:
+            d_coice = (
+                float(np.max(np.abs(xCO_ice_new - xCO_ice_old) / denom_coice))
+                if self.enable_co_phase
+                else 0.0
+            )
+            if (k_step + 1) >= N and max(d_h2, d_co, d_coice) <= self.shielding_reltol:
                 break
 
-        chi_dust_arr, Tdust_flat, T_flat, theta_h2, theta_co, theta_c, Gph, GPE, GISRF = self._prepare_environment(
-            y_state=y_state,
-        )
+        (
+            chi_dust_arr,
+            Tdust_flat,
+            T_flat,
+            theta_h2,
+            theta_co,
+            theta_c,
+            theta_CO_pdes,
+            Gph,
+            GPE,
+            GISRF,
+            F_CO_pdes_external_unshielded,
+        ) = self._prepare_environment(y_state=y_state)
         result = _gow17.solve_batch_equilibrium(
             y0=self._project_state(y_state),
             nH=self.nH_flat,
@@ -731,7 +805,9 @@ class Gow17TimeStepper:
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
+            theta_CO_pdes=theta_CO_pdes,
             chi_dust_arr=chi_dust_arr,
             Gph=Gph,
             GISRF=GISRF,
+            F_CO_pdes_external_unshielded=F_CO_pdes_external_unshielded,
         )

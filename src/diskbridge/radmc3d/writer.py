@@ -262,7 +262,9 @@ class RadWriter:
             ncell = mesh.ncell(name)
             if ncell is not None and ncell > 0:
                 dims.append(ncell)
-                active_dims[i] = 1
+                active_dims[i] = 0 if (
+                    mesh.coord_system == 'spherical' and name == 'phi' and int(ncell) == 1
+                ) else 1
             else:
                 dims.append(1)  # Inactive dimension has size 1
         
@@ -288,7 +290,7 @@ class RadWriter:
                         edges_cgs = self.radmc_spherical_phi_edges_rad(mesh)
                     
                     for val in edges_cgs:
-                        f.write(f'{val:13.6e} ')
+                        f.write(f'{val:.16e} ')
                 else:
                     # Write dummy edges for inactive dimension
                     f.write('0.0 1.0 ')

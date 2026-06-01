@@ -79,7 +79,8 @@ static py::dict solve_slab_1d_equilibrium(
     const double co_Y_CO,
     const double co_N_SURF,
     const int co_N_LAY,
-    const bool userJac) {
+    const bool userJac,
+    const bool shield_pdes_1d) {
     gow17 ode;
     const int dim = ode.Dimen();
 
@@ -139,6 +140,7 @@ static py::dict solve_slab_1d_equilibrium(
     slab.IsCOMolSheilding(isfsCO);
     slab.IsCselfSheilding(isfsC);
     slab.IsDustSheilding(isdust);
+    slab.SetCOPhotodesorptionFluxControls(co_F_DRAINE, shield_pdes_1d);
 
     slab.SolveEq(tolfac, tmin, tmax, verbose, NULL);
 
@@ -1002,7 +1004,8 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("co_Y_CO"),
         py::arg("co_N_SURF"),
         py::arg("co_N_LAY"),
-        py::arg("userJac"));
+        py::arg("userJac"),
+        py::arg("shield_pdes_1d") = false);
 
     m.def(
         "solve_batch_equilibrium",
