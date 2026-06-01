@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, TYPE_CHECKING, Tuple, Union
 
@@ -29,6 +30,17 @@ class DiskFrameData:
     vphi_d: Quantity
     vz_d: Quantity
     theta_from_midplane: np.ndarray
+
+
+@dataclass(frozen=True)
+class JoosCriterionData:
+    """Dimensionless Joos criterion margins evaluated on the native grid."""
+    valid: np.ndarray
+    q_vr: np.ndarray
+    q_vz: np.ndarray
+    q_rot: np.ndarray
+    q_rho: np.ndarray
+    hard_pass: np.ndarray
 
 
 def _compute_disk_orientation(
@@ -302,18 +314,32 @@ def _threshold_for_cells(
     return out
 
 
-def _compute_cell_criteria_mask(
+def _safe_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """Return numerator / denominator with disk-mask friendly zero handling."""
+    num = np.asarray(numerator, dtype=float)
+    den = np.asarray(denominator, dtype=float)
+    ratio = np.zeros_like(num, dtype=float)
+    finite_num = np.isfinite(num)
+    finite_den = np.isfinite(den)
+    ok = finite_num & finite_den & (den > 0.0)
+    np.divide(num, den, out=ratio, where=ok)
+    ratio[finite_num & finite_den & (den == 0.0) & (num > 0.0)] = np.inf
+    ratio[~finite_num | ~finite_den | (num < 0.0)] = 0.0
+    ratio[np.isnan(ratio)] = 0.0
+    return ratio
+
+
+def _compute_joos_criterion_data(
     rho: Quantity,
     disk_frame: DiskFrameData,
     Pth: Quantity,
     r_bin: np.ndarray,
-    t_bin: np.ndarray,
     valid: np.ndarray,
     rho_disk_min: Quantity,
     fthres_use: Union[float, np.ndarray],
     fthres_vr_use: Union[float, np.ndarray],
-) -> np.ndarray:
-    """Evaluate Joos criteria per cell and keep midplane-connected theta columns."""
+) -> JoosCriterionData:
+    """Evaluate Joos criterion margins on individual cells."""
     fthres_grid = _threshold_for_cells(fthres_use, r_bin, valid)
     fthres_vr_grid = _threshold_for_cells(fthres_vr_use, r_bin, valid)
 
@@ -323,15 +349,38 @@ def _compute_cell_criteria_mask(
     rho_base = rho.to_base_units().magnitude
     rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units().magnitude
     P = Pth.to_base_units().magnitude
+    rho_min = float(rho_disk_min.to_base_units().magnitude)
 
-    cell_pass = (
+    q_vr = _safe_ratio(vphi_abs, fthres_vr_grid * vR_abs)
+    q_vz = _safe_ratio(vphi_abs, fthres_grid * vz_abs)
+    q_rot = _safe_ratio(rot, fthres_grid * P)
+    q_rho = _safe_ratio(rho_base, np.full_like(rho_base, rho_min, dtype=float))
+    for q in (q_vr, q_vz, q_rot, q_rho):
+        q[~valid] = 0.0
+
+    hard_pass = (
         valid
-        & (vphi_abs > (fthres_vr_grid * vR_abs))
-        & (vphi_abs > (fthres_grid * vz_abs))
-        & (rot > (fthres_grid * P))
-        & (rho_base > rho_disk_min.to_base_units().magnitude)
+        & (q_vr > 1.0)
+        & (q_vz > 1.0)
+        & (q_rot > 1.0)
+        & (q_rho > 1.0)
+    )
+    return JoosCriterionData(
+        valid=valid,
+        q_vr=q_vr,
+        q_vz=q_vz,
+        q_rot=q_rot,
+        q_rho=q_rho,
+        hard_pass=hard_pass,
     )
 
+
+def _apply_hard_midplane_connectivity(
+    cell_pass: np.ndarray,
+    disk_frame: DiskFrameData,
+    valid: np.ndarray,
+) -> np.ndarray:
+    """Keep the contiguous hard-pass chain around the closest hard-pass midplane cell."""
     connected = np.zeros_like(cell_pass, dtype=bool)
     nr, _ntheta, nphi = cell_pass.shape
     for ir in range(nr):
@@ -365,6 +414,192 @@ def _compute_cell_criteria_mask(
     return connected
 
 
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    """Numerically stable logistic function."""
+    x = np.asarray(x, dtype=float)
+    out = np.empty_like(x, dtype=float)
+    pos = x >= 0.0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    exp_x = np.exp(x[~pos])
+    out[~pos] = exp_x / (1.0 + exp_x)
+    return out
+
+
+def _soft_cut_from_ratio(q: np.ndarray, delta: float, floor: float) -> np.ndarray:
+    """Map a hard Joos margin q > 1 to a continuous score in [0, 1]."""
+    if delta <= 0.0 or not np.isfinite(delta):
+        raise ValueError("soft Joos delta values must be positive and finite")
+    if floor < 0.0 or floor >= 0.5:
+        raise ValueError("weight_floor must satisfy 0 <= weight_floor < 0.5")
+    q = np.asarray(q, dtype=float)
+    x = np.full_like(q, -np.inf, dtype=float)
+    positive = q > 0.0
+    x[positive] = np.log(q[positive]) / float(delta)
+    score = _sigmoid(x)
+    if floor > 0.0:
+        score = np.where(score <= floor, 0.0, score)
+        score = np.where(score >= 1.0 - floor, 1.0, score)
+    score[~np.isfinite(score)] = 0.0
+    return np.clip(score, 0.0, 1.0)
+
+
+def _soft_delta_value(
+    soft_delta: Union[float, Mapping[str, float]],
+    key: str,
+) -> float:
+    if isinstance(soft_delta, Mapping):
+        if key in soft_delta:
+            return float(soft_delta[key])
+        if "default" in soft_delta:
+            return float(soft_delta["default"])
+        raise KeyError(f"soft_delta mapping is missing {key!r} and 'default'")
+    return float(soft_delta)
+
+
+def _compute_local_soft_joos_weight(
+    criteria: JoosCriterionData,
+    soft_delta: Union[float, Mapping[str, float]],
+    weight_floor: float,
+) -> np.ndarray:
+    """Compute the local fuzzy-AND of the Joos criterion scores."""
+    s_vr = _soft_cut_from_ratio(
+        criteria.q_vr,
+        _soft_delta_value(soft_delta, "vr"),
+        weight_floor,
+    )
+    s_vz = _soft_cut_from_ratio(
+        criteria.q_vz,
+        _soft_delta_value(soft_delta, "vz"),
+        weight_floor,
+    )
+    s_rot = _soft_cut_from_ratio(
+        criteria.q_rot,
+        _soft_delta_value(soft_delta, "rot"),
+        weight_floor,
+    )
+    s_rho = _soft_cut_from_ratio(
+        criteria.q_rho,
+        _soft_delta_value(soft_delta, "rho"),
+        weight_floor,
+    )
+    w_local = np.minimum.reduce([s_vr, s_vz, s_rot, s_rho])
+    w_local[~criteria.valid] = 0.0
+    return np.clip(w_local, 0.0, 1.0)
+
+
+def _apply_soft_midplane_connectivity(
+    w_local: np.ndarray,
+    disk_frame: DiskFrameData,
+    valid: np.ndarray,
+    *,
+    seed_min: float,
+    floor: float,
+) -> np.ndarray:
+    """Propagate soft disk weight from the true midplane by a weakest-link rule.
+
+    The connected weight of a cell is the minimum local Joos score along the
+    vertical path from the column midplane to that cell. Columns whose midplane
+    cell is below ``seed_min`` are assigned zero weight.
+    """
+    if seed_min < 0.0 or seed_min > 1.0:
+        raise ValueError("weight_m0/seed_min must lie in [0, 1]")
+    w_conn = np.zeros_like(w_local, dtype=float)
+    nr, _ntheta, nphi = w_local.shape
+    for ir in range(nr):
+        for iphi in range(nphi):
+            populated = np.flatnonzero(valid[ir, :, iphi])
+            if populated.size == 0:
+                continue
+            theta_col = disk_frame.theta_from_midplane[ir, populated, iphi]
+            pop_order = populated[np.argsort(theta_col)]
+            mid_pos = int(
+                np.argmin(
+                    np.abs(disk_frame.theta_from_midplane[ir, pop_order, iphi])
+                )
+            )
+            mid = int(pop_order[mid_pos])
+            mid_weight = float(w_local[ir, mid, iphi])
+            if mid_weight < seed_min or mid_weight <= floor:
+                continue
+
+            running = mid_weight
+            for k in range(mid_pos, pop_order.size):
+                j = int(pop_order[k])
+                running = min(running, float(w_local[ir, j, iphi]))
+                if running <= floor:
+                    break
+                w_conn[ir, j, iphi] = running
+
+            running = mid_weight
+            for k in range(mid_pos - 1, -1, -1):
+                j = int(pop_order[k])
+                running = min(running, float(w_local[ir, j, iphi]))
+                if running <= floor:
+                    break
+                w_conn[ir, j, iphi] = running
+
+    return np.clip(w_conn, 0.0, 1.0)
+
+
+def _build_disk_weight(
+    hard_mask: np.ndarray,
+    criteria: JoosCriterionData,
+    disk_frame: DiskFrameData,
+    *,
+    weight_mode: str,
+    soft_delta: Union[float, Mapping[str, float]],
+    weight_m0: float,
+    weight_floor: float,
+) -> np.ndarray:
+    mode = str(weight_mode).lower()
+    if mode in {"cell", "binary", "hard"}:
+        return hard_mask.astype(float)
+    if mode in {"soft", "soft_joos", "soft-connected", "soft_connected"}:
+        w_local = _compute_local_soft_joos_weight(
+            criteria,
+            soft_delta,
+            weight_floor,
+        )
+        if mode in {"soft", "soft_joos"}:
+            return w_local
+        return _apply_soft_midplane_connectivity(
+            w_local,
+            disk_frame,
+            criteria.valid,
+            seed_min=float(weight_m0),
+            floor=float(weight_floor),
+        )
+    raise ValueError(
+        "weight_mode must be one of 'none', 'cell', 'soft', or 'soft_connected'"
+    )
+
+
+def _compute_cell_criteria_mask(
+    rho: Quantity,
+    disk_frame: DiskFrameData,
+    Pth: Quantity,
+    r_bin: np.ndarray,
+    t_bin: np.ndarray,
+    valid: np.ndarray,
+    rho_disk_min: Quantity,
+    fthres_use: Union[float, np.ndarray],
+    fthres_vr_use: Union[float, np.ndarray],
+) -> np.ndarray:
+    """Evaluate Joos criteria per cell and keep midplane-connected theta columns."""
+    del t_bin
+    criteria = _compute_joos_criterion_data(
+        rho,
+        disk_frame,
+        Pth,
+        r_bin,
+        valid,
+        rho_disk_min,
+        fthres_use,
+        fthres_vr_use,
+    )
+    return _apply_hard_midplane_connectivity(criteria.hard_pass, disk_frame, valid)
+
+
 def set_mask_from_joos_disk(
     model: "Model",
     rho_disk_min: Quantity,
@@ -381,6 +616,7 @@ def set_mask_from_joos_disk(
     weight_delta_bins: float = 3.0,
     weight_m0: float = 0.25,
     weight_floor: float = 1e-4,
+    soft_delta: Union[float, Mapping[str, float]] = 0.20,
 ) -> "SubModel":
     """Create a disk region mask using the Joos et al. (2012) kinematic/pressure criteria.
 
@@ -396,6 +632,8 @@ def set_mask_from_joos_disk(
     5) Returns a SubModel with the same boolean mask.
 
     By default, it also registers the same binary mask as model.gas["disk_weight"].
+    Use ``weight_mode="soft"`` or ``"soft_connected"`` to register a continuous
+    disk/ISM material split derived from Joos criterion margins.
 
     Args:
         model: DiskBridge Model with spherical mesh and gas fields.
@@ -411,11 +649,15 @@ def set_mask_from_joos_disk(
         n_r_bins: Optional downsampling of radial bins (cannot refine beyond native).
         n_theta_bins: Number of theta_from_midplane bins used for ring averages.
         r_max: Optional maximum radius included in the final boolean mask.
-        weight_mode: If "none", no weight field is registered. Any other value registers
-            the binary cell-wise disk mask as model.gas["disk_weight"].
+        weight_mode: "none" skips disk_weight, "cell" registers the binary cell-wise
+            disk mask, "soft" registers the local soft Joos score, and
+            "soft_connected" registers the soft score with weakest-link midplane
+            connectivity.
         weight_delta_bins: Retained for API compatibility; ignored by the cell-wise mask.
-        weight_m0: Retained for API compatibility; ignored by the cell-wise mask.
-        weight_floor: Retained for API compatibility; ignored by the cell-wise mask.
+        weight_m0: Minimum midplane seed weight for soft_connected mode.
+        weight_floor: Scores at or below this value are truncated to zero.
+        soft_delta: Shared or criterion-specific softness in log-ratio space. Mapping
+            keys are "vr", "vz", "rot", "rho", or "default".
 
     Returns:
         SubModel representing the disk region. The returned SubModel.mask is boolean.
@@ -492,26 +734,54 @@ def set_mask_from_joos_disk(
     t_bin = np.digitize(disk_frame.theta_from_midplane, theta_edges) - 1
     valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
 
-    mask = _compute_cell_criteria_mask(
+    criteria = _compute_joos_criterion_data(
         rho,
         disk_frame,
         Pth,
         r_bin,
-        t_bin,
         valid,
         rho_disk_min,
         fthres_use,
         fthres_vr_use,
     )
 
+    mask = _apply_hard_midplane_connectivity(
+        criteria.hard_pass,
+        disk_frame,
+        valid,
+    )
+    inside_rmax = None
     if r_max is not None:
-        mask &= (r_grid <= r_max)
+        inside_rmax = r_grid <= r_max
+        mask &= inside_rmax
 
-    if weight_mode != "none":
+    if str(weight_mode).lower() != "none":
+        w_disk = _build_disk_weight(
+            mask,
+            criteria,
+            disk_frame,
+            weight_mode=weight_mode,
+            soft_delta=soft_delta,
+            weight_m0=weight_m0,
+            weight_floor=weight_floor,
+        )
+        if inside_rmax is not None:
+            w_disk = np.where(inside_rmax, w_disk, 0.0)
         w_field = Field(
-            data=Quantity(mask.astype(float), "dimensionless"),
+            data=Quantity(np.clip(w_disk, 0.0, 1.0), "dimensionless"),
             quantity="mask",
             axis_order=mesh.axis_names(),
+            attrs={
+                "source": "joos_disk",
+                "weight_mode": str(weight_mode),
+                "soft_delta": (
+                    dict(soft_delta)
+                    if isinstance(soft_delta, Mapping)
+                    else float(soft_delta)
+                ),
+                "weight_m0": float(weight_m0),
+                "weight_floor": float(weight_floor),
+            },
         )
         model.gas_register("disk_weight", w_field)
 

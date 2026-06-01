@@ -23,6 +23,7 @@ from diskbridge.model.profiles import (
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
 from diskbridge.radmc3d.uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
+    draine_references_for_product_partitions,
     draine_reference_for_product,
     uv_product_edges_from_specs,
     uv_product_specs_from_config,
@@ -592,12 +593,24 @@ class SegmentedRadRunner:
             .to("1/(cm^2 s)")
             .magnitude
         )
+        f_pdes_band_ref = (
+            draine_references_for_product_partitions("F_CO_pdes_photon", specs)
+            .to("1/(cm^2 s)")
+            .magnitude
+        )
+        chi_broad_arr = np.asarray(chi_broad.to("dimensionless").magnitude, dtype=np.float64)
         for name in UV_PRODUCT_MERGED_FIELD_NAMES:
             if name == "chi_broad":
                 continue
             if name == "F_CO_pdes_photon":
                 products[name] = Quantity(
-                    np.asarray(chi_broad.to("dimensionless").magnitude) * float(f_pdes_ref),
+                    chi_broad_arr * float(f_pdes_ref),
+                    "1/(cm^2 s)",
+                )
+            elif name == "F_CO_pdes_photon_bands":
+                products[name] = Quantity(
+                    f_pdes_band_ref.reshape((int(f_pdes_band_ref.size),) + (1,) * chi_broad_arr.ndim)
+                    * chi_broad_arr[None, ...],
                     "1/(cm^2 s)",
                 )
             else:

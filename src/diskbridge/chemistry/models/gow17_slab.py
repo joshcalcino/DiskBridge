@@ -32,6 +32,7 @@ from diskbridge.chemistry.models.gow17 import (
     _initial_gas_temperature,
     _maybe_quantity_to_float,
     _model_microturbulence_grid_kms,
+    _resolve_co_phase_controls,
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_co_phase_runtime_params,
@@ -135,6 +136,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     )
 
     ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
+    ion_rate_arr = np.full(ncells, float(ion_rate_s), dtype=np.float64)
     Zg = float(cfg["Zg"])
     Zd = float(cfg["Zd"])
     reltol = float(cfg["reltol"])
@@ -148,8 +150,18 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     userJac = bool(cfg["userJac"])
     gradv = float(cfg["gradv"])
     co_phase_params = _resolve_co_phase_runtime_params(cfg)
+    S_CO, F_CRUV_CO_pdes_arr, k_crdes_CO_arr = _resolve_co_phase_controls(
+        cfg=cfg,
+        ion_rate_arr=ion_rate_arr,
+        ncells=ncells,
+    )
     co_phase_cfg = cfg.get("co_phase", {}) if isinstance(cfg.get("co_phase", {}), dict) else {}
     shield_pdes_1d = bool(co_phase_cfg.get("shield_pdes_1d", False))
+    co_sigma_d_per_H_ref = (
+        _maybe_quantity_to_float(cfg["dust"]["sigma_d_ISM_ref"], "cm^2")
+        if enable_co_phase
+        else 0.0
+    )
 
     abstol = _build_gow17_abstol(cfg, abstol0)
     abstol[I_E] = float(
@@ -195,7 +207,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         fSplusgr=float(cfg["fSplusgr"]),
         fSiplusgr=float(cfg["fSiplusgr"]),
         fCplusCR=float(cfg["fCplusCR"]),
-        co_sigma_d_per_H_ref=0.0,
+        co_sigma_d_per_H_ref=float(co_sigma_d_per_H_ref),
         co_E_bind_co=(float(co_phase_params["E_bind_CO"]) if enable_co_phase else 0.0),
         co_nu0_co=(float(co_phase_params["nu0_CO"]) if enable_co_phase else 0.0),
         co_F_DRAINE=float(_co_pdes_draine_flux()) if enable_co_phase else 0.0,
@@ -204,6 +216,13 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         co_N_LAY=(int(co_phase_params["N_LAY"]) if enable_co_phase else 0),
         userJac=bool(userJac),
         shield_pdes_1d=bool(shield_pdes_1d),
+        co_S_CO=(float(S_CO) if enable_co_phase else 0.0),
+        co_F_CRUV_CO_pdes=(
+            float(F_CRUV_CO_pdes_arr.reshape(-1)[0]) if enable_co_phase else 0.0
+        ),
+        co_k_crdes_CO=(
+            float(k_crdes_CO_arr.reshape(-1)[0]) if enable_co_phase else 0.0
+        ),
     )
 
     y_out = np.asarray(slab["y"], dtype=np.float64).reshape(shape + (N_Y,))
@@ -254,6 +273,9 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_CO_pdes_arr = theta_co_arr if (enable_co_phase and shield_pdes_1d) else np.ones_like(theta_co_arr)
     F_CO_pdes_unshielded = chi_arr * _co_pdes_draine_flux()
     F_CO_pdes_actual = F_CO_pdes_unshielded * theta_CO_pdes_arr
+    F_CO_pdes_total = F_CO_pdes_actual + (
+        F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else 0.0
+    )
     G_CO = chi_arr * theta_co_arr
     fields = {
         "co_ice": Quantity(y_out[..., I_CO_ICE] * nH_cm3, "cm^-3"),
@@ -277,7 +299,11 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         "G_H2_diss_actual": Quantity(chi_arr * theta_h2_arr, "dimensionless"),
         "F_CO_pdes_external_unshielded": Quantity(F_CO_pdes_unshielded, "1/(cm^2 s)"),
         "F_CO_pdes_external_actual": Quantity(F_CO_pdes_actual, "1/(cm^2 s)"),
-        "F_CO_pdes_photon_total": Quantity(F_CO_pdes_actual, "1/(cm^2 s)"),
+        "F_CRUV_CO_pdes": Quantity(
+            F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else np.zeros(shape, dtype=np.float64),
+            "1/(cm^2 s)",
+        ),
+        "F_CO_pdes_photon_total": Quantity(F_CO_pdes_total, "1/(cm^2 s)"),
     }
 
     rad.gow17_y = y_out
@@ -316,6 +342,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
             "fail_idx_head": [],
             "status_hist": {0: int(ncells), -1: 0},
             "shield_pdes_1d": bool(shield_pdes_1d),
+            "co_sigma_d_per_H_ref": float(co_sigma_d_per_H_ref),
         },
     )
 

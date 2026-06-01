@@ -88,7 +88,10 @@ DEFAULT_UV_PRODUCT_SPECS = (
 )
 
 UV_PRODUCT_FIELD_NAMES = tuple(spec.field_name for spec in DEFAULT_UV_PRODUCT_SPECS)
-UV_PRODUCT_MERGED_FIELD_NAMES = UV_PRODUCT_FIELD_NAMES + ("F_CO_pdes_photon",)
+UV_PRODUCT_MERGED_FIELD_NAMES = UV_PRODUCT_FIELD_NAMES + (
+    "F_CO_pdes_photon",
+    "F_CO_pdes_photon_bands",
+)
 
 
 @dataclass(frozen=True)
@@ -441,6 +444,13 @@ def _spec_by_name(name: str, specs=DEFAULT_UV_PRODUCT_SPECS) -> UVProductSpec:
     raise KeyError(f"Unknown UV product {name!r}")
 
 
+def _reference_product_name(name: str) -> str:
+    """Map stored physical fields onto their normalized UV product spec."""
+    if name in {"F_CO_pdes_photon", "F_CO_pdes_photon_bands"}:
+        return "G_CO_pdes"
+    return name
+
+
 def integrate_draine_reference(
     spec: UVProductSpec,
     *,
@@ -491,8 +501,43 @@ def draine_reference_for_product(
     Quantity
         Draine reference quantity.
     """
-    lookup_name = "G_CO_pdes" if name == "F_CO_pdes_photon" else name
+    lookup_name = _reference_product_name(name)
     return integrate_draine_reference(_spec_by_name(lookup_name, specs), isrf_path=isrf_path)
+
+
+def partitions_for_product(
+    name: str,
+    specs=DEFAULT_UV_PRODUCT_SPECS,
+) -> list[UVPartition]:
+    """Return UV partitions covered by a product's wavelength band."""
+    spec = _spec_by_name(_reference_product_name(name), specs)
+    partitions = make_uv_partitions(specs)
+    idx = _partition_indices_for_band(
+        partitions,
+        spec.band.lam_min_nm,
+        spec.band.lam_max_nm,
+    )
+    return [partitions[i] for i in idx]
+
+
+def draine_references_for_product_partitions(
+    name: str,
+    specs=DEFAULT_UV_PRODUCT_SPECS,
+    *,
+    isrf_path: str | Path | None = None,
+) -> Quantity:
+    """Return Draine reference integrals for each partition in a product band."""
+    spec = _spec_by_name(_reference_product_name(name), specs)
+    partitions = make_uv_partitions(specs)
+    idx = _partition_indices_for_band(
+        partitions,
+        spec.band.lam_min_nm,
+        spec.band.lam_max_nm,
+    )
+    draine = load_draine_reference(isrf_path)
+    refs = integrate_draine_partitions(draine, partitions, weighting=spec.band.weight)
+    unit = "erg/cm^3" if spec.band.weight == "energy" else "1/(cm^2 s)"
+    return Quantity(np.asarray(refs[idx], dtype=np.float64), unit)
 
 
 def _validate_frequency_coverage(freq_hz, lam_min_nm: float, lam_max_nm: float) -> None:
@@ -642,8 +687,19 @@ def compute_uv_products(
             pdes_spec.band.lam_min_nm,
             pdes_spec.band.lam_max_nm,
         )
+        pdes_band_fields = np.stack(
+            [
+                photon_parts[ipart, :].reshape(mesh_shape, order="F")
+                for ipart in pdes_idx
+            ],
+            axis=0,
+        )
         products["F_CO_pdes_photon"] = Quantity(
             np.sum(photon_parts[pdes_idx, :], axis=0).reshape(mesh_shape, order="F"),
+            "1/(cm^2 s)",
+        )
+        products["F_CO_pdes_photon_bands"] = Quantity(
+            pdes_band_fields,
             "1/(cm^2 s)",
         )
     return products

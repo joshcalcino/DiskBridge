@@ -340,6 +340,7 @@ class Model:
         weight_delta_bins: float = 3.0,
         weight_m0: float = 0.25,
         weight_floor: float = 1e-4,
+        soft_delta: Union[float, Mapping[str, float]] = 0.20,
     ) -> SubModel:
         from .masking import set_mask_from_joos_disk as _set_mask_from_joos_disk
 
@@ -358,6 +359,7 @@ class Model:
             weight_delta_bins=weight_delta_bins,
             weight_m0=weight_m0,
             weight_floor=weight_floor,
+            soft_delta=soft_delta,
         )
 
     def set_mask_from_array(

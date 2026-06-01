@@ -74,6 +74,7 @@ def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
         "chi_c": "dimensionless",
         "G_CO_pdes": "dimensionless",
         "F_CO_pdes_photon": "1/(cm^2 s)",
+        "F_CO_pdes_photon_bands": "1/(cm^2 s)",
         "uv_product_measured_mask": "dimensionless",
         "segment_id": "dimensionless",
     }

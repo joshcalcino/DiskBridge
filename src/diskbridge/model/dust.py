@@ -670,10 +670,15 @@ class Dust(SubModel):
         *,
         include_ism: bool = True,
         alpha: Optional[float] = None,
+        mask_field: Optional[str] = None,
     ) -> None:
         """Add the canonical disk dust component and, by default, ISM dust."""
-        if self.parent.gas is None or "disk_mask" not in self.parent.gas:
-            raise KeyError("Disk mask not found; call set_mask_from_joos_disk first")
+        if self.parent.gas is None:
+            raise KeyError("Model has no gas submodel")
+        if mask_field is None:
+            mask_field = "disk_weight" if "disk_weight" in self.parent.gas else "disk_mask"
+        if mask_field not in self.parent.gas:
+            raise KeyError("Disk mask/weight not found; call set_mask_from_joos_disk first")
 
         current_params = _current_params()
         disk_mode = mode if mode is not None else current_params.disk_dust_mode
@@ -685,14 +690,14 @@ class Dust(SubModel):
             disk_alpha = current_params.disk_dust_settling_alpha
 
         self.add_component_from_mask(
-            mask="disk_mask",
+            mask=mask_field,
             mode=disk_mode,
             alpha=disk_alpha,
         )
 
         if include_ism:
             self.add_component_from_mask(
-                mask="disk_mask",
+                mask=mask_field,
                 complement=True,
                 mode="proportional",
             )
@@ -786,7 +791,7 @@ class Dust(SubModel):
         candidates = []
         for comp in self._components:
             attrs = getattr(comp.mask, "attrs", {}) if comp.mask is not None else {}
-            if attrs.get("complement_of") == "disk_mask":
+            if attrs.get("complement_of") in {"disk_mask", "disk_weight"}:
                 candidates.append(comp)
 
         if len(candidates) == 1:

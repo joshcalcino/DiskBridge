@@ -845,15 +845,16 @@ def _actual_solver_uv_fields(
     }
 
 
-def _shield_co_pdes_external_flux(
-    F_CO_pdes_external_unshielded: np.ndarray,
-    theta_CO_pdes: np.ndarray,
+def _shield_external_band_flux(
+    F_external_unshielded: np.ndarray,
+    theta_external: np.ndarray,
     *,
     ncells: int,
+    name: str = "external band flux",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return effective CO photodesorption shielding and shielded external flux."""
-    F_raw = np.asarray(F_CO_pdes_external_unshielded, dtype=np.float64)
-    theta = np.asarray(theta_CO_pdes, dtype=np.float64)
+    """Return effective shielding and shielded flux for scalar or banded fields."""
+    F_raw = np.asarray(F_external_unshielded, dtype=np.float64)
+    theta = np.asarray(theta_external, dtype=np.float64)
 
     if F_raw.ndim == 1:
         F_flat = F_raw.reshape(ncells)
@@ -865,7 +866,7 @@ def _shield_co_pdes_external_flux(
 
     if F_raw.ndim != 2:
         raise ValueError(
-            "F_CO_pdes_external_unshielded must be 1D or 2D "
+            f"{name} must be 1D or 2D "
             f"after flattening, got ndim={F_raw.ndim}"
         )
 
@@ -874,7 +875,7 @@ def _shield_co_pdes_external_flux(
         F_bands = F_bands.T
     if F_bands.shape[-1] != ncells:
         raise ValueError(
-            "CO photodesorption band flux array must have one axis of length "
+            f"{name} array must have one axis of length "
             f"ncells={ncells}, got shape={F_raw.shape}"
         )
 
@@ -886,7 +887,7 @@ def _shield_co_pdes_external_flux(
             theta_bands = theta_bands.T
         if theta_bands.shape != F_bands.shape:
             raise ValueError(
-                "CO photodesorption shielding band array must match flux bands; "
+                f"{name} shielding array must match flux bands; "
                 f"got theta={theta.shape}, flux={F_raw.shape}"
             )
 
@@ -901,6 +902,29 @@ def _shield_co_pdes_external_flux(
     return (
         np.ascontiguousarray(theta_eff, dtype=np.float64),
         np.ascontiguousarray(F_shielded, dtype=np.float64),
+    )
+
+
+def _flatten_band_field(
+    arr: np.ndarray,
+    *,
+    shape: tuple,
+    ncells: int,
+    name: str = "band field",
+) -> np.ndarray:
+    """Flatten a scalar or band-resolved grid field to ``(nbands, ncells)``."""
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.shape == shape:
+        return np.ascontiguousarray(arr.reshape(1, ncells), dtype=np.float64)
+    if arr.ndim == len(shape) + 1 and arr.shape[1:] == shape:
+        return np.ascontiguousarray(arr.reshape(arr.shape[0], ncells), dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[-1] == ncells:
+        return np.ascontiguousarray(arr, dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[0] == ncells:
+        return np.ascontiguousarray(arr.T, dtype=np.float64)
+    raise ValueError(
+        f"{name} must have shape "
+        f"shape, (nbands, *shape), (nbands, ncells), or (ncells, nbands); got {arr.shape}"
     )
 
 
@@ -1754,6 +1778,7 @@ def _compute_shielding_and_gph(
     G_H2_diss_flat: np.ndarray,
     G_C_ion_flat: np.ndarray,
     G_CO_pdes_flat: np.ndarray,
+    F_CO_pdes_photon_bands_flat: np.ndarray | None,
     F_CO_pdes_photon_flat: np.ndarray | None,
     xCtot_flat: np.ndarray,
     Zd_arr: np.ndarray,
@@ -1804,7 +1829,19 @@ def _compute_shielding_and_gph(
     )
 
     W_rays = getattr(rad, "W_rays", None)
-    theta_h2_arr, theta_co_arr, theta_c_arr, _, _ = compute_pdr_shielding_healpix(
+    n_pdes_bands = (
+        1
+        if F_CO_pdes_photon_bands_flat is None
+        else int(np.asarray(F_CO_pdes_photon_bands_flat).shape[0])
+    )
+    (
+        theta_h2_arr,
+        theta_co_arr,
+        theta_c_arr,
+        _,
+        _,
+        theta_CO_pdes_bands_arr,
+    ) = compute_pdr_shielding_healpix(
         mesh=rad.model.mesh,
         nH=nH_cm3,
         chi=chi_dust_arr,
@@ -1822,6 +1859,7 @@ def _compute_shielding_and_gph(
             "pdr_shielding_memory_budget_gib",
             None,
         ),
+        co_shielding_nbands=n_pdes_bands,
     )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)
@@ -1836,22 +1874,29 @@ def _compute_shielding_and_gph(
     Gph[:, IPH_H2] = G_H2_diss_flat
     Gph[:, IPH_C] = G_C_ion_flat
     GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
-    if F_CO_pdes_photon_flat is None:
+    if F_CO_pdes_photon_bands_flat is None and F_CO_pdes_photon_flat is None:
         f_co_pdes_ref = _co_pdes_draine_flux()
-        F_CO_pdes_ext_unshielded = np.ascontiguousarray(
-            G_CO_pdes_flat * f_co_pdes_ref,
+        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
+            (G_CO_pdes_flat * f_co_pdes_ref).reshape(1, ncells),
+            dtype=np.float64,
+        )
+    elif F_CO_pdes_photon_bands_flat is None:
+        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
+            np.asarray(F_CO_pdes_photon_flat, dtype=np.float64).reshape(1, ncells),
             dtype=np.float64,
         )
     else:
-        F_CO_pdes_ext_unshielded = np.ascontiguousarray(
-            F_CO_pdes_photon_flat,
+        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
+            F_CO_pdes_photon_bands_flat,
             dtype=np.float64,
         )
 
-    theta_CO_pdes_flat, F_CO_pdes_ext_shielded = _shield_co_pdes_external_flux(
-        F_CO_pdes_ext_unshielded,
-        theta_co_flat,
+    theta_CO_pdes_bands_flat = theta_CO_pdes_bands_arr.reshape(n_pdes_bands, ncells)
+    theta_CO_pdes_flat, F_CO_pdes_ext_shielded = _shield_external_band_flux(
+        F_CO_pdes_ext_unshielded_bands,
+        theta_CO_pdes_bands_flat,
         ncells=ncells,
+        name="CO photodesorption external flux",
     )
 
     Gph[:, IPH_C] *= theta_c_flat
@@ -1962,6 +2007,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "F_CO_pdes_photon",
             fallback_to_chi=False,
         )
+        F_CO_pdes_photon_bands = rad.ensure_uv_product(
+            "F_CO_pdes_photon_bands",
+            fallback_to_chi=False,
+        )
     else:
         chi = rad.ensure_chi()
         G_CO_diss = chi
@@ -1972,6 +2021,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             G_CO_pdes.to("dimensionless").magnitude * f_co_pdes_ref,
             "1/(cm^2 s)",
         )
+        F_CO_pdes_photon_bands = F_CO_pdes_photon
 
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
@@ -1991,6 +2041,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     G_C_ion_arr = _as_cgs_f64(G_C_ion, "dimensionless")
     G_CO_pdes_arr = _as_cgs_f64(G_CO_pdes, "dimensionless")
     F_CO_pdes_photon_arr = _as_cgs_f64(F_CO_pdes_photon, "1/(cm^2 s)")
+    F_CO_pdes_photon_bands_arr = _as_cgs_f64(
+        F_CO_pdes_photon_bands,
+        "1/(cm^2 s)",
+    )
 
     shape = nH_cm3.shape
     ncells = nH_cm3.size
@@ -2015,6 +2069,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     G_C_ion_flat = G_C_ion_arr.reshape(ncells)
     G_CO_pdes_flat = G_CO_pdes_arr.reshape(ncells)
     F_CO_pdes_photon_flat = F_CO_pdes_photon_arr.reshape(ncells)
+    F_CO_pdes_photon_bands_flat = _flatten_band_field(
+        F_CO_pdes_photon_bands_arr,
+        shape=shape,
+        ncells=ncells,
+        name="CO photodesorption band field",
+    )
 
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
@@ -2315,6 +2375,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         G_H2_diss_flat=G_H2_diss_flat,
         G_C_ion_flat=G_C_ion_flat,
         G_CO_pdes_flat=G_CO_pdes_flat,
+        F_CO_pdes_photon_bands_flat=F_CO_pdes_photon_bands_flat,
         F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
         xCtot_flat=xCtot_flat,
         Zd_arr=Zd_arr,

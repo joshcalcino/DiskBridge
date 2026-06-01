@@ -27,7 +27,12 @@ from diskbridge.radmc3d.model import RadModel
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_luminosity
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
 from diskbridge.chemistry.models.gow17_timestep import Gow17TimeStepper
-from diskbridge.radmc3d.uv_products import DEFAULT_UV_PRODUCT_SPECS, draine_reference_for_product
+from diskbridge.radmc3d.uv_products import (
+    DEFAULT_UV_PRODUCT_SPECS,
+    draine_references_for_product_partitions,
+    draine_reference_for_product,
+    partitions_for_product,
+)
 import diskbridge._gow17 as _gow17
 
 I_CO = _gow17.I_CO
@@ -244,6 +249,24 @@ def _star_uv_product_sources(cfg: InfallStream1DConfig) -> dict[str, float]:
     out["F_CO_pdes_draine"] = float(
         draine_reference_for_product("F_CO_pdes_photon").to("1/(cm^2 s)").magnitude
     )
+    pdes_partitions = partitions_for_product("F_CO_pdes_photon", DEFAULT_UV_PRODUCT_SPECS)
+    out["F_CO_pdes_photon_bands"] = np.array(
+        [
+            float(
+                compute_star_uv_source_strength(
+                    params,
+                    float(part.lam_min_nm) * 1.0e-7,
+                    float(part.lam_max_nm) * 1.0e-7,
+                    weighting="photon",
+                )
+            )
+            for part in pdes_partitions
+        ],
+        dtype=np.float64,
+    )
+    out["F_CO_pdes_draine_bands"] = draine_references_for_product_partitions(
+        "F_CO_pdes_photon"
+    ).to("1/(cm^2 s)").magnitude
     return out
 
 
@@ -270,6 +293,18 @@ def _compute_uv_product_cells(
             + ambient * float(sources["F_CO_pdes_draine"])
         ),
     }
+    for name in ("G_S_ion", "G_Si_ion", "G_CH_diss", "G_OH_diss"):
+        if name in sources:
+            products[name] = float(sources[name]) * dilution + ambient
+    if "F_CO_pdes_photon_bands" in sources:
+        pdes_band_lum = np.asarray(sources["F_CO_pdes_photon_bands"], dtype=float)
+        pdes_band_draine = np.asarray(sources["F_CO_pdes_draine_bands"], dtype=float)
+        products["F_CO_pdes_photon_bands"] = (
+            pdes_band_lum[:, None] * dilution[None, :]
+            + ambient * pdes_band_draine[:, None]
+        )
+    else:
+        products["F_CO_pdes_photon_bands"] = products["F_CO_pdes_photon"][None, :]
     return {name: np.asarray(value, dtype=float) for name, value in products.items()}
 
 
@@ -367,6 +402,12 @@ def _assign_product_environment(
         "G_CO_pdes": Quantity(np.asarray(uv_products["G_CO_pdes"], dtype=float).reshape(shape), "dimensionless"),
         "F_CO_pdes_photon": Quantity(
             np.asarray(uv_products["F_CO_pdes_photon"], dtype=float).reshape(shape),
+            "1/(cm^2 s)",
+        ),
+        "F_CO_pdes_photon_bands": Quantity(
+            np.asarray(uv_products["F_CO_pdes_photon_bands"], dtype=float).reshape(
+                (np.asarray(uv_products["F_CO_pdes_photon_bands"]).shape[0],) + tuple(shape)
+            ),
             "1/(cm^2 s)",
         ),
     }

@@ -41,6 +41,7 @@ from diskbridge.chemistry.models.gow17 import (
     _compute_shielding_and_gph,
     _co_pdes_draine_flux,
     _infer_gow17_radiation_mode,
+    _flatten_band_field,
     _initial_gas_temperature,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
@@ -293,6 +294,10 @@ class Gow17TimeStepper:
                 "F_CO_pdes_photon",
                 fallback_to_chi=False,
             )
+            F_CO_pdes_photon_bands = rad.ensure_uv_product(
+                "F_CO_pdes_photon_bands",
+                fallback_to_chi=False,
+            )
         else:
             chi_broad = rad.ensure_chi()
             G_CO_diss = chi_broad
@@ -300,6 +305,7 @@ class Gow17TimeStepper:
             G_C_ion = chi_broad
             G_CO_pdes = chi_broad
             F_CO_pdes_photon = None
+            F_CO_pdes_photon_bands = None
 
         chi_dust_arr = _as_cgs_f64(chi_broad, "dimensionless")
         chi_dust_flat = chi_dust_arr.reshape(self.ncells)
@@ -311,11 +317,18 @@ class Gow17TimeStepper:
             F_CO_pdes_photon_flat = (
                 G_CO_pdes_flat * _co_pdes_draine_flux()
             )
+            F_CO_pdes_photon_bands_flat = F_CO_pdes_photon_flat.reshape(1, self.ncells)
         else:
             F_CO_pdes_photon_flat = _as_cgs_f64(
                 F_CO_pdes_photon,
                 "1/(cm^2 s)",
             ).reshape(self.ncells)
+            F_CO_pdes_photon_bands_flat = _flatten_band_field(
+                _as_cgs_f64(F_CO_pdes_photon_bands, "1/(cm^2 s)"),
+                shape=self.shape,
+                ncells=self.ncells,
+                name="CO photodesorption band field",
+            )
 
         (
             self.dust_cooling_mode,
@@ -370,6 +383,7 @@ class Gow17TimeStepper:
             G_H2_diss_flat=G_H2_diss_flat,
             G_C_ion_flat=G_C_ion_flat,
             G_CO_pdes_flat=G_CO_pdes_flat,
+            F_CO_pdes_photon_bands_flat=F_CO_pdes_photon_bands_flat,
             F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
             xCtot_flat=self.xCtot_flat,
             Zd_arr=self.Zd_arr,
