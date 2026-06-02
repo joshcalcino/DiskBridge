@@ -80,6 +80,7 @@ class Params:
 
     external_uv: bool
     external_uv_chi: float
+    external_ir_Tback: Quantity
 
     nside: int
     w_rays_keep_closure_diagnostics: bool
@@ -155,6 +156,7 @@ PARAM_UNITS = {
     'uv_min': 'nm',
     'uv_max': 'nm',
     'co_E_bind_co': 'K',
+    'external_ir_Tback': 'K',
     'rstar': 'solar_radius',
     'teff': 'K',
     'mstar': 'solar_mass',

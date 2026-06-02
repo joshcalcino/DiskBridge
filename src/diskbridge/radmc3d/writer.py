@@ -18,14 +18,9 @@ from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 from diskbridge._constants import (
     C_LIGHT as C_CGS,
-    EXTERNAL_CMB,
-    EXTERNAL_IR_BETA,
-    EXTERNAL_IR_BACKGROUND,
-    EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-    EXTERNAL_IR_TBACK,
-    EXTERNAL_IR_TCOLOR,
     H_PLANCK as H_CGS,
     K_B as K_B_CGS,
+    MMP83_IR_TABLE,
     SIGMA_SB as SIGMA_SB_CGS,
     T_CMB,
 )
@@ -882,32 +877,8 @@ class RadWriter:
         x = H_CGS * nu / (K_B_CGS * float(T))
         x = np.clip(x, 1.0e-10, 1.0e3)
         prefac = 2.0 * H_CGS * nu**3 / C_CGS**2
-        return prefac / np.expm1(x)
-
-    def _normalized_ir_greybody_i_nu(
-        self,
-        nu_hz: np.ndarray,
-        T_back: float,
-        T_color: float,
-        beta: float,
-        lambda_ref_um: float,
-    ) -> np.ndarray:
-        nu = np.asarray(nu_hz, dtype=float)
-        lambda_ref_cm = float(lambda_ref_um) * 1.0e-4
-        nu_ref = C_CGS / lambda_ref_cm
-        g_nu = (nu / nu_ref) ** float(beta) * self._planck_B_nu(nu, float(T_color))
-        g_nu = np.where(np.isfinite(g_nu), g_nu, 0.0)
-        g_nu = np.maximum(g_nu, 0.0)
-
-        target = (SIGMA_SB_CGS / np.pi) * max(float(T_back) ** 4 - T_CMB**4, 0.0)
-        if target <= 0.0:
-            return np.zeros_like(nu)
-
-        order = np.argsort(nu)
-        integral = float(np.trapezoid(g_nu[order], nu[order]))
-        if not np.isfinite(integral) or integral <= 0.0:
-            return np.zeros_like(nu)
-        return (target / integral) * g_nu
+        with np.errstate(over="ignore"):
+            return prefac / np.expm1(x)
 
     def _load_leiden_draine_i_nu(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
         data = np.loadtxt(str(path), comments="#")
@@ -923,25 +894,64 @@ class RadWriter:
         order = np.argsort(lam_cm)
         return lam_cm[order], i_nu[order]
 
+    def _load_mmp83_ir_i_nu(self, lam_cm: np.ndarray, path: Path) -> np.ndarray:
+        data = np.loadtxt(str(path), comments="#")
+        if data.ndim != 2 or data.shape[1] < 2:
+            raise ValueError(f"Invalid MMP83 IR table: {path}")
+        lam_tab_cm = np.asarray(data[:, 0], dtype=float) * 1.0e-4
+        i_nu_tab = np.asarray(data[:, 1], dtype=float)
+        order = np.argsort(lam_tab_cm)
+        lam_tab_cm = lam_tab_cm[order]
+        i_nu_tab = i_nu_tab[order]
+
+        i_ir = np.zeros_like(lam_cm, dtype=float)
+        m = (lam_cm >= lam_tab_cm.min()) & (lam_cm <= lam_tab_cm.max())
+        if np.any(m):
+            good = (i_nu_tab > 0.0) & np.isfinite(i_nu_tab)
+            i_ir[m] = np.exp(
+                np.interp(
+                    np.log(lam_cm[m]),
+                    np.log(lam_tab_cm[good]),
+                    np.log(i_nu_tab[good]),
+                )
+            )
+        return i_ir
+
+    def _integrate_i_nu(self, i_nu: np.ndarray, nu_hz: np.ndarray) -> float:
+        i_nu = np.asarray(i_nu, dtype=float)
+        nu = np.asarray(nu_hz, dtype=float)
+        order = np.argsort(nu)
+        return float(np.trapezoid(i_nu[order], nu[order]))
+
+    def _compute_chi_ir(
+        self,
+        i_uv: np.ndarray,
+        i_ir_shape: np.ndarray,
+        i_cmb: np.ndarray,
+        nu_hz: np.ndarray,
+        T_back: float,
+    ) -> float:
+        target = SIGMA_SB_CGS / np.pi * float(T_back) ** 4
+        base = self._integrate_i_nu(i_uv + i_cmb, nu_hz)
+        ir_unit = self._integrate_i_nu(i_ir_shape, nu_hz)
+        if not np.isfinite(ir_unit) or ir_unit <= 0.0:
+            return 0.0
+        chi_ir = max((target - base) / ir_unit, 0.0)
+        return float(chi_ir)
+
     def _make_external_i_nu(
         self,
         lam_cm: np.ndarray,
         chi: float,
         isrf_path: Path,
-        include_ir_dust: bool = True,
+        ir_path: Path,
         T_back_ir: float = 10.0,
-        T_color_ir: float = 18.0,
-        beta_ir: float = 1.7,
-        lambda_ref_um: float = 250.0,
-        include_cmb: bool = True,
     ) -> np.ndarray:
         """Build external RADMC-3D boundary intensity I_nu.
 
-        The Draine/Leiden UV-optical-NIR ISRF is scaled by ``chi``. The IR
-        component is a modified blackbody with color temperature
-        ``T_color_ir`` and beta ``beta_ir``, normalized so its integrated
-        intensity corresponds to ``T_back_ir`` after subtracting the CMB
-        contribution. The CMB component is unscaled.
+        The Draine/Leiden UV-optical-NIR ISRF is scaled by ``chi``. The MMP83
+        IR component is scaled so the total external intensity corresponds to
+        ``T_back_ir``. The CMB component is unscaled.
         """
         lam_cm = np.asarray(lam_cm, dtype=float)
         nu = C_CGS / lam_cm
@@ -957,18 +967,17 @@ class RadWriter:
                     np.log(i_nu_tab[good]),
                 )
             )
-        i_total = float(chi) * i_draine
-        if include_ir_dust:
-            i_ir = self._normalized_ir_greybody_i_nu(
-                nu,
-                T_back=T_back_ir,
-                T_color=T_color_ir,
-                beta=beta_ir,
-                lambda_ref_um=lambda_ref_um,
-            )
-            i_total += i_ir
-        if include_cmb:
-            i_total += self._planck_B_nu(nu, T_CMB)
+        i_uv = float(chi) * i_draine
+        i_cmb = self._planck_B_nu(nu, T_CMB)
+        i_ir_shape = self._load_mmp83_ir_i_nu(lam_cm, ir_path)
+        chi_ir = self._compute_chi_ir(i_uv, i_ir_shape, i_cmb, nu, T_back_ir)
+
+        # External field:
+        # I_ext = chi_uv * I_Draine/Leiden + chi_ir * I_MMP83_IR + B_nu(T_CMB).
+        # chi_ir is chosen so that int I_ext dnu = sigma/pi * T_back**4,
+        # following the DIANA/ProDiMo background-field prescription, except that
+        # we retain the Draine/Leiden UV field for consistency with the chemistry.
+        i_total = i_uv + chi_ir * i_ir_shape + i_cmb
         i_total = np.where(np.isfinite(i_total), i_total, 0.0)
         i_total = np.maximum(i_total, 0.0)
         return i_total
@@ -997,6 +1006,9 @@ class RadWriter:
         isrf_name = Path(isrf_path).name
         isrf_path = data_dir / isrf_name
         isrf_file = self._ensure_isrf_file(isrf_path)
+        ir_file = Path(__file__).resolve().parents[3] / "data" / MMP83_IR_TABLE
+        if not ir_file.is_file():
+            raise FileNotFoundError(f"MMP83 IR table not found: {ir_file}")
         wav_file = output_dir / 'wavelength_micron.inp'
         lam_um = self._read_wavelength_grid_from_file(wav_file)
         lam_cm = lam_um * 1.0e-4
@@ -1008,12 +1020,12 @@ class RadWriter:
             lam_cm,
             chi=chi_val,
             isrf_path=isrf_file,
-            include_ir_dust=EXTERNAL_IR_BACKGROUND,
-            T_back_ir=EXTERNAL_IR_TBACK,
-            T_color_ir=EXTERNAL_IR_TCOLOR,
-            beta_ir=EXTERNAL_IR_BETA,
-            lambda_ref_um=EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-            include_cmb=EXTERNAL_CMB,
+            ir_path=ir_file,
+            T_back_ir=float(
+                getattr(self.params, "external_ir_Tback", Quantity(10.0, "K"))
+                .to("K")
+                .magnitude
+            ),
         )
         filepath = output_dir / 'external_source.inp'
         with open(filepath, 'w') as f:

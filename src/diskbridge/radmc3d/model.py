@@ -52,13 +52,8 @@ SIGMA_SB = units('sigma_SB')
 
 from diskbridge._constants import (
     EPS_CHI,
-    EXTERNAL_CMB,
-    EXTERNAL_IR_BETA,
-    EXTERNAL_IR_BACKGROUND,
-    EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-    EXTERNAL_IR_TBACK,
-    EXTERNAL_IR_TCOLOR,
     LOG_CHI_OVER_NH_PDISS,
+    MMP83_IR_TABLE,
 )
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
@@ -85,6 +80,7 @@ _MCTHERM_PARAM_KEYS = (
     'secondorder',
     'external_uv',
     'external_uv_chi',
+    'external_ir_Tback',
 )
 
 _MCMONO_EXTRA_PARAM_KEYS = (
@@ -94,22 +90,17 @@ _MCMONO_EXTRA_PARAM_KEYS = (
     'uv_n_wavelengths',
     'external_uv',
     'external_uv_chi',
+    'external_ir_Tback',
 )
 
 
 def _external_source_cache_context(params) -> dict[str, object]:
     if not bool(getattr(params, "external_uv", False)):
         return {"external_source_enabled": False}
+    ir_path = Path(__file__).resolve().parents[3] / "data" / MMP83_IR_TABLE
     return {
         "external_source_enabled": True,
-        "external_ir_background": bool(EXTERNAL_IR_BACKGROUND),
-        "external_ir_Tback": float(EXTERNAL_IR_TBACK),
-        "external_ir_Tcolor": float(EXTERNAL_IR_TCOLOR),
-        "external_ir_beta": float(EXTERNAL_IR_BETA),
-        "external_ir_reference_wavelength_micron": float(
-            EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON
-        ),
-        "external_cmb": bool(EXTERNAL_CMB),
+        "external_mmp83_ir_table_hash": file_sha256(ir_path) if ir_path.is_file() else "",
     }
 
 

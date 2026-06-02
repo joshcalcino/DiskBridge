@@ -62,6 +62,7 @@ uv_n_wavelengths = 10              # Number of wavelengths in the uv grid
 co_E_bind_co     = 855.0           # CO binding energy for GOW17 freeze-out/desorption in K
 external_uv      = T               # include external boundary photons
 external_uv_chi  = 0.1             # scales only the Draine/Leiden UV-optical-NIR ISRF
+external_ir_Tback = 10.0           # background equivalent temperature in K
  nside            = 4
 w_rays_keep_closure_diagnostics = F # opt-in scalar UV closure diagnostics for W_rays
  

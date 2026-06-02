@@ -45,15 +45,10 @@ HEALPIX_SELF_WEIGHT = 0.5
 # RADMC-3D EXTERNAL BOUNDARY FIELD
 # =============================================================================
 
-# Scaling of the Draine/Leiden UV-optical-NIR ISRF is controlled only by
-# params.external_uv_chi. The IR background is independent of chi and is
-# normalized so its integrated intensity corresponds to EXTERNAL_IR_TBACK.
-EXTERNAL_IR_BACKGROUND = True
-EXTERNAL_IR_TBACK = 10.0
-EXTERNAL_IR_TCOLOR = 18.0
-EXTERNAL_IR_BETA = 1.7
-EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON = 250.0
-EXTERNAL_CMB = True
+# Scaling of the Draine/Leiden UV-optical-NIR ISRF is controlled by
+# params.external_uv_chi. The MMP83 IR background is scaled at write time so
+# the total external-field integral corresponds to params.external_ir_Tback.
+MMP83_IR_TABLE = "MMP83_IR.dat"
 
 # =============================================================================
 # ASTRONOMICAL CONSTANTS (from config)
