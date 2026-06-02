@@ -50,7 +50,16 @@ C_LIGHT = units('c')
 M_H = units('m_H')
 SIGMA_SB = units('sigma_SB')
 
-from diskbridge._constants import EPS_CHI, LOG_CHI_OVER_NH_PDISS
+from diskbridge._constants import (
+    EPS_CHI,
+    EXTERNAL_CMB,
+    EXTERNAL_IR_BETA,
+    EXTERNAL_IR_DUST,
+    EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
+    EXTERNAL_IR_T0,
+    EXTERNAL_IR_TAU_REF,
+    LOG_CHI_OVER_NH_PDISS,
+)
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
  
@@ -86,6 +95,22 @@ _MCMONO_EXTRA_PARAM_KEYS = (
     'external_uv',
     'external_uv_chi',
 )
+
+
+def _external_source_cache_context(params) -> dict[str, object]:
+    if not bool(getattr(params, "external_uv", False)):
+        return {"external_source_enabled": False}
+    return {
+        "external_source_enabled": True,
+        "external_ir_dust": bool(EXTERNAL_IR_DUST),
+        "external_ir_T0": float(EXTERNAL_IR_T0),
+        "external_ir_beta": float(EXTERNAL_IR_BETA),
+        "external_ir_reference_wavelength_micron": float(
+            EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON
+        ),
+        "external_ir_tau_ref": float(EXTERNAL_IR_TAU_REF),
+        "external_cmb": bool(EXTERNAL_CMB),
+    }
 
 
 class RadModel:
@@ -833,6 +858,7 @@ class RadModel:
         cache_context = {
             'nphot': int(nphot),
         }
+        cache_context.update(_external_source_cache_context(self.params))
         
         countwrite = max(1, int(nphot // 100))
         countwrite = min(countwrite, int(np.iinfo(np.int32).max))
@@ -1278,6 +1304,7 @@ class RadModel:
             'wavelengths_min_um': float(np.min(mcmono_lam_um)),
             'wavelengths_max_um': float(np.max(mcmono_lam_um)),
         }
+        cache_context.update(_external_source_cache_context(self.params))
 
         if compute_uv_products:
             isrf_path = default_isrf_path()

@@ -16,6 +16,18 @@ if TYPE_CHECKING:
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
+from diskbridge._constants import (
+    C_LIGHT as C_CGS,
+    EXTERNAL_CMB,
+    EXTERNAL_IR_BETA,
+    EXTERNAL_IR_DUST,
+    EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
+    EXTERNAL_IR_T0,
+    EXTERNAL_IR_TAU_REF,
+    H_PLANCK as H_CGS,
+    K_B as K_B_CGS,
+    T_CMB,
+)
 import diskbridge
 from .opacities import DustOpacityCalculator
 from diskbridge.model.utils import transpose_to_axis_order
@@ -24,13 +36,6 @@ from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_micro
 # Physical constants from config
 G_CGS = units('G')
 SIGMA_SB = units('sigma_SB')
-
-# Local physical constants (cgs)
-H_CGS = units('h').to('erg*s').magnitude
-C_CGS = units('c').to('cm/s').magnitude
-K_B_CGS = units('k_B').to('erg/K').magnitude
-T_CMB = units('T_CMB').to('K').magnitude
-
 
 class RadWriter:
     """Write RADMC-3D input files from a DiskBridge Model.
@@ -871,120 +876,77 @@ class RadWriter:
             f"Expected to find it at: {path}"
         )
     
-    def _parse_isrf_table(self, path: Path, quantity: str = 'auto') -> tuple[np.ndarray, np.ndarray, str]:
-        lam = []
-        val = []
-        header = []
-        with open(path, 'r') as f:
-            for line in f:
-                s = line.strip()
-                if not s:
-                    continue
-                if s[0] in ('#', '!', '%') or any(c.isalpha() for c in s.split()[0]):
-                    header.append(s.lower())
-                    continue
-                parts = s.split()
-                try:
-                    x = float(parts[0])
-                    y = float(parts[1])
-                    lam.append(x)
-                    val.append(y)
-                except Exception:
-                    continue
-        lam_arr = np.array(lam, dtype=float)
-        val_arr = np.array(val, dtype=float)
-        if lam_arr.size == 0:
-            raise RuntimeError("ISRF file could not be parsed")
-        if quantity is None or str(quantity).lower() == 'auto':
-            q = 'j_lambda'
-            joined = ' '.join(header)
-            if 'u_lambda' in joined:
-                q = 'u_lambda'
-            elif 'i_lambda' in joined:
-                q = 'i_lambda'
-            elif 'j_lambda' in joined:
-                q = 'j_lambda'
-        else:
-            q = str(quantity).lower()
-        joined = ' '.join(header)
-        if 'angstrom' in joined or 'ang' in joined:
-            lam_cm = lam_arr * 1e-8
-        elif 'micron' in joined or 'um' in joined:
-            lam_cm = lam_arr * 1e-4
-        elif 'nm' in joined:
-            lam_cm = lam_arr * 1e-7
-        else:
-            a = float(np.median(lam_arr))
-            if a > 50.0:
-                lam_cm = lam_arr * 1e-8
-            elif a < 1e-2:
-                lam_cm = lam_arr
-            else:
-                lam_cm = lam_arr * 1e-4
-        return lam_cm, val_arr, q
-    
-    def _to_i_nu_from_table(self, lam_cm: np.ndarray, values: np.ndarray, quantity: str) -> np.ndarray:
-        c = C_CGS
-        pi = np.pi
-        q = quantity.lower()
-        if q == 'u_lambda':
-            return (lam_cm ** 2 / (4.0 * pi)) * values
-        if q == 'j_lambda':
-            return values * (lam_cm ** 2 / c)
-        if q == 'i_lambda':
-            return values * (lam_cm ** 2 / c)
-        return values * (lam_cm ** 2 / c)
-    
-    def _planck_B_lambda(self, lam_cm: np.ndarray, T: float) -> np.ndarray:
-        lam = np.asarray(lam_cm, dtype=float)
-        lam = np.clip(lam, 1.0e-12, None)
-        x = H_CGS * C_CGS / (lam * K_B_CGS * T)
+    def _planck_B_nu(self, nu_hz: np.ndarray, T: float) -> np.ndarray:
+        nu = np.asarray(nu_hz, dtype=float)
+        x = H_CGS * nu / (K_B_CGS * float(T))
         x = np.clip(x, 1.0e-10, 1.0e3)
-        prefac = 2.0 * H_CGS * (C_CGS ** 2) / (lam ** 5)
+        prefac = 2.0 * H_CGS * nu**3 / C_CGS**2
         return prefac / np.expm1(x)
 
-    def _load_leiden_draine_isrf(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
+    def _load_leiden_draine_i_nu(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
         data = np.loadtxt(str(path), comments="#")
         lam_nm = data[:, 0]
-        j_phot_nm = data[:, 1]
+        photon_flux_nm = data[:, 1]
         lam_cm = lam_nm * 1.0e-7
         e_ph = H_CGS * C_CGS / lam_cm
-        j_lambda = j_phot_nm * e_ph / 1.0e-7 / (4.0 * np.pi)
-        return lam_cm, j_lambda
+        # table is photons s^-1 cm^-2 nm^-1
+        # convert nm^-1 -> cm^-1, then divide by 4pi for isotropic intensity
+        i_lambda = photon_flux_nm * e_ph / 1.0e-7 / (4.0 * np.pi)
+        # I_nu = I_lambda * lambda^2 / c
+        i_nu = i_lambda * lam_cm**2 / C_CGS
+        order = np.argsort(lam_cm)
+        return lam_cm[order], i_nu[order]
 
-    def _make_ism_background_lambda(
+    def _make_external_i_nu(
         self,
         lam_cm: np.ndarray,
         chi: float,
         isrf_path: Path,
         include_ir_dust: bool = True,
-        T_dust: float = 18.0,
-        beta_dust: float = 1.7,
-        dust_norm: float = 1.0,
+        T0_ir: float = 18.0,
+        beta_ir: float = 1.7,
+        lambda_ref_um: float = 250.0,
+        tau_ref: float = 1.0,
         include_cmb: bool = True,
     ) -> np.ndarray:
+        """Build external RADMC-3D boundary intensity I_nu.
+
+        The Draine/Leiden UV-optical-NIR ISRF is scaled by ``chi``. The same
+        scale sets the greybody IR temperature as
+        T_IR = T0_ir * chi**(1 / (4 + beta_ir)); ``tau_ref`` normalizes the
+        greybody at ``lambda_ref_um``. The CMB component is unscaled.
+        """
         lam_cm = np.asarray(lam_cm, dtype=float)
-        lam_tab_cm, j_draine_tab = self._load_leiden_draine_isrf(isrf_path)
-        j_draine = np.zeros_like(lam_cm)
-        m = (lam_cm >= np.min(lam_tab_cm)) & (lam_cm <= np.max(lam_tab_cm))
+        nu = C_CGS / lam_cm
+        lam_tab_cm, i_nu_tab = self._load_leiden_draine_i_nu(isrf_path)
+        i_draine = np.zeros_like(lam_cm)
+        m = (lam_cm >= lam_tab_cm.min()) & (lam_cm <= lam_tab_cm.max())
         if np.any(m):
-            log_lam_tab = np.log(lam_tab_cm)
-            log_j_tab = np.log(j_draine_tab)
-            j_draine[m] = np.exp(
-                np.interp(np.log(lam_cm[m]), log_lam_tab, log_j_tab)
+            good = i_nu_tab > 0.0
+            i_draine[m] = np.exp(
+                np.interp(
+                    np.log(lam_cm[m]),
+                    np.log(lam_tab_cm[good]),
+                    np.log(i_nu_tab[good]),
+                )
             )
-        j_total = float(chi) * j_draine
+        i_total = float(chi) * i_draine
         if include_ir_dust:
-            nu = C_CGS / lam_cm
-            b_nu = (2.0 * H_CGS * (nu ** 3) / (C_CGS ** 2)) / np.expm1(
-                H_CGS * nu / (K_B_CGS * T_dust)
+            beta = float(beta_ir)
+            T_ir = float(T0_ir) * float(chi) ** (1.0 / (4.0 + beta))
+            lambda_ref_cm = float(lambda_ref_um) * 1.0e-4
+            nu_ref = C_CGS / lambda_ref_cm
+            i_ir = (
+                float(tau_ref)
+                * (nu / nu_ref) ** beta
+                * self._planck_B_nu(nu, T_ir)
             )
-            j_ir_lambda = (nu ** beta_dust) * b_nu * (C_CGS / (nu ** 2))
-            j_total += float(dust_norm) * j_ir_lambda
+            i_total += i_ir
         if include_cmb:
-            j_cmb = self._planck_B_lambda(lam_cm, T_CMB)
-            j_total += j_cmb
-        return j_total
+            i_total += self._planck_B_nu(nu, T_CMB)
+        i_total = np.where(np.isfinite(i_total), i_total, 0.0)
+        i_total = np.maximum(i_total, 0.0)
+        return i_total
 
     def _read_wavelength_grid_from_file(self, filepath: Path) -> np.ndarray:
         if not filepath.is_file():
@@ -1003,7 +965,6 @@ class RadWriter:
         output_dir: str | Path = '.',
         chi: Optional[float] = None,
         isrf_path: str | Path = 'ISRF.dat',
-        quantity: str = 'auto',
     ) -> None:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'external')
@@ -1018,17 +979,17 @@ class RadWriter:
             chi_val = float(getattr(self.params, 'external_uv_chi', 1.0))
         else:
             chi_val = float(chi)
-        j_lambda = self._make_ism_background_lambda(
+        i_nu_scaled = self._make_external_i_nu(
             lam_cm,
             chi=chi_val,
             isrf_path=isrf_file,
-            include_ir_dust=True,
-            T_dust=18.0,
-            beta_dust=1.7,
-            dust_norm=1.0,
-            include_cmb=True,
+            include_ir_dust=EXTERNAL_IR_DUST,
+            T0_ir=EXTERNAL_IR_T0,
+            beta_ir=EXTERNAL_IR_BETA,
+            lambda_ref_um=EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
+            tau_ref=EXTERNAL_IR_TAU_REF,
+            include_cmb=EXTERNAL_CMB,
         )
-        i_nu_scaled = (lam_cm * lam_cm / C_CGS) * j_lambda
         filepath = output_dir / 'external_source.inp'
         with open(filepath, 'w') as f:
             # RADMC-3D manual (sec-ext-src-inp): format 2, then nlam, then

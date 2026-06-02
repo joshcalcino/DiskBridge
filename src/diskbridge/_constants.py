@@ -42,6 +42,24 @@ U_DRAINE = 9.0e-14
 HEALPIX_SELF_WEIGHT = 0.5
 
 # =============================================================================
+# RADMC-3D EXTERNAL BOUNDARY FIELD
+# =============================================================================
+
+# Scaling of the Draine/Leiden UV-optical-NIR ISRF remains controlled by
+# params.external_uv_chi. That same scale sets the IR temperature through
+# T_IR = EXTERNAL_IR_T0 * external_uv_chi**(1 / (4 + EXTERNAL_IR_BETA)).
+# These constants define the fixed far-IR/CMB background used by
+# RadWriter.write_external_source.
+EXTERNAL_IR_DUST = True
+EXTERNAL_IR_T0 = 18.0
+EXTERNAL_IR_BETA = 1.7
+EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON = 250.0
+# tau_ref=1 gives an IR radiation bath / temperature floor.
+# tau_ref<<1 gives optically thin diffuse IR emission.
+EXTERNAL_IR_TAU_REF = 1.0
+EXTERNAL_CMB = True
+
+# =============================================================================
 # ASTRONOMICAL CONSTANTS (from config)
 # =============================================================================
 

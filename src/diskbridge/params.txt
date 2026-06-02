@@ -60,8 +60,8 @@ uv_min           = 91.2            # min uv wavelength in nano meters
 uv_max           = 206.7           # max uv wavelength in nanometers
 uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
 co_E_bind_co     = 855.0           # CO binding energy for GOW17 freeze-out/desorption in K
-external_uv      = F               # include external uv photons 
-external_uv_chi  = 1.0             # uv field strength in Draine units 
+external_uv      = T               # include external boundary photons
+external_uv_chi  = 0.1             # scales Draine/Leiden UV-optical-NIR ISRF; also sets T_IR via constants in _constants.py
  nside            = 4
 w_rays_keep_closure_diagnostics = F # opt-in scalar UV closure diagnostics for W_rays
  
