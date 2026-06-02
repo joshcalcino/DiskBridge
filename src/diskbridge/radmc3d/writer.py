@@ -20,12 +20,13 @@ from diskbridge._constants import (
     C_LIGHT as C_CGS,
     EXTERNAL_CMB,
     EXTERNAL_IR_BETA,
-    EXTERNAL_IR_DUST,
+    EXTERNAL_IR_BACKGROUND,
     EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-    EXTERNAL_IR_T0,
-    EXTERNAL_IR_TAU_REF,
+    EXTERNAL_IR_TBACK,
+    EXTERNAL_IR_TCOLOR,
     H_PLANCK as H_CGS,
     K_B as K_B_CGS,
+    SIGMA_SB as SIGMA_SB_CGS,
     T_CMB,
 )
 import diskbridge
@@ -883,6 +884,31 @@ class RadWriter:
         prefac = 2.0 * H_CGS * nu**3 / C_CGS**2
         return prefac / np.expm1(x)
 
+    def _normalized_ir_greybody_i_nu(
+        self,
+        nu_hz: np.ndarray,
+        T_back: float,
+        T_color: float,
+        beta: float,
+        lambda_ref_um: float,
+    ) -> np.ndarray:
+        nu = np.asarray(nu_hz, dtype=float)
+        lambda_ref_cm = float(lambda_ref_um) * 1.0e-4
+        nu_ref = C_CGS / lambda_ref_cm
+        g_nu = (nu / nu_ref) ** float(beta) * self._planck_B_nu(nu, float(T_color))
+        g_nu = np.where(np.isfinite(g_nu), g_nu, 0.0)
+        g_nu = np.maximum(g_nu, 0.0)
+
+        target = (SIGMA_SB_CGS / np.pi) * max(float(T_back) ** 4 - T_CMB**4, 0.0)
+        if target <= 0.0:
+            return np.zeros_like(nu)
+
+        order = np.argsort(nu)
+        integral = float(np.trapezoid(g_nu[order], nu[order]))
+        if not np.isfinite(integral) or integral <= 0.0:
+            return np.zeros_like(nu)
+        return (target / integral) * g_nu
+
     def _load_leiden_draine_i_nu(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
         data = np.loadtxt(str(path), comments="#")
         lam_nm = data[:, 0]
@@ -903,18 +929,19 @@ class RadWriter:
         chi: float,
         isrf_path: Path,
         include_ir_dust: bool = True,
-        T0_ir: float = 18.0,
+        T_back_ir: float = 10.0,
+        T_color_ir: float = 18.0,
         beta_ir: float = 1.7,
         lambda_ref_um: float = 250.0,
-        tau_ref: float = 1.0,
         include_cmb: bool = True,
     ) -> np.ndarray:
         """Build external RADMC-3D boundary intensity I_nu.
 
-        The Draine/Leiden UV-optical-NIR ISRF is scaled by ``chi``. The same
-        scale sets the greybody IR temperature as
-        T_IR = T0_ir * chi**(1 / (4 + beta_ir)); ``tau_ref`` normalizes the
-        greybody at ``lambda_ref_um``. The CMB component is unscaled.
+        The Draine/Leiden UV-optical-NIR ISRF is scaled by ``chi``. The IR
+        component is a modified blackbody with color temperature
+        ``T_color_ir`` and beta ``beta_ir``, normalized so its integrated
+        intensity corresponds to ``T_back_ir`` after subtracting the CMB
+        contribution. The CMB component is unscaled.
         """
         lam_cm = np.asarray(lam_cm, dtype=float)
         nu = C_CGS / lam_cm
@@ -932,14 +959,12 @@ class RadWriter:
             )
         i_total = float(chi) * i_draine
         if include_ir_dust:
-            beta = float(beta_ir)
-            T_ir = float(T0_ir) * float(chi) ** (1.0 / (4.0 + beta))
-            lambda_ref_cm = float(lambda_ref_um) * 1.0e-4
-            nu_ref = C_CGS / lambda_ref_cm
-            i_ir = (
-                float(tau_ref)
-                * (nu / nu_ref) ** beta
-                * self._planck_B_nu(nu, T_ir)
+            i_ir = self._normalized_ir_greybody_i_nu(
+                nu,
+                T_back=T_back_ir,
+                T_color=T_color_ir,
+                beta=beta_ir,
+                lambda_ref_um=lambda_ref_um,
             )
             i_total += i_ir
         if include_cmb:
@@ -983,11 +1008,11 @@ class RadWriter:
             lam_cm,
             chi=chi_val,
             isrf_path=isrf_file,
-            include_ir_dust=EXTERNAL_IR_DUST,
-            T0_ir=EXTERNAL_IR_T0,
+            include_ir_dust=EXTERNAL_IR_BACKGROUND,
+            T_back_ir=EXTERNAL_IR_TBACK,
+            T_color_ir=EXTERNAL_IR_TCOLOR,
             beta_ir=EXTERNAL_IR_BETA,
             lambda_ref_um=EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-            tau_ref=EXTERNAL_IR_TAU_REF,
             include_cmb=EXTERNAL_CMB,
         )
         filepath = output_dir / 'external_source.inp'

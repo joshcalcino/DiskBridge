@@ -54,10 +54,10 @@ from diskbridge._constants import (
     EPS_CHI,
     EXTERNAL_CMB,
     EXTERNAL_IR_BETA,
-    EXTERNAL_IR_DUST,
+    EXTERNAL_IR_BACKGROUND,
     EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON,
-    EXTERNAL_IR_T0,
-    EXTERNAL_IR_TAU_REF,
+    EXTERNAL_IR_TBACK,
+    EXTERNAL_IR_TCOLOR,
     LOG_CHI_OVER_NH_PDISS,
 )
 
@@ -102,13 +102,13 @@ def _external_source_cache_context(params) -> dict[str, object]:
         return {"external_source_enabled": False}
     return {
         "external_source_enabled": True,
-        "external_ir_dust": bool(EXTERNAL_IR_DUST),
-        "external_ir_T0": float(EXTERNAL_IR_T0),
+        "external_ir_background": bool(EXTERNAL_IR_BACKGROUND),
+        "external_ir_Tback": float(EXTERNAL_IR_TBACK),
+        "external_ir_Tcolor": float(EXTERNAL_IR_TCOLOR),
         "external_ir_beta": float(EXTERNAL_IR_BETA),
         "external_ir_reference_wavelength_micron": float(
             EXTERNAL_IR_REFERENCE_WAVELENGTH_MICRON
         ),
-        "external_ir_tau_ref": float(EXTERNAL_IR_TAU_REF),
         "external_cmb": bool(EXTERNAL_CMB),
     }
 
