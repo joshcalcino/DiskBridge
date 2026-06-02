@@ -16,6 +16,7 @@ C_CGS = units("c").to("cm/s").magnitude
 
 DRAINE_BROAD_NM = (91.2, 206.7)
 CO_PDES_NM = (91.2, 205.0)
+UV_BAND_INTEGRATION_NQUAD = 16
 
 
 @dataclass(frozen=True)
@@ -364,6 +365,105 @@ def integrate_partitioned(
     return result
 
 
+def _loglinear_interp_strict(lam_sample, J_sample, lam_quad):
+    """
+    Interpolate J_nu onto lam_quad using linear interpolation in
+    log(J_nu)-log(lambda) space.
+    lam_sample: shape (nwave,)
+    J_sample:   shape (ncell, nwave)
+    lam_quad:   shape (nquad,)
+    """
+    if np.any(J_sample <= 0.0) or np.any(~np.isfinite(J_sample)):
+        raise ValueError(
+            "UV mean intensity contains non-positive or non-finite values. "
+            "Increase mcmono photons or check RADMC-3D output."
+        )
+    x = np.log(lam_sample)
+    xq = np.log(lam_quad)
+    idx = np.searchsorted(x, xq) - 1
+    idx = np.clip(idx, 0, len(x) - 2)
+    w = (xq - x[idx]) / (x[idx + 1] - x[idx])
+    logJ = np.log(J_sample)
+    logJq = (
+        (1.0 - w[None, :]) * logJ[:, idx]
+        + w[None, :] * logJ[:, idx + 1]
+    )
+    return np.exp(logJq)
+
+
+def integrate_partitions_loglinear(
+    freq_hz,
+    lam_nm: np.ndarray,
+    Jnu_flat,
+    partitions: list[UVPartition],
+    *,
+    weighting: str,
+    nquad: int = UV_BAND_INTEGRATION_NQUAD,
+    chunk_ncells: int | None = None,
+) -> np.ndarray:
+    """Integrate UV partitions using log-linear reconstructed J_nu."""
+    if hasattr(freq_hz, "to"):
+        freq = np.asarray(freq_hz.to("Hz").magnitude, dtype=np.float64)
+    else:
+        freq = np.asarray(freq_hz, dtype=np.float64)
+    lam = np.asarray(lam_nm, dtype=np.float64)
+    if hasattr(Jnu_flat, "to"):
+        J = np.asarray(Jnu_flat.to("erg/(s*cm^2*Hz*sr)").magnitude, dtype=np.float64)
+    else:
+        J = np.asarray(Jnu_flat, dtype=np.float64)
+    if freq.ndim != 1 or lam.ndim != 1 or freq.size != lam.size:
+        raise ValueError("freq_hz and lam_nm must be matching 1-D arrays")
+    if J.ndim != 2 or J.shape[1] != lam.size:
+        raise ValueError("Jnu_flat must have shape (ncells, nwav)")
+
+    weighting = str(weighting).lower()
+    if weighting not in {"energy", "photon"}:
+        raise ValueError("weighting must be 'energy' or 'photon'")
+    nquad = int(nquad)
+    if nquad < 2:
+        raise ValueError("nquad must be at least 2")
+
+    order_lam = np.argsort(lam)
+    lam_sample = lam[order_lam]
+    J_sample = J[:, order_lam]
+    ncells = int(J.shape[0])
+    result = np.empty((len(partitions), ncells), dtype=np.float64)
+
+    if chunk_ncells is None or int(chunk_ncells) <= 0 or int(chunk_ncells) >= ncells:
+        chunks = [(0, ncells)]
+    else:
+        chunk = int(chunk_ncells)
+        chunks = [(start, min(start + chunk, ncells)) for start in range(0, ncells, chunk)]
+
+    for ipart, part in enumerate(partitions):
+        lam_quad = np.linspace(
+            float(part.lam_min_nm),
+            float(part.lam_max_nm),
+            nquad,
+            dtype=np.float64,
+        )
+        nu_quad = C_CGS / (lam_quad * 1.0e-7)
+        order_nu = np.argsort(nu_quad)
+        nu_sorted = nu_quad[order_nu]
+        for start, stop in chunks:
+            J_quad = _loglinear_interp_strict(
+                lam_sample,
+                J_sample[start:stop, :],
+                lam_quad,
+            )
+            J_sorted = J_quad[:, order_nu]
+            if weighting == "energy":
+                integrand = (4.0 * np.pi / C_CGS) * J_sorted
+            else:
+                integrand = 4.0 * np.pi * J_sorted / (H_CGS * nu_sorted[None, :])
+            result[ipart, start:stop] = np.trapezoid(
+                integrand,
+                nu_sorted,
+                axis=1,
+            )
+    return result
+
+
 def _interp_with_edges(
     lam_nm: np.ndarray,
     values: np.ndarray,
@@ -640,17 +740,20 @@ def compute_uv_products(
         _validate_frequency_coverage(freq, spec.band.lam_min_nm, spec.band.lam_max_nm)
 
     partitions = make_uv_partitions(specs)
-    energy_weights = build_partition_weights(freq, lam_nm, partitions, weighting="energy")
-    photon_weights = build_partition_weights(freq, lam_nm, partitions, weighting="photon")
-
-    energy_parts = integrate_partitioned(
+    energy_parts = integrate_partitions_loglinear(
+        freq,
+        lam_nm,
         Jnu_flat,
-        energy_weights,
+        partitions,
+        weighting="energy",
         chunk_ncells=chunk_ncells,
     )
-    photon_parts = integrate_partitioned(
+    photon_parts = integrate_partitions_loglinear(
+        freq,
+        lam_nm,
         Jnu_flat,
-        photon_weights,
+        partitions,
+        weighting="photon",
         chunk_ncells=chunk_ncells,
     )
 
