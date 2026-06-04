@@ -80,7 +80,9 @@ _MCTHERM_PARAM_KEYS = (
     'secondorder',
     'external_uv',
     'external_uv_chi',
+    'external_ir_background',
     'external_ir_Tback',
+    'external_cmb',
 )
 
 _MCMONO_EXTRA_PARAM_KEYS = (
@@ -90,7 +92,9 @@ _MCMONO_EXTRA_PARAM_KEYS = (
     'uv_n_wavelengths',
     'external_uv',
     'external_uv_chi',
+    'external_ir_background',
     'external_ir_Tback',
+    'external_cmb',
 )
 
 

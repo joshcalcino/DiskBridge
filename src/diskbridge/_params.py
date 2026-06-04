@@ -51,7 +51,7 @@ class Params:
     pindex: Union[float, List[float]]
     dust_to_gas_ratio: Union[float, List[float]]
     nbins: Union[int, List[int]]
-    grain_density: Union[Quantity, List[Quantity]]
+    grain_density: Optional[Union[Quantity, List[Quantity]]]
     disk_dust_mode: str
     disk_dust_settling_alpha: float
 
@@ -80,7 +80,9 @@ class Params:
 
     external_uv: bool
     external_uv_chi: float
+    external_ir_background: bool
     external_ir_Tback: Quantity
+    external_cmb: bool
 
     nside: int
     w_rays_keep_closure_diagnostics: bool
@@ -202,14 +204,14 @@ def _parse_scalar(raw: str, target_type, param_name: str = ''):
 def _parse_value(raw: str, target_type, param_name: str = ''):
     raw = raw.split("#", 1)[0].strip()
     origin = get_origin(target_type)
+    args = get_args(target_type)
 
-    if raw.lower() in {"none", "null"}:
-        if target_type is Optional or type(None) in get_args(target_type):
+    if raw.lower() in {"none", "null", ""}:
+        if target_type is Optional or type(None) in args:
             return None
 
     # Union[T, List[T]] support (e.g. Union[Quantity, List[Quantity]])
     if origin is Union:
-        args = get_args(target_type)
         list_type = next((t for t in args if get_origin(t) is list or t is list), None)
         if list_type:
             # Check if raw value is a list
@@ -306,13 +308,16 @@ def read_params(filename: Optional[Union[str, Path]] = None) -> Params:
     kwargs = {}
     for field in fields(Params):
         key = field.name
+        # Use the resolved type from type_hints, not field.type which may be a string
+        field_type = type_hints[key]
         if key not in values:
+            if type(None) in get_args(field_type):
+                kwargs[key] = None
+                continue
             raise KeyError(
                 f"Missing required parameter '{key}' in params.txt (no default provided)."
             )
         raw = values[key]
-        # Use the resolved type from type_hints, not field.type which may be a string
-        field_type = type_hints[key]
         parsed = _parse_value(raw, field_type, param_name=key)
         kwargs[key] = parsed
 

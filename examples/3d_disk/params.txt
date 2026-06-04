@@ -48,7 +48,6 @@ scat_mode             = 2             # 0: abs only, 2: anisotropic scattering
 amin                = 0.01           # min size (um)
 amax                = 1000.0         # max size (um)
 pindex              = 3.0            # minus slope of size dist
-grain_density       = 2.7            # grain material density (g/cm^3)
 dust_to_gas_ratio   = 1e-2
 nbins               = 10
 
@@ -56,7 +55,7 @@ nbins               = 10
 #  Dust opacities    #
 ######################
 
-species          = mix_2species_ice70 # label for opacities
+species          = mix_2species_60silicates_40carbons # label for opacities
 opacity_dir      = data/opac
 
 #########################

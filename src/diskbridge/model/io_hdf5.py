@@ -287,7 +287,7 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
                 size_min=dist.bin_edges[local_idx],
                 size_max=dist.bin_edges[local_idx + 1],
                 mass_fraction=float(dist.mass_fractions[local_idx]),
-                density_material=dist.grain_density,
+                density_material=comp.grain_density,
             )
             global_bin_idx += 1
 

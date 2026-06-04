@@ -206,7 +206,7 @@ def clip_model(
                     size_min=comp.distribution.bin_edges[local_idx],
                     size_max=comp.distribution.bin_edges[local_idx + 1],
                     mass_fraction=comp.distribution.mass_fractions[local_idx],
-                    density_material=comp.distribution.grain_density,
+                    density_material=comp.grain_density,
                 )
 
         new_dust._dust_fields = {}

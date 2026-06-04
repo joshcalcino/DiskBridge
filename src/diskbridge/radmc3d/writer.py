@@ -24,6 +24,11 @@ from diskbridge._constants import (
     SIGMA_SB as SIGMA_SB_CGS,
     T_CMB,
 )
+from diskbridge.dust_species import (
+    normalize_species_name,
+    resolve_species_grain_density,
+    species_optconst_path,
+)
 import diskbridge
 from .opacities import DustOpacityCalculator
 from diskbridge.model.utils import transpose_to_axis_order
@@ -664,7 +669,7 @@ class RadWriter:
         Args:
             output_dir: Directory to write files
             optconst_file: Path to optical constants file (.lnk format)
-            grain_density: Grain material density in g/cm^3 (default: species-dependent)
+            grain_density: Grain material density override for custom species in g/cm^3
             ntheta: Number of scattering angles
             scattering_mode: Scattering mode (>=3 for full matrix)
             logawidth: Width parameter for size distribution smoothing (default: 0.05)
@@ -675,27 +680,11 @@ class RadWriter:
 
         # Derive optical constants file from global parameters if not provided
         if optconst_file is None:
-            opacity_dir = self.params.opacity_dir
-            species = self.params.species
-            optconst_file = Path(opacity_dir) / f"{species}.lnk"
+            species = normalize_species_name(self.params.species)
+            optconst_file = species_optconst_path(species, self.params.opacity_dir)
         else:
             # Extract species name from optconst_file for density lookup
-            species = Path(optconst_file).stem
-        
-        # Set grain density based on species (matching fargo2radmc3d defaults)
-        if grain_density is None:
-            species_lower = species.lower()
-            if 'ice70' in species_lower or species_lower == 'mix_2species_ice70':
-                grain_density = 1.26  # g/cm^3 for mix_2species_ice70
-            elif 'porous' in species_lower:
-                grain_density = 0.1   # g/cm^3 for porous species
-            elif species_lower in ['mix_2species', 'mix_2species_60silicates_40ice']:
-                grain_density = 1.7   # g/cm^3
-            elif '60silicates_40carbons' in species_lower:
-                grain_density = 2.7   # g/cm^3
-            else:
-                grain_density = 2.7   # g/cm^3 default
-                logger.warning(f"Unknown species '{species}', using default grain_density = {grain_density} g/cm^3")
+            species = normalize_species_name(optconst_file)
 
         # Default scattering mode from global parameters if not provided
         if scattering_mode is None:
@@ -730,15 +719,25 @@ class RadWriter:
             bin_data = self.model.dust.bins[f"bin_{ibin}"]
             
             # Get grain size in CGS
-            grain_size_cgs = bin_data.size_min.to_base_units().magnitude
+            grain_size_cgs = bin_data.size.to_base_units().magnitude
+            bin_grain_density = getattr(
+                bin_data,
+                "species_grain_density",
+                getattr(bin_data, "density_material", None),
+            )
+            grain_density_cgs = resolve_species_grain_density(
+                species,
+                grain_density if grain_density is not None else bin_grain_density,
+            ).to("g/cm^3").magnitude
             
             logger.debug(f"Computing opacity for bin {ibin}: "
-                         f"size = {grain_size_cgs:.6e} cm")
+                         f"size = {grain_size_cgs:.6e} cm, "
+                         f"rho_s = {grain_density_cgs:.6e} g/cm^3")
             
             # Compute opacity
             opac = self.opacity_calculator.compute_opacity(
                 optconst_file=optconst_file,
-                grain_density=grain_density,
+                grain_density=grain_density_cgs,
                 grain_size=grain_size_cgs,
                 wavelengths=waves_cm,
                 theta=theta,
@@ -779,7 +778,7 @@ class RadWriter:
         Args:
             output_dir: Directory to write all files
             optconst_file: Path to optical constants file
-            grain_density: Grain material density in g/cm^3
+            grain_density: Grain material density override for custom species in g/cm^3
             rstar: Stellar radius in solar radii
             tstar: Stellar temperature in K
             mstar: Stellar mass in solar masses
@@ -792,8 +791,6 @@ class RadWriter:
         logger.info(f"Writing all RADMC-3D input files to {output_dir}")
 
         # Fill defaults from global parameter set if not explicitly given
-        if grain_density is None:
-            grain_density = self.params.grain_density
         if scattering_mode is None:
             scattering_mode = self.params.scat_mode
         if nphot is None:
@@ -945,7 +942,9 @@ class RadWriter:
         chi: float,
         isrf_path: Path,
         ir_path: Path,
+        include_ir_background: bool = True,
         T_back_ir: float = 10.0,
+        include_cmb: bool = True,
     ) -> np.ndarray:
         """Build external RADMC-3D boundary intensity I_nu.
 
@@ -968,9 +967,17 @@ class RadWriter:
                 )
             )
         i_uv = float(chi) * i_draine
-        i_cmb = self._planck_B_nu(nu, T_CMB)
-        i_ir_shape = self._load_mmp83_ir_i_nu(lam_cm, ir_path)
-        chi_ir = self._compute_chi_ir(i_uv, i_ir_shape, i_cmb, nu, T_back_ir)
+        i_cmb = self._planck_B_nu(nu, T_CMB) if include_cmb else np.zeros_like(lam_cm)
+        i_ir_shape = (
+            self._load_mmp83_ir_i_nu(lam_cm, ir_path)
+            if include_ir_background
+            else np.zeros_like(lam_cm)
+        )
+        chi_ir = (
+            self._compute_chi_ir(i_uv, i_ir_shape, i_cmb, nu, T_back_ir)
+            if include_ir_background
+            else 0.0
+        )
 
         # External field:
         # I_ext = chi_uv * I_Draine/Leiden + chi_ir * I_MMP83_IR + B_nu(T_CMB).
@@ -1005,12 +1012,19 @@ class RadWriter:
         data_dir = Path(__file__).resolve().parents[3] / 'data'
         isrf_name = Path(isrf_path).name
         isrf_path = data_dir / isrf_name
-        isrf_file = self._ensure_isrf_file(isrf_path)
-        ir_file = Path(__file__).resolve().parents[3] / "data" / MMP83_IR_TABLE
-        if not ir_file.is_file():
-            raise FileNotFoundError(f"MMP83 IR table not found: {ir_file}")
+        isrf_file = isrf_path
+        mmp83_file = data_dir / MMP83_IR_TABLE
+        if not isrf_file.exists():
+            raise FileNotFoundError(f"Missing external UV table: {isrf_file}")
+        if not mmp83_file.exists():
+            raise FileNotFoundError(f"Missing MMP83 IR table: {mmp83_file}")
         wav_file = output_dir / 'wavelength_micron.inp'
         lam_um = self._read_wavelength_grid_from_file(wav_file)
+        include_ir_background = bool(getattr(self.params, "external_ir_background", True))
+        if np.max(lam_um) < 3000.0 and include_ir_background:
+            raise ValueError(
+                "MMP83 IR background normalization requires lambda_max >= 3000 micron."
+            )
         lam_cm = lam_um * 1.0e-4
         if chi is None:
             chi_val = float(getattr(self.params, 'external_uv_chi', 1.0))
@@ -1020,12 +1034,14 @@ class RadWriter:
             lam_cm,
             chi=chi_val,
             isrf_path=isrf_file,
-            ir_path=ir_file,
+            ir_path=mmp83_file,
+            include_ir_background=include_ir_background,
             T_back_ir=float(
                 getattr(self.params, "external_ir_Tback", Quantity(10.0, "K"))
                 .to("K")
                 .magnitude
             ),
+            include_cmb=bool(getattr(self.params, "external_cmb", True)),
         )
         filepath = output_dir / 'external_source.inp'
         with open(filepath, 'w') as f:

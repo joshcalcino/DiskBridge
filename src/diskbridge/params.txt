@@ -29,17 +29,16 @@ posangle         = 0.0       # position angle of the source in degrees
 scat_mode        = 0           # radmc3d scattering mode 
 
 # Dust sizes 
-amin             = 0.01        # min grain size in micron 
-amax             = 100.0       # max grain size in micron 
-pindex           = 3.0         # slope of the power law size distribution 
+amin             = [0.01, 0.01]      # min grain size in micron 
+amax             = [1000.0, 1.0]     # max grain size in micron 
+pindex           = [3.0, 3.5]        # slope of the power law size distribution 
 dust_to_gas_ratio = 1e-2      # dust to gas ratio 
-nbins            = 10         # number of dust bins in the distribution 
-grain_density    = 1.26       # density of the grains in g/cm^3 (may be overwritten)
+nbins            = [10, 10]   # number of dust bins in the distribution 
 disk_dust_mode   = proportional # disk dust mode: proportional|settling
 disk_dust_settling_alpha = 1e-2 # settling alpha used when disk_dust_mode=settling
 
 # Opacity 
-species          = mix_2species_ice70
+species          = mix_2species_60silicates_40carbons
 opacity_dir      = data/opac
 
 # Gas RT 
@@ -60,9 +59,11 @@ uv_min           = 91.2            # min uv wavelength in nano meters
 uv_max           = 206.7           # max uv wavelength in nanometers
 uv_n_wavelengths = 10              # Number of wavelengths in the uv grid 
 co_E_bind_co     = 855.0           # CO binding energy for GOW17 freeze-out/desorption in K
-external_uv      = T               # include external boundary photons
+external_uv      = T               # write full external source: UV + IR + CMB
 external_uv_chi  = 0.1             # scales only the Draine/Leiden UV-optical-NIR ISRF
+external_ir_background = T         # include MMP83 infrared background shape
 external_ir_Tback = 10.0           # background equivalent temperature in K
+external_cmb = T                   # include CMB boundary intensity
  nside            = 4
 w_rays_keep_closure_diagnostics = F # opt-in scalar UV closure diagnostics for W_rays
  

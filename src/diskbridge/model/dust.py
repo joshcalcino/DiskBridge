@@ -14,6 +14,7 @@ from diskbridge._logging import logger
 from diskbridge.model.field import Field
 from diskbridge.model.disk import scale_height, keplerian_frequency
 from diskbridge._params import canonicalize_dust_params
+from diskbridge.dust_species import resolve_species_grain_density
 
 if TYPE_CHECKING:
     from .core import Model
@@ -38,6 +39,10 @@ def _current_params():
     import diskbridge
 
     return diskbridge.params
+
+
+def _select_component_value(value, index: int = 0):
+    return value[index] if isinstance(value, list) else value
 
 
 def stokes_number(
@@ -126,6 +131,7 @@ class DustBin:
         self.size_max = size_max
         self.mass_fraction = mass_fraction
         self.density_material = density_material
+        self.species_grain_density = density_material
         self._stored_fields: Dict[str, Field] = {}
         
     def __getitem__(self, key: str) -> Field:
@@ -174,8 +180,8 @@ class DustDistribution:
         amin: Quantity,
         amax: Quantity,
         nbin: int,
+        grain_density: Quantity,
         power_index: float = 3.5,
-        grain_density: Quantity = 2.7 * units('g/cm^3'),
     ):
         """Initialize dust grain size distribution.
         
@@ -233,27 +239,6 @@ class DustDistribution:
         
         return fractions
         
-    def create_species_list(self, name_prefix: str = "dust") -> List[DustSpecies]:
-        """Create list of DustSpecies objects for each bin.
-        
-        Args:
-            name_prefix: Prefix for species names
-            
-        Returns:
-            List of DustSpecies objects
-        """
-        species = []
-        for i in range(self.nbin):
-            spec = DustSpecies(
-                name=f"{name_prefix}_{i}",
-                grain_size=self.bin_centers[i],
-                grain_density=self.grain_density,
-                abundance_fraction=self.mass_fractions[i],
-            )
-            species.append(spec)
-        return species
-
-
 class DustComponent:
     """Represents a single dust component with its own distribution and spatial region.
     
@@ -294,6 +279,11 @@ class DustComponent:
             species_base: Base name for opacity files
             component_index: Component index (for naming)
         """
+        resolved_grain_density = resolve_species_grain_density(
+            species_base,
+            distribution.grain_density,
+        )
+        distribution.grain_density = resolved_grain_density
         self.distribution = distribution
         self.dust_to_gas_ratio = dust_to_gas_ratio
         self.mode = mode
@@ -302,6 +292,8 @@ class DustComponent:
         self.delta = delta if delta is not None else alpha
         self.mean_molecular_weight = mean_molecular_weight
         self.species_base = species_base
+        self.grain_density = resolved_grain_density
+        self.species_grain_density = resolved_grain_density
         self.component_index = component_index
         
     def __repr__(self) -> str:
@@ -400,19 +392,29 @@ class Dust(SubModel):
         # Pull defaults from params if not provided
         if amin is None:
             # params.amin is already a Quantity in microns
-            amin = current_params.amin
+            amin = _select_component_value(current_params.amin)
         if amax is None:
             # params.amax is already a Quantity in microns
-            amax = current_params.amax
+            amax = _select_component_value(current_params.amax)
         if nbin is None:
-            nbin = current_params.nbins
+            nbin = int(_select_component_value(current_params.nbins))
         if power_index is None:
-            power_index = current_params.pindex
-        if grain_density is None:
-            # params.grain_density is already a Quantity in g/cm^3
-            grain_density = current_params.grain_density
+            power_index = float(_select_component_value(current_params.pindex))
         if dust_to_gas_ratio is None:
-            dust_to_gas_ratio = current_params.dust_to_gas_ratio
+            dust_to_gas_ratio = float(_select_component_value(current_params.dust_to_gas_ratio))
+
+        # Get species base name from params
+        species_base = (
+            current_params.species
+            if isinstance(current_params.species, str)
+            else current_params.species[0]
+        )
+        user_grain_density = (
+            grain_density
+            if grain_density is not None
+            else _select_component_value(current_params.grain_density)
+        )
+        grain_density = resolve_species_grain_density(species_base, user_grain_density)
         
         distribution = DustDistribution(
             amin=amin,
@@ -434,13 +436,6 @@ class Dust(SubModel):
                 alpha = float(getattr(alpha_q, "magnitude", alpha_q))
             delta = delta if delta is not None else alpha  # Assume Sc ~ 1
             logger.info(f"Settling mode: alpha={alpha}, delta={delta}")
-        
-        # Get species base name from params
-        species_base = (
-            current_params.species
-            if isinstance(current_params.species, str)
-            else current_params.species[0]
-        )
         
         # Create a single component (for backward compatibility)
         component = DustComponent(
@@ -474,7 +469,7 @@ class Dust(SubModel):
                 size_min=distribution.bin_edges[i],
                 size_max=distribution.bin_edges[i + 1],
                 mass_fraction=distribution.mass_fractions[i],
-                density_material=grain_density,
+                density_material=component.grain_density,
             )
             self._bins[f"bin_{global_bin_idx}"] = dust_bin
             global_bin_idx += 1
@@ -589,20 +584,9 @@ class Dust(SubModel):
             nbin = int(canon['nbins'][param_index])
         if power_index is None:
             power_index = float(canon['pindex'][param_index])
-        if grain_density is None:
-            grain_density = canon['grain_density'][param_index]
         if dust_to_gas_ratio is None:
             dust_to_gas_ratio = float(canon['dust_to_gas_ratio'][param_index])
-        
-        # Create distribution for this component
-        distribution = DustDistribution(
-            amin=amin,
-            amax=amax,
-            nbin=nbin,
-            power_index=power_index,
-            grain_density=grain_density,
-        )
-        
+
         # Validate settling mode
         if mode == 'settling':
             if alpha is None:
@@ -622,6 +606,18 @@ class Dust(SubModel):
             species_base = canon_species[param_index]
         else:
             species_base = str(canon_species)
+
+        user_grain_density = grain_density if grain_density is not None else canon['grain_density'][param_index]
+        grain_density = resolve_species_grain_density(species_base, user_grain_density)
+
+        # Create distribution for this component
+        distribution = DustDistribution(
+            amin=amin,
+            amax=amax,
+            nbin=nbin,
+            power_index=power_index,
+            grain_density=grain_density,
+        )
         
         # Create component
         component = DustComponent(
@@ -654,7 +650,7 @@ class Dust(SubModel):
                 size_min=distribution.bin_edges[local_idx],
                 size_max=distribution.bin_edges[local_idx + 1],
                 mass_fraction=distribution.mass_fractions[local_idx],
-                density_material=grain_density,
+                density_material=component.grain_density,
             )
             self._bins[bin_name] = dust_bin
         
@@ -808,7 +804,7 @@ class Dust(SubModel):
         sigma = 0.0
         for i in range(comp.distribution.nbin):
             a_i = float(comp.distribution.bin_centers[i].to("cm").magnitude)
-            rho_s = float(comp.distribution.grain_density.to("g/cm^3").magnitude)
+            rho_s = float(comp.grain_density.to("g/cm^3").magnitude)
             f_i = float(comp.distribution.mass_fractions[i])
             sigma += (
                 3.0
@@ -1078,7 +1074,7 @@ class Dust(SubModel):
             gas_density=rho_g0,
             gas_temperature=T0,
             keplerian_freq=Omega_K,
-            grain_density=component.distribution.grain_density,
+            grain_density=component.grain_density,
             mean_molecular_weight=mu,
         )
         
