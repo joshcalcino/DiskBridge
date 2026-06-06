@@ -14,8 +14,7 @@ Slab::Slab(gow17 &ode, CvodeDense &solver,
    logNH_(logNH),
    NH_min_(NH_min),
    field_geo_(0),
-   co_F_DRAINE_(0.0),
-   shield_pdes_(false)
+   co_F_DRAINE_(0.0)
 {
   prad_ = new RadField(ngrid, G0_, Zd);
 	y_ = new double* [ngrid];
@@ -93,9 +92,8 @@ void Slab::CopyGPE(double *out) const {
 	}
 }
 
-void Slab::SetCOPhotodesorptionFluxControls(double F_DRAINE, bool shield_pdes) {
+void Slab::SetCOPhotodesorptionFlux(double F_DRAINE) {
   co_F_DRAINE_ = F_DRAINE;
-  shield_pdes_ = shield_pdes;
 }
 
 void Slab::WriteAbd(FILE *pf) {
@@ -167,9 +165,6 @@ void Slab::SolveEq(const double tolfac, const double tmin,
 		fShieldCOmol_[i] = prad_->GetfShieldCOmol();
     /*assign radiation field to chemistry*/
     double FCO_pdes_photon = prad_->GISRF[i] * co_F_DRAINE_;
-    if (shield_pdes_) {
-      FCO_pdes_photon *= fShieldCOmol_[i];
-    }
     ode_.SetRadField(prad_->GPE + i, *(prad_->Gph + i), &FCO_pdes_photon);
     /*solve to equalibrium*/
 		solver_.SolveEq(tolfac, tmax, verbose, tmin);

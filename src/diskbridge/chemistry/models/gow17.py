@@ -625,7 +625,6 @@ def _gow17_checkpoint_result(
     theta_h2_flat: np.ndarray,
     theta_co_flat: np.ndarray,
     theta_c_flat: np.ndarray,
-    theta_CO_pdes_flat: np.ndarray,
     Gph: np.ndarray,
     GISRF: np.ndarray,
     status_acc: np.ndarray,
@@ -638,23 +637,19 @@ def _gow17_checkpoint_result(
         xCtot,
         line_h2_opr=line_h2_opr,
     )
-    actual_uv = _actual_solver_uv_fields(Gph=Gph, F_CO_pdes_external=GISRF, shape=shape)
+    actual_uv = _actual_solver_uv_fields(Gph=Gph, F_CO_pdes_photon=GISRF, shape=shape)
     fields = {
         "Tgas": Quantity(T_out.reshape(shape), "K"),
         "status": Quantity(status_acc.reshape(shape).astype(np.float64), "dimensionless"),
         "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
         "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
-        "theta_CO_pdes": Quantity(
-            theta_CO_pdes_flat.reshape(shape),
-            "dimensionless",
-        ),
         "chi_eff": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_CO_diss_actual": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_C_ion_actual": Quantity(actual_uv["G_C_ion_actual"], "dimensionless"),
         "G_H2_diss_actual": Quantity(actual_uv["G_H2_diss_actual"], "dimensionless"),
-        "F_CO_pdes_external_actual": Quantity(
-            actual_uv["F_CO_pdes_external_actual"],
+        "F_CO_pdes_photon": Quantity(
+            actual_uv["F_CO_pdes_photon"],
             "1/(cm^2 s)",
         ),
     }
@@ -821,17 +816,17 @@ def _co_pdes_draine_flux() -> float:
 def _actual_solver_uv_fields(
     *,
     Gph: np.ndarray,
-    F_CO_pdes_external: np.ndarray,
+    F_CO_pdes_photon: np.ndarray,
     shape: tuple,
 ) -> dict[str, np.ndarray]:
     """Return UV fields exactly as passed to the native solver.
 
     ``Gph`` already includes the radiation-mode normalization and molecular/atomic shielding.
-    ``F_CO_pdes_external`` is the external CO photodesorption photon flux passed
-    to the solver before CRUV/direct CR terms are added in CO phase diagnostics.
+    ``F_CO_pdes_photon`` is the local continuum-attenuated CO photodesorption
+    photon flux passed to the solver before CRUV/direct CR terms are added.
     """
     Gph_arr = np.asarray(Gph, dtype=np.float64)
-    F_arr = np.asarray(F_CO_pdes_external, dtype=np.float64)
+    F_arr = np.asarray(F_CO_pdes_photon, dtype=np.float64)
     return {
         "G_C_ion_actual": Gph_arr[:, IPH_C].reshape(shape),
         "G_CH_diss_actual": Gph_arr[:, IPH_CH].reshape(shape),
@@ -840,68 +835,8 @@ def _actual_solver_uv_fields(
         "G_H2_diss_actual": Gph_arr[:, IPH_H2].reshape(shape),
         "G_S_ion_actual": Gph_arr[:, IPH_S].reshape(shape),
         "G_Si_ion_actual": Gph_arr[:, IPH_SI].reshape(shape),
-        "F_CO_pdes_external_actual": F_arr.reshape(shape),
+        "F_CO_pdes_photon": F_arr.reshape(shape),
     }
-
-
-def _shield_external_band_flux(
-    F_external_unshielded: np.ndarray,
-    theta_external: np.ndarray,
-    *,
-    ncells: int,
-    name: str = "external band flux",
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return effective shielding and shielded flux for scalar or banded fields."""
-    F_raw = np.asarray(F_external_unshielded, dtype=np.float64)
-    theta = np.asarray(theta_external, dtype=np.float64)
-
-    if F_raw.ndim == 1:
-        F_flat = F_raw.reshape(ncells)
-        theta_flat = theta.reshape(ncells)
-        return (
-            np.ascontiguousarray(theta_flat, dtype=np.float64),
-            np.ascontiguousarray(F_flat * theta_flat, dtype=np.float64),
-        )
-
-    if F_raw.ndim != 2:
-        raise ValueError(
-            f"{name} must be 1D or 2D "
-            f"after flattening, got ndim={F_raw.ndim}"
-        )
-
-    F_bands = F_raw
-    if F_bands.shape[-1] != ncells and F_bands.shape[0] == ncells:
-        F_bands = F_bands.T
-    if F_bands.shape[-1] != ncells:
-        raise ValueError(
-            f"{name} array must have one axis of length "
-            f"ncells={ncells}, got shape={F_raw.shape}"
-        )
-
-    if theta.ndim == 1:
-        theta_bands = np.broadcast_to(theta.reshape(1, ncells), F_bands.shape)
-    else:
-        theta_bands = theta
-        if theta_bands.shape[-1] != ncells and theta_bands.shape[0] == ncells:
-            theta_bands = theta_bands.T
-        if theta_bands.shape != F_bands.shape:
-            raise ValueError(
-                f"{name} shielding array must match flux bands; "
-                f"got theta={theta.shape}, flux={F_raw.shape}"
-            )
-
-    F_shielded = np.sum(F_bands * theta_bands, axis=0)
-    F_sum = np.sum(F_bands, axis=0)
-    theta_eff = np.divide(
-        F_shielded,
-        F_sum,
-        out=np.ones(ncells, dtype=np.float64),
-        where=(F_sum != 0.0),
-    )
-    return (
-        np.ascontiguousarray(theta_eff, dtype=np.float64),
-        np.ascontiguousarray(F_shielded, dtype=np.float64),
-    )
 
 
 def _flatten_band_field(
@@ -1648,7 +1583,7 @@ def _compute_co_phase_diagnostics(
     Tgas_flat = np.asarray(Tgas_K, dtype=np.float64).reshape(ncells)
     Tdust_flat = np.asarray(Tdust_K, dtype=np.float64).reshape(ncells)
     sigma_flat = np.asarray(sigma_d_CO_per_H, dtype=np.float64).reshape(ncells)
-    F_ext_shielded = np.asarray(F_CO_pdes_photon, dtype=np.float64).reshape(ncells)
+    F_pdes = np.asarray(F_CO_pdes_photon, dtype=np.float64).reshape(ncells)
     F_cruv = np.asarray(F_CRUV_CO_pdes, dtype=np.float64).reshape(ncells)
     k_crdes = np.asarray(k_crdes_CO, dtype=np.float64).reshape(ncells)
     Gco_actual = np.asarray(G_CO_diss_actual, dtype=np.float64).reshape(ncells)
@@ -1691,7 +1626,7 @@ def _compute_co_phase_diagnostics(
         out=np.zeros(ncells, dtype=np.float64),
         where=(n_ice > 0.0),
     )
-    F_total = np.maximum(F_ext_shielded, 0.0) + np.maximum(F_cruv, 0.0)
+    F_total = np.maximum(F_pdes, 0.0) + np.maximum(F_cruv, 0.0)
     if int(N_LAY_local) > 0 and float(N_SURF_local) > 0.0:
         k_pd_surface = F_total * float(Y_CO_local) / (
             4.0 * float(N_SURF_local) * int(N_LAY_local)
@@ -1745,9 +1680,8 @@ def _compute_co_phase_diagnostics(
         "sigma_d_CO_per_H": Quantity(sigma_flat.reshape(shape), "cm^2"),
         "CO_sticking": Quantity(np.full(shape, float(S_CO), dtype=np.float64), "dimensionless"),
         "F_CRUV_CO_pdes": Quantity(F_cruv.reshape(shape), "1/(cm^2 s)"),
-        "F_CO_pdes_external_actual": Quantity(F_ext_shielded.reshape(shape), "1/(cm^2 s)"),
+        "F_CO_pdes_photon": Quantity(F_pdes.reshape(shape), "1/(cm^2 s)"),
         "F_CO_pdes_photon_total": Quantity(F_total.reshape(shape), "1/(cm^2 s)"),
-        "F_CO_pdes_total_actual": Quantity(F_total.reshape(shape), "1/(cm^2 s)"),
         "G_CO_diss_actual": Quantity(Gco_actual.reshape(shape), "dimensionless"),
         "G_C_ion_actual": Quantity(Gc_actual.reshape(shape), "dimensionless"),
         "G_H2_diss_actual": Quantity(Gh2_actual.reshape(shape), "dimensionless"),
@@ -1785,7 +1719,6 @@ def _compute_shielding_and_gph(
     G_H2_diss_flat: np.ndarray,
     G_C_ion_flat: np.ndarray,
     G_CO_pdes_flat: np.ndarray,
-    F_CO_pdes_photon_bands_flat: np.ndarray | None,
     F_CO_pdes_photon_flat: np.ndarray | None,
     xCtot_flat: np.ndarray,
     Zd_arr: np.ndarray,
@@ -1805,9 +1738,9 @@ def _compute_shielding_and_gph(
 
     Returns
     -------
-    theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat : np.ndarray
+    theta_h2_flat, theta_co_flat, theta_c_flat : np.ndarray
         Shielding factors, shape ``(ncells,)``.
-    Gph, GPE, F_CO_pdes_ext_shielded : np.ndarray
+    Gph, GPE, F_CO_pdes_photon : np.ndarray
         Radiation field arrays ready for the batch solver.
     """
     xCO = y_flat[:, I_CO]
@@ -1838,18 +1771,12 @@ def _compute_shielding_and_gph(
     )
 
     W_rays = getattr(rad, "W_rays", None)
-    n_pdes_bands = (
-        1
-        if F_CO_pdes_photon_bands_flat is None
-        else int(np.asarray(F_CO_pdes_photon_bands_flat).shape[0])
-    )
     (
         theta_h2_arr,
         theta_co_arr,
         theta_c_arr,
         _,
         _,
-        theta_CO_pdes_bands_arr,
     ) = compute_pdr_shielding_healpix(
         mesh=rad.model.mesh,
         nH=nH_cm3,
@@ -1870,7 +1797,6 @@ def _compute_shielding_and_gph(
             "pdr_shielding_memory_budget_gib",
             None,
         ),
-        co_shielding_nbands=n_pdes_bands,
     )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)
@@ -1885,30 +1811,17 @@ def _compute_shielding_and_gph(
     Gph[:, IPH_H2] = G_H2_diss_flat
     Gph[:, IPH_C] = G_C_ion_flat
     GPE = np.ascontiguousarray(G_broad.copy(), dtype=np.float64)
-    if F_CO_pdes_photon_bands_flat is None and F_CO_pdes_photon_flat is None:
+    if F_CO_pdes_photon_flat is None:
         f_co_pdes_ref = _co_pdes_draine_flux()
-        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
-            (G_CO_pdes_flat * f_co_pdes_ref).reshape(1, ncells),
-            dtype=np.float64,
-        )
-    elif F_CO_pdes_photon_bands_flat is None:
-        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
-            np.asarray(F_CO_pdes_photon_flat, dtype=np.float64).reshape(1, ncells),
+        F_CO_pdes_ext = np.ascontiguousarray(
+            G_CO_pdes_flat * f_co_pdes_ref,
             dtype=np.float64,
         )
     else:
-        F_CO_pdes_ext_unshielded_bands = np.ascontiguousarray(
-            F_CO_pdes_photon_bands_flat,
+        F_CO_pdes_ext = np.ascontiguousarray(
+            np.asarray(F_CO_pdes_photon_flat, dtype=np.float64).reshape(ncells),
             dtype=np.float64,
         )
-
-    theta_CO_pdes_bands_flat = theta_CO_pdes_bands_arr.reshape(n_pdes_bands, ncells)
-    theta_CO_pdes_flat, F_CO_pdes_ext_shielded = _shield_external_band_flux(
-        F_CO_pdes_ext_unshielded_bands,
-        theta_CO_pdes_bands_flat,
-        ncells=ncells,
-        name="CO photodesorption external flux",
-    )
 
     Gph[:, IPH_C] *= theta_c_flat
     Gph[:, IPH_CO] *= theta_co_flat
@@ -1918,10 +1831,9 @@ def _compute_shielding_and_gph(
         theta_h2_flat,
         theta_co_flat,
         theta_c_flat,
-        theta_CO_pdes_flat,
         Gph,
         GPE,
-        F_CO_pdes_ext_shielded,
+        F_CO_pdes_ext,
     )
 
 
@@ -2018,10 +1930,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "F_CO_pdes_photon",
             fallback_to_chi=False,
         )
-        F_CO_pdes_photon_bands = rad.ensure_uv_product(
-            "F_CO_pdes_photon_bands",
-            fallback_to_chi=False,
-        )
     else:
         chi = rad.ensure_chi()
         G_CO_diss = chi
@@ -2032,7 +1940,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             G_CO_pdes.to("dimensionless").magnitude * f_co_pdes_ref,
             "1/(cm^2 s)",
         )
-        F_CO_pdes_photon_bands = F_CO_pdes_photon
 
     # Pre-compute directional UV weights (W_rays) once for reuse across
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
@@ -2052,10 +1959,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     G_C_ion_arr = _as_cgs_f64(G_C_ion, "dimensionless")
     G_CO_pdes_arr = _as_cgs_f64(G_CO_pdes, "dimensionless")
     F_CO_pdes_photon_arr = _as_cgs_f64(F_CO_pdes_photon, "1/(cm^2 s)")
-    F_CO_pdes_photon_bands_arr = _as_cgs_f64(
-        F_CO_pdes_photon_bands,
-        "1/(cm^2 s)",
-    )
 
     shape = nH_cm3.shape
     ncells = nH_cm3.size
@@ -2085,12 +1988,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     G_C_ion_flat = G_C_ion_arr.reshape(ncells)
     G_CO_pdes_flat = G_CO_pdes_arr.reshape(ncells)
     F_CO_pdes_photon_flat = F_CO_pdes_photon_arr.reshape(ncells)
-    F_CO_pdes_photon_bands_flat = _flatten_band_field(
-        F_CO_pdes_photon_bands_arr,
-        shape=shape,
-        ncells=ncells,
-        name="CO photodesorption band field",
-    )
 
     Zg_arr = _broadcast_scalar_or_array(Zg, ncells)
     ion_rate_arr = _broadcast_scalar_or_array(ion_rate_s, ncells)
@@ -2308,7 +2205,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     theta_h2_arr = np.ones(ncells, dtype=np.float64)
     theta_co_arr = np.ones(ncells, dtype=np.float64)
     theta_c_arr = np.ones(ncells, dtype=np.float64)
-    theta_CO_pdes_arr = np.ones(ncells, dtype=np.float64)
 
     xCtot_flat = Zg_arr * float(XC_STD)
     xOtot_flat = Zg_arr * float(XO_STD)
@@ -2391,7 +2287,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         G_H2_diss_flat=G_H2_diss_flat,
         G_C_ion_flat=G_C_ion_flat,
         G_CO_pdes_flat=G_CO_pdes_flat,
-        F_CO_pdes_photon_bands_flat=F_CO_pdes_photon_bands_flat,
         F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
         xCtot_flat=xCtot_flat,
         Zd_arr=Zd_arr,
@@ -2655,7 +2550,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             xH2_old = np.ascontiguousarray(y_guess[:, I_H2].copy(), dtype=np.float64)
             Tgas_old = _state_temperature(y_guess) if not const_temp else None
 
-            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
                     **_shielding_kw,
@@ -2769,7 +2664,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             # N=0: compute shielding once from y_guess, then go straight
             # to the final equilibrium solve (no pseudo-time integration).
             y_guess[:, :] = _project(y_guess)
-            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_guess,
                     **_shielding_kw,
@@ -2848,7 +2743,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             theta_h2_flat = np.ones(ncells, dtype=np.float64)
             theta_co_flat = np.ones(ncells, dtype=np.float64)
             theta_c_flat = np.ones(ncells, dtype=np.float64)
-            theta_CO_pdes_flat = np.ones(ncells, dtype=np.float64)
             accel_species = [I_H2, I_CO] + ([I_CO_ICE] if enable_co_phase else [])
             accel_prev2: dict[int, np.ndarray] | None = None
             accel_prev1: dict[int, np.ndarray] | None = (
@@ -2907,7 +2801,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Tgas_old = _state_temperature(y_state) if not const_temp else None
 
                 # Step 1+2: compute columns and shielding from current y_state.
-                theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
+                theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                     _compute_shielding_and_gph(
                         y_flat=y_state,
                         **_shielding_kw,
@@ -3063,7 +2957,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                         theta_h2_flat=theta_h2_flat,
                         theta_co_flat=theta_co_flat,
                         theta_c_flat=theta_c_flat,
-                        theta_CO_pdes_flat=theta_CO_pdes_flat,
                         Gph=Gph,
                         GISRF=GISRF,
                         status_acc=status_acc,
@@ -3100,7 +2993,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
             # After N macro-updates: recompute columns + shielding from final y_state.
             y_state[:, :] = _project(y_state)
-            theta_h2_flat, theta_co_flat, theta_c_flat, theta_CO_pdes_flat, Gph, GPE, GISRF = (
+            theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
                 _compute_shielding_and_gph(
                     y_flat=y_state,
                     **_shielding_kw,
@@ -3427,7 +3320,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     actual_uv = _actual_solver_uv_fields(
         Gph=Gph,
-        F_CO_pdes_external=GISRF,
+        F_CO_pdes_photon=GISRF,
         shape=shape,
     )
 
@@ -3474,17 +3367,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "theta_co": Quantity(theta_co_flat.reshape(shape), "dimensionless"),
         "theta_h2": Quantity(theta_h2_flat.reshape(shape), "dimensionless"),
         "theta_c": Quantity(theta_c_flat.reshape(shape), "dimensionless"),
-        "theta_CO_pdes": Quantity(theta_CO_pdes_flat.reshape(shape), "dimensionless"),
         "chi_eff": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_CO_diss_actual": Quantity(actual_uv["G_CO_diss_actual"], "dimensionless"),
         "G_C_ion_actual": Quantity(actual_uv["G_C_ion_actual"], "dimensionless"),
         "G_H2_diss_actual": Quantity(actual_uv["G_H2_diss_actual"], "dimensionless"),
-        "F_CO_pdes_external_unshielded": Quantity(
-            F_CO_pdes_photon_arr,
-            "1/(cm^2 s)",
-        ),
-        "F_CO_pdes_external_actual": Quantity(
-            actual_uv["F_CO_pdes_external_actual"],
+        "F_CO_pdes_photon": Quantity(
+            actual_uv["F_CO_pdes_photon"],
             "1/(cm^2 s)",
         ),
     }

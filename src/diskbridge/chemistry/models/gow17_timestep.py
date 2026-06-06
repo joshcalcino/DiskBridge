@@ -41,7 +41,6 @@ from diskbridge.chemistry.models.gow17 import (
     _compute_shielding_and_gph,
     _co_pdes_draine_flux,
     _infer_gow17_radiation_mode,
-    _flatten_band_field,
     _initial_gas_temperature,
     _maybe_quantity_to_float,
     _resolve_co_dust_scalings,
@@ -296,10 +295,6 @@ class Gow17TimeStepper:
                 "F_CO_pdes_photon",
                 fallback_to_chi=False,
             )
-            F_CO_pdes_photon_bands = rad.ensure_uv_product(
-                "F_CO_pdes_photon_bands",
-                fallback_to_chi=False,
-            )
         else:
             chi_broad = rad.ensure_chi()
             G_CO_diss = chi_broad
@@ -307,7 +302,6 @@ class Gow17TimeStepper:
             G_C_ion = chi_broad
             G_CO_pdes = chi_broad
             F_CO_pdes_photon = None
-            F_CO_pdes_photon_bands = None
 
         chi_dust_arr = _as_cgs_f64(chi_broad, "dimensionless")
         chi_dust_flat = chi_dust_arr.reshape(self.ncells)
@@ -319,18 +313,11 @@ class Gow17TimeStepper:
             F_CO_pdes_photon_flat = (
                 G_CO_pdes_flat * _co_pdes_draine_flux()
             )
-            F_CO_pdes_photon_bands_flat = F_CO_pdes_photon_flat.reshape(1, self.ncells)
         else:
             F_CO_pdes_photon_flat = _as_cgs_f64(
                 F_CO_pdes_photon,
                 "1/(cm^2 s)",
             ).reshape(self.ncells)
-            F_CO_pdes_photon_bands_flat = _flatten_band_field(
-                _as_cgs_f64(F_CO_pdes_photon_bands, "1/(cm^2 s)"),
-                shape=self.shape,
-                ncells=self.ncells,
-                name="CO photodesorption band field",
-            )
 
         (
             self.dust_cooling_mode,
@@ -379,7 +366,7 @@ class Gow17TimeStepper:
             self.shielding_linewidth_meta,
         )
 
-        theta_h2, theta_co, theta_c, theta_CO_pdes, Gph, GPE, GISRF = _compute_shielding_and_gph(
+        theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,
             nH_flat=self.nH_flat,
             chi_dust_flat=chi_dust_flat,
@@ -387,7 +374,6 @@ class Gow17TimeStepper:
             G_H2_diss_flat=G_H2_diss_flat,
             G_C_ion_flat=G_C_ion_flat,
             G_CO_pdes_flat=G_CO_pdes_flat,
-            F_CO_pdes_photon_bands_flat=F_CO_pdes_photon_bands_flat,
             F_CO_pdes_photon_flat=F_CO_pdes_photon_flat,
             xCtot_flat=self.xCtot_flat,
             Zd_arr=self.Zd_arr,
@@ -410,11 +396,9 @@ class Gow17TimeStepper:
             theta_h2,
             theta_co,
             theta_c,
-            theta_CO_pdes,
             Gph,
             GPE,
             GISRF,
-            F_CO_pdes_photon_flat,
         )
 
     def _commit_solution(
@@ -425,11 +409,9 @@ class Gow17TimeStepper:
         theta_h2: np.ndarray,
         theta_co: np.ndarray,
         theta_c: np.ndarray,
-        theta_CO_pdes: np.ndarray,
         chi_dust_arr: np.ndarray,
         Gph: np.ndarray,
         GISRF: np.ndarray,
-        F_CO_pdes_external_unshielded: np.ndarray,
     ) -> dict:
         rad = self.rad
 
@@ -480,26 +462,20 @@ class Gow17TimeStepper:
         theta_co_arr = np.asarray(theta_co, dtype=np.float64).reshape(self.shape)
         theta_h2_arr = np.asarray(theta_h2, dtype=np.float64).reshape(self.shape)
         theta_c_arr = np.asarray(theta_c, dtype=np.float64).reshape(self.shape)
-        theta_CO_pdes_arr = np.asarray(theta_CO_pdes, dtype=np.float64).reshape(self.shape)
 
         rad.theta_co = Quantity(theta_co_arr, "dimensionless")
         rad.theta_h2 = Quantity(theta_h2_arr, "dimensionless")
         rad.theta_c = Quantity(theta_c_arr, "dimensionless")
-        rad.theta_CO_pdes = Quantity(theta_CO_pdes_arr, "dimensionless")
         actual_uv = _actual_solver_uv_fields(
             Gph=Gph,
-            F_CO_pdes_external=GISRF,
+            F_CO_pdes_photon=GISRF,
             shape=self.shape,
         )
         rad.G_CO_diss_actual = Quantity(actual_uv["G_CO_diss_actual"], "dimensionless")
         rad.G_C_ion_actual = Quantity(actual_uv["G_C_ion_actual"], "dimensionless")
         rad.G_H2_diss_actual = Quantity(actual_uv["G_H2_diss_actual"], "dimensionless")
-        rad.F_CO_pdes_external_actual = Quantity(
-            actual_uv["F_CO_pdes_external_actual"],
-            "1/(cm^2 s)",
-        )
-        rad.F_CO_pdes_external_unshielded = Quantity(
-            np.asarray(F_CO_pdes_external_unshielded, dtype=np.float64).reshape(self.shape),
+        rad.F_CO_pdes_photon = Quantity(
+            actual_uv["F_CO_pdes_photon"],
             "1/(cm^2 s)",
         )
         rad.F_CO_pdes_photon_total = Quantity(
@@ -534,7 +510,6 @@ class Gow17TimeStepper:
             "theta_co": theta_co_arr,
             "theta_h2": theta_h2_arr,
             "theta_c": theta_c_arr,
-            "theta_CO_pdes": theta_CO_pdes_arr,
             "b_H2_kms": self.b_H2_kms_arr.reshape(self.shape),
             "b_CO_kms": self.b_CO_kms_arr.reshape(self.shape),
             "shielding_linewidth": dict(self.shielding_linewidth_meta),
@@ -594,11 +569,9 @@ class Gow17TimeStepper:
             theta_h2,
             theta_co,
             theta_c,
-            theta_CO_pdes,
             Gph,
             GPE,
             GISRF,
-            F_CO_pdes_external_unshielded,
         ) = self._prepare_environment()
 
         result = _gow17.solve_batch_time(
@@ -648,11 +621,9 @@ class Gow17TimeStepper:
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
-            theta_CO_pdes=theta_CO_pdes,
             chi_dust_arr=chi_dust_arr,
             Gph=Gph,
             GISRF=GISRF,
-            F_CO_pdes_external_unshielded=F_CO_pdes_external_unshielded,
         )
 
     def solve_equilibrium(self) -> dict:
@@ -699,14 +670,12 @@ class Gow17TimeStepper:
                 theta_h2,
                 theta_co,
                 theta_c,
-                theta_CO_pdes,
                 Gph,
                 GPE,
                 GISRF,
-                F_CO_pdes_external_unshielded,
             ) = self._prepare_environment(y_state=y_state)
             result_time = _gow17.solve_batch_time(
-                    y0=self._project_state(y_state),
+                y0=self._project_state(y_state),
                 nH=self.nH_flat,
                 Tgas=T_flat,
                 Tdust=Tdust_flat,
@@ -772,11 +741,9 @@ class Gow17TimeStepper:
             theta_h2,
             theta_co,
             theta_c,
-            theta_CO_pdes,
             Gph,
             GPE,
             GISRF,
-            F_CO_pdes_external_unshielded,
         ) = self._prepare_environment(y_state=y_state)
         result = _gow17.solve_batch_equilibrium(
             y0=self._project_state(y_state),
@@ -827,9 +794,7 @@ class Gow17TimeStepper:
             theta_h2=theta_h2,
             theta_co=theta_co,
             theta_c=theta_c,
-            theta_CO_pdes=theta_CO_pdes,
             chi_dust_arr=chi_dust_arr,
             Gph=Gph,
             GISRF=GISRF,
-            F_CO_pdes_external_unshielded=F_CO_pdes_external_unshielded,
         )

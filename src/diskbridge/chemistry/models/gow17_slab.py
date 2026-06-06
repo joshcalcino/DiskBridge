@@ -161,8 +161,6 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         ion_rate_arr=ion_rate_arr,
         ncells=ncells,
     )
-    co_phase_cfg = cfg.get("co_phase", {}) if isinstance(cfg.get("co_phase", {}), dict) else {}
-    shield_pdes_1d = bool(co_phase_cfg.get("shield_pdes_1d", False))
     co_sigma_d_per_H_ref = (
         _maybe_quantity_to_float(cfg["dust"]["sigma_d_ISM_ref"], "cm^2")
         if enable_co_phase
@@ -221,7 +219,6 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         co_N_SURF=(float(co_phase_params["N_SURF"]) if enable_co_phase else 0.0),
         co_N_LAY=(int(co_phase_params["N_LAY"]) if enable_co_phase else 0),
         userJac=bool(userJac),
-        shield_pdes_1d=bool(shield_pdes_1d),
         co_S_CO=(float(S_CO) if enable_co_phase else 0.0),
         co_F_CRUV_CO_pdes=(
             float(F_CRUV_CO_pdes_arr.reshape(-1)[0]) if enable_co_phase else 0.0
@@ -276,10 +273,8 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         line_h2_opr=cfg["line_h2_opr"],
     )
 
-    theta_CO_pdes_arr = theta_co_arr if (enable_co_phase and shield_pdes_1d) else np.ones_like(theta_co_arr)
-    F_CO_pdes_unshielded = chi_arr * _co_pdes_draine_flux()
-    F_CO_pdes_actual = F_CO_pdes_unshielded * theta_CO_pdes_arr
-    F_CO_pdes_total = F_CO_pdes_actual + (
+    F_CO_pdes_photon = chi_arr * _co_pdes_draine_flux()
+    F_CO_pdes_total = F_CO_pdes_photon + (
         F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else 0.0
     )
     G_CO = chi_arr * theta_co_arr
@@ -295,17 +290,14 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         "G_H2_diss": Quantity(chi_arr, "dimensionless"),
         "G_C_ion": Quantity(chi_arr, "dimensionless"),
         "G_CO_pdes": Quantity(chi_arr, "dimensionless"),
-        "F_CO_pdes_photon": Quantity(F_CO_pdes_unshielded, "1/(cm^2 s)"),
+        "F_CO_pdes_photon": Quantity(F_CO_pdes_photon, "1/(cm^2 s)"),
         "theta_co": Quantity(theta_co_arr, "dimensionless"),
         "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
         "theta_c": Quantity(theta_c_arr, "dimensionless"),
-        "theta_CO_pdes": Quantity(theta_CO_pdes_arr, "dimensionless"),
         "chi_eff": Quantity(G_CO, "dimensionless"),
         "G_CO_diss_actual": Quantity(G_CO, "dimensionless"),
         "G_C_ion_actual": Quantity(chi_arr * theta_c_arr, "dimensionless"),
         "G_H2_diss_actual": Quantity(chi_arr * theta_h2_arr, "dimensionless"),
-        "F_CO_pdes_external_unshielded": Quantity(F_CO_pdes_unshielded, "1/(cm^2 s)"),
-        "F_CO_pdes_external_actual": Quantity(F_CO_pdes_actual, "1/(cm^2 s)"),
         "F_CRUV_CO_pdes": Quantity(
             F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else np.zeros(shape, dtype=np.float64),
             "1/(cm^2 s)",
@@ -348,7 +340,6 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
             "max_status": 0,
             "fail_idx_head": [],
             "status_hist": {0: int(ncells), -1: 0},
-            "shield_pdes_1d": bool(shield_pdes_1d),
             "co_sigma_d_per_H_ref": float(co_sigma_d_per_H_ref),
         },
     )

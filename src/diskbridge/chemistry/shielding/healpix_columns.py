@@ -998,7 +998,6 @@ def compute_pdr_shielding_healpix(
     W_rays: Optional[np.ndarray] = None,
     chunk_size: Optional[int] = None,
     memory_budget_gib: Optional[float] = None,
-    co_shielding_nbands: int = 0,
 ) -> tuple[np.ndarray, ...]:
     """Compute PDR shielding factors (H2, CO, C) and effective UV via HEALPix rays.
 
@@ -1058,11 +1057,6 @@ def compute_pdr_shielding_healpix(
         Approximate working-memory budget for one shielding chunk. Defaults to
         a conservative internal budget because ``W_rays`` may already be
         resident.
-    co_shielding_nbands : int, optional
-        Number of CO/H2 molecular shielding band factors to return. These are
-        evaluated from the same ray columns used for gas-phase CO shielding; no
-        additional column integration is performed.
-
     Returns
     -------
     theta_h2 : ndarray
@@ -1076,9 +1070,6 @@ def compute_pdr_shielding_healpix(
         Combined PDR shielding factor = theta_h2 * theta_co.
     chi_eff_pdr : ndarray
         Effective UV field = chi * theta_pdr.
-    theta_CO_pdes_bands : ndarray, optional
-        Returned only when ``co_shielding_nbands > 0``. Shape is
-        ``(co_shielding_nbands, *nH.shape)``.
     """
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
@@ -1118,14 +1109,6 @@ def compute_pdr_shielding_healpix(
     theta_c = np.ones_like(nH_cgs, dtype=np.float64)
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     theta_pdr = np.ones_like(nH_cgs, dtype=np.float64)
-    n_pdes_bands = int(co_shielding_nbands)
-    if n_pdes_bands < 0:
-        raise ValueError("co_shielding_nbands must be non-negative")
-    theta_CO_pdes_bands = (
-        np.ones((n_pdes_bands,) + tuple(nH_cgs.shape), dtype=np.float64)
-        if n_pdes_bands > 0
-        else None
-    )
 
     n_candidates = int(candidate_idx.shape[0])
     npix = int(dirs.shape[0])
@@ -1143,7 +1126,6 @@ def compute_pdr_shielding_healpix(
             visser is not None and b_CO_kms_grid is not None
         )
         dense_count = (8 if visser is None else 12) + 2 * linewidth_field_count
-        dense_count += max(0, n_pdes_bands)
         if chunk_size is None:
             chunk_size = _chunk_size_from_memory_budget(
                 n_candidates=n_candidates,
@@ -1169,8 +1151,6 @@ def compute_pdr_shielding_healpix(
 
     if n_candidates == 0:
         chi_eff_pdr = chi_arr * theta_pdr
-        if theta_CO_pdes_bands is not None:
-            return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr, theta_CO_pdes_bands
         return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
 
     for ichunk, start in enumerate(range(0, n_candidates, int(chunk_size)), start=1):
@@ -1251,23 +1231,9 @@ def compute_pdr_shielding_healpix(
             theta_co_mean = _average_rays(theta_co_rays, W_chunk)
             _scatter_candidates_3d(theta_co, candidate_idx_chunk, theta_co_mean)
 
-            if theta_CO_pdes_bands is not None:
-                # The photodesorption bands currently use the same Visser
-                # CO/H2 molecular shielding law as gas-phase CO. Keeping this
-                # band axis here lets callers do a true sum(F_band * theta_band)
-                # while reusing the same ray-column integration.
-                for iband in range(n_pdes_bands):
-                    _scatter_candidates_3d(
-                        theta_CO_pdes_bands[iband],
-                        candidate_idx_chunk,
-                        theta_co_mean,
-                    )
-
             theta_pdr_rays = f_sh_rays * theta_co_rays
             theta_pdr_mean = _average_rays(theta_pdr_rays, W_chunk)
             _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_pdr_mean)
 
     chi_eff_pdr = chi_arr * theta_pdr
-    if theta_CO_pdes_bands is not None:
-        return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr, theta_CO_pdes_bands
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
