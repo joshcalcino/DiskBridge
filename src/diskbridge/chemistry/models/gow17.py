@@ -19,7 +19,6 @@ from diskbridge._constants import M_H
 from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.model.microturbulence import (
     ensure_microturbulence_field,
-    microturbulence_spatially_constant,
 )
 from diskbridge.chemistry.io import attach_chemistry_result_to_model
 from diskbridge.chemistry.types import ChemistryResult
@@ -1314,8 +1313,8 @@ def _resolve_co_phase_runtime_params(cfg: dict) -> dict[str, float | int]:
 def _resolve_shielding_linewidth(
     Tgas_K: np.ndarray,
     v_turb_grid_kms: np.ndarray,
-) -> tuple[float, np.ndarray, dict]:
-    """Resolve CO shielding linewidth from temperature and microturbulence."""
+) -> tuple[float, np.ndarray, float, np.ndarray, dict]:
+    """Resolve H2 and CO shielding linewidths from Tgas and microturbulence."""
     T_arr = np.asarray(Tgas_K, dtype=np.float64)
 
     if not np.all(np.isfinite(T_arr)):
@@ -1346,32 +1345,37 @@ def _resolve_shielding_linewidth(
             f"n_bad={bad.shape[0]}"
         )
 
-    mCO = 28.0 * float(M_H)
-    b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mCO) / 1.0e5
-    b_arr = np.sqrt(b_thermal**2 + v_grid**2)
+    def _species_b_kms(mass_g: float) -> np.ndarray:
+        b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mass_g) / 1.0e5
+        return np.sqrt(b_thermal * b_thermal + v_grid * v_grid)
 
-    if not np.all(np.isfinite(b_arr)):
-        bad = np.argwhere(~np.isfinite(b_arr))
-        raise ValueError(
-            "CO shielding linewidth b_CO contains non-finite values; "
-            f"first bad index={tuple(int(i) for i in bad[0])}, "
-            f"n_bad={bad.shape[0]}"
-        )
-    if np.any(b_arr <= 0.0):
-        bad = np.argwhere(b_arr <= 0.0)
-        raise ValueError(
-            "CO shielding linewidth b_CO contains non-positive values; "
-            f"first bad index={tuple(int(i) for i in bad[0])}, "
-            f"n_bad={bad.shape[0]}"
-        )
+    b_H2_arr = _species_b_kms(2.0 * float(M_H))
+    b_CO_arr = _species_b_kms(28.0 * float(M_H))
 
-    b_scalar = float(np.median(b_arr))
+    for label, b_arr in (("H2", b_H2_arr), ("CO", b_CO_arr)):
+        if not np.all(np.isfinite(b_arr)):
+            bad = np.argwhere(~np.isfinite(b_arr))
+            raise ValueError(
+                f"{label} shielding linewidth b_{label} contains non-finite values; "
+                f"first bad index={tuple(int(i) for i in bad[0])}, "
+                f"n_bad={bad.shape[0]}"
+            )
+        if np.any(b_arr <= 0.0):
+            bad = np.argwhere(b_arr <= 0.0)
+            raise ValueError(
+                f"{label} shielding linewidth b_{label} contains non-positive values; "
+                f"first bad index={tuple(int(i) for i in bad[0])}, "
+                f"n_bad={bad.shape[0]}"
+            )
+
+    b_H2_scalar = float(np.median(b_H2_arr))
+    b_CO_scalar = float(np.median(b_CO_arr))
     meta = {
-        "b_CO_scalar_kms": float(b_scalar),
+        "b_H2_scalar_kms": float(b_H2_scalar),
+        "b_CO_scalar_kms": float(b_CO_scalar),
         "b_CO_scalar_approximation": True,
-        "b_CO_bins_used": [float(b_scalar)],
     }
-    return b_scalar, b_arr, meta
+    return b_H2_scalar, b_H2_arr, b_CO_scalar, b_CO_arr, meta
 
 
 def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> np.ndarray:
@@ -1388,14 +1392,17 @@ def _model_microturbulence_grid_kms(rad: "RadModel", shape: tuple[int, ...]) -> 
     return np.ascontiguousarray(arr, dtype=np.float64)
 
 
-def _shielding_b_grid_from_microturbulence(
-    rad: "RadModel",
-    b_CO_kms_arr: np.ndarray,
+def _shielding_b_grid_or_none(
+    b_kms_arr: np.ndarray,
 ) -> np.ndarray | None:
-    is_constant = microturbulence_spatially_constant(rad.model)
-    if not is_constant:
-        return b_CO_kms_arr
-    return None
+    """Return a b-grid only when it actually varies across the domain."""
+    arr = np.asarray(b_kms_arr, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    first = float(arr.reshape(-1)[0])
+    if np.allclose(arr, first, rtol=0.0, atol=0.0):
+        return None
+    return np.ascontiguousarray(arr, dtype=np.float64)
 
 
 def _resolve_visser_table_linewidth(
@@ -1420,7 +1427,7 @@ def _resolve_visser_table_linewidth(
         logger.info(
             "gow17: requested representative CO shielding b_kms=%.6g km/s; "
             "loaded nearest Visser family at %.6g km/s for table interpolation. "
-            "H2 shielding still uses the scalar table value.",
+            "Ray-wise CO b values are interpolated across the available Visser tables.",
             b_requested,
             b_table,
         )
@@ -1788,7 +1795,9 @@ def _compute_shielding_and_gph(
     nH_cm3: np.ndarray,
     chi_dust_arr: np.ndarray,
     visser,
-    b_kms: float,
+    b_H2_kms: float,
+    b_CO_kms: float,
+    b_H2_kms_grid: np.ndarray | None,
     b_CO_kms_grid: np.ndarray | None,
     nside: int,
 ) -> tuple:
@@ -1850,7 +1859,9 @@ def _compute_shielding_and_gph(
         nC=nC_cm3,
         nH2=nH2_cm3,
         nside=nside,
-        b_kms=b_kms,
+        b_H2_kms=b_H2_kms,
+        b_CO_kms=b_CO_kms,
+        b_H2_kms_grid=b_H2_kms_grid,
         b_CO_kms_grid=b_CO_kms_grid,
         W_rays=W_rays,
         chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
@@ -2051,14 +2062,19 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     ensure_microturbulence_field(rad.model, diskbridge.params)
     v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
-    b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
+    (
+        b_H2_kms,
+        b_H2_kms_arr,
+        b_CO_kms,
+        b_CO_kms_arr,
+        shielding_linewidth_meta,
+    ) = _resolve_shielding_linewidth(
         T_K,
         v_turb_grid_kms,
     )
-    b_CO_kms_grid = _shielding_b_grid_from_microturbulence(rad, b_CO_kms_arr)
-    shielding_linewidth_meta["microturbulence_spatially_constant"] = (
-        b_CO_kms_grid is None
-    )
+    b_H2_kms_grid = _shielding_b_grid_or_none(b_H2_kms_arr)
+    b_CO_kms_grid = _shielding_b_grid_or_none(b_CO_kms_arr)
+    shielding_linewidth_meta["b_H2_ray_grid"] = b_H2_kms_grid is not None
     shielding_linewidth_meta["b_CO_ray_grid"] = b_CO_kms_grid is not None
 
     nH_flat = nH_cm3.reshape(ncells)
@@ -2230,7 +2246,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 Omega,
                 eR,
                 L_cell_cand,
-                b_kms=float(b_kms),
+                b_kms=float(b_CO_kms),
                 q=float(gradv_q),
                 N0=float(gradv_N0),
                 p=float(gradv_p),
@@ -2255,8 +2271,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             Leff_CO_max_arr[candidate_flat_idx] = L_geo_cand
             rad.Lgeo_gow17 = Leff_CO_max_arr.reshape(shape)
 
-    b_kms, visser, shielding_linewidth_meta = _resolve_visser_table_linewidth(
-        b_kms,
+    b_CO_kms, visser, shielding_linewidth_meta = _resolve_visser_table_linewidth(
+        b_CO_kms,
         shielding_linewidth_meta,
     )
 
@@ -2385,7 +2401,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         nH_cm3=nH_cm3,
         chi_dust_arr=chi_dust_arr,
         visser=visser,
-        b_kms=b_kms,
+        b_H2_kms=b_H2_kms,
+        b_CO_kms=b_CO_kms,
+        b_H2_kms_grid=b_H2_kms_grid,
         b_CO_kms_grid=b_CO_kms_grid,
         nside=nside,
     )
@@ -3445,6 +3463,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             np.full(shape, dust_cooling_mode_id, dtype=np.float64),
             "dimensionless",
         ),
+        "b_H2_kms": Quantity(b_H2_kms_arr, "km/s"),
         "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
         "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
         "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
@@ -3603,8 +3622,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "model": "gow17",
         "enable_co_phase": bool(enable_co_phase),
         "nside": int(nside),
-        "b_kms": float(b_kms),
-        "b_CO_kms_scalar": float(b_kms),
+        "b_H2_kms_scalar": float(b_H2_kms),
+        "b_CO_kms_scalar": float(b_CO_kms),
         "ion_rate_s": float(ion_rate_s),
         "Zg": float(Zg),
         "Zd": float(Zd),

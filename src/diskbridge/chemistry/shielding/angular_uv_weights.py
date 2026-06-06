@@ -348,6 +348,7 @@ def compute_uv_direction_weights_healpix(
     star_uv_luminosity_erg_s: float,
     star_uv_reference_energy_density: float = U_DRAINE,
     star_uv_weighting: str = "energy",
+    star_inner_radius_cm: float = 0.0,
     progress_chunks: int | None = None,
     chunk_size: int | None = None,
     memory_budget_gib: float | None = None,
@@ -387,6 +388,9 @@ def compute_uv_direction_weights_healpix(
         UV band.
     star_uv_weighting : {"energy", "photon"}, optional
         Weighting for the stellar source strength.
+    star_inner_radius_cm : float, optional
+        Stellar/source radius where direct-star attenuation rays stop. Use 0
+        to stop at the coordinate origin.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
     chunk_size : int or None, optional
@@ -589,6 +593,7 @@ def compute_uv_direction_weights_healpix(
                 cell_centers_chunk,
                 dust_fields_stack,
                 candidate_idx=candidate_idx_chunk,
+                stop_radius_cm=float(star_inner_radius_cm),
             )
 
             for ibin in range(nbin):

@@ -57,6 +57,7 @@ def _build_cache_key(
     nside: int,
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
+    star_inner_radius_cm: float,
     isotropic_outside_r_au: float | None,
     outer_weight_mode: str | None,
     uv_product: str = "chi",
@@ -72,6 +73,8 @@ def _build_cache_key(
         External UV field strength (Draine units).
     star_uv_luminosity_erg_s : float
         Stellar UV luminosity (erg/s).
+    star_inner_radius_cm : float
+        Inner radius where direct-star rays stop.
     Returns
     -------
     tuple
@@ -88,6 +91,7 @@ def _build_cache_key(
         int(nside),
         float(chi_ext0),
         float(star_uv_luminosity_erg_s),
+        float(star_inner_radius_cm),
         None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
         None if outer_weight_mode is None else str(outer_weight_mode),
         str(uv_product),
@@ -308,6 +312,9 @@ def ensure_W_rays(
     uv_weighting = _uv_product_weighting(uv_product)
     uv_band_um = _uv_product_band_um(uv_product)
     uv_reference = _uv_product_draine_reference(uv_product, uv_weighting)
+    star_inner_radius_cm = 0.0
+    if float(star_uv_luminosity_erg_s) > 0.0:
+        star_inner_radius_cm = float(diskbridge.params.rstar.to("cm").magnitude)
     uv_product_fingerprint = (
         float(uv_band_um[0]),
         float(uv_band_um[1]),
@@ -318,6 +325,7 @@ def ensure_W_rays(
         nside,
         chi_ext0,
         star_uv_luminosity_erg_s,
+        star_inner_radius_cm,
         isotropic_outside_r_au,
         outer_weight_mode,
         uv_product,
@@ -431,6 +439,7 @@ def ensure_W_rays(
             star_uv_luminosity_erg_s=float(star_uv_luminosity_erg_s),
             star_uv_reference_energy_density=uv_reference,
             star_uv_weighting=uv_weighting,
+            star_inner_radius_cm=star_inner_radius_cm,
             chunk_size=resolved_chunk_size,
             memory_budget_gib=memory_budget_gib,
             keep_debug_arrays=keep_debug_arrays,

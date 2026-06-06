@@ -130,7 +130,13 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
 
     ensure_microturbulence_field(rad.model, diskbridge.params)
     v_turb_grid_kms = _model_microturbulence_grid_kms(rad, shape)
-    b_kms, b_CO_kms_arr, shielding_linewidth_meta = _resolve_shielding_linewidth(
+    (
+        b_H2_kms,
+        b_H2_kms_arr,
+        b_CO_kms,
+        b_CO_kms_arr,
+        shielding_linewidth_meta,
+    ) = _resolve_shielding_linewidth(
         T_K,
         v_turb_grid_kms,
     )
@@ -282,6 +288,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         "Tgas": Quantity(T_out, "K"),
         "Tgas_minus_Tdust": Quantity(T_out - Tdust_K, "K"),
         "Tgas_status": Quantity(np.zeros(shape, dtype=np.int32), "dimensionless"),
+        "b_H2_kms": Quantity(b_H2_kms_arr, "km/s"),
         "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
         "chi_broad": Quantity(chi_arr, "dimensionless"),
         "G_CO_diss": Quantity(chi_arr, "dimensionless"),
@@ -327,8 +334,8 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
             "model": "gow17_slab",
             "enable_co_phase": bool(enable_co_phase),
             "radiation_mode": "incident_slab",
-            "b_kms": float(b_kms),
-            "b_CO_kms_scalar": float(b_kms),
+            "b_H2_kms_scalar": float(b_H2_kms),
+            "b_CO_kms_scalar": float(b_CO_kms),
             "shielding_linewidth": shielding_linewidth_meta,
             "ion_rate_s": float(ion_rate_s),
             "Zg": float(Zg),

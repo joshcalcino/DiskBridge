@@ -257,6 +257,52 @@ def _scatter_candidates_3d(
     target[i0, i1, i2] = v
 
 
+def _add_weighted_b2_field(
+    fields: dict[str, np.ndarray],
+    *,
+    name: str,
+    density: np.ndarray,
+    b_grid: Optional[np.ndarray],
+    shape: tuple[int, ...],
+) -> None:
+    """Add ``density * b^2`` to a ray-field map when a b-grid is supplied."""
+    if b_grid is None:
+        return
+    b_arr = _as_f64(f"b_{name}_kms_grid", b_grid)
+    if b_arr.shape != tuple(shape):
+        raise ValueError(f"b_{name}_kms_grid must match nH shape")
+    fields[f"{name}_b2"] = np.ascontiguousarray(density * b_arr * b_arr, dtype=np.float64)
+
+
+def _effective_b_from_columns(
+    b2_col: np.ndarray,
+    n_col: np.ndarray,
+    *,
+    fallback_kms: float,
+) -> np.ndarray:
+    """Column-weighted effective Doppler b from integrated ``n*b^2``.
+
+    The fallback is used for optically negligible columns so array-valued H2
+    shielding never sees b=0 in cells with no H2 along a ray.
+    """
+    n_arr = np.asarray(n_col, dtype=np.float64)
+    fallback2 = float(fallback_kms) * float(fallback_kms)
+    b2_eff = np.divide(
+        np.asarray(b2_col, dtype=np.float64),
+        n_arr,
+        out=np.full_like(n_arr, fallback2),
+        where=n_arr > N_SHIELD_MIN,
+    )
+    return np.sqrt(np.maximum(b2_eff, np.finfo(np.float64).tiny))
+
+
+def _average_rays(theta_rays: np.ndarray, W_rays: Optional[np.ndarray]) -> np.ndarray:
+    """Average ray shielding factors using directional weights or uniformly."""
+    if W_rays is not None:
+        return (W_rays * theta_rays).sum(axis=1)
+    return theta_rays.mean(axis=1)
+
+
 
 def _compute_mask_hash(mask: np.ndarray) -> str:
     packed = np.packbits(np.asarray(mask, dtype=np.uint8).ravel())
@@ -824,7 +870,7 @@ def compute_co_shielding_healpix(
     nCO: np.ndarray,
     nH2: np.ndarray,
     nside: int = 4,
-    b_kms: Optional[float] = None,
+    b_CO_kms: Optional[float] = None,
     b_CO_kms_grid: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
@@ -865,7 +911,7 @@ def compute_co_shielding_healpix(
         H2 number density (cm^-3), 3-D grid.
     nside : int, optional
         HEALPix Nside (npix = 12 * nside^2). Default 4.
-    b_kms : float or None, optional
+    b_CO_kms : float or None, optional
         Doppler parameter in km/s for the Visser shielding table.
     progress_chunks : int or None, optional
         If set, ray integration is split into this many chunks with logging.
@@ -892,11 +938,13 @@ def compute_co_shielding_healpix(
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
 
     fields: dict[str, np.ndarray] = {"co": nCO_cgs, "h2": nH2_cgs}
-    if b_CO_kms_grid is not None:
-        b_grid = _as_f64("b_CO_kms_grid", b_CO_kms_grid)
-        if b_grid.shape != nH_cgs.shape:
-            raise ValueError("b_CO_kms_grid must match nH shape.")
-        fields["co_b2"] = nCO_cgs * b_grid * b_grid
+    _add_weighted_b2_field(
+        fields,
+        name="co",
+        density=nCO_cgs,
+        b_grid=b_CO_kms_grid,
+        shape=nH_cgs.shape,
+    )
 
     candidate_idx, dirs, cols = compute_column_rays_healpix(
         mesh,
@@ -912,15 +960,18 @@ def compute_co_shielding_healpix(
         N_CO_rays = cols["co"]
         N_H2_rays = cols["h2"]
         if b_CO_kms_grid is not None:
-            b_eff = np.sqrt(cols["co_b2"] / np.maximum(N_CO_rays, N_SHIELD_MIN))
+            if b_CO_kms is None:
+                raise ValueError("b_CO_kms is required when b_CO_kms_grid is supplied")
+            b_eff = _effective_b_from_columns(
+                cols["co_b2"], N_CO_rays, fallback_kms=float(b_CO_kms)
+            )
             theta_rays = visser.theta_interpolated_b("co", N_CO_rays, N_H2_rays, b_eff)
         else:
-            theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
+            if b_CO_kms is None:
+                raise ValueError("b_CO_kms is required for scalar CO shielding")
+            theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=float(b_CO_kms))
 
-        if W_rays is not None:
-            theta_eff = (W_rays * theta_rays).sum(axis=1)
-        else:
-            theta_eff = theta_rays.mean(axis=1)
+        theta_eff = _average_rays(theta_rays, W_rays)
 
         _scatter_candidates_3d(theta_co, candidate_idx, theta_eff)
 
@@ -938,7 +989,9 @@ def compute_pdr_shielding_healpix(
     nC: np.ndarray,
     nH2: np.ndarray,
     nside: int = 4,
-    b_kms: float = 0.3,
+    b_H2_kms: float = 0.3,
+    b_CO_kms: float = 0.3,
+    b_H2_kms_grid: Optional[np.ndarray] = None,
     b_CO_kms_grid: Optional[np.ndarray] = None,
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
@@ -988,8 +1041,10 @@ def compute_pdr_shielding_healpix(
         H2 number density (cm^-3), 3-D grid.
     nside : int, optional
         HEALPix Nside. Default 4.
-    b_kms : float, optional
-        Doppler parameter in km/s. Default 0.3.
+    b_H2_kms, b_CO_kms : float, optional
+        Representative Doppler parameters in km/s. These are used directly
+        when the corresponding b-grid is absent, and as safe fallbacks for
+        zero-column rays when a column-weighted effective b is computed.
     progress_chunks : int or None, optional
         If set, split ray integration into chunks with logging.
     cache_dir : Path or str or None, optional
@@ -1031,16 +1086,25 @@ def compute_pdr_shielding_healpix(
     nC_cgs = _as_f64("nC", nC)
 
     fields: dict[str, np.ndarray] = {"h2": nH2_cgs, "c": nC_cgs}
+    _add_weighted_b2_field(
+        fields,
+        name="h2",
+        density=nH2_cgs,
+        b_grid=b_H2_kms_grid,
+        shape=nH_cgs.shape,
+    )
     if visser is not None:
         if nCO is None:
             raise ValueError("nCO is required if visser is provided")
         nCO_cgs = _as_f64("nCO", nCO)
         fields["co"] = nCO_cgs
-        if b_CO_kms_grid is not None:
-            b_grid = _as_f64("b_CO_kms_grid", b_CO_kms_grid)
-            if b_grid.shape != nH_cgs.shape:
-                raise ValueError("b_CO_kms_grid must match nH shape")
-            fields["co_b2"] = nCO_cgs * b_grid * b_grid
+        _add_weighted_b2_field(
+            fields,
+            name="co",
+            density=nCO_cgs,
+            b_grid=b_CO_kms_grid,
+            shape=nH_cgs.shape,
+        )
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
     tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
@@ -1075,7 +1139,10 @@ def compute_pdr_shielding_healpix(
     if n_candidates > 0:
         # Dense ray maps alive in a chunk: integrated columns, H2 factors, C
         # factors, optional CO/PDR factors, and W_rays multiplication inputs.
-        dense_count = 8 if visser is None else (14 if b_CO_kms_grid is not None else 12)
+        linewidth_field_count = int(b_H2_kms_grid is not None) + int(
+            visser is not None and b_CO_kms_grid is not None
+        )
+        dense_count = (8 if visser is None else 12) + 2 * linewidth_field_count
         dense_count += max(0, n_pdes_bands)
         if chunk_size is None:
             chunk_size = _chunk_size_from_memory_budget(
@@ -1134,14 +1201,17 @@ def compute_pdr_shielding_healpix(
         N_H2_rays = cols["h2"]
         N_C_rays = cols["c"]
 
-        f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=float(b_kms))
+        if b_H2_kms_grid is not None:
+            b_H2_eff = _effective_b_from_columns(
+                cols["h2_b2"], N_H2_rays, fallback_kms=float(b_H2_kms)
+            )
+        else:
+            b_H2_eff = float(b_H2_kms)
+        f_sh_rays = h2_self_shielding_db96(N_H2_rays, b5=b_H2_eff)
 
         # H2 shielding
-        if W_rays is not None:
-            W_chunk = W_rays[start:end]
-            theta_h2_mean = (W_chunk * f_sh_rays).sum(axis=1)
-        else:
-            theta_h2_mean = f_sh_rays.mean(axis=1)
+        W_chunk = None if W_rays is None else W_rays[start:end]
+        theta_h2_mean = _average_rays(f_sh_rays, W_chunk)
         _scatter_candidates_3d(theta_h2, candidate_idx_chunk, theta_h2_mean)
 
         # C self-shielding 
@@ -1155,10 +1225,7 @@ def compute_pdr_shielding_healpix(
         rc = np.exp(-1.6e-17 * N_C_rays)
         theta_c_rays = rc * ry
 
-        if W_rays is not None:
-            theta_c_mean = (W_chunk * theta_c_rays).sum(axis=1)
-        else:
-            theta_c_mean = theta_c_rays.mean(axis=1)
+        theta_c_mean = _average_rays(theta_c_rays, W_chunk)
         _scatter_candidates_3d(theta_c, candidate_idx_chunk, theta_c_mean)
 
         theta_pdr_mean = theta_h2_mean
@@ -1167,7 +1234,9 @@ def compute_pdr_shielding_healpix(
         if visser is not None:
             N_CO_rays = cols["co"]
             if b_CO_kms_grid is not None:
-                b_eff = np.sqrt(cols["co_b2"] / np.maximum(N_CO_rays, N_SHIELD_MIN))
+                b_eff = _effective_b_from_columns(
+                    cols["co_b2"], N_CO_rays, fallback_kms=float(b_CO_kms)
+                )
                 theta_co_rays = visser.theta_interpolated_b(
                     "co",
                     N_CO_rays,
@@ -1175,12 +1244,11 @@ def compute_pdr_shielding_healpix(
                     b_eff,
                 )
             else:
-                theta_co_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=b_kms)
+                theta_co_rays = visser.theta(
+                    "co", N_CO_rays, N_H2_rays, b_kms=float(b_CO_kms)
+                )
 
-            if W_rays is not None:
-                theta_co_mean = (W_chunk * theta_co_rays).sum(axis=1)
-            else:
-                theta_co_mean = theta_co_rays.mean(axis=1)
+            theta_co_mean = _average_rays(theta_co_rays, W_chunk)
             _scatter_candidates_3d(theta_co, candidate_idx_chunk, theta_co_mean)
 
             if theta_CO_pdes_bands is not None:
@@ -1196,10 +1264,7 @@ def compute_pdr_shielding_healpix(
                     )
 
             theta_pdr_rays = f_sh_rays * theta_co_rays
-            if W_rays is not None:
-                theta_pdr_mean = (W_chunk * theta_pdr_rays).sum(axis=1)
-            else:
-                theta_pdr_mean = theta_pdr_rays.mean(axis=1)
+            theta_pdr_mean = _average_rays(theta_pdr_rays, W_chunk)
             _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_pdr_mean)
 
     chi_eff_pdr = chi_arr * theta_pdr

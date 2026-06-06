@@ -108,7 +108,9 @@ def compute_pdr_shielding_1d(
     nCO: Optional[np.ndarray] = None,
     nC: np.ndarray,
     nH2: np.ndarray,
-    b_kms: Optional[float] = None,
+    b_H2_kms: Optional[float] = None,
+    b_CO_kms: Optional[float] = None,
+    b_H2_kms_grid: Optional[np.ndarray] = None,
     b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
@@ -121,12 +123,15 @@ def compute_pdr_shielding_1d(
     if visser is not None and nCO is None:
         raise ValueError("compute_pdr_shielding_1d requires nCO when visser is provided")
     nCO_cgs = None if nCO is None else _as_f64("nCO", nCO)
+    b_H2_grid = None if b_H2_kms_grid is None else _as_f64("b_H2_kms_grid", b_H2_kms_grid)
     b_CO_grid = None if b_CO_kms_grid is None else _as_f64("b_CO_kms_grid", b_CO_kms_grid)
 
     if nH2_cgs.shape != nH_cgs.shape or nC_cgs.shape != nH_cgs.shape:
         raise ValueError("nC and nH2 must match nH shape")
     if nCO_cgs is not None and nCO_cgs.shape != nH_cgs.shape:
         raise ValueError("nCO must match nH shape")
+    if b_H2_grid is not None and b_H2_grid.shape != nH_cgs.shape:
+        raise ValueError("b_H2_kms_grid must match nH shape")
     if b_CO_grid is not None and b_CO_grid.shape != nH_cgs.shape:
         raise ValueError("b_CO_kms_grid must match nH shape")
 
@@ -142,10 +147,28 @@ def compute_pdr_shielding_1d(
 
     from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 
-    if b_kms is None:
-        raise ValueError("b_kms is required for H2 self-shielding")
+    if b_H2_kms is None:
+        raise ValueError("b_H2_kms is required for H2 self-shielding")
+    if b_H2_grid is not None:
+        N_H2_b2 = column_to_outer_boundary_1d(
+            mesh,
+            nH2_cgs * b_H2_grid * b_H2_grid,
+            axis_name=axis_name,
+            axis_index=axis_index,
+            outer=outer,
+        )
+        b_H2_eff = np.sqrt(
+            np.divide(
+                N_H2_b2,
+                N_H2,
+                out=np.full_like(N_H2, float(b_H2_kms) ** 2),
+                where=N_H2 > N_SHIELD_MIN,
+            )
+        )
+    else:
+        b_H2_eff = float(b_H2_kms)
 
-    theta_h2 = h2_self_shielding_db96(N_H2, b5=float(b_kms))
+    theta_h2 = h2_self_shielding_db96(N_H2, b5=b_H2_eff)
 
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
     if visser is not None:
@@ -153,6 +176,8 @@ def compute_pdr_shielding_1d(
             mesh, nCO_cgs, axis_name=axis_name, axis_index=axis_index, outer=outer
         )
         if b_CO_grid is not None:
+            if b_CO_kms is None:
+                raise ValueError("b_CO_kms is required when b_CO_kms_grid is supplied")
             N_CO_b2 = column_to_outer_boundary_1d(
                 mesh,
                 nCO_cgs * b_CO_grid * b_CO_grid,
@@ -160,10 +185,19 @@ def compute_pdr_shielding_1d(
                 axis_index=axis_index,
                 outer=outer,
             )
-            b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
+            b_eff = np.sqrt(
+                np.divide(
+                    N_CO_b2,
+                    N_CO,
+                    out=np.full_like(N_CO, float(b_CO_kms) ** 2),
+                    where=N_CO > N_SHIELD_MIN,
+                )
+            )
             theta_co = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
         else:
-            theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+            if b_CO_kms is None:
+                raise ValueError("b_CO_kms is required for scalar CO shielding")
+            theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_CO_kms))
 
     AH2 = 1.17e-8
     tau_H2 = 1.2e-14 * 2.0 * N_H2
@@ -185,7 +219,7 @@ def compute_co_shielding_1d(
     visser: VisserShielding,
     nCO: np.ndarray,
     nH2: np.ndarray,
-    b_kms: float,
+    b_CO_kms: float,
     b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
@@ -218,9 +252,16 @@ def compute_co_shielding_1d(
             axis_index=axis_index,
             outer=outer,
         )
-        b_eff = np.sqrt(N_CO_b2 / np.maximum(N_CO, N_SHIELD_MIN))
+        b_eff = np.sqrt(
+            np.divide(
+                N_CO_b2,
+                N_CO,
+                out=np.full_like(N_CO, float(b_CO_kms) ** 2),
+                where=N_CO > N_SHIELD_MIN,
+            )
+        )
         theta_co = visser.theta_interpolated_b("co", N_CO, N_H2, b_eff)
     else:
-        theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_kms))
+        theta_co = visser.theta("co", N_CO, N_H2, b_kms=float(b_CO_kms))
     chi_eff = chi_arr * theta_co
     return theta_co, chi_eff

@@ -53,7 +53,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
-    _shielding_b_grid_from_microturbulence,
+    _shielding_b_grid_or_none,
     _warn_if_co_phase_settings_ignored,
     _model_microturbulence_grid_kms,
 )
@@ -141,17 +141,19 @@ class Gow17TimeStepper:
             float(self.temperature_cfg["Tgas_floor"]),
             float(self.temperature_cfg["Tgas_ceiling"]),
         )
-        self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
+        (
+            self.b_H2_kms,
+            self.b_H2_kms_arr,
+            self.b_CO_kms,
+            self.b_CO_kms_arr,
+            self.shielding_linewidth_meta,
+        ) = _resolve_shielding_linewidth(
             T_init,
             v_turb_grid_kms,
         )
-        self.b_CO_kms_grid = _shielding_b_grid_from_microturbulence(
-            rad,
-            self.b_CO_kms_arr,
-        )
-        self.shielding_linewidth_meta["microturbulence_spatially_constant"] = (
-            self.b_CO_kms_grid is None
-        )
+        self.b_H2_kms_grid = _shielding_b_grid_or_none(self.b_H2_kms_arr)
+        self.b_CO_kms_grid = _shielding_b_grid_or_none(self.b_CO_kms_arr)
+        self.shielding_linewidth_meta["b_H2_ray_grid"] = self.b_H2_kms_grid is not None
         self.shielding_linewidth_meta["b_CO_ray_grid"] = self.b_CO_kms_grid is not None
 
         self.abstol = _build_gow17_abstol(cfg, self.abstol0)
@@ -209,8 +211,8 @@ class Gow17TimeStepper:
         self.xCtot_flat = self.Zg_arr * float(XC_STD)
         self.xOtot_flat = self.Zg_arr * float(XO_STD)
 
-        self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
-            self.b_kms,
+        self.b_CO_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
+            self.b_CO_kms,
             self.shielding_linewidth_meta,
         )
         self.co_phase_params = _resolve_co_phase_runtime_params(cfg)
@@ -358,20 +360,22 @@ class Gow17TimeStepper:
         ).reshape(self.ncells)
         ensure_microturbulence_field(self.rad.model, diskbridge.params)
         v_turb_grid_kms = _model_microturbulence_grid_kms(self.rad, self.shape)
-        self.b_kms, self.b_CO_kms_arr, self.shielding_linewidth_meta = _resolve_shielding_linewidth(
+        (
+            self.b_H2_kms,
+            self.b_H2_kms_arr,
+            self.b_CO_kms,
+            self.b_CO_kms_arr,
+            self.shielding_linewidth_meta,
+        ) = _resolve_shielding_linewidth(
             T_flat.reshape(self.shape),
             v_turb_grid_kms,
         )
-        self.b_CO_kms_grid = _shielding_b_grid_from_microturbulence(
-            self.rad,
-            self.b_CO_kms_arr,
-        )
-        self.shielding_linewidth_meta["microturbulence_spatially_constant"] = (
-            self.b_CO_kms_grid is None
-        )
+        self.b_H2_kms_grid = _shielding_b_grid_or_none(self.b_H2_kms_arr)
+        self.b_CO_kms_grid = _shielding_b_grid_or_none(self.b_CO_kms_arr)
+        self.shielding_linewidth_meta["b_H2_ray_grid"] = self.b_H2_kms_grid is not None
         self.shielding_linewidth_meta["b_CO_ray_grid"] = self.b_CO_kms_grid is not None
-        self.b_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
-            self.b_kms,
+        self.b_CO_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
+            self.b_CO_kms,
             self.shielding_linewidth_meta,
         )
 
@@ -393,7 +397,9 @@ class Gow17TimeStepper:
             nH_cm3=self.nH_cm3,
             chi_dust_arr=chi_dust_arr,
             visser=self.visser,
-            b_kms=self.b_kms,
+            b_H2_kms=self.b_H2_kms,
+            b_CO_kms=self.b_CO_kms,
+            b_H2_kms_grid=self.b_H2_kms_grid,
             b_CO_kms_grid=self.b_CO_kms_grid,
             nside=self.nside,
         )
@@ -520,6 +526,7 @@ class Gow17TimeStepper:
             )
             rad.Tgas_gow17 = Quantity(T_out, "K")
             rad.gas_temperature = rad.Tgas_gow17
+        rad.b_H2_kms = Quantity(self.b_H2_kms_arr.reshape(self.shape), "km/s")
         rad.b_CO_kms = Quantity(self.b_CO_kms_arr.reshape(self.shape), "km/s")
 
         return {
@@ -528,6 +535,7 @@ class Gow17TimeStepper:
             "theta_h2": theta_h2_arr,
             "theta_c": theta_c_arr,
             "theta_CO_pdes": theta_CO_pdes_arr,
+            "b_H2_kms": self.b_H2_kms_arr.reshape(self.shape),
             "b_CO_kms": self.b_CO_kms_arr.reshape(self.shape),
             "shielding_linewidth": dict(self.shielding_linewidth_meta),
             "co_phase_params": dict(self.co_phase_params),
