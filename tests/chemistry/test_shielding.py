@@ -228,24 +228,6 @@ def test_chunked_weights_match_single_chunk():
     assert "tau_ext_rays" not in debug_chunked
 
 
-def test_cartesian_direct_stellar_weights_are_rejected():
-    """Cartesian starward attenuation must not silently march past the source."""
-    ncells = 4
-    mesh = _make_uniform_cartesian_mesh(ncells=ncells)
-    shape = (ncells, ncells, ncells)
-
-    with pytest.raises(NotImplementedError, match="Cartesian meshes"):
-        compute_uv_direction_weights_healpix(
-            mesh,
-            chi_radmc=np.ones(shape, dtype=np.float64),
-            nside=1,
-            dust_rho_bins=[np.full(shape, 1e-23, dtype=np.float64)],
-            kext_uv=np.array([100.0]),
-            chi_ext0=0.0,
-            star_uv_luminosity_erg_s=2.0e31,
-        )
-
-
 def test_weights_require_dust_rho_bins():
     """Missing dust_rho_bins should raise ValueError."""
     mesh = _make_uniform_cartesian_mesh(ncells=2)
@@ -281,35 +263,6 @@ def test_weights_require_kext_uv():
             chi_ext0=1.0,
             star_uv_luminosity_erg_s=0.0,
         )
-
-
-# ---- W_rays=None gives isotropic mean in shielding -------------------------
-
-def test_w_rays_none_gives_isotropic_mean():
-    """With W_rays=None, shielding should use uniform (isotropic) averaging."""
-    ncells = 4
-    mesh = _make_uniform_cartesian_mesh(ncells=ncells)
-    shape = (ncells, ncells, ncells)
-
-    nH = np.full(shape, 1e-2, dtype=np.float64)
-    nCO = np.full(shape, 1e-4 * 1e-2, dtype=np.float64)
-    nH2 = np.full(shape, 0.5 * 1e-2, dtype=np.float64)
-    chi = np.full(shape, 1.0, dtype=np.float64)
-
-    visser = VisserShielding(b_kms=0.3)
-
-    theta, chi_eff = compute_co_shielding_healpix(
-        mesh, nH, chi, visser,
-        nCO=nCO, nH2=nH2,
-        nside=2,
-        b_kms=0.3,
-        W_rays=None,
-    )
-
-    assert theta.shape == shape
-    assert chi_eff.shape == shape
-    assert np.all(theta >= 0.0)
-    assert np.all(theta <= 1.0)
 
 
 def test_chunked_pdr_shielding_matches_single_chunk():

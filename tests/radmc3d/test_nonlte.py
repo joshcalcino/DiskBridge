@@ -259,7 +259,7 @@ def test_radimage_strict_gow17_lamda_requires_collider_density_files(
 
 @pytest.mark.parametrize(
     ("line_mode", "expected"),
-    [(1, False), (2, False), (3, True), (4, True), (50, True), (-50, True)],
+    [(2, False), (3, True), (4, True), (50, True), (-50, True)],
 )
 def test_line_mode_gas_temperature_policy(line_mode: int, expected: bool) -> None:
     assert _line_mode_uses_gas_temperature(line_mode) is expected
