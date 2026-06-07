@@ -38,7 +38,7 @@ from diskbridge.radmc3d.model import RadModel
 from diskbridge._units import Quantity
 
 
-REF_DIR = Path(__file__).parent / "reference" / "gow17_fig2_external_pdr"
+REF_DIR = Path(__file__).resolve().parents[1] / "reference" / "gow17_fig2_external_pdr"
 SPEC_LIST_REF = ["He+", "OHx", "CHx", "CO", "C+", "HCO+", "H2", "H+", "H3+", "H2+", "S+", "Si+", "O+", "E"]
 IDX_REF = {n: i for i, n in enumerate(SPEC_LIST_REF)}
 EXTERNAL_PDR_RTOL = 1.0e-12
