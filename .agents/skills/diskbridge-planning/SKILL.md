@@ -34,6 +34,14 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
 9. Define risks and human decisions.
 10. Define completion criteria.
 
+## RADMC-3D I/O Invariant
+
+For any plan that touches RADMC-3D I/O, data loading, data writing, cached
+RADMC-3D outputs, UV products, or line-transfer staging, require one supported
+binary-only RADMC-3D data representation. Do not plan broad ASCII/text fallback
+discovery or parallel data structures for the same RADMC-3D quantity. Plans
+must state how binary file names, units, shapes, and axis order remain stable.
+
 ## Required Sections
 
 Every plan must include:

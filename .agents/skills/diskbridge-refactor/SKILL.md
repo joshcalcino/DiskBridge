@@ -42,6 +42,10 @@ Improve structure without changing scientific behavior unless the user explicitl
 - Keep Pint quantities at public boundaries.
 - Keep Numba/performance kernels unitless and array-oriented.
 - Preserve existing file formats unless the user explicitly requests a format change.
+- For RADMC-3D I/O, preserve the binary-only policy and one supported internal
+  file-backed data representation. Do not introduce ASCII/text fallback paths,
+  broad extension discovery, or parallel shape/unit/axis-order representations
+  for the same RADMC-3D quantity.
 - Keep module boundaries clear:
   - chemistry logic belongs in `src/diskbridge/chemistry/`
   - shielding belongs in `src/diskbridge/chemistry/shielding/`

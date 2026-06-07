@@ -21,6 +21,15 @@ dependencies = [
   "h5py>=3.8"
 ]
 
+[project.optional-dependencies]
+docs = [
+  "sphinx>=7.2",
+  "myst-parser>=2.0",
+  "numpydoc>=1.6",
+  "sphinxcontrib-bibtex>=2.6",
+  "pydata-sphinx-theme>=0.15",
+]
+
 [project.urls]
 Homepage = "https://github.com/joshcalcino/fargo2radmc3d"
 

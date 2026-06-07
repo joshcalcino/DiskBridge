@@ -50,6 +50,8 @@ Project plans live in `projects/active/` while work is ongoing. When complete, m
 
 Stable user-facing documentation belongs in `docs/`. Documentation must describe current behavior only, not the history of corrections or previous implementations. Release-facing summaries belong in `CHANGELOG.md`.
 
+The documentation is a Sphinx site (myst-parser, autodoc/autosummary, numpydoc, sphinxcontrib-bibtex, pydata-sphinx-theme). The authoring standard is `docs/contributing/documentation.md`: Markdown guide pages with an Overview / Usage / Deep dive / References structure, NumPy-style docstrings, and literature cited inline as author-year text with per-page ADS links resolved from `docs/refs.bib`. Follow it for any documentation change.
+
 ## Skill Usage
 
 When using an AI coding agent that supports skills, use the DiskBridge skills for non-trivial work. Before editing code, state which skill or skills are being used.

@@ -82,6 +82,10 @@ Existing validations may use established `out/` directories, but new validations
   CLI flags. Put ordinary defaults in committed config or parameter files.
   Avoid adding many optional arguments or "smoke" modes to validation scripts
   unless the user explicitly requests them.
+- For validations that consume or produce RADMC-3D files, use the supported
+  binary-only RADMC-3D data representation. Do not add validation-local
+  ASCII/text fallback paths or alternate data structures that bypass production
+  RADMC-3D I/O policy.
 - Do not present toy "smoke" runs as validation evidence. For Monte Carlo
   RADMC-3D validations, configure enough photon packets per relevant cell to
   meet the stated noise target; a 1% target implies roughly `1e4` packets per

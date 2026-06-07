@@ -129,13 +129,20 @@ class ShieldingGrid2D:
 
 
 class VisserShielding:
-    """
-    Loader/interpolator for Visser+09 CO shielding functions.
+    """Loader and interpolator for the Visser CO shielding tables.
 
-    Typical usage
-    -------------
-    vis = VisserShielding(data_dir=".../visser_tables")
-    theta = vis.theta("co", Nco, Nh2, b_kms=0.3)
+    Downloads and parses the Leiden CO shielding archive and evaluates the
+    interpolated shielding factor for an isotopologue as a function of the CO
+    and H2 column densities at a given Doppler parameter.
+
+    Examples
+    --------
+    >>> vis = VisserShielding(data_dir=".../visser_tables")
+    >>> theta = vis.theta("co", Nco, Nh2, b_kms=0.3)
+
+    References
+    ----------
+    Visser et al. 2009, A&A 503, 323; see the shielding guide.
     """
 
     def __init__(
@@ -178,24 +185,37 @@ class VisserShielding:
         Nh2: ArrayLike,
         b_kms: Optional[float] = None,
     ) -> np.ndarray:
-        """
-        Evaluate shielding theta for one isotopologue.
+        """Evaluate the CO shielding factor for one isotopologue.
+
+        Interpolates the loaded Visser table in ``log10(Nco)`` and
+        ``log10(Nh2)``. Cells below the table floor in both columns are treated
+        as unshielded (theta = 1).
 
         Parameters
         ----------
         isotop : str
-            "co", "13co", "c18o", "c17o" (case-insensitive).
-        Nco, Nh2 : scalar or ndarray
-            Column densities [cm^-2].
+            One of "co", "13co", "c18o", "c17o" (case-insensitive).
+        Nco, Nh2 : float or ndarray
+            CO and H2 column densities [cm^-2]; broadcast against each other.
         b_kms : float, optional
-            If given and differs from loaded file, user should load another file.
-        log_floor : (logNco_min, logNh2_min)
-            Floors to avoid log10(0).
+            Doppler parameter [km/s]. Must match the loaded table; load a
+            different file for another value.
 
         Returns
         -------
         ndarray
-            theta values.
+            Shielding factor in [0, 1], broadcast to the common input shape.
+
+        Raises
+        ------
+        KeyError
+            If ``isotop`` is not present in the loaded table.
+        ValueError
+            If ``b_kms`` differs from the loaded table's Doppler parameter.
+
+        References
+        ----------
+        Visser et al. 2009, A&A 503, 323; see the shielding guide.
         """
         iso = isotop.lower()
         if iso not in self._grids:

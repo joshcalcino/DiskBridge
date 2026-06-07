@@ -29,6 +29,14 @@ Implement the requested feature with the smallest clean design that fits DiskBri
 - Do not silently change defaults.
 - Document new user-facing options in the relevant docstring or config comments.
 
+## RADMC-3D I/O Invariant
+
+When implementing RADMC-3D readers, writers, UV products, cached outputs, or
+line-transfer staging, support only RADMC-3D binary files and one internal
+file-backed RADMC-3D data representation. Do not add ASCII/text fallbacks,
+broad extension discovery, or parallel data structures for the same quantity.
+Keep units, shapes, axis order, and binary filename policy explicit and tested.
+
 ## Units And Arrays
 
 - Public APIs may accept Pint quantities.

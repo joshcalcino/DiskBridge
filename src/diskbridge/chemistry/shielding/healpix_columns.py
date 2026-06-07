@@ -745,6 +745,44 @@ def compute_column_rays_healpix(
     candidate_idx: Optional[np.ndarray] = None,
     cell_centers: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Integrate density fields outward along HEALPix rays from candidate cells.
+
+    For each candidate cell and each of ``npix = 12 * nside**2`` HEALPix
+    directions, integrates every field in ``fields`` outward to the domain
+    boundary, producing a column density per ray. Ray geometry can be passed in
+    (``tracer``, ``dirs``, ``candidate_idx``, ``cell_centers``) or is built from
+    ``candidate_mask``. When ``cache_dir`` is given and a ``candidate_mask`` is
+    used, per-field column results are cached and reused.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        DiskBridge mesh (spherical or cartesian).
+    fields : dict of str to ndarray
+        Named density fields [cm^-3] on the mesh grid to integrate.
+    nside : int
+        HEALPix Nside; the number of ray directions is ``12 * nside**2``.
+    candidate_mask : ndarray of bool, optional
+        Mesh-shaped mask selecting the cells to trace from. Required unless the
+        ray geometry is supplied directly.
+    progress_chunks : int, optional
+        If set, ray integration is split into this many logged chunks.
+    cache_dir : Path or str, optional
+        Directory for caching ray geometry and per-field column results.
+    tracer, dirs, candidate_idx, cell_centers : optional
+        Precomputed ray geometry. When all are supplied, geometry construction
+        is skipped.
+
+    Returns
+    -------
+    candidate_idx : ndarray
+        Flat indices of the traced candidate cells, shape (n_candidates,).
+    dirs : ndarray
+        Unit ray directions, shape (npix, 3).
+    columns : dict of str to ndarray
+        Column density per ray for each input field, each of shape
+        (n_candidates, npix) [cm^-2].
+    """
     if candidate_mask is not None:
         candidate_mask = np.asarray(candidate_mask, dtype=bool)
 

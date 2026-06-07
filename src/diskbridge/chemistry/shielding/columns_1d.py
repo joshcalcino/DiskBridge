@@ -114,6 +114,55 @@ def compute_pdr_shielding_1d(
     b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
+    """Compute 1-D PDR shielding factors (H2, CO, C) and the effective UV field.
+
+    Reduced-geometry counterpart of
+    :func:`~diskbridge.chemistry.shielding.healpix_columns.compute_pdr_shielding_healpix`
+    for effectively 1-D meshes. Columns are integrated along the effective
+    radial axis to the outer boundary, then per-species self-shielding factors
+    are evaluated: H2 from Draine & Bertoldi, CO from the Visser tables (when
+    ``visser`` is supplied), and C from atomic-carbon continuum plus H2 line
+    overlap.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        DiskBridge mesh that is effectively 1-D.
+    nH : ndarray
+        Total hydrogen number density [cm^-3].
+    chi : ndarray
+        Dust-attenuated UV field (Draine units).
+    visser : VisserShielding, optional
+        Preloaded Visser CO shielding table. When omitted, CO shielding is unity
+        and ``nCO`` is not required.
+    nCO : ndarray, optional
+        CO number density [cm^-3]; required when ``visser`` is given.
+    nC : ndarray
+        Atomic carbon number density [cm^-3].
+    nH2 : ndarray
+        H2 number density [cm^-3].
+    b_H2_kms, b_CO_kms : float, optional
+        Representative Doppler parameters [km/s] for H2 and CO shielding.
+    b_H2_kms_grid, b_CO_kms_grid : ndarray, optional
+        Per-cell Doppler parameters [km/s]; when given, a column-weighted
+        effective ``b`` is used in place of the scalar value.
+    outer : str, optional
+        Direction of the outward column integration along the effective axis.
+
+    Returns
+    -------
+    theta_h2, theta_co, theta_c : ndarray
+        Per-cell H2, CO, and C shielding factors in [0, 1].
+    theta_pdr : ndarray
+        Combined factor ``theta_h2 * theta_co``.
+    chi_eff_pdr : ndarray
+        Effective UV field ``chi * theta_pdr``.
+
+    References
+    ----------
+    Draine & Bertoldi 1996, ApJ 468, 269; Visser et al. 2009, A&A 503, 323;
+    see the shielding guide.
+    """
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
 
@@ -223,6 +272,47 @@ def compute_co_shielding_1d(
     b_CO_kms_grid: Optional[np.ndarray] = None,
     outer: str = "max",
 ):
+    """Compute 1-D CO self-shielding factors and the effective UV field.
+
+    Reduced-geometry counterpart of
+    :func:`~diskbridge.chemistry.shielding.healpix_columns.compute_co_shielding_healpix`
+    for effectively 1-D meshes. N(CO) and N(H2) are integrated along the
+    effective radial axis to the outer boundary, and the Visser table is
+    evaluated for the CO shielding factor.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        DiskBridge mesh that is effectively 1-D.
+    nH : ndarray
+        Total hydrogen number density [cm^-3].
+    chi : ndarray
+        Dust-attenuated UV field (Draine units).
+    visser : VisserShielding
+        Preloaded Visser CO shielding table.
+    nCO : ndarray
+        CO number density [cm^-3].
+    nH2 : ndarray
+        H2 number density [cm^-3].
+    b_CO_kms : float
+        Representative Doppler parameter [km/s] for CO shielding.
+    b_CO_kms_grid : ndarray, optional
+        Per-cell Doppler parameter [km/s]; when given, a column-weighted
+        effective ``b`` is used in place of the scalar value.
+    outer : str, optional
+        Direction of the outward column integration along the effective axis.
+
+    Returns
+    -------
+    theta_co : ndarray
+        Per-cell CO shielding factor in [0, 1] (1.0 = unshielded).
+    chi_eff : ndarray
+        Effective UV field ``chi * theta_co``.
+
+    References
+    ----------
+    Visser et al. 2009, A&A 503, 323; see the shielding guide.
+    """
     nH_cgs = _as_f64("nH", nH)
     chi_arr = _as_f64("chi", chi)
     nH2_cgs = _as_f64("nH2", nH2)

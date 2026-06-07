@@ -20,6 +20,8 @@ Check whether the plan:
 - identifies affected modules;
 - identifies public APIs and config keys;
 - identifies file outputs and array-shape assumptions;
+- identifies whether RADMC-3D I/O remains binary-only with one supported
+  internal file-backed data representation;
 - includes appropriate fast pytest tests;
 - includes simple objective physics tests when they are cheap and deterministic;
 - includes validation work when physical behavior changes need slower, broader, or human-interpreted checks;
@@ -38,6 +40,8 @@ Check whether the implementation:
 - introduced duplicate logic;
 - silently changed defaults;
 - changed units, shapes, or file outputs;
+- added ASCII/text RADMC-3D fallbacks, broad extension discovery, or parallel
+  data structures for the same RADMC-3D quantity;
 - added useful tests;
 - added or proposed required validations;
 - updated documentation;

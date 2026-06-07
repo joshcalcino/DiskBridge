@@ -138,6 +138,9 @@ Do not keep temporary one-off tests that only inspect a private helper unless th
 - unit conversion tests
 - shape/order tests
 - file writer/reader smoke tests
+- RADMC-3D binary-only reader/writer tests, including rejection of unsupported
+  ASCII/text files and confirmation that one internal file-backed data
+  representation preserves units, shapes, and axis order
 - small-grid shielding tests
 - small-grid UV product tests
 - budget conservation tests
