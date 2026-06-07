@@ -1,0 +1,47 @@
+---
+name: diskbridge-implementation
+description: Implement a new DiskBridge feature or extend an existing scientific workflow. Use when adding code, changing APIs, wiring config, adding physics options, changing outputs, or implementing an approved project plan.
+---
+
+# DiskBridge Implementation Skill
+
+Use this skill when the user asks to add new functionality, implement a physics extension, add a workflow option, expose a new API, or wire together existing DiskBridge components.
+
+## Goal
+
+Implement the requested feature with the smallest clean design that fits DiskBridge's existing architecture.
+
+## Before Coding
+
+1. Identify whether the change affects physics, units, performance, file I/O, configuration, validation, or plotting/diagnostics.
+2. Check existing modules before creating new ones.
+3. Avoid adding new dependencies unless the user explicitly approves.
+4. If the task belongs to an active project, update the relevant file in `projects/` before editing code.
+
+## Design Rules
+
+- Prefer explicit, readable code over clever abstractions.
+- Prefer one high-level callable function for a workflow.
+- Keep low-level numerical kernels small.
+- Keep physical assumptions close to the code that uses them.
+- Do not duplicate existing config parsing.
+- Do not add broad fallback behavior.
+- Do not silently change defaults.
+- Document new user-facing options in the relevant docstring or config comments.
+
+## Units And Arrays
+
+- Public APIs may accept Pint quantities.
+- Internal heavy numerical routines should use raw NumPy arrays and explicit CGS magnitudes.
+- Be explicit about shape expectations.
+- Avoid hidden transposes or implicit axis-order assumptions.
+
+## Completion Criteria
+
+A feature is complete when:
+
+1. The implementation is wired into the intended public path.
+2. A fast pytest test exists if the behavior is deterministic.
+3. A validation case is proposed if the feature changes physical interpretation.
+4. Relevant docs or project notes are updated.
+5. The final response states what was tested and what still needs scientific validation.

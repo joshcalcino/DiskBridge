@@ -1,0 +1,828 @@
+Yes. Verification should be a ladder, not one big “does the final CO cube look reasonable?” test. I would verify four separate things:
+
+1. The statistical-equilibrium math is correct.
+2. The HEALPix escape-probability kernel is correct.
+3. The levelpop_<species>.dat handoff to RADMC-3D is correct.
+4. The full disk+ISM science model is numerically converged and physically interpretable.
+
+RADMC-3D’s documented external-population pathway is lines_mode = 50, where it reads files like levelpop_co.dat; those files contain one row per cell and level populations in cm^-3, not fractional populations. RADMC-3D’s manual also explicitly recommends inspecting level populations and making simple tests because line transfer in 3D velocity fields is numerically delicate.  ￼
+
+⸻
+
+1. First verification target: file and array integrity
+
+Before checking physics, verify that the data are internally consistent.
+
+For every species run, check:
+
+\sum_i n_i^\mathrm{level}(\mathbf{x})
+=
+n_\mathrm{species}(\mathbf{x})
+
+in every cell.
+
+This is the single most important invariant. If it fails, either the solver populations are wrong, the cell ordering is wrong, or the writer is wrong.
+
+For each levelpop_<species>.dat, require:
+
+n_cells matches amr_grid.inp
+n_levels matches the written level list
+all level populations are finite
+all level populations are >= 0
+sum(levelpop over levels) == numberdens_species
+level numbers are valid 1-based molecule-file levels
+
+The tolerance should be tight:
+
+absolute tolerance: 1e-40 cm^-3 for nearly empty cells
+relative tolerance: 1e-10 to 1e-8 for populated cells
+
+Also write a read-back test:
+
+write levelpop
+read levelpop
+compare to original levelpop array
+
+This catches formatting, precision, ordering, and row/column transposition bugs.
+
+⸻
+
+2. Verify RADMC cell ordering
+
+This deserves its own test because a cell-ordering error can produce plausible-looking but physically meaningless images.
+
+Construct a fake species density field with a unique spatial fingerprint, for example:
+
+n(x_i,y_j,z_k)
+=
+10^0 i + 10^3 j + 10^6 k
+
+or the spherical-grid equivalent. Then make a fake level-population file with, say,
+
+n_0 = 0.25 n_\mathrm{species},
+\qquad
+n_1 = 0.75 n_\mathrm{species}.
+
+Write:
+
+numberdens_<species>.binp
+levelpop_<species>.dat
+
+Then read both back with DiskBridge’s own readers and assert:
+
+n_0+n_1=n_\mathrm{species}
+
+cell by cell in RADMC order.
+
+This test should be run for every supported grid geometry, especially spherical grids, because spherical RADMC ordering is easy to get wrong.
+
+⸻
+
+3. Verify the molecular data parser
+
+The new solver depends on the molecule file being parsed exactly.
+
+For each bundled molecule file:
+
+molecule_co.inp
+molecule_catom.inp
+molecule_hco+.inp
+
+test that the parser returns:
+
+correct molecular weight
+correct number of levels
+correct number of radiative transitions
+correct level energies
+correct statistical weights
+correct upper/lower transition indices
+correct Einstein A values
+correct frequencies
+correct collision table count
+correct collision temperature grids
+
+Use a few hard-coded reference values from the molecule files.
+
+Also verify Einstein coefficient consistency internally:
+
+B_{ul}
+=
+\frac{c^2}{2h\nu^3} A_{ul},
+
+B_{lu}
+=
+\frac{g_u}{g_l} B_{ul}.
+
+This catches unit mistakes in frequency, energy, or degeneracy.
+
+⸻
+
+4. Verify collision rates
+
+The collision-rate test should be independent of the full population solver.
+
+For one cell with known:
+
+Tgas
+n_collider_1
+n_collider_2
+...
+
+compute:
+
+C_{ul}
+=
+\sum_p n_p \gamma_{ul,p}(T)
+
+and
+
+C_{lu}
+=
+C_{ul}
+\frac{g_u}{g_l}
+\exp[-(E_u-E_l)/kT].
+
+Compare this directly against a small reference calculation, ideally using the existing lines.py implementation as the oracle for the same molecule file and collider densities.
+
+Test three temperatures:
+
+near lower collision-table bound
+middle of table
+near upper collision-table bound
+
+Also require that the code raises a clear error if a populated cell has a gas temperature outside the tabulated collision-rate range.
+
+⸻
+
+5. Verify the statistical-equilibrium matrix with a two-level analytic solution
+
+A two-level system gives an exact test.
+
+For levels l and u, with a prescribed escape probability \beta, the equilibrium solution is:
+
+n_u
+\left[
+C_{ul}
++
+A_{ul}\beta
++
+B_{ul}\beta J_\mathrm{bg}
+\right]
+=
+n_l
+\left[
+C_{lu}
++
+B_{lu}\beta J_\mathrm{bg}
+\right].
+
+So:
+
+\frac{n_u}{n_l}
+=
+\frac{
+C_{lu}+B_{lu}\beta J_\mathrm{bg}
+}{
+C_{ul}+A_{ul}\beta+B_{ul}\beta J_\mathrm{bg}
+}.
+
+Build a fake two-level molecule and compare the numerical solver to this formula over a grid of:
+
+density: very low, intermediate, very high
+temperature: cold, warm
+beta: 1, 0.1, 0.01, 1e-4
+background: off and CMB-only
+
+Expected limits:
+
+At high collider density,
+
+\frac{n_u}{n_l}
+\rightarrow
+\frac{g_u}{g_l}
+\exp(-h\nu/kT_\mathrm{gas}).
+
+With collisions removed and a Planck background at T_\mathrm{bg},
+
+\frac{n_u}{n_l}
+\rightarrow
+\frac{g_u}{g_l}
+\exp(-h\nu/kT_\mathrm{bg}).
+
+With collisions removed and no background, all population should drain to the ground state.
+
+This test is the cleanest way to prove the SE matrix construction is correct.
+
+⸻
+
+6. Verify LTE recovery in the multi-level solver
+
+For the real molecule files, run artificial one-zone models with very high collider density.
+
+For each species:
+
+CO
+C
+HCO+
+
+set:
+
+Tgas = fixed value
+collider density = extremely high
+beta = any finite value
+
+The solved fractional populations should approach:
+
+f_i^\mathrm{LTE}
+=
+\frac{
+g_i \exp(-E_i/kT)
+}{
+\sum_j g_j \exp(-E_j/kT)
+}.
+
+Check at several temperatures:
+
+10 K
+30 K
+100 K
+300 K
+
+Use only temperatures covered by the relevant collision tables.
+
+Acceptance criterion:
+
+max relative error in populated levels < 1e-6 to 1e-4
+
+The tolerance can be looser for extremely tiny high-level populations.
+
+⸻
+
+7. Verify low-density behavior
+
+Run one-zone models at very low collider density.
+
+Expected behavior:
+
+With CMB enabled, low-frequency transitions should not become arbitrarily cold; they should be influenced by T_\mathrm{bg}.
+
+With no external background, excited states should become weakly populated unless there is collisional pumping.
+
+This test should be done for:
+
+CO low-J
+C fine-structure levels
+HCO+ low-J
+
+The goal is not to match a disk model. The goal is to confirm that the solver behaves correctly in the ISM-like limit.
+
+⸻
+
+8. Verify the escape-probability function itself
+
+Test:
+
+\beta(\tau)=\frac{1-e^{-\tau}}{\tau}.
+
+Required behavior:
+
+beta(0) = 1 by limit
+0 < beta <= 1
+beta decreases monotonically with tau
+beta ≈ 1 - tau/2 + tau^2/6 for tau << 1
+beta ≈ 1/tau for tau >> 1
+
+Use logarithmically spaced optical depths:
+
+tau = 1e-12 ... 1e8
+
+This catches catastrophic cancellation at small optical depth and overflow/underflow problems at large optical depth.
+
+⸻
+
+9. Verify the HEALPix ray geometry without line physics
+
+Before integrating optical depth, test path lengths.
+
+For a uniform Cartesian box, start rays from known locations:
+
+box center
+off-center cell
+near-boundary cell
+
+For each HEALPix direction \hat n, the expected geometric path length to the boundary is analytically known:
+
+s_\mathrm{exit}
+=
+\min_{\mathrm{positive}}
+\left[
+\frac{x_\mathrm{face}-x_0}{n_x},
+\frac{y_\mathrm{face}-y_0}{n_y},
+\frac{z_\mathrm{face}-z_0}{n_z}
+\right].
+
+Compare the DDA-integrated path length to this analytic value.
+
+Acceptance criterion:
+
+relative error < 1e-10 for simple grids
+
+This verifies:
+
+ray starts at cell center
+first segment length is correct
+cell-face crossings are correct
+boundary termination is correct
+no direction has the wrong sign convention
+
+⸻
+
+10. Verify optical-depth integration in a static uniform medium
+
+Set:
+
+alpha0 = constant
+velocity = 0
+a_line = constant
+
+Then for each direction:
+
+\tau_k = \alpha_0 s_{\mathrm{exit},k}.
+
+The HEALPix kernel should reproduce:
+
+\beta
+=
+\frac{1}{N_\mathrm{pix}}
+\sum_k
+\frac{1-\exp(-\alpha_0 s_{\mathrm{exit},k})}
+{\alpha_0 s_{\mathrm{exit},k}}.
+
+Compare the compiled HEALPix kernel against a simple, slow Python reference implementation.
+
+Run this for:
+
+alpha0 very small
+alpha0 moderate
+alpha0 very large
+
+This verifies the optical-depth accumulation and beta averaging.
+
+⸻
+
+11. Verify velocity coherence
+
+The production escape kernel includes the velocity-overlap factor:
+
+\exp
+\left[
+-
+\left(
+\frac{
+[\vec v(\mathbf{x}')-\vec v(\mathbf{x})]\cdot\hat n
+}{
+a_\mathrm{line}(\mathbf{x}')}
+\right)^2
+\right].
+
+Test this in a one-dimensional velocity-gradient setup.
+
+Example:
+
+uniform alpha0
+uniform a_line
+velocity v_z = q z
+rays along +z and -z
+
+For a ray along z,
+
+\tau
+=
+\int_0^L
+\alpha_0
+\exp[-(qs/a)^2]
+ds.
+
+This has the analytic form:
+
+\tau
+=
+\alpha_0
+\frac{\sqrt{\pi}a}{2q}
+\operatorname{erf}(qL/a).
+
+Compare the numerical HEALPix/DDA result to this expression for rays aligned with the gradient, and to a high-resolution quadrature for oblique directions.
+
+Expected behavior:
+
+larger velocity gradient → smaller effective optical depth
+larger microturbulent width → larger velocity-coherent column
+zero velocity gradient → static column result
+
+This test is crucial. It verifies that the solver is not treating all material to the boundary as resonant when the velocity field Doppler-shifts it out of the local line.
+
+⸻
+
+12. Verify HEALPix angular convergence
+
+For a smooth test model, run:
+
+nside = 1
+nside = 2
+nside = 4
+nside = 8
+
+Track:
+
+beta_min
+beta_median
+beta_max
+level populations
+final line luminosity
+
+Expected behavior:
+
+nside=1 may be rough
+nside=2 should be qualitatively right
+nside=4 should be close
+nside=8 should be a convergence check
+
+For production, define a criterion such as:
+
+integrated line flux changes by < 2–5% from nside=4 to nside=8
+important line-ratio diagnostics change by < 2–5%
+
+If the disk is geometrically thin or strongly shadowed, you may need a higher nside.
+
+⸻
+
+13. Verify fixed-point convergence
+
+For each species and test model, record per iteration:
+
+iteration number
+max fractional population change
+median fractional population change
+beta_min
+beta_median
+beta_max
+number of cells with negative opacity factor
+number of failed cells
+
+The convergence curve should usually decrease monotonically or nearly monotonically. Some mild non-monotonicity is not automatically fatal, but sustained oscillation means the iteration needs damping.
+
+The production solver should fail loudly if:
+
+population error does not reach convcrit
+any important cell has non-finite population
+any important cell has significantly negative population
+any important transition has significantly negative opacity
+
+For a first acceptance criterion:
+
+convcrit = 1e-5
+maxiter = 60
+
+Then verify that tightening to:
+
+convcrit = 1e-6
+
+does not materially change the final line fluxes or line ratios.
+
+⸻
+
+14. Verify with a constant one-zone box rendered by RADMC-3D
+
+This is the first end-to-end RADMC-3D test.
+
+Create a uniform box:
+
+constant gas temperature
+constant species density
+constant level populations
+zero velocity
+constant microturbulence
+no dust, or dust disabled
+
+Write levelpop_<species>.dat.
+
+Render a line through the box with lines_mode = 50.
+
+For a uniform slab, the formal solution is:
+
+I_\nu
+=
+I_{\nu,0} e^{-\tau_\nu}
++
+S_\nu
+\left(1-e^{-\tau_\nu}\right).
+
+With no incoming background:
+
+I_\nu
+=
+S_\nu
+\left(1-e^{-\tau_\nu}\right).
+
+The source function from the level populations is:
+
+S_\nu
+=
+\frac{j_\nu}{\alpha_\nu}.
+
+Compare the RADMC-3D output intensity at line center against this analytic solution.
+
+This verifies:
+
+RADMC-3D is reading levelpop_<species>.dat
+units are correct
+line opacity sign is correct
+line source function is correct
+microturbulent width is consistent
+velocity convention is harmless in the zero-velocity case
+
+RADMC-3D’s manual says that lines_mode = 50 makes RADMC-3D read externally supplied population files with the same format as levelpop_co.dat.  ￼
+
+⸻
+
+15. Verify external populations against RADMC-3D’s internal LTE rendering
+
+This is a very useful handoff test.
+
+Construct LTE populations externally:
+
+n_i^\mathrm{level}
+=
+n_\mathrm{species}
+\frac{
+g_i \exp(-E_i/kT)
+}{
+Z(T)
+}.
+
+Write levelpop_<species>.dat, render with:
+
+lines_mode = 50
+
+Then render the same model with RADMC-3D’s internal LTE line rendering.
+
+The two images/spectra should agree within ray-tracing tolerances.
+
+This test verifies that:
+
+level numbering is correct
+population units are correct
+molecule file matches the levelpop file
+RADMC cell order is correct
+RADMC final ray tracing behaves as expected
+
+Use a simple model first, then repeat with:
+
+velocity field on
+microturbulence on
+dust continuum on
+spherical grid
+
+⸻
+
+16. Verify RADMC-3D rendering resolution
+
+Even if the populations are perfect, the final ray tracing can be wrong if the channels or image pixels are under-resolved. RADMC-3D’s manual specifically warns that if the Doppler shift between cells is larger than the intrinsic thermal-plus-microturbulent linewidth, ray tracing can miss line emission; it also describes doppcatch as the way to force substeps through these Doppler jumps.  ￼
+
+For the real disk model, test:
+
+channel width / spectral sampling
+image npix
+doppcatch on/off
+catch_doppler_resolution
+microturbulent width
+
+Acceptance criterion should be based on science quantities:
+
+integrated line flux converged
+line profile shape converged
+peak brightness converged
+line ratios converged
+moment maps stable
+
+Do not trust a channel map that changes substantially when npix or spectral sampling is increased.
+
+⸻
+
+17. Verify physically meaningful limits in the disk+ISM model
+
+For the real model, inspect these maps or histograms:
+
+n_species
+Tgas
+collider densities
+microturbulence
+beta_ul
+tau_escape
+level populations
+excitation temperature
+LTE population ratio
+non-LTE / LTE population ratio
+emissivity
+opacity
+source function
+
+For each important transition, compute an excitation temperature:
+
+T_\mathrm{ex}
+=
+\frac{h\nu/k}
+{
+\ln\left[
+(g_u n_l)/(g_l n_u)
+\right]
+}.
+
+Then check expected behavior:
+
+In dense disk regions:
+
+Tex should approach Tgas where collider density is high.
+
+In low-density ambient ISM:
+
+Tex should generally depart from Tgas.
+populations should not become LTE-like merely because the gas is static.
+
+In optically thick molecular regions:
+
+beta should be small.
+effective radiative loss should be reduced.
+levels can move closer to LTE than in transparent gas.
+
+In velocity-sheared regions:
+
+beta should increase relative to a static-column estimate.
+
+These diagnostics should be plotted before trusting any synthetic observation.
+
+⸻
+
+18. Verify species separately
+
+Do not validate only CO and assume the rest are fine.
+
+CO
+
+Check:
+
+para-H2 and ortho-H2 collider mapping
+low-J transitions
+cold gas thermal width
+disk optical-depth behavior
+
+CO is the best species for debugging because it is abundant and easy to make optically thick.
+
+Neutral C / catom
+
+Check:
+
+fine-structure level populations
+H, H2, and electron collider contributions
+[C I] 492 GHz and 809 GHz excitation temperatures
+
+Because C has few levels, it should be one of the easiest species to verify.
+
+HCO+
+
+Check:
+
+H2 collider handling
+high dipole moment behavior
+subthermal excitation in low-density gas
+sensitivity to electron collisions if those are later added
+
+HCO+ should be especially sensitive to density, so it is a good test of whether the non-LTE solver is actually doing something meaningful.
+
+⸻
+
+19. Verify parallel determinism
+
+Because the HEALPix kernel will be parallel, test that results do not depend on:
+
+number of threads
+cell chunk size
+candidate-cell ordering
+memory budget
+
+Run the same small model with:
+
+1 thread
+2 threads
+4 threads
+8 threads
+
+and compare:
+
+beta arrays
+fractional populations
+levelpop files
+final spectra
+
+Floating-point reductions may differ at the last few bits, but the differences should be tiny:
+
+relative population differences < 1e-10 to 1e-8
+line flux differences < 1e-6 for deterministic tests
+
+If thread count changes science results, there is a race condition or an unstable reduction.
+
+⸻
+
+20. Verify performance scaling
+
+Measure wall time and memory for controlled grids:
+
+32^3
+64^3
+128^3
+
+and for:
+
+nside = 2
+nside = 4
+nside = 8
+
+Expected scaling is roughly:
+
+\mathrm{cost}
+\propto
+N_\mathrm{candidate}
+N_\mathrm{dir}
+N_\mathrm{raystep}
+N_\mathrm{line}
+N_\mathrm{iter}.
+
+The code should not store:
+
+tau[cell, direction, line]
+
+for the full domain. It should accumulate beta per chunk and discard directional optical depths.
+
+Track:
+
+peak memory
+time per iteration
+time in HEALPix kernel
+time in SE solve
+number of candidate cells
+average ray steps per direction
+
+This tells you where optimization matters.
+
+⸻
+
+21. Recommended verification sequence
+
+I would require the implementing AI to pass the tests in this order:
+
+A. Parser and units
+B. Collision rates
+C. Two-level SE analytic solution
+D. LTE recovery
+E. beta(tau)
+F. DDA path lengths
+G. static uniform optical-depth integration
+H. velocity-coherent optical-depth integration
+I. full fixed-point iteration on a tiny grid
+J. levelpop writer/read-back
+K. RADMC-3D uniform slab render
+L. external LTE populations vs RADMC internal LTE render
+M. nside convergence
+N. real disk+ISM diagnostic plots
+
+Do not start with the real disk model.
+
+⸻
+
+22. Concrete acceptance criteria
+
+For code merge:
+
+unit tests pass for parser, rates, SE matrix, beta, and I/O
+DDA path lengths correct to ~1e-10 on simple grids
+two-level analytic solution correct to ~1e-10
+high-density populations approach LTE
+levelpop sum matches numberdens in every populated cell
+parallel results are independent of thread count within tolerance
+RADMC-3D reads lines_mode=50 populations and renders a uniform slab correctly
+
+For science use:
+
+nside convergence demonstrated
+iteration convergence demonstrated
+image/channel convergence demonstrated
+important diagnostics inspected
+CO, C, and HCO+ each validated separately
+
+The final sign-off should not be “the image looks plausible.” It should be:
+
+the populations conserve molecule density,
+the limiting cases are correct,
+the HEALPix escape probability behaves correctly,
+RADMC-3D reads the external populations correctly,
+and the final observables are converged with respect to solver and rendering resolution.
