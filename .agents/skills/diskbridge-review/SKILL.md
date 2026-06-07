@@ -51,11 +51,11 @@ Check whether tests are fast, deterministic, pytest-based, focused on behavior o
 
 Import/API smoke coverage should normally be one curated public API test, not many repeated import-only tests.
 
-Test files should have concise names, a module docstring explaining the protected behavior, and short function docstrings or comments for non-obvious invariants, regressions, analytic limits, or literature-based expectations. Check that machine-readable reference data lives in `tests/reference/` and human-readable reference explanations live in `docs/testing/`.
+Test files should have concise names, a module docstring explaining the protected behavior, and short function docstrings or comments for non-obvious invariants, regressions, analytic limits, or literature-based expectations. Check that machine-readable reference data lives in `tests/reference/` and human-readable reference explanations live in `docs/testing/`. Flag any `tests/validation/` path as wrong. Also flag pytest files that exist only to test validation-specific drivers, configs, plotting helpers, or workflow glue.
 
 ## Validation Review
 
-Check whether validations live under `validation/`, have a scientific question, define expected behavior, produce plots, summaries, and reports, require human interpretation when appropriate, and are not simple objective checks that should run in pytest instead.
+Check whether validations live under the repo-level `validation/` directory, have a scientific question, define expected behavior, produce plots, summaries, and reports, require human interpretation when appropriate, and are not simple objective checks that should run in pytest instead. Reject validation workflows placed under `tests/`, and reject pytest coverage added only for validation-specific helpers.
 
 ## Documentation Review
 

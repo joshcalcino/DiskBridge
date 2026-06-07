@@ -62,6 +62,8 @@ Default mapping:
 - Refactoring existing code: `diskbridge-refactor`
 - Adding or running fast pytest checks: `diskbridge-tests`
 - Creating or running larger physics/workflow checks: `diskbridge-validation`
+- Creating, refactoring, or reviewing plotting helpers and diagnostic figures:
+  `diskbridge-visualization`
 - Updating docs, docstrings, validation READMEs, or release notes: `diskbridge-documenter`
 
 For non-trivial changes, do not skip planning unless the user explicitly says to skip planning.

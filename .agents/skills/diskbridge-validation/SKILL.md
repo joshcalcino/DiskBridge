@@ -21,9 +21,9 @@ It should answer questions like:
 
 ## Tests Versus Validations
 
-Tests go in `tests/` and use pytest. Fast, deterministic, objective physics checks can be pytest tests when they use synthetic or analytic toy inputs and have clear pass/fail expectations.
+Tests go in `tests/` and use pytest for production code behavior and small objective physics invariants. Do not add pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue. Do not create `tests/validation/`; that name is reserved for the repo-level `validation/` workflow tree.
 
-Validations go in `validation/` and must not use pytest as their main driver. Use validations for slower pipelines, comparisons to papers or other codes, generated diagnostic plots, archived outputs, and human-interpreted scientific judgment.
+Validations go in the repository-level `validation/` directory and must not use pytest as their main driver. Use validations for slower pipelines, comparisons to papers or other codes, generated diagnostic plots, archived outputs, and human-interpreted scientific judgment.
 
 Validations should produce human-readable outputs such as plots, tables, JSON summaries, markdown reports, saved comparison arrays, or logs with exact commands and config choices.
 
@@ -42,6 +42,10 @@ validation/<validation_name>/
 ```
 
 Follow existing validation layout when updating an established validation.
+Never place validation workflows under `tests/` or create a `tests/validation/`
+directory. Do not create pytest coverage for validation-specific helper logic;
+the validation's own run summaries, metadata, plots, and reports are the review
+surface.
 
 ## Required Validation README
 
@@ -74,6 +78,16 @@ Existing validations may use established `out/` directories, but new validations
 - Clearly state whether the validation is quantitative, qualitative, or exploratory.
 - Do not overwrite previous validation outputs unless the script has an explicit `--overwrite` option.
 - If the validation depends on unavailable external data, provide a small synthetic fallback only if it still answers the scientific question.
+- Prefer a single readable validation entry point that runs with no required
+  CLI flags. Put ordinary defaults in committed config or parameter files.
+  Avoid adding many optional arguments or "smoke" modes to validation scripts
+  unless the user explicitly requests them.
+- Do not present toy "smoke" runs as validation evidence. For Monte Carlo
+  RADMC-3D validations, configure enough photon packets per relevant cell to
+  meet the stated noise target; a 1% target implies roughly `1e4` packets per
+  cell for the sampled product, before allowing for optical-depth and geometry
+  inefficiencies. Very short runs may be useful only for wiring/debug checks and
+  must be labeled as such.
 
 ## Final Report
 

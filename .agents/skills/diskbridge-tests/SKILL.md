@@ -26,6 +26,12 @@ Tests can include simple physics checks when they are cheap, deterministic, obje
 
 Put persistent tests in `tests/` and use pytest. Do not put long physical workflows in `tests/`.
 
+Do not create `tests/validation/`. In DiskBridge, validation workflows live in
+the repository-level `validation/` directory. Do not add pytest files for
+validation-specific drivers, configs, plotting helpers, or workflow glue. If
+reusable production code is extracted from a validation into `src/diskbridge/`,
+test that production code in the normal subsystem path.
+
 Use one curated public API smoke test, normally `tests/test_public_api.py`, for import and public-surface checks. Do not spread many import-only tests across the suite unless they exercise meaningfully different optional dependency behavior.
 
 Keep `tests/README.md` current with the local testing standard. Use `docs/testing/` for human-readable explanations of analytic cases, benchmark assumptions, literature references, and recurring testing conventions.
@@ -119,6 +125,8 @@ Physics-based pytest checks are encouraged when they are fast and objective. Goo
 - invalid physical inputs raising clear errors
 
 Move the work to `validation/` when the check is slow, depends on large or external data, requires plots for interpretation, compares against papers or other codes, runs a full pipeline, or asks a human to judge scientific plausibility.
+Do not add pytest coverage for code that exists only to run or plot such a
+validation workflow.
 
 ## What Not To Keep
 

@@ -22,9 +22,14 @@ Use:
 - `README.md` for high-level project usage;
 - `tests/README.md` for local pytest organization and naming standards;
 - NumPy-style docstrings for public functions/classes;
-- `validation/<case>/README.md` for validation workflows;
+- `validation/<case>/README.md` for validation workflows in the repo-level
+  `validation/` directory;
 - `CHANGELOG.md` for release-facing summaries;
 - `projects/active/` or `projects/completed/` for implementation plans and progress logs.
+
+Do not document or create a `tests/validation/` convention. Validation
+workflows are not pytest suites; they live under `validation/<case>/`. Do not
+document validation-specific helper pytest files as an expected practice.
 
 ## What To Document
 

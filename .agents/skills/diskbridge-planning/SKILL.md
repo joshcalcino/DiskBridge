@@ -29,7 +29,7 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
 4. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
 5. Define implementation steps.
 6. Define fast pytest tests, including simple objective physics invariants when appropriate.
-7. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation.
+7. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
 8. Define documentation updates.
 9. Define risks and human decisions.
 10. Define completion criteria.
@@ -58,6 +58,8 @@ Every plan must include:
 - Do not use the plan to document stable user-facing behavior. Use `docs/` for that.
 - Do not hide subjective physics validation inside pytest.
 - Do not move simple objective physics invariants out of pytest only because they are physics-based.
+- Do not create `tests/validation/`. Use `validation/<case>/` for validation
+  workflows. Do not add pytest files for validation-specific helpers.
 - If a plan replaces another plan, mark the old plan as superseded and move it to `projects/superseded/`.
 - If the task is completed, move the plan to `projects/completed/` and update `projects/index.md`.
 - Keep the plan concise and current. Remove stale details instead of accumulating contradictory history.

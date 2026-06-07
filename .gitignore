@@ -26,4 +26,7 @@ examples/leon_sim6/*.png
 examples/mwc758_comp/
 examples/testbed/
 examples/validation/
+validation/*/out/
+validation/*/outputs/
+validation/validation_out/
 legacy/

@@ -1,0 +1,61 @@
+############################################
+# Outer disk CO phase validation RT config #
+############################################
+
+nbcores          = 18
+nphot_thermal    = 1e7
+nphot_scat       = 1e7
+nphot_mono       = 1e7
+
+n_lambda          = 150
+lambda_min        = 0.0912
+lambda_max        = 3000.0
+
+scat_mode        = 1
+
+amin             = 0.05
+amax             = 0.25
+pindex           = 3.5
+dust_to_gas_ratio = 1e-2
+nbins            = 1
+grain_density    = 2.7
+disk_dust_mode   = proportional
+disk_dust_settling_alpha = 1e-2
+
+species          = mix_2species_60silicates_40carbons
+opacity_dir      = data/opac
+
+gasspecies       = co
+iline            = 3
+abundance        = 1e-4
+width            = 2.0
+nline            = 40
+turbvel          = 0.0
+microturbulence  = 0.2
+line_mode        = 1
+line_colliders   = gow17_lamda
+line_h2_opr      = 3.0
+photodissociation = T
+freezeout        = T
+photodesorption  = T
+uv_min           = 91.2
+uv_max           = 206.7
+uv_n_wavelengths = 12
+co_E_bind_co     = 1150.0
+external_uv      = T
+external_uv_chi  = 1.0
+nside            = 4
+w_rays_keep_closure_diagnostics = F
+
+rstar       = 2.0
+teff        = 4000.0
+mstar       = 1.0
+mdot        = 0.0
+accretion_fill_factor = 0.01
+
+secondorder      = T
+noscat           = F
+doppcatch        = T
+
+prepend_name     =
+append_name      =
