@@ -13,7 +13,6 @@ from Pint Quantities to CGS units.
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, List, Tuple
 from pathlib import Path
-import hashlib
 import numpy as np
 
 if TYPE_CHECKING:
@@ -38,6 +37,7 @@ import diskbridge
 from .opacities import DustOpacityCalculator
 from diskbridge.model.utils import transpose_to_axis_order
 from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
+from diskbridge.utils import sha256_radmc3d_vector_binp
 
 # Physical constants from config
 G_CGS = units('G')
@@ -134,10 +134,7 @@ class RadWriter:
         """Hash the exact binary payload written by ``write_gas_velocity``."""
 
         vectors = RadWriter.flatten_vector_to_radmc_order(mesh, components)
-        digest = hashlib.sha256()
-        digest.update(np.asarray([1, 8, vectors.shape[0]], dtype=np.int64).tobytes())
-        digest.update(np.ascontiguousarray(vectors, dtype=np.float64).tobytes())
-        return digest.hexdigest()
+        return sha256_radmc3d_vector_binp(vectors)
 
     @staticmethod
     def write_levelpop_dat(

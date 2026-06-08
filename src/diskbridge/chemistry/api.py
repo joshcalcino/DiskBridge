@@ -26,8 +26,9 @@ from diskbridge.chemistry.io import (
 )
 from diskbridge.model.microturbulence import ensure_microturbulence_field
 from diskbridge.radmc3d.cache import should_use_cache, stable_json_hash, write_cache_context
-from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES, file_sha256
+from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES
 from diskbridge.serialization import jsonable
+from diskbridge.utils import sha256_file
 
 
 def _quantity_context(q, unit: str | None = None) -> dict[str, Any]:
@@ -51,7 +52,7 @@ def _file_hashes(root: Path, patterns: tuple[str, ...]) -> dict[str, str]:
     for pattern in patterns:
         for path in sorted(root.rglob(pattern)):
             if path.is_file():
-                out[str(path.relative_to(root))] = file_sha256(path)
+                out[str(path.relative_to(root))] = sha256_file(path)
     return out
 
 

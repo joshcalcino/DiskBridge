@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import hashlib
 import json
 import time
 
@@ -35,6 +34,7 @@ from diskbridge._units import units
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.colliders import gow17_lamda_colliders
 from diskbridge.radmc3d.writer import RadWriter
+from diskbridge.utils import sha256_array, sha256_file
 from diskbridge.chemistry.shielding.healpix_columns import (
     SphericalHealpixRayTracer,
     CartesianHealpixRayTracer,
@@ -212,23 +212,6 @@ def _build_a_line(Tgas: np.ndarray, a_turb: np.ndarray, molweight: float) -> np.
     return np.sqrt(np.maximum(a_turb * a_turb + thermal_sq, 0.0))
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _sha256_array(values: np.ndarray) -> str:
-    arr = np.ascontiguousarray(values)
-    digest = hashlib.sha256()
-    digest.update(str(arr.dtype).encode("ascii"))
-    digest.update(np.asarray(arr.shape, dtype=np.int64).tobytes())
-    digest.update(arr.tobytes())
-    return digest.hexdigest()
-
-
 def _range_pair(values: np.ndarray) -> list[float]:
     arr = np.asarray(values, dtype=np.float64)
     if arr.size == 0:
@@ -268,7 +251,7 @@ def _velocity_range_diagnostics(velocity_xyz: np.ndarray) -> dict[str, list[floa
     }
 
 
-def _gas_velocity_binp_sha256(rad) -> str:
+def _gas_velocity_components_cm_s(rad) -> tuple:
     mesh = rad.model.mesh
     gas = rad.model.gas
     if mesh.coord_system == "spherical":
@@ -281,7 +264,7 @@ def _gas_velocity_binp_sha256(rad) -> str:
         _gas_field(rad, name, unit="cm/s")
         for name in names
     )
-    return RadWriter.gas_velocity_binp_sha256(mesh, components)
+    return mesh, components
 
 
 def _mesh_edge_hashes(mesh) -> dict[str, str]:
@@ -294,7 +277,7 @@ def _mesh_edge_hashes(mesh) -> dict[str, str]:
         "z": "cm",
     }
     return {
-        name: _sha256_array(mesh.edges_f64(name, units_by_axis[name]))
+        name: sha256_array(mesh.edges_f64(name, units_by_axis[name]))
         for name in mesh.axis_names()
     }
 
@@ -352,11 +335,11 @@ def _checkpoint_fingerprint(
         "mesh_coord_system": transfer_mesh.coord_system,
         "mesh_shape": [int(x) for x in n_species.shape],
         "mesh_edge_hashes": _mesh_edge_hashes(transfer_mesh),
-        "species_density_sha256": _sha256_array(n_species),
-        "temperature_sha256": _sha256_array(Tgas),
-        "microturbulence_sha256": _sha256_array(a_turb),
-        "candidate_idx_sha256": _sha256_array(cell_idx),
-        "collider_density_candidate_sha256": _sha256_array(collider_dens_cand),
+        "species_density_sha256": sha256_array(n_species),
+        "temperature_sha256": sha256_array(Tgas),
+        "microturbulence_sha256": sha256_array(a_turb),
+        "candidate_idx_sha256": sha256_array(cell_idx),
+        "collider_density_candidate_sha256": sha256_array(collider_dens_cand),
     }
 
 
@@ -873,7 +856,7 @@ def solve_and_write_healpix_levelpop(
             stale.unlink()
 
     molecule = parse_lamda_molecule_file(molecule_file)
-    molecule_sha256 = _sha256_file(Path(molecule_file))
+    molecule_sha256 = sha256_file(Path(molecule_file))
 
     expected_colliders = gow17_lamda_colliders(species)
     actual_colliders = list(molecule.collider_names)
@@ -895,7 +878,11 @@ def solve_and_write_healpix_levelpop(
     n_species = _species_density_cm3(chemistry_result, species)
     velocity_xyz = _velocity_xyz_cm_s(rad, basis_mesh=transfer_mesh)
     velocity_range = _velocity_range_diagnostics(velocity_xyz)
-    gas_velocity_sha256 = _gas_velocity_binp_sha256(rad)
+    velocity_mesh, velocity_components = _gas_velocity_components_cm_s(rad)
+    gas_velocity_sha256 = RadWriter.gas_velocity_binp_sha256(
+        velocity_mesh,
+        velocity_components,
+    )
 
     if n_species.shape != Tgas.shape or n_species.shape != a_turb.shape:
         raise ValueError(

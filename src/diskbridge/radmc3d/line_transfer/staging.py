@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import hashlib
 import json
 import shutil
 
 import numpy as np
+from diskbridge.utils import sha256_file
 
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import normalize_collider_name, write_lines_inp
@@ -23,14 +23,6 @@ from diskbridge.radmc3d.colliders import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _resolve_manifest_path(path_value: str, *, base_dir: Path) -> Path:
@@ -419,14 +411,14 @@ def prepare_external_population_line_run(
         staged[name] = str(dst)
     expected_gas_velocity_sha256 = solver_manifest.get("gas_velocity_sha256")
     if expected_gas_velocity_sha256:
-        staged_gas_velocity_sha256 = _sha256_file(work_inputs / "gas_velocity.binp")
+        staged_gas_velocity_sha256 = sha256_file(work_inputs / "gas_velocity.binp")
         if staged_gas_velocity_sha256 != expected_gas_velocity_sha256:
             raise ValueError(
                 "Staged gas_velocity.binp does not match the velocity field used "
                 "by the external population solver."
             )
     else:
-        staged_gas_velocity_sha256 = _sha256_file(work_inputs / "gas_velocity.binp")
+        staged_gas_velocity_sha256 = sha256_file(work_inputs / "gas_velocity.binp")
 
     if molecule_file is None:
         manifest_molecule = solver_manifest.get("molecule_file")
@@ -443,7 +435,7 @@ def prepare_external_population_line_run(
         molecule_src = Path(molecule_file)
     if not molecule_src.exists():
         raise FileNotFoundError(f"molecule_file does not exist: {molecule_src}")
-    molecule_sha256 = _sha256_file(molecule_src)
+    molecule_sha256 = sha256_file(molecule_src)
     expected_molecule_sha256 = solver_manifest.get("molecule_sha256")
     if expected_molecule_sha256 and molecule_sha256 != expected_molecule_sha256:
         raise ValueError(

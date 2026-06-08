@@ -7,11 +7,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
+from diskbridge.utils import sha256_file
 
 from .validation import (
     _check_required,
@@ -19,14 +19,6 @@ from .validation import (
     check_radmc_binp_file,
     parse_radmc3d_inp,
 )
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _inputs_dir(work_dir: Path) -> Path:
@@ -140,7 +132,7 @@ def validate_external_population_run(
         ):
             raise ValueError(f"{manifest.name} does not describe a converged solve")
         expected_sha = manifest_payload.get("molecule_sha256")
-        if expected_sha and _sha256_file(molecule) != expected_sha:
+        if expected_sha and sha256_file(molecule) != expected_sha:
             raise ValueError(
                 f"{molecule.name} does not match the molecule file used to solve populations"
             )
@@ -180,7 +172,7 @@ def validate_external_population_run(
     check_radmc_binp_file(gas_vel, expected_ncells=ncells, components=3)
     if manifest_path is not None:
         expected_gas_velocity_sha = manifest_payload.get("gas_velocity_sha256")
-        if expected_gas_velocity_sha and _sha256_file(gas_vel) != expected_gas_velocity_sha:
+        if expected_gas_velocity_sha and sha256_file(gas_vel) != expected_gas_velocity_sha:
             raise ValueError(
                 "gas_velocity.binp does not match the velocity field used by the "
                 "external population solver"
@@ -229,7 +221,7 @@ def validate_external_population_run(
         "levelpop_file": str(levelpop),
         "gas_temperature_file": str(gas_temp),
         "gas_velocity_file": str(gas_vel),
-        "gas_velocity_sha256": _sha256_file(gas_vel),
+        "gas_velocity_sha256": sha256_file(gas_vel),
         "microturbulence_file": str(micro),
         "numberdens_file": str(emitter),
         "ncells": ncells,

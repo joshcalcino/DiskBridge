@@ -14,6 +14,7 @@ import hashlib
 import numpy as np
 
 from diskbridge._units import Quantity, units
+from diskbridge.utils import sha256_file as file_sha256
 
 
 H_CGS = units("h").to("erg*s").magnitude
@@ -852,26 +853,6 @@ def uv_product_schema_hash(specs=DEFAULT_UV_PRODUCT_SPECS) -> str:
 
     payload = json.dumps(uv_product_schema(specs), sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
-
-
-def file_sha256(path: str | Path) -> str:
-    """Return the SHA256 hash for a file.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        File path to hash.
-
-    Returns
-    -------
-    str
-        SHA256 hash string.
-    """
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def validate_uv_chemistry_config(
