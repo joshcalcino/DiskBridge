@@ -1,3 +1,8 @@
+# db-keywords: gow17, nonlte, line-transfer, gas-temperature, config, radmc3d, field, dust, molecule-data
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for gow17, nonlte, line-transfer, gas-temperature.
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

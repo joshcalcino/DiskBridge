@@ -4,6 +4,11 @@ These tests use small synthetic files and configs to protect LAMDA collider
 policy, `lines.inp` staging, gas-temperature requirements, and run validation.
 """
 
+# db-keywords: photodesorption, gow17, nonlte, line-transfer, gas-temperature, validation, config, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for RADMC-3D non-LTE line-transfer setup contracts.
+
 from __future__ import annotations
 
 import json

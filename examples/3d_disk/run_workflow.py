@@ -10,7 +10,7 @@ This script:
 """
 
 import diskbridge
-import diskbridge.chemistry as chemistry
+from diskbridge.chemistry import run_chemistry
 from diskbridge.radmc3d import RadWriter, RadModel, RadImage
 from diskbridge.visualization.diagnostics import make_dust_component_diagnostic_plots
 
@@ -60,12 +60,13 @@ rad = RadModel(model)
 rad.compute_temperature(force=True)
 
 # Compute CO abundance using Pinte+2018 switches from params
-X_co, n_co = chemistry.compute_abundance(
+result = run_chemistry(
     rad,
-    molecule="co",
-    X0=p.abundance,
-    write_output=True,
+    model="pinte_switches",
+    config={"molecule": "co", "X0": p.abundance},
+    write=True,
 )
+X_co = result.abundances["co"]
 
 mean_X = float(X_co.magnitude.mean())
 print(f"CO mean abundance X = {mean_X:.3e}")

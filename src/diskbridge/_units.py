@@ -1,3 +1,8 @@
+# db-keywords: config, units, io, serialization, paths, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for config, units, io, serialization.
+
 from __future__ import annotations
 
 from pathlib import Path

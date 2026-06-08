@@ -3,6 +3,11 @@
 Ensures consistency between computed abundances and conservation laws.
 """
 
+# db-keywords: photodesorption, units, chemistry, field, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Chemistry state validation functions.
+
 from __future__ import annotations
 
 import numpy as np

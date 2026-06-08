@@ -1,5 +1,10 @@
 """Diagnostic plotting helpers for DiskBridge workflows."""
 
+# db-keywords: uv-products, units, radmc3d, model, mesh, field
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Diagnostic plotting helpers for DiskBridge workflows.
+
 from __future__ import annotations
 
 import json

@@ -1,5 +1,10 @@
 """End-to-end smoke test for the HEALPix non-LTE external-population driver."""
 
+# db-keywords: healpix-columns, nonlte, line-transfer, gas-temperature, validation, config, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: End-to-end smoke test for the HEALPix non-LTE external-population driver.
+
 from __future__ import annotations
 
 import json

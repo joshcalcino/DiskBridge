@@ -1,3 +1,8 @@
+# db-keywords: gas-temperature, units, model, mesh, field, coordinates
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for gas-temperature, units, model, mesh.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

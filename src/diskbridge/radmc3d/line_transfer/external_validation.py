@@ -1,5 +1,10 @@
 """Validation checks for a staged RADMC-3D ``lines_mode = 50`` run."""
 
+# db-keywords: nonlte, line-transfer, gas-temperature, radmc3d, mesh, field, io
+# db-role: helper
+# db-scope: package
+# db-purpose: Validation checks for a staged RADMC-3D ``lines_mode = 50`` run.
+
 from __future__ import annotations
 
 import hashlib

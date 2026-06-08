@@ -1,3 +1,8 @@
+# db-keywords: gow17, gas-temperature, validation, config, field, io, serialization
+# db-role: validation
+# db-scope: validation
+# db-purpose: Validation module for gow17, gas-temperature, validation, config.
+
 from __future__ import annotations
 
 import json

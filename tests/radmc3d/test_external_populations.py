@@ -1,5 +1,10 @@
 """Tests for the DiskBridge 3D HEALPix non-LTE external-population pipeline."""
 
+# db-keywords: healpix-columns, nonlte, line-transfer, validation, radmc3d, field, coordinates, ray-tracing
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for the DiskBridge 3D HEALPix non-LTE external-population pipeline.
+
 from __future__ import annotations
 
 from pathlib import Path

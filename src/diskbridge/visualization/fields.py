@@ -8,6 +8,11 @@ derived field functions for quantities like:
 - Stokes number
 """
 
+# db-keywords: uv-products, gas-temperature, dust-gas-coupling, config, units, radmc3d, mesh, field, coordinates
+# db-role: helper
+# db-scope: package
+# db-purpose: Field definitions and derived fields for yt visualization.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Tuple, Callable

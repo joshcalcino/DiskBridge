@@ -14,6 +14,11 @@ Key features:
 - Integration with both Model and RadModel data sources
 """
 
+# db-keywords: uv-products, gas-temperature, units, radmc3d, model, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: yt-based visualization backend for DiskBridge.
+
 from __future__ import annotations
 
 from pathlib import Path

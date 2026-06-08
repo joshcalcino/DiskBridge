@@ -1,5 +1,10 @@
 """Logging."""
 
+# db-keywords: io, logging
+# db-role: canonical
+# db-scope: package
+# db-purpose: Logging.
+
 import logging
 import platform
 

@@ -1,3 +1,8 @@
+# db-keywords: disk-mask, line-transfer, units, model, mesh, field
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for disk-mask, line-transfer, units, model.
+
 from __future__ import annotations
 
 from collections.abc import Mapping

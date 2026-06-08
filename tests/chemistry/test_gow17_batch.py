@@ -5,6 +5,11 @@ Key invariants tested:
 2. No double dust attenuation: when Gph is set directly, no extra exp(-Av) applied
 3. Scaling test: if chi_dust changes by factor X, photorate changes by factor X
 """
+# db-keywords: gow17, gas-temperature, validation, chemistry, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for native batch GOW17 solver.
+
 from __future__ import annotations
 
 import numpy as np

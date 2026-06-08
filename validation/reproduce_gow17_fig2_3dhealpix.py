@@ -9,6 +9,11 @@ Sections
 5. Convergence sweep drivers (astrochem sweep; fixed-point vs astrochem comparison)
 6. main()
 """
+# db-keywords: healpix-columns, photodesorption, gow17, validation, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: validation
+# db-purpose: Reproduce Gong+17 Fig 2 with a 3-D HEALPix-shielded sphere.
+
 from __future__ import annotations
 
 import json

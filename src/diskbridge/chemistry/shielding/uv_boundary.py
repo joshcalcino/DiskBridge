@@ -1,3 +1,8 @@
+# db-keywords: shielding, uv-products, chemistry, model, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for shielding, uv-products, chemistry, model.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional

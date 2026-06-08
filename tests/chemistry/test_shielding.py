@@ -8,6 +8,11 @@ Verifies:
 - W_rays=None in shielding functions equals isotropic mean
 """
 
+# db-keywords: shielding, co-shielding, healpix-columns, uv-products, gow17, validation, units, radmc3d, chemistry, model, mesh
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for angular UV direction weights and W_rays-based shielding.
+
 import numpy as np
 import pytest
 

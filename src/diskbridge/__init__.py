@@ -1,3 +1,8 @@
+# db-keywords: config, units, model, io, serialization, arrays
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for config, units, model, io.
+
 from __future__ import annotations
 
 import sys

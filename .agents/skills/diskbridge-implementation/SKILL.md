@@ -17,11 +17,17 @@ Implement the requested feature with the smallest clean design that fits DiskBri
 2. Check existing modules before creating new ones.
 3. Identify likely capability keywords and inspect existing tagged code with
    `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
-4. Prefer extending tagged canonical/entrypoint code over creating a parallel
+4. Search the generated symbol index for proposed helper names and concepts
+   with `python tools/diskbridge_agent/capability_map.py symbols --query <text>`.
+5. Check `.agents/code_index/` and
+   `diskbridge_code_map/UTILITY_CONSOLIDATION_GUIDE.md` for existing duplicate
+   or duplication-prone helpers before adding private helpers.
+6. Prefer extending tagged canonical/entrypoint code over creating a parallel
    implementation. If new discoverable code is added, add sparse
-   `db-keywords` / `db-role` tags using the registry.
-5. Avoid adding new dependencies unless the user explicitly approves.
-6. If the task belongs to an active project, update the relevant file in `projects/` before editing code.
+   `db-keywords` / `db-role` tags using the registry; use module-level tags for
+   helper families and direct tags for reusable or duplication-prone helpers.
+7. Avoid adding new dependencies unless the user explicitly approves.
+8. If the task belongs to an active project, update the relevant file in `projects/` before editing code.
 
 ## Design Rules
 

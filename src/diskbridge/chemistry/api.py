@@ -1,3 +1,8 @@
+# db-keywords: uv-products, gow17, disk-mask, gas-temperature, config, units, radmc3d, chemistry, model, field, api, hashing
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for uv-products, gow17, disk-mask, gas-temperature.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional

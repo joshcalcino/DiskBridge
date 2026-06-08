@@ -14,6 +14,11 @@ Users can override defaults by calling diskbridge.load_config(path) before
 importing this module.
 """
 
+# db-keywords: config, units, chemistry, radmc3d, model
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package constants loaded from configuration and units.
+
 from __future__ import annotations
 
 from diskbridge._units import units, Quantity

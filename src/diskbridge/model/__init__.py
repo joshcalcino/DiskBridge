@@ -1,3 +1,8 @@
+# db-keywords: disk-mask, units, model, mesh, field, io
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for disk-mask, units, model, mesh.
+
 from pathlib import Path
 from typing import Mapping, Optional, Union
 

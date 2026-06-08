@@ -12,6 +12,11 @@ RADMC3DWriter for that. This separation mirrors the radmc3dPy structure
 where data (reading), setup (writing), and models (high-level) are separate.
 """
 
+# db-keywords: uv-products, line-transfer, gas-temperature, config, units, radmc3d, model, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: RADMC-3D model wrapper for molecular line radiative transfer.
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple, Sequence
 from pathlib import Path

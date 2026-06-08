@@ -1,3 +1,8 @@
+# db-keywords: units, model, mesh, field, arrays, plotting
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for units, model, mesh, field.
+
 import numpy as np
 from .mesh import Mesh
 from .field import Field

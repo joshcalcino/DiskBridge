@@ -25,6 +25,11 @@ This separation ensures clean interfaces:
 - Model building (Model class) vs RADMC-3D operations (RadModel)
 """
 
+# db-keywords: radmc3d, model, io, line-transfer, uv-products
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package exports for RADMC-3D readers, writers, and workflows.
+
 from .writer import RadWriter
 from .data import RadData
 from .model import RadModel

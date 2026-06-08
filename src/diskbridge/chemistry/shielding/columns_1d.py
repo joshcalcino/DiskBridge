@@ -1,3 +1,8 @@
+# db-keywords: shielding, gow17, units, chemistry, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for shielding, gow17, units, chemistry.
+
 from __future__ import annotations
 
 from typing import Optional, Tuple

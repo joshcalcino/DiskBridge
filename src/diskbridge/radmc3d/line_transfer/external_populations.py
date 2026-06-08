@@ -13,6 +13,11 @@ escape-probability statistical-equilibrium solver. It:
    manifest.
 """
 
+# db-keywords: shielding, healpix-columns, gow17, nonlte, line-transfer, gas-temperature, units, radmc3d, model, mesh, field
+# db-role: helper
+# db-scope: package
+# db-purpose: External non-LTE level populations for RADMC-3D ``lines_mode = 50``.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

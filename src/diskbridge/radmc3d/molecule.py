@@ -12,6 +12,11 @@ The class handles:
 This mirrors the structure of radmc3dPy.molecule but adapted for DiskBridge.
 """
 
+# db-keywords: line-transfer, config, units, radmc3d, mesh, field, io
+# db-role: canonical
+# db-scope: package
+# db-purpose: RADMC-3D molecule data handler.
+
 from __future__ import annotations
 from typing import Optional
 from pathlib import Path

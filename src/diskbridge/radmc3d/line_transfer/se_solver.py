@@ -14,6 +14,11 @@ Numba-parallelized over cells. The linear solve uses
 ``np.linalg.solve`` on the stacked matrices.
 """
 
+# db-keywords: healpix-columns, nonlte, line-transfer, gas-temperature, radmc3d, mesh, ray-tracing, cache
+# db-role: canonical
+# db-scope: package
+# db-purpose: Statistical-equilibrium solver for non-LTE populations under HEALPix escape-probability closure.
+
 from __future__ import annotations
 
 import numpy as np

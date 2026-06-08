@@ -1,3 +1,8 @@
+# db-keywords: uv-products, gow17, validation, field, coordinates, paths
+# db-role: validation
+# db-scope: validation
+# db-purpose: Validation module for uv-products, gow17, validation, field.
+
 from __future__ import annotations
 
 from pathlib import Path

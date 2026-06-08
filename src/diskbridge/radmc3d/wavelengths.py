@@ -4,6 +4,11 @@ This module provides utilities for creating, validating, and writing
 wavelength grids for RADMC-3D computations.
 """
 
+# db-keywords: units, radmc3d, mesh, io, paths, arrays, wavelengths
+# db-role: canonical
+# db-scope: package
+# db-purpose: Wavelength grid utilities for RADMC-3D.
+
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional

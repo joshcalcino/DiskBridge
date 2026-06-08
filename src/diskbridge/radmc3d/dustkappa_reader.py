@@ -32,6 +32,11 @@ load_kext_uv_for_bins
     Load band-averaged kext_uv for all dust bins in a directory.
 """
 
+# db-keywords: uv-products, config, units, radmc3d, io, serialization, paths
+# db-role: canonical
+# db-scope: package
+# db-purpose: Reader and UV-band averaging for RADMC-3D dustkappa opacity files.
+
 from __future__ import annotations
 
 import os

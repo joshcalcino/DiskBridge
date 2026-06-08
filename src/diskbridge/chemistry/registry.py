@@ -1,3 +1,8 @@
+# db-keywords: gow17, config, radmc3d, chemistry, model, serialization
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for gow17, config, radmc3d, chemistry.
+
 from __future__ import annotations
 
 from importlib import import_module

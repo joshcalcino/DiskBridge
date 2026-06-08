@@ -9,6 +9,11 @@ The key functions are:
 - get_unyt_unit: Get unyt unit from a string
 """
 
+# db-keywords: units, radmc3d, field, visualization, serialization, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Unit conversion utilities for DiskBridge visualization.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Union

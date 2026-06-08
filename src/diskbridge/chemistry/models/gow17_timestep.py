@@ -1,3 +1,8 @@
+# db-keywords: shielding, uv-products, photodesorption, gow17, gas-temperature, config, units, chemistry, model, mesh
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for shielding, uv-products, photodesorption, gow17.
+
 from __future__ import annotations
 
 import numpy as np

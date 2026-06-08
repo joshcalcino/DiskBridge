@@ -4,6 +4,11 @@ These tests use tiny synthetic models to protect deterministic writer behavior,
 dust bin counts, and intrinsic grain-density policy.
 """
 
+# db-keywords: validation, config, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for RADMC-3D dust output and dust-species density contracts.
+
 from __future__ import annotations
 
 from pathlib import Path

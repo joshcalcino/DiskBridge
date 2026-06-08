@@ -1,3 +1,8 @@
+# db-keywords: gow17, config, model, io, serialization, paths
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for gow17, config, model, io.
+
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,3 +1,8 @@
+# db-keywords: units, chemistry, field, coordinates, serialization, molecule-data
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for units, chemistry, field, coordinates.
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

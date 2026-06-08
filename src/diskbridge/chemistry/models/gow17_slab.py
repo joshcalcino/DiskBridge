@@ -1,3 +1,8 @@
+# db-keywords: shielding, photodesorption, gow17, gas-temperature, config, units, radmc3d, chemistry, model, mesh
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for shielding, photodesorption, gow17, gas-temperature.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

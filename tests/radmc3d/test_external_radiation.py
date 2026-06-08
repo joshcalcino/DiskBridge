@@ -4,6 +4,11 @@ These tests use analytic blackbody/CMB checks and tiny synthetic wavelength
 files to protect external UV/IR intensity scaling and writer policy.
 """
 
+# db-keywords: uv-products, validation, units, radmc3d, field, io, paths
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for RADMC-3D external radiation field assembly.
+
 from pathlib import Path
 import inspect
 from types import SimpleNamespace

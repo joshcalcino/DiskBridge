@@ -4,6 +4,11 @@ These tests intentionally check only curated public imports and tiny public
 object construction. They are not a private-module import census.
 """
 
+# db-keywords: disk-mask, validation, config, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Smoke tests for DiskBridge's public import surface.
+
 from __future__ import annotations
 
 import diskbridge

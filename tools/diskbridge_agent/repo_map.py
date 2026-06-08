@@ -1,5 +1,10 @@
 """Print a compact map of DiskBridge workflow files."""
 
+# db-keywords: io, paths, workflow, cli
+# db-role: entrypoint
+# db-scope: module
+# db-purpose: Print a compact map of DiskBridge workflow files.
+
 from __future__ import annotations
 
 from pathlib import Path

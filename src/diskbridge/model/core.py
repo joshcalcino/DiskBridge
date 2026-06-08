@@ -1,3 +1,8 @@
+# db-keywords: units, model, mesh, field, coordinates, io
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for units, model, mesh, field.
+
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Mapping, Optional, Union, TYPE_CHECKING

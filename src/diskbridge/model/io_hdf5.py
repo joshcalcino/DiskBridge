@@ -21,6 +21,11 @@ Notes
   Quantities and numpy scalars.
 """
 
+# db-keywords: shielding, disk-mask, units, model, mesh, field
+# db-role: helper
+# db-scope: package
+# db-purpose: HDF5 snapshot I/O for DiskBridge Model objects.
+
 from __future__ import annotations
 
 from pathlib import Path

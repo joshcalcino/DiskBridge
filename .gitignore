@@ -28,6 +28,10 @@ examples/leon_sim6/*.png
 examples/mwc758_comp/
 examples/testbed/
 examples/validation/
+examples/leon_laptop_test/
+examples/bondi_all_stars/
+examples/leon_dust_rt_test/
+examples/leon_full_test/
 validation/*/out/
 validation/*/outputs/
 validation/validation_out/

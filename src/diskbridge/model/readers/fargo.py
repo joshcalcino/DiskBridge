@@ -1,3 +1,8 @@
+# db-keywords: units, model, mesh, field, io, serialization
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for units, model, mesh, field.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

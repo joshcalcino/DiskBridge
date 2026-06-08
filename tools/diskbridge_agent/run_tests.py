@@ -1,5 +1,10 @@
 """Run fast DiskBridge pytest tests by scope."""
 
+# db-keywords: shielding, uv-products, gow17, nonlte, config, radmc3d, model, mesh, io
+# db-role: entrypoint
+# db-scope: module
+# db-purpose: Run fast DiskBridge pytest tests by scope.
+
 from __future__ import annotations
 
 import argparse

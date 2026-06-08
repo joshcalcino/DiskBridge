@@ -1,3 +1,8 @@
+# db-keywords: shielding, healpix-columns, chemistry, mesh, field, coordinates
+# db-role: helper
+# db-scope: package
+# db-purpose: Package module for shielding, healpix-columns, chemistry, mesh.
+
 from __future__ import annotations
 
 from typing import Tuple

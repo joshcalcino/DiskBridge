@@ -1,3 +1,8 @@
+# db-keywords: uv-products, photodesorption, disk-mask, config, units, radmc3d, chemistry, model, mesh
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for uv-products, photodesorption, disk-mask, config.
+
 from __future__ import annotations
 
 from typing import Optional, Tuple, TYPE_CHECKING

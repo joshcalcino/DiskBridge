@@ -1,3 +1,8 @@
+# db-keywords: disk-mask, model, mesh, field, coordinates, serialization
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for disk-mask, model, mesh, field.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Tuple

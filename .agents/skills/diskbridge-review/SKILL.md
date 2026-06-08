@@ -19,7 +19,9 @@ Check whether the plan:
 - separates refactoring from physics changes;
 - identifies affected modules;
 - identifies relevant capability keywords, tagged code inspected, and the
-  reuse/extend/merge/add decision;
+  symbol-index searches plus reuse/extend/merge/add decision;
+- identifies relevant utility-consolidation guide entries and helper-module
+  impact when the change touches reusable helpers;
 - identifies public APIs and config keys;
 - identifies file outputs and array-shape assumptions;
 - identifies whether RADMC-3D I/O remains binary-only with one supported
@@ -37,7 +39,9 @@ Check whether the plan:
 Check whether the implementation:
 
 - follows the plan;
-- checked existing capability tags before adding new code;
+- checked existing capability tags and generated symbol entries before adding
+  new code or private helpers;
+- checked the utility-consolidation guide before adding reusable helpers;
 - changed more files than necessary;
 - changed scientific behavior intentionally or accidentally;
 - introduced duplicate logic;

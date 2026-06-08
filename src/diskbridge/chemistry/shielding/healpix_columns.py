@@ -22,6 +22,11 @@ Dependencies
 - diskbridge.chemistry.shielding.visser_shielding for theta_CO tables.
 """
 
+# db-keywords: shielding, co-shielding, healpix-columns, gow17, chemistry, mesh, field
+# db-role: helper
+# db-scope: package
+# db-purpose: HEALPix-based CO self-shielding / column integration helpers.
+
 from __future__ import annotations
 
 import hashlib

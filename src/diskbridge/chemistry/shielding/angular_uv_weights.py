@@ -53,6 +53,11 @@ compute_uv_direction_weights_healpix
     Build per-direction UV weights for HEALPix shielding averaging.
 """
 
+# db-keywords: shielding, co-shielding, healpix-columns, uv-products, disk-mask, config, radmc3d, chemistry, mesh, ray-tracing
+# db-role: canonical
+# db-scope: package
+# db-purpose: Directional UV weighting for HEALPix-based shielding averages.
+
 from __future__ import annotations
 
 from pathlib import Path

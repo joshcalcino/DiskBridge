@@ -4,6 +4,11 @@ This module provides dust grain distribution modeling with power-law size distri
 memory-efficient storage for gas-proportional dust, and integration with radmc3d.
 """
 
+# db-keywords: gas-temperature, config, units, radmc3d, model, field, coordinates
+# db-role: helper
+# db-scope: package
+# db-purpose: Dust grain submodel for DiskBridge.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Optional, Callable, List, Literal, Union

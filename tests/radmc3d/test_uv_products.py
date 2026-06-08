@@ -4,6 +4,11 @@ These tests use analytic spectra, Draine reference integrals, and small
 synthetic RADMC workflows to protect deterministic UV-band product behavior.
 """
 
+# db-keywords: uv-products, disk-mask, validation, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for RADMC-3D UV product normalization and partition contracts.
+
 import numpy as np
 import pytest
 

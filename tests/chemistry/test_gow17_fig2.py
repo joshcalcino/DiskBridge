@@ -4,6 +4,11 @@ Regression test for GOW17 PDR chemistry against reference slab data.
 Reproduces GOW17 Figure 2 benchmark conditions and asserts that key species
 abundances match the reference within specified tolerances.
 """
+# db-keywords: shielding, uv-products, photodesorption, gow17, gas-temperature, validation, config, units, radmc3d, chemistry, model, mesh
+# db-role: validation
+# db-scope: test
+# db-purpose: Regression test for GOW17 PDR chemistry against reference slab data.
+
 from __future__ import annotations
 
 import pytest

@@ -4,6 +4,11 @@ These tests write tiny synthetic RADMC-3D-like files and assert that readers
 reject outputs whose cell counts do not match the model mesh.
 """
 
+# db-keywords: validation, units, radmc3d, model, mesh, field, fixtures
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for RADMC-3D data/grid consistency checks.
+
 from __future__ import annotations
 
 from pathlib import Path

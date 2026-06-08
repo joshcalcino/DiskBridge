@@ -4,6 +4,11 @@ This module removes duplicate meshgrid/coordinate transformation boilerplate
 and ensures consistent axis ordering across the codebase.
 """
 
+# db-keywords: units, model, mesh, coordinates, arrays, plotting
+# db-role: canonical
+# db-scope: package
+# db-purpose: Coordinate transformation and grid helpers.
+
 from __future__ import annotations
 
 from typing import Tuple

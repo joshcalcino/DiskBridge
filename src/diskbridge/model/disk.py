@@ -3,6 +3,11 @@
 This module provides disk geometry laws and the Disk component class.
 """
 
+# db-keywords: disk-mask, units, model, mesh, field, coordinates
+# db-role: canonical
+# db-scope: package
+# db-purpose: Disk geometry and structure models.
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, TYPE_CHECKING

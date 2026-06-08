@@ -24,6 +24,11 @@ maybe_ensure_W_rays
     Resolve prerequisites from rad/params and call ensure_W_rays if possible.
 """
 
+# db-keywords: shielding, healpix-columns, uv-products, config, units, radmc3d, chemistry, model, mesh
+# db-role: helper
+# db-scope: package
+# db-purpose: Cache and reuse directional UV weights (W_rays) across shielding iterations.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional

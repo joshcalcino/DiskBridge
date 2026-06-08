@@ -13,6 +13,11 @@ convention, and starts integration at the cell center using the first DDA
 segment length to the next face.
 """
 
+# db-keywords: shielding, healpix-columns, gow17, line-transfer, radmc3d, mesh, field, coordinates
+# db-role: canonical
+# db-scope: package
+# db-purpose: HEALPix velocity-coherent escape-probability kernel (Numba, parallel).
+
 from __future__ import annotations
 
 from typing import Tuple

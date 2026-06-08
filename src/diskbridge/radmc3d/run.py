@@ -4,6 +4,11 @@ This module provides utilities for managing the symlink context needed for
 RADMC-3D runs and executing RADMC-3D commands with proper logging.
 """
 
+# db-keywords: radmc3d, model, mesh, field, io, serialization
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: RADMC-3D execution context and runner utilities.
+
 from __future__ import annotations
 from pathlib import Path
 import json

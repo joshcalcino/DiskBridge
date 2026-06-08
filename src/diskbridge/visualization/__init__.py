@@ -45,6 +45,11 @@ Using yt Directly
 >>> slc.save('density_slice.png')
 """
 
+# db-keywords: visualization, plotting, model, radmc3d, field
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package exports for DiskBridge visualization helpers.
+
 from __future__ import annotations
 
 # Core classes

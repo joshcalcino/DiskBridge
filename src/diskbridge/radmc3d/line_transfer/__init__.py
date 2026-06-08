@@ -1,5 +1,10 @@
 """Helpers for staging RADMC-3D line-transfer runs (LTE, non-LTE, and external)."""
 
+# db-keywords: line-transfer, nonlte, radmc3d, molecule-data, workflow
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package exports for RADMC-3D line-transfer staging and validation.
+
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import write_lines_inp
 from diskbridge.radmc3d.colliders import assert_lamda_collision_order, read_lamda_collision_order

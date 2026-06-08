@@ -9,6 +9,11 @@ This script:
   read from params.txt.
 """
 
+# db-keywords: disk-mask, gas-temperature, config, units, radmc3d, model, mesh, field
+# db-role: entrypoint
+# db-scope: example
+# db-purpose: Example module for disk-mask, gas-temperature, config, units.
+
 import diskbridge
 from diskbridge.visualization.profiles import plot_phi_avg_rz_slice
 from diskbridge.visualization.diagnostics import make_dust_component_diagnostic_plots

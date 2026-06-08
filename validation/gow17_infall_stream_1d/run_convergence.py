@@ -1,3 +1,8 @@
+# db-keywords: uv-products, gow17, validation, mesh, field, io
+# db-role: validation
+# db-scope: validation
+# db-purpose: Validation module for uv-products, gow17, validation, mesh.
+
 from __future__ import annotations
 
 import json

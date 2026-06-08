@@ -1,3 +1,8 @@
+# db-keywords: config, units, field, paths, opacity, dust
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for config, units, field, paths.
+
 from __future__ import annotations
 
 from pathlib import Path

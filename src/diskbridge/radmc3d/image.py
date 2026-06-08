@@ -6,6 +6,11 @@ and writing FITS files with proper WCS headers.
 This is adapted from radmc3dPy.image but simplified to focus on FITS output.
 """
 
+# db-keywords: gow17, nonlte, line-transfer, gas-temperature, config, units, radmc3d, model, mesh, field
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: RADMC-3D image handler for DiskBridge.
+
 from __future__ import annotations
 from typing import Optional, Dict, Any
 from pathlib import Path

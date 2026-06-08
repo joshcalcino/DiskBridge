@@ -1,3 +1,8 @@
+# db-keywords: shielding, co-shielding, config, units, chemistry, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for shielding, co-shielding, config, units.
+
 from __future__ import annotations
 
 import numpy as np

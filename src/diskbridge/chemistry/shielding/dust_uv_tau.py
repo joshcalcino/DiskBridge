@@ -38,6 +38,11 @@ prepare_dust_density_fields
     Extract per-bin dust density arrays from a model.
 """
 
+# db-keywords: shielding, healpix-columns, uv-products, radmc3d, chemistry, model, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: Dust UV optical depth computation for HEALPix directional shielding.
+
 from __future__ import annotations
 
 from pathlib import Path

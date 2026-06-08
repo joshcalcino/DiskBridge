@@ -4,6 +4,11 @@ These tests use synthetic model fields and small solver inputs to protect
 deterministic chemistry API behavior and simple objective physical invariants.
 """
 
+# db-keywords: shielding, uv-products, photodesorption, gow17, gas-temperature, dust-gas-coupling, validation, config, units, radmc3d, chemistry, model, mesh
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for GOW17 configuration, scaling, diagnostics, and budget contracts.
+
 import numpy as np
 import pytest
 from types import SimpleNamespace

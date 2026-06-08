@@ -1,3 +1,8 @@
+# db-keywords: config, units, model, mesh, field, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for config, units, model, mesh.
+
 from __future__ import annotations
 
 from typing import Any

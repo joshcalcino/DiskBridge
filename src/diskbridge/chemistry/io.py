@@ -1,3 +1,8 @@
+# db-keywords: gow17, line-transfer, gas-temperature, units, radmc3d, chemistry, model, mesh
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for gow17, line-transfer, gas-temperature, units.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Dict

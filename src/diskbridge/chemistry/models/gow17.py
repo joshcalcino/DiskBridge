@@ -1,3 +1,8 @@
+# db-keywords: shielding, healpix-columns, uv-products, photodesorption, gow17, config, units, radmc3d, chemistry, model, mesh, external-pdr
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for shielding, healpix-columns, uv-products, photodesorption.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

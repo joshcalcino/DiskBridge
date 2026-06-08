@@ -18,6 +18,11 @@ When loading data, Model fields are reordered explicitly using Field.axis_order
 metadata to match yt/RADMC-3D order.
 """
 
+# db-keywords: uv-products, gas-temperature, units, radmc3d, model, mesh, field
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: DiskBridge dataset wrapper for yt-project integration.
+
 from __future__ import annotations
 
 from pathlib import Path

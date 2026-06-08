@@ -1,3 +1,8 @@
+# db-keywords: shielding, uv-products, config, units, radmc3d, model, field, coordinates
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for shielding, uv-products, config, units.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

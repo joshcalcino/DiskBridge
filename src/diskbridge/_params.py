@@ -1,3 +1,8 @@
+# db-keywords: uv-products, photodesorption, line-transfer, config, units, radmc3d, field, io, serialization
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for uv-products, photodesorption, line-transfer, config.
+
 from __future__ import annotations
 
 from dataclasses import dataclass, fields

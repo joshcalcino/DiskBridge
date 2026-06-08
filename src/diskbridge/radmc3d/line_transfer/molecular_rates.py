@@ -15,6 +15,11 @@ Reference: ``other_codes/lines.py:radmc3dMolecule`` is consulted for formula
 shape only.
 """
 
+# db-keywords: gow17, nonlte, line-transfer, units, radmc3d, field, io, paths
+# db-role: canonical
+# db-scope: package
+# db-purpose: LAMDA parser and collision-rate helpers for external-population non-LTE.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

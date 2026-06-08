@@ -1,3 +1,8 @@
+# db-keywords: config, units, radmc3d, model, field, io
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Package module for config, units, radmc3d, model.
+
 from __future__ import annotations
 
 from pathlib import Path

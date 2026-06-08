@@ -1,5 +1,10 @@
 """Serialization helpers for DiskBridge metadata."""
 
+# db-keywords: units, io, serialization, paths, arrays
+# db-role: canonical
+# db-scope: package
+# db-purpose: Serialization helpers for DiskBridge metadata.
+
 from __future__ import annotations
 
 from pathlib import Path

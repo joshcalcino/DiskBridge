@@ -4,6 +4,11 @@ This module provides utilities for checking whether cached RADMC-3D outputs
 are still valid based on parameter snapshots and signatures.
 """
 
+# db-keywords: config, radmc3d, field, io, serialization, paths, hashing, cache
+# db-role: canonical
+# db-scope: package
+# db-purpose: Cache validation for RADMC-3D computations.
+
 from __future__ import annotations
 from pathlib import Path
 import hashlib

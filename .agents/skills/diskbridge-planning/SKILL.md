@@ -27,15 +27,20 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
 2. Identify affected modules.
 3. Identify likely capability keywords and inspect existing tagged code with
    `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
-4. State whether the change reuses, extends, merges, or adds code.
-5. Separate structural changes from physics changes.
-6. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
-7. Define implementation steps.
-8. Define fast pytest tests, including simple objective physics invariants when appropriate.
-9. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
-10. Define documentation updates.
-11. Define risks and human decisions.
-12. Define completion criteria.
+4. Search the generated symbol index for proposed function names and helper
+   concepts with `python tools/diskbridge_agent/capability_map.py symbols --query <text>`.
+5. Check `.agents/code_index/` and
+   `diskbridge_code_map/UTILITY_CONSOLIDATION_GUIDE.md` for known duplicate or
+   duplication-prone helpers before proposing new helpers.
+6. State whether the change reuses, extends, merges, or adds code.
+7. Separate structural changes from physics changes.
+8. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
+9. Define implementation steps.
+10. Define fast pytest tests, including simple objective physics invariants when appropriate.
+11. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
+12. Define documentation updates.
+13. Define risks and human decisions.
+14. Define completion criteria.
 
 ## RADMC-3D I/O Invariant
 
@@ -64,6 +69,18 @@ Every plan must include:
 - Risks and human decisions
 - Completion criteria
 - Progress log
+
+## Capability Map Review Requirements
+
+The plan's capability map review must state:
+
+- relevant keywords;
+- existing tagged code inspected;
+- generated symbol-index searches and what they found;
+- utility-consolidation guide entries inspected, when relevant;
+- reuse, extend, merge, or add decision;
+- new or updated source tags planned;
+- utility/helper module impact.
 
 ## Rules
 

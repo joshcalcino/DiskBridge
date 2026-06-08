@@ -16,6 +16,11 @@ References:
   Leiden CO shielding archive: CO_shielding_functions.zip
 """
 
+# db-keywords: shielding, co-shielding, chemistry, mesh, coordinates, io, interpolation, files
+# db-role: helper
+# db-scope: package
+# db-purpose: Visser+2009 CO shielding functions with auto-download.
+
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path

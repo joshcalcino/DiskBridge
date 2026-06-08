@@ -1,5 +1,10 @@
 """Partitioned UV radiation products for RADMC-3D mean intensities."""
 
+# db-keywords: uv-products, disk-mask, config, units, radmc3d, field, serialization, paths
+# db-role: canonical
+# db-scope: package
+# db-purpose: Partitioned UV radiation products for RADMC-3D mean intensities.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -1,3 +1,8 @@
+# db-keywords: shielding, healpix-columns, photodesorption, disk-mask, config, units, radmc3d, chemistry, model, mesh
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for shielding, healpix-columns, photodesorption, disk-mask.
+
 from __future__ import annotations
 
 from typing import Tuple, TYPE_CHECKING

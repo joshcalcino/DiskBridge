@@ -1,5 +1,10 @@
 """Diagnostic plots for line-transfer and external non-LTE runs."""
 
+# db-keywords: disk-mask, nonlte, line-transfer, units, radmc3d, field, visualization, io
+# db-role: entrypoint
+# db-scope: package
+# db-purpose: Diagnostic plots for line-transfer and external non-LTE runs.
+
 from __future__ import annotations
 
 from pathlib import Path

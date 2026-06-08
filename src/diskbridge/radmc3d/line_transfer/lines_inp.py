@@ -1,3 +1,8 @@
+# db-keywords: line-transfer, config, radmc3d, io, paths, molecule-data
+# db-role: canonical
+# db-scope: package
+# db-purpose: Package module for line-transfer, config, radmc3d, io.
+
 from __future__ import annotations
 
 from pathlib import Path

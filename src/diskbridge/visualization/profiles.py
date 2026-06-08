@@ -9,6 +9,11 @@ and other 1D/2D reductions commonly used in disk analysis:
 - Column density integration
 """
 
+# db-keywords: gas-temperature, units, radmc3d, model, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: Profile and averaging utilities for disk analysis.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Tuple, Union

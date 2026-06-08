@@ -4,6 +4,11 @@ This module provides dust opacity calculations using the Bohren & Huffman
 Mie scattering code, adapted from the fargo2radmc3d package.
 """
 
+# db-keywords: config, units, radmc3d, model, coordinates, serialization
+# db-role: canonical
+# db-scope: package
+# db-purpose: Dust opacity calculations using Mie scattering theory.
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple, Dict
 from pathlib import Path

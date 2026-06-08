@@ -8,6 +8,11 @@ The class is separate from the writer functionality, providing clean separation
 between input (writer) and output (data reader) operations.
 """
 
+# db-keywords: gas-temperature, units, radmc3d, model, mesh, field, io, files
+# db-role: helper
+# db-scope: package
+# db-purpose: RADMC-3D data reader class.
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Tuple
 from pathlib import Path

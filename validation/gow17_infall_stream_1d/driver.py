@@ -1,3 +1,8 @@
+# db-keywords: shielding, uv-products, photodesorption, gow17, gas-temperature, validation, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: validation
+# db-purpose: Validation module for shielding, uv-products, photodesorption, gow17.
+
 from __future__ import annotations
 
 import json

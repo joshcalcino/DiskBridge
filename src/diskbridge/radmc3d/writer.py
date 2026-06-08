@@ -5,6 +5,11 @@ and writes the necessary RADMC-3D input files, handling unit conversion
 from Pint Quantities to CGS units.
 """
 
+# db-keywords: config, units, radmc3d, model, mesh, field
+# db-role: canonical
+# db-scope: package
+# db-purpose: RADMC-3D input file writer for DiskBridge Models.
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, List, Tuple
 from pathlib import Path

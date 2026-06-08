@@ -25,7 +25,12 @@ Improve structure without changing scientific behavior unless the user explicitl
 2. Find public entry points and internal helpers.
 3. Identify relevant capability keywords and inspect tagged canonical code with
    `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
-4. Identify what must remain stable:
+4. Search the generated symbol index for helper names/concepts likely to be
+   duplicated with `python tools/diskbridge_agent/capability_map.py symbols --query <text>`.
+5. Check `.agents/code_index/` and
+   `diskbridge_code_map/UTILITY_CONSOLIDATION_GUIDE.md` for known duplicate
+   helper families, proposed canonical homes, and risks.
+6. Identify what must remain stable:
    - public API signatures
    - output file names
    - array shapes/order
@@ -33,13 +38,15 @@ Improve structure without changing scientific behavior unless the user explicitl
    - config keys
    - validation expectations
    - existing tests
-5. Do not delete code only because it has no obvious static caller. Some code may be used by examples, validation drivers, or external workflows.
+7. Do not delete code only because it has no obvious static caller. Some code may be used by examples, validation drivers, or external workflows.
 
 ## Refactor Rules
 
 - Prefer one clear public entry point over many parallel pathways.
 - Remove duplicated logic only after identifying the canonical implementation.
-- Keep or update sparse capability tags when canonical implementations move.
+- Keep or update sparse capability tags when canonical implementations move;
+  use module-level tags for helper families and direct tags for reusable or
+  duplication-prone small helpers.
 - Do not create fallback branches unless the user explicitly requests them.
 - Do not mix physics changes with structural cleanup.
 - Keep Pint quantities at public boundaries.

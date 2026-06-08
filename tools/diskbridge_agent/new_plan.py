@@ -1,5 +1,10 @@
 """Create a new DiskBridge project plan from the standard template."""
 
+# db-keywords: io, paths, workflow, cli
+# db-role: entrypoint
+# db-scope: module
+# db-purpose: Create a new DiskBridge project plan from the standard template.
+
 from __future__ import annotations
 
 import argparse

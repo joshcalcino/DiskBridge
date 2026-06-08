@@ -4,6 +4,11 @@ This module defines the interface that all visualization backends must implement
 Currently the main implementation is YTBackend which uses yt-project.
 """
 
+# db-keywords: field, coordinates, visualization, io, paths, plotting
+# db-role: helper
+# db-scope: package
+# db-purpose: Abstract base class for visualization backends.
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

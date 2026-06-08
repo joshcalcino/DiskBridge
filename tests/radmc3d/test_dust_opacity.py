@@ -7,6 +7,11 @@ Tests cover:
 4. resolve_uv_tau_mode: decision logic for dustkappa vs sigma_dust
 """
 
+# db-keywords: shielding, uv-products, validation, radmc3d, io, paths, arrays
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for dustkappa reader, band-averaged kext, and dust UV tau computation.
+
 import tempfile
 from pathlib import Path
 

@@ -31,7 +31,7 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/joshcalcino/fargo2radmc3d"
+Homepage = "https://github.com/joshcalcino/DiskBridge"
 
 [project.scripts]
 # no console scripts for diskbridge yet

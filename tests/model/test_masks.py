@@ -4,6 +4,11 @@ These tests use tiny synthetic models to check objective mask invariants such as
 soft-weight ranges, threshold behavior, monotonicity, and binary cell mode.
 """
 
+# db-keywords: disk-mask, validation, units, model, mesh, field
+# db-role: validation
+# db-scope: test
+# db-purpose: Tests for DiskBridge disk-mask weighting contracts.
+
 import numpy as np
 
 from diskbridge._units import Quantity

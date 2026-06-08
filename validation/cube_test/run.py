@@ -1,3 +1,8 @@
+# db-keywords: shielding, healpix-columns, uv-products, validation, config, units, radmc3d, model, mesh, field
+# db-role: validation
+# db-scope: validation
+# db-purpose: Validation module for shielding, healpix-columns, uv-products, validation.
+
 from __future__ import annotations
 
 import argparse
