@@ -27,6 +27,8 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Updated the cube validation workflow for current GOW17/RADMC-3D UV products, fixed-dust-temperature chemistry, and explicit shielding-off comparisons.
+
 ### Internal
 
 - Integrated code-map tag guidance into the capability registry, source tags,

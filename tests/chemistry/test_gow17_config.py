@@ -623,6 +623,54 @@ def test_co_pdes_radiation_assembly_keeps_photodesorption_flux_unshielded(monkey
     np.testing.assert_allclose(theta_c, np.ones(ncells))
 
 
+def test_skip_shielding_uses_unity_factors_without_column_solve(monkeypatch):
+    shape = (2,)
+    ncells = 2
+
+    def fail_compute_pdr_shielding_healpix(**kwargs):
+        raise AssertionError("shielding solve should be skipped")
+
+    monkeypatch.setattr(
+        "diskbridge.chemistry.shielding.healpix_columns.compute_pdr_shielding_healpix",
+        fail_compute_pdr_shielding_healpix,
+    )
+
+    y = np.zeros((ncells, N_Y), dtype=np.float64)
+    y[:, I_CO] = 1.0e-6
+    y[:, I_H2] = 0.1
+    G_CO_diss = np.array([3.0, 4.0], dtype=np.float64)
+
+    theta_h2, theta_co, theta_c, Gph, _, _ = _compute_shielding_and_gph(
+        y_flat=y,
+        nH_flat=np.full(ncells, 1.0e4, dtype=np.float64),
+        chi_dust_flat=np.ones(ncells, dtype=np.float64),
+        G_CO_diss_flat=G_CO_diss,
+        G_H2_diss_flat=np.ones(ncells, dtype=np.float64),
+        G_C_ion_flat=np.ones(ncells, dtype=np.float64),
+        G_CO_pdes_flat=np.ones(ncells, dtype=np.float64),
+        F_CO_pdes_photon_flat=np.array([100.0, 200.0], dtype=np.float64),
+        xCtot_flat=np.full(ncells, 1.0e-4, dtype=np.float64),
+        Zd_arr=np.ones(ncells, dtype=np.float64),
+        shape=shape,
+        ncells=ncells,
+        rad=SimpleNamespace(model=SimpleNamespace(mesh=object())),
+        nH_cm3=np.full(shape, 1.0e4, dtype=np.float64),
+        chi_dust_arr=np.ones(shape, dtype=np.float64),
+        visser=None,
+        b_H2_kms=1.0,
+        b_CO_kms=1.0,
+        b_H2_kms_grid=None,
+        b_CO_kms_grid=None,
+        nside=1,
+        skip_shielding=True,
+    )
+
+    np.testing.assert_allclose(theta_h2, np.ones(ncells))
+    np.testing.assert_allclose(theta_co, np.ones(ncells))
+    np.testing.assert_allclose(theta_c, np.ones(ncells))
+    np.testing.assert_allclose(Gph[:, 2], G_CO_diss)
+
+
 def test_co_pdes_diagnostics_use_photon_flux_plus_cruv():
     from diskbridge.chemistry.models.gow17 import _resolve_co_phase_runtime_params
 

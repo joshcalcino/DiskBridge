@@ -1738,6 +1738,7 @@ def _compute_shielding_and_gph(
     b_H2_kms_grid: np.ndarray | None,
     b_CO_kms_grid: np.ndarray | None,
     nside: int,
+    skip_shielding: bool = False,
 ) -> tuple:
     """Compute shielding factors and radiation field arrays from current abundances.
 
@@ -1771,38 +1772,43 @@ def _compute_shielding_and_gph(
         (xC_neutral * nH_flat).reshape(shape), dtype=np.float64
     )
 
-    from diskbridge.chemistry.shielding.healpix_columns import (
-        compute_pdr_shielding_healpix,
-    )
+    if skip_shielding:
+        theta_h2_arr = np.ones(shape, dtype=np.float64)
+        theta_co_arr = np.ones(shape, dtype=np.float64)
+        theta_c_arr = np.ones(shape, dtype=np.float64)
+    else:
+        from diskbridge.chemistry.shielding.healpix_columns import (
+            compute_pdr_shielding_healpix,
+        )
 
-    W_rays = getattr(rad, "W_rays", None)
-    (
-        theta_h2_arr,
-        theta_co_arr,
-        theta_c_arr,
-        _,
-        _,
-    ) = compute_pdr_shielding_healpix(
-        mesh=rad.model.mesh,
-        nH=nH_cm3,
-        chi=chi_dust_arr,
-        visser=visser,
-        nCO=nCO_cm3,
-        nC=nC_cm3,
-        nH2=nH2_cm3,
-        nside=nside,
-        b_H2_kms=b_H2_kms,
-        b_CO_kms=b_CO_kms,
-        b_H2_kms_grid=b_H2_kms_grid,
-        b_CO_kms_grid=b_CO_kms_grid,
-        W_rays=W_rays,
-        chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
-        memory_budget_gib=getattr(
-            diskbridge.params,
-            "pdr_shielding_memory_budget_gib",
-            None,
-        ),
-    )
+        W_rays = getattr(rad, "W_rays", None)
+        (
+            theta_h2_arr,
+            theta_co_arr,
+            theta_c_arr,
+            _,
+            _,
+        ) = compute_pdr_shielding_healpix(
+            mesh=rad.model.mesh,
+            nH=nH_cm3,
+            chi=chi_dust_arr,
+            visser=visser,
+            nCO=nCO_cm3,
+            nC=nC_cm3,
+            nH2=nH2_cm3,
+            nside=nside,
+            b_H2_kms=b_H2_kms,
+            b_CO_kms=b_CO_kms,
+            b_H2_kms_grid=b_H2_kms_grid,
+            b_CO_kms_grid=b_CO_kms_grid,
+            W_rays=W_rays,
+            chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
+            memory_budget_gib=getattr(
+                diskbridge.params,
+                "pdr_shielding_memory_budget_gib",
+                None,
+            ),
+        )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)
     theta_co_flat = theta_co_arr.reshape(ncells)
@@ -1901,6 +1907,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     verbose = bool(cfg["verbose"])
 
     shielding_max_iter = int(cfg["shielding_max_iter"])
+    skip_shielding = bool(cfg["skip_shielding"])
     shielding_reltol = float(cfg["shielding_reltol"])
     shielding_abstol = float(cfg["shielding_abstol"])
     tgas_convergence_reltol = float(cfg["tgas_convergence_reltol"])
@@ -1952,7 +1959,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     # shielding iterations.  Returns None for 1-D meshes or when dustkappa
     # files are unavailable (shielding then falls back to isotropic averaging).
     directional_uv_product = radiation_mode.directional_uv_product
-    maybe_ensure_W_rays(rad, nside=nside, uv_product=directional_uv_product)
+    if not skip_shielding:
+        maybe_ensure_W_rays(rad, nside=nside, uv_product=directional_uv_product)
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     T_K = np.clip(
@@ -2308,6 +2316,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         b_H2_kms_grid=b_H2_kms_grid,
         b_CO_kms_grid=b_CO_kms_grid,
         nside=nside,
+        skip_shielding=skip_shielding,
     )
 
     # Common keyword dict for CO phase parameters passed to batch solvers.
@@ -3163,6 +3172,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "dust_cooling_mode_id_map": {1: "surface_area", 2: "gow17_original"},
         "sigma_d_H_ref": float(sigma_d_H_ref),
         "shielding_iter": n_shielding_iter,
+        "skip_shielding": bool(skip_shielding),
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),
         "d_coice_hist": np.asarray(d_coice_hist, dtype=np.float64),
@@ -3539,6 +3549,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "reltol": float(reltol),
         "abstol0": float(abstol0),
         "shielding_max_iter": int(shielding_max_iter),
+        "skip_shielding": bool(skip_shielding),
         "shielding_reltol": float(shielding_reltol),
         "n_fail": int(n_fail),
         "max_status": int(max_status),

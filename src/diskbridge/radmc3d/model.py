@@ -1015,6 +1015,8 @@ class RadModel:
                 ),
             )
             for name, arr in products.items():
+                if name == "F_CO_pdes_photon_bands":
+                    continue
                 self.model.gas_register(
                     name,
                     Field(

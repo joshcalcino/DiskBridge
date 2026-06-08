@@ -132,6 +132,11 @@ validation workflow.
 
 Do not keep temporary one-off tests that only inspect a private helper unless they protect a meaningful regression. It is acceptable to create temporary local tests during development, but remove them once the change is working unless they serve as useful regression tests.
 
+For trivial refactors that only move identical private helper bodies into a
+shared helper, do not add a persistent helper-only test by default. Prefer the
+existing subsystem tests that exercise the public or workflow call sites, plus
+import/compile or metadata checks when appropriate.
+
 ## Useful Test Categories
 
 - config resolution tests

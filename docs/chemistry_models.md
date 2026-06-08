@@ -96,5 +96,4 @@ The following files reference the deleted `carbon_reduced` model / `_carbon_redu
 - [`validation/carbon_reduced_slab.py`](../validation/carbon_reduced_slab.py)
 - [`validation/freezeout_slab.py`](../validation/freezeout_slab.py)
 - [`validation/thermochem_slab.py`](../validation/thermochem_slab.py)
-- [`validation/cube_test/run.py`](../validation/cube_test/run.py)
 - [`examples/thermal_balance_example.py`](../examples/thermal_balance_example.py)

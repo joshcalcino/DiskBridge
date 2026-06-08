@@ -65,7 +65,10 @@ Improve structure without changing scientific behavior unless the user explicitl
 ## After Editing
 
 1. Run the smallest relevant pytest tests.
-2. Report what was moved, what was deleted, what public behavior changed, which tests were run, and which validations may need human review.
+2. For trivial helper consolidation that only removes duplicate private bodies,
+   prefer existing focused tests, import/compile checks, symbol scans, or
+   capability checks over adding a new persistent private-helper pytest file.
+3. Report what was moved, what was deleted, what public behavior changed, which tests were run, and which validations may need human review.
 
 ## Final Report
 

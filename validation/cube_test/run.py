@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
@@ -17,9 +18,7 @@ import diskbridge
 from diskbridge._units import Quantity, units
 from diskbridge._params import DEFAULT_PARAMS_FILE
 from diskbridge.chemistry.api import run_chemistry
-from diskbridge.chemistry.shielding.angular_uv_weights import compute_uv_direction_weights_healpix
-from diskbridge.chemistry.shielding.dust_uv_tau import prepare_dust_density_fields
-from diskbridge.radmc3d.dustkappa_reader import load_kext_uv_for_bins
+from diskbridge.chemistry.shielding.w_rays_cache import maybe_ensure_W_rays
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
@@ -31,14 +30,14 @@ from diskbridge.radmc3d.cache import find_cached_output
 
 @dataclass(frozen=True)
 class CubeTestConfig:
-    nx: int = 64
-    ny: int = 64
-    nz: int = 64
+    nx: int = 128
+    ny: int = 128
+    nz: int = 128
 
-    L_au: float = 100000.0
+    L_au: float = 1000000.0
 
     # Turbulent lognormal density: rho = rho0 * exp(s), where s is correlated Gaussian
-    rho0_g_cm3_list: tuple[float, ...] = (1.0e-21,)
+    rho0_g_cm3_list: tuple[float, ...] = (2.0e-18,)
     sigma_s: float = 1.0
     peak_boost: float = 5.0
     p: float = 11.0 / 3.0
@@ -55,15 +54,26 @@ class CubeTestConfig:
     chi0: float = 1.0
 
     # Shielding
-    shielding_iter: int = 5
+    shielding_iter: int = 8
     nside: int = 4
     b_kms: float = 0.3
 
     # RADMC
-    nphot_thermal: int = 20000000
-    nphot_mono: int = 20000000
+    nphot_thermal: int = 200000000
+    nphot_mono: int = 200000000
     scat_mode: int = 0
     nbcores: int = 12
+
+
+@contextmanager
+def _using_diskbridge_params(params):
+    """Temporarily activate a DiskBridge params object."""
+    prev_params = diskbridge.params
+    try:
+        diskbridge.params = params
+        yield params
+    finally:
+        diskbridge.params = prev_params
 
 
 def _setup_matplotlib():
@@ -104,6 +114,20 @@ def _write_inputs(out_dir: Path, cfg: CubeTestConfig) -> None:
     (out_dir / "inputs.json").write_text(
         json.dumps(inputs, indent=2, sort_keys=True), encoding="utf-8"
     )
+
+
+def _clean_plot_artifacts(out_dir: Path) -> None:
+    """Remove generated plot artifacts before writing current diagnostics."""
+    out_dir = Path(out_dir)
+    plot_dirs = [out_dir]
+    plot_dirs.extend(path for path in out_dir.glob("rho0_*") if path.is_dir())
+
+    for plot_dir in plot_dirs:
+        for png_path in plot_dir.glob("*.png"):
+            png_path.unlink()
+        stale_summary = plot_dir / "avg_mode_compare_summary.json"
+        if stale_summary.exists():
+            stale_summary.unlink()
 
 
 def _build_cube_mesh(cfg: CubeTestConfig) -> Mesh:
@@ -221,6 +245,19 @@ def _build_model_with_density(mesh: Mesh, rho_g_cm3: np.ndarray) -> Model:
     return model
 
 
+def _register_gas_quantity(model: Model, name: str, data: Quantity) -> None:
+    if model.mesh is None:
+        raise ValueError("Model has no mesh")
+    model.gas_register(
+        name,
+        Field(
+            quantity=name,
+            data=data,
+            axis_order=model.mesh.axis_names(),
+        ),
+    )
+
+
 def _ensure_dust_setup(cfg: CubeTestConfig, model: Model) -> None:
     if model.dust is None:
         model.dust = Dust(model)
@@ -233,27 +270,6 @@ def _ensure_dust_setup(cfg: CubeTestConfig, model: Model) -> None:
 
     if model.dust.nbin <= 0:
         raise RuntimeError("Dust distribution created zero bins")
-
-
-def _ensure_dustkappa_files(
-    *,
-    inputs_dir: Path,
-    species: str,
-    nbin: int,
-    source_dir: Path,
-) -> list[str]:
-    copied: list[str] = []
-    for i in range(int(nbin)):
-        fname = f"dustkappa_{species}{i}.inp"
-        dst = inputs_dir / fname
-        if dst.exists():
-            continue
-        src = source_dir / fname
-        if not src.exists():
-            raise FileNotFoundError(f"Missing opacity file {src}")
-        dst.write_bytes(src.read_bytes())
-        copied.append(fname)
-    return copied
 
 
 def _write_radmc3d_params_txt(
@@ -274,13 +290,14 @@ def _write_radmc3d_params_txt(
         "scat_mode": str(int(cfg.scat_mode)),
         "lambda_min": str(0.05),
         "uv_min": str(91.2),
-        "uv_max": str(111.8),
+        "uv_max": str(206.7),
         "uv_n_wavelengths": str(10),
         "external_uv": "T",
         "external_uv_chi": str(float(cfg.chi0)),
         "nside": str(int(cfg.nside)),
         "nbins": str(int(cfg.dust_nbins)),
         "dust_to_gas_ratio": str(float(cfg.dust_to_gas_ratio)),
+        "microturbulence": str(float(cfg.b_kms)),
     }
 
     out_lines: list[str] = []
@@ -327,56 +344,14 @@ def _compute_and_attach_uv_weights(
     cfg: CubeTestConfig,
     chi: Quantity,
 ) -> None:
-    """Compute directional UV weights and attach to rad.W_rays.
-
-    Uses dustkappa-derived UV extinction opacities and the external UV field
-    strength to build per-direction weights via
-    :func:`compute_uv_direction_weights_healpix`.  The weights are stored on
-    ``rad.W_rays`` so that GOW17 chemistry picks them up automatically.
-
-    Parameters
-    ----------
-    rad : RadModel
-        RADMC-3D model wrapper (must have dust set up).
-    cfg : CubeTestConfig
-        Cube test configuration.
-    chi : Quantity
-        RADMC-3D chi field (Draine units), 3-D grid.
-    """
-    inputs_dir = Path(rad.model_dir) / "radmc3d_inputs"
-    species = (
-        diskbridge.params.species[0]
-        if isinstance(diskbridge.params.species, list)
-        else str(diskbridge.params.species)
-    )
-    kext_uv = load_kext_uv_for_bins(
-        radmc_inputs_dir=inputs_dir,
-        species_base=species,
-        nbin=int(rad.model.dust.nbin),
-        uv_min_um=float(diskbridge.params.uv_min.to("micrometer").magnitude),
-        uv_max_um=float(diskbridge.params.uv_max.to("micrometer").magnitude),
-    )
-    if kext_uv is None:
-        print("  [WARNING] Could not load dustkappa UV opacities; skipping UV weights")
-        rad.W_rays = None
-        return
-
-    dust_rho_bins = prepare_dust_density_fields(rad.model)
-
-    chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=np.float64)
-
-    W_rays, _, _, _, debug = compute_uv_direction_weights_healpix(
-        rad.model.mesh,
-        chi_radmc=chi_arr,
-        nside=int(cfg.nside),
-        dust_rho_bins=dust_rho_bins,
-        kext_uv=kext_uv,
-        chi_ext0=float(cfg.chi0),
-        star_uv_luminosity_erg_s=0.0,
-    )
-    rad.W_rays = W_rays
-    print(f"  UV weights computed: shape={W_rays.shape}, "
-          f"median(chi_iso)={float(np.median(debug.get('chi_iso', [0.0]))):.3e}")
+    """Compute and cache directional UV weights using the package helper."""
+    del chi
+    uv_product = "G_CO_diss" if rad.has_uv_product("G_CO_diss") else "chi"
+    W_rays = maybe_ensure_W_rays(rad, nside=int(cfg.nside), uv_product=uv_product)
+    if W_rays is None:
+        print("  UV weights unavailable; GOW17 will use isotropic ray averaging")
+    else:
+        print(f"  UV weights computed: shape={W_rays.shape}")
 
 
 def _run_radmc3d_external_uv(
@@ -393,66 +368,57 @@ def _run_radmc3d_external_uv(
 
     # Override global params for this run and sync writer/model.
     params_path = _write_radmc3d_params_txt(model_dir=model_dir, cfg=cfg)
-    prev_params = diskbridge.params
     prev_rad_params = rad.params
     prev_writer_params = rad.writer.params
     new_params = diskbridge.read_params(params_path)
-    diskbridge.params = new_params
-    diskbridge._params_module.params = new_params
-    rad.params = new_params
-    rad.writer.params = new_params
 
     try:
-        rad.writer.write_amr_grid(model_dir)
-        rad.writer.write_wavelength_grid(model_dir)
-        _write_stars_none(inputs_dir=inputs_dir)
-        rad.writer.write_radmc3d_inp(
-            model_dir,
-            scattering_mode_max=int(new_params.scat_mode),
-            nphot=int(new_params.nphot_thermal),
-            nphot_mono=int(new_params.nphot_mono),
-            nphot_scat=int(new_params.nphot_scat),
-            setthreads=int(new_params.nbcores),
-        )
-        rad.writer.write_dust_density(model_dir, binary=True)
-        rad.writer.write_dustopac(model_dir, scattering_mode=int(new_params.scat_mode))
+        with _using_diskbridge_params(new_params):
+            rad.params = new_params
+            rad.writer.params = new_params
+            rad.writer.write_amr_grid(model_dir)
+            rad.writer.write_wavelength_grid(model_dir)
+            _write_stars_none(inputs_dir=inputs_dir)
+            rad.writer.write_radmc3d_inp(
+                model_dir,
+                scattering_mode_max=int(new_params.scat_mode),
+                nphot=int(new_params.nphot_thermal),
+                nphot_mono=int(new_params.nphot_mono),
+                nphot_scat=int(new_params.nphot_scat),
+                setthreads=int(new_params.nbcores),
+            )
+            rad.writer.write_dust_density(model_dir, binary=True)
+            rad.writer.write_dustopac(model_dir, scattering_mode=int(new_params.scat_mode))
 
-        # Ensure dustkappa files exist (reuse baseline precomputed opacities).
-        root = Path(__file__).resolve().parents[2]
-        opac_src_dir = root / "examples" / "testbed" / "baseline_run" / "radmc3d_inputs"
-        species = (
-            new_params.species[0]
-            if isinstance(new_params.species, list)
-            else str(new_params.species)
-        )
-        _ensure_dustkappa_files(
-            inputs_dir=inputs_dir,
-            species=species,
-            nbin=int(rad.model.dust.nbin),
-            source_dir=opac_src_dir,
-        )
+            rad.writer.compute_and_write_dust_opacities(
+                model_dir,
+                scattering_mode=int(new_params.scat_mode),
+            )
 
-        rad.writer.write_external_source(model_dir, chi=float(cfg.chi0))
+            rad.writer.write_external_source(model_dir, chi=float(cfg.chi0))
 
-        # Provide a fixed dust temperature, written in the location mcmono expects.
-        temp = Quantity(
-            np.full(rad.model.mesh.shape, float(cfg.Tdust_K), dtype=float),
-            "K",
-        )
-        rad.dust_temperature = temp
+            # Provide a fixed dust temperature, written in the location mcmono expects.
+            temp = Quantity(
+                np.full(rad.model.mesh.shape, float(cfg.Tdust_K), dtype=float),
+                "K",
+            )
+            rad.dust_temperature = temp
+            _register_gas_quantity(rad.model, "dust_temperature", temp)
 
-        writer = RadWriter(rad.model, organize_files=True)
-        writer.write_dust_temperature(
-            temperature=temp,
-            output_dir=outputs_dir,
-            nspec=int(rad.model.dust.nbin),
-        )
+            writer = RadWriter(rad.model, organize_files=True)
+            writer.params = new_params
+            writer.write_dust_temperature(
+                temperature=temp,
+                output_dir=outputs_dir,
+                nspec=int(rad.model.dust.nbin),
+            )
 
-        rad.ensure_chi(force=True)
-
+            rad.compute_mcmono(
+                force=False,
+                setthreads=int(new_params.nbcores),
+                compute_uv_products=True,
+            )
     finally:
-        diskbridge.params = prev_params
-        diskbridge._params_module.params = prev_params
         rad.params = prev_rad_params
         rad.writer.params = prev_writer_params
 
@@ -517,24 +483,11 @@ def _write_cube_plots(
         where=(nco_off_arr > 0.0),
     )
 
-    params_box = [
-        f"n={cfg.nx}x{cfg.ny}x{cfg.nz}",
-        f"L={cfg.L_au:g} au",
-        f"rho0={cfg.rho0_g_cm3_list}",
-        f"sigma0={cfg.sigma_s:g} sigma_eff={float(sigma_eff):g} (peak_boost={cfg.peak_boost:g})",
-        f"p={cfg.p:g}",
-        f"k=[{cfg.k_min:g},{cfg.k_max:g}] * {cfg.k_multiplier:g} (integer modes)",
-        f"seed={cfg.seed}",
-        f"nside={cfg.nside}",
-        f"shielding_iter={cfg.shielding_iter}",
-    ]
-
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
     ax.hist(np.log10(rho.reshape(-1)), bins=60, color="k", alpha=0.8)
     ax.set_xlabel("log10(rho[g/cm^3])")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
-    _annotate(ax, params_box)
     fig.tight_layout()
     fig.savefig(out_dir / f"{network}_hist_log10_rho.png", dpi=150)
     plt.close(fig)
@@ -544,19 +497,18 @@ def _write_cube_plots(
         np.log10(np.maximum(Xco_off_arr.reshape(-1), tiny)),
         bins=60,
         alpha=0.7,
-        label="Xco (shielding off)",
+        label="shielding off",
     )
     ax.hist(
         np.log10(np.maximum(Xco_on_arr.reshape(-1), tiny)),
         bins=60,
         alpha=0.7,
-        label="Xco (shielding on)",
+        label="shielding on",
     )
     ax.set_xlabel("log10(Xco_gas)")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
-    _annotate(ax, params_box)
     fig.tight_layout()
     fig.savefig(out_dir / f"{network}_hist_log10_Xco.png", dpi=150)
     plt.close(fig)
@@ -566,19 +518,18 @@ def _write_cube_plots(
         np.log10(np.maximum(nco_off_arr.reshape(-1), tiny)),
         bins=60,
         alpha=0.7,
-        label="nCO_gas [cm^-3] (shielding off)",
+        label="shielding off",
     )
     ax.hist(
         np.log10(np.maximum(nco_on_arr.reshape(-1), tiny)),
         bins=60,
         alpha=0.7,
-        label="nCO_gas [cm^-3] (shielding on)",
+        label="shielding on",
     )
     ax.set_xlabel("log10(nCO_gas [cm^-3])")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
-    _annotate(ax, params_box)
     fig.tight_layout()
     fig.savefig(out_dir / f"{network}_hist_log10_nCO_gas.png", dpi=150)
     plt.close(fig)
@@ -588,7 +539,6 @@ def _write_cube_plots(
     ax.set_xlabel("log10(Xco_on / Xco_off)")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
-    _annotate(ax, params_box)
     fig.tight_layout()
     fig.savefig(out_dir / f"{network}_hist_log10_Xco_ratio.png", dpi=150)
     plt.close(fig)
@@ -598,7 +548,6 @@ def _write_cube_plots(
     ax.set_xlabel("log10(nCO_on / nCO_off)")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
-    _annotate(ax, params_box)
     fig.tight_layout()
     fig.savefig(out_dir / f"{network}_hist_log10_nCO_ratio.png", dpi=150)
     plt.close(fig)
@@ -837,13 +786,24 @@ def _write_chemistry_compare_plots(
     nHI_off = _get_field(chem_off, "h", "cm^-3")
     nHI_on = _get_field(chem_on, "h", "cm^-3")
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        X_Cplus_off = np.where(nH > 0.0, nCplus_off / nH, 0.0) if nCplus_off is not None else None
-        X_Cplus_on = np.where(nH > 0.0, nCplus_on / nH, 0.0) if nCplus_on is not None else None
-        X_C_off = np.where(nH > 0.0, nC_off / nH, 0.0) if nC_off is not None else None
-        X_C_on = np.where(nH > 0.0, nC_on / nH, 0.0) if nC_on is not None else None
-        X_e_off = np.where(nH > 0.0, ne_off / nH, 0.0) if ne_off is not None else None
-        X_e_on = np.where(nH > 0.0, ne_on / nH, 0.0) if ne_on is not None else None
+    def _abundance(number_density: np.ndarray | None) -> np.ndarray | None:
+        if number_density is None:
+            return None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(nH > 0.0, np.asarray(number_density, dtype=float) / nH, 0.0)
+
+    Xco_ice_off = _abundance(nco_ice_off)
+    Xco_ice_on = _abundance(nco_ice_on)
+    X_Cplus_off = _abundance(nCplus_off)
+    X_Cplus_on = _abundance(nCplus_on)
+    X_C_off = _abundance(nC_off)
+    X_C_on = _abundance(nC_on)
+    X_e_off = _abundance(ne_off)
+    X_e_on = _abundance(ne_on)
+    X_H2_off = _abundance(nH2_off)
+    X_H2_on = _abundance(nH2_on)
+    X_HI_off = _abundance(nHI_off)
+    X_HI_on = _abundance(nHI_on)
 
     # Build plot list: (key, title, off_arr, on_arr, unit_label, log10, cmap)
     # Only include plots where both off and on arrays are available.
@@ -856,6 +816,7 @@ def _write_chemistry_compare_plots(
     _add("chi_eff", "chi_eff (effective UV)", chi_eff_off, chi_eff_on, "log10", True)
     _add("theta_co", "theta_co (CO shielding)", theta_off, theta_on, "dimensionless", False, "viridis")
     _add("Xco", "Xco (CO gas abundance)", Xco_off, Xco_on, "log10", True)
+    _add("Xco_ice", "Xco_ice (CO ice abundance)", Xco_ice_off, Xco_ice_on, "log10", True)
     _add("nco_gas", "nCO_gas", nco_off, nco_on, "log10(cm^-3)", True)
     _add("nco_ice", "nCO_ice", nco_ice_off, nco_ice_on, "log10(cm^-3)", True)
     _add("nCplus", "nC+", nCplus_off, nCplus_on, "log10(cm^-3)", True)
@@ -864,6 +825,8 @@ def _write_chemistry_compare_plots(
     _add("X_Cplus", "X(C+)", X_Cplus_off, X_Cplus_on, "log10", True)
     _add("X_C", "X(C)", X_C_off, X_C_on, "log10", True)
     _add("X_e", "X(e)", X_e_off, X_e_on, "log10", True)
+    _add("X_H2", "X(H2)", X_H2_off, X_H2_on, "log10", True)
+    _add("X_HI", "X(HI)", X_HI_off, X_HI_on, "log10", True)
     _add("nH2", "nH2", nH2_off, nH2_on, "log10(cm^-3)", True)
     _add("nHI", "nHI", nHI_off, nHI_on, "log10(cm^-3)", True)
 
@@ -985,17 +948,24 @@ def _rho_from_dust_bin0(
     rho_dust_bin0_g_cm3: np.ndarray,
     params,
 ) -> np.ndarray:
+    def _component_value(value):
+        if isinstance(value, (list, tuple)):
+            if not value:
+                raise ValueError("Dust parameter list cannot be empty")
+            return value[0]
+        return value
+
     distribution = DustDistribution(
-        amin=params.amin,
-        amax=params.amax,
+        amin=_component_value(params.amin),
+        amax=_component_value(params.amax),
         nbin=int(params.nbins),
-        power_index=float(params.pindex),
-        grain_density=params.grain_density,
+        power_index=float(_component_value(params.pindex)),
+        grain_density=_component_value(params.grain_density),
     )
     f0 = float(distribution.mass_fractions[0])
     if f0 <= 0.0:
         raise ValueError("Dust bin0 mass fraction is non-positive")
-    d2g = float(params.dust_to_gas_ratio)
+    d2g = float(_component_value(params.dust_to_gas_ratio))
     if d2g <= 0.0:
         raise ValueError("dust_to_gas_ratio must be > 0")
     return np.asarray(rho_dust_bin0_g_cm3, dtype=float) / (d2g * f0)
@@ -1008,7 +978,35 @@ def _load_chi_from_outputs(*, rad: RadModel, case_dir: Path, params) -> Quantity
         raise FileNotFoundError(
             f"Missing mean_intensity.bout in {outputs_dir}; cannot plot without rerunning RADMC-3D"
         )
-    return rad._postprocess_chi(mean_path, params.uv_min, params.uv_max)
+    try:
+        return rad._postprocess_chi(
+            mean_path,
+            params.uv_min,
+            params.uv_max,
+            compute_products=True,
+        )
+    except ValueError as exc:
+        if "does not cover canonical UV band" not in str(exc):
+            raise
+        freq_hz, Jnu_flat = rad.data.read_mean_intensity_file(mean_path)
+        chi, _ = rad._compute_chi_from_mean_intensity(
+            Jnu_flat,
+            freq_hz,
+            params.uv_min,
+            params.uv_max,
+            rad.model.mesh.shape,
+            Quantity(9.0e-14, "erg/cm^3"),
+            str(mean_path),
+        )
+        rad.chi = chi
+        rad.uv_products = {}
+        rad.radiation_mode = "local_chi"
+        _register_gas_quantity(rad.model, "chi", chi)
+        print(
+            "  [WARNING] mean_intensity output does not cover current canonical "
+            "UV products; using legacy narrow-band chi for plots-only"
+        )
+        return chi
 
 
 def _load_case(mesh: Mesh, case_dir: Path, cfg: CubeTestConfig):
@@ -1019,29 +1017,34 @@ def _load_case(mesh: Mesh, case_dir: Path, cfg: CubeTestConfig):
     new_params = diskbridge.read_params(
         _write_radmc3d_params_txt(model_dir=case_dir, cfg=cfg)
     )
-    diskbridge.params = new_params
-    diskbridge._params_module.params = new_params
+    with _using_diskbridge_params(new_params):
+        rho_d0 = _read_dust_density_bin0(
+            dust_density_binp=case_dir / "radmc3d_inputs" / "dust_density.binp",
+            shape=mesh.shape,
+        )
+        rho = _rho_from_dust_bin0(rho_dust_bin0_g_cm3=rho_d0, params=new_params)
 
-    rho_d0 = _read_dust_density_bin0(
-        dust_density_binp=case_dir / "radmc3d_inputs" / "dust_density.binp",
-        shape=mesh.shape,
-    )
-    rho = _rho_from_dust_bin0(rho_dust_bin0_g_cm3=rho_d0, params=new_params)
+        model = _build_model_with_density(mesh, rho)
+        if model.dust is None:
+            model.dust = Dust(model)
+        model.dust.set_distribution(
+            nbin=int(new_params.nbins),
+            dust_to_gas_ratio=float(cfg.dust_to_gas_ratio),
+            mode="proportional",
+        )
 
-    model = _build_model_with_density(mesh, rho)
-    if model.dust is None:
-        model.dust = Dust(model)
-    model.dust.set_distribution(
-        nbin=int(new_params.nbins),
-        dust_to_gas_ratio=float(new_params.dust_to_gas_ratio),
-        mode="proportional",
-    )
+        rad = RadModel(model, model_dir=case_dir)
+        rad.params = new_params
+        rad.writer.params = new_params
 
-    rad = RadModel(model, model_dir=case_dir)
-    rad.params = new_params
-    rad.writer.params = new_params
+        temp = Quantity(
+            np.full(model.mesh.shape, float(cfg.Tdust_K), dtype=float),
+            "K",
+        )
+        rad.dust_temperature = temp
+        _register_gas_quantity(rad.model, "dust_temperature", temp)
 
-    chi = _load_chi_from_outputs(rad=rad, case_dir=case_dir, params=new_params)
+        chi = _load_chi_from_outputs(rad=rad, case_dir=case_dir, params=new_params)
     return rad, rho, chi, new_params
 
 
@@ -1053,14 +1056,13 @@ def _iter_cases(out_dir: Path, cfg: CubeTestConfig):
         raise FileNotFoundError(f"No rho0_* case directories found under {out_dir}")
 
     for case_dir in case_dirs:
-        prev_params = diskbridge.params
-        prev_module_params = diskbridge._params_module.params
+        rad, rho, chi, params = _load_case(mesh, case_dir, cfg)
         try:
-            rad, rho, chi, _ = _load_case(mesh, case_dir, cfg)
-            yield case_dir, rad, rho, chi
+            with _using_diskbridge_params(params):
+                yield case_dir, rad, rho, chi
         finally:
-            diskbridge.params = prev_params
-            diskbridge._params_module.params = prev_module_params
+            rad.params = diskbridge.params
+            rad.writer.params = diskbridge.params
 
 
 def _build_chemistry_config(
@@ -1072,13 +1074,8 @@ def _build_chemistry_config(
     base = {
         "skip_shielding": bool(skip_shielding),
         "nside": int(cfg.nside),
-        "b_kms": float(cfg.b_kms),
+        "temperature": {"mode": "dust"},
     }
-    if skip_shielding:
-        base["shielding_iter"] = 0
-    else:
-        base["shielding_iter"] = int(cfg.shielding_iter)
-
     base["shielding_max_iter"] = int(cfg.shielding_iter) if not skip_shielding else 1
     return base
 
@@ -1090,6 +1087,7 @@ def run_plots_only(out_dir: Path) -> None:
         err_path.unlink()
     cfg = _load_cfg_from_inputs(out_dir)
     network = "gow17"
+    _clean_plot_artifacts(out_dir)
 
     for case_dir, rad, rho, chi in _iter_cases(out_dir, cfg):
         print(f"[{case_dir.name}] Computing UV weights ...")
@@ -1153,6 +1151,7 @@ def run(out_dir: Path) -> None:
 
     cfg = CubeTestConfig()
     _write_inputs(out_dir, cfg)
+    _clean_plot_artifacts(out_dir)
 
     error: str | None = None
     summary: dict = {}

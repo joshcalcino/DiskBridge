@@ -37,6 +37,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
+from diskbridge.chemistry.shielding._array_utils import _as_f64
 from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_multi,
@@ -218,15 +219,6 @@ def _load_npz_cache(
     except Exception as e:
         logger.warning(f"Failed to load healpix cache: {e}")
         return None
-
-
-def _as_f64(name: str, x) -> np.ndarray:
-    if hasattr(x, "magnitude") and hasattr(x, "units"):
-        raise TypeError(f"{name} must be a float64 numpy array (no unit-carrying objects).")
-    a = np.asarray(x, dtype=np.float64)
-    if a.dtype == object:
-        raise TypeError(f"{name} must be float64; got dtype=object")
-    return np.ascontiguousarray(a, dtype=np.float64)
 
 
 def _scatter_candidates_3d(

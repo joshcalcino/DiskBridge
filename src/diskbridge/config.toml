@@ -180,6 +180,7 @@ mxsteps = 10000
 maxord = 5
 userJac = false
 verbose = false
+skip_shielding = false
 shielding_max_iter = 10
 shielding_reltol = 1.0e-3
 shielding_abstol = 1.0e-15

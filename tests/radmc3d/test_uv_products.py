@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 
 from diskbridge._units import Quantity, units
+from diskbridge.model.core import Model, SubModel
+from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.model import RadModel
 from diskbridge.radmc3d.uv_products import (
     C_CGS,
@@ -238,6 +240,54 @@ def test_radmodel_uv_product_fallback_to_chi():
     assert product is rad.chi
     with pytest.raises(KeyError):
         RadModel.ensure_uv_product(rad, "F_CO_pdes_photon", fallback_to_chi=False)
+
+
+def test_radmodel_postprocess_registers_uv_product_axis_orders():
+    lam_ref_nm, _ = load_draine_reference(default_isrf_path())
+    lam_nm = np.unique(
+        np.concatenate(
+            [
+                lam_ref_nm[(lam_ref_nm >= 91.2) & (lam_ref_nm <= 206.7)],
+                UV_PRODUCT_EDGES_NM,
+            ]
+        )
+    )
+    freq_hz, jnu = _draine_jnu_on_grid(lam_nm, chi=1.0)
+
+    class FakeData:
+        def read_mean_intensity_file(self, path):
+            return freq_hz, jnu
+
+        def _getMeshShape(self):
+            return (1, 1, 1)
+
+    model = Model()
+    model.mesh = Mesh.cartesian(
+        x=Axis(edges=Quantity(np.array([0.0, 1.0]), "cm")),
+        y=Axis(edges=Quantity(np.array([0.0, 1.0]), "cm")),
+        z=Axis(edges=Quantity(np.array([0.0, 1.0]), "cm")),
+    )
+    model.gas = SubModel(model)
+
+    rad = RadModel.__new__(RadModel)
+    rad.data = FakeData()
+    rad.model = model
+    rad.uv_products = {}
+    rad.chi = None
+
+    chi = RadModel._postprocess_chi(
+        rad,
+        mean_intensity_file="unused.bout",
+        uv_min=Quantity(91.2, "nm"),
+        uv_max=Quantity(206.7, "nm"),
+        compute_products=True,
+    )
+
+    assert chi.shape == (1, 1, 1)
+    assert model.gas["G_CO_diss"].axis_order == ("x", "y", "z")
+    assert model.gas["F_CO_pdes_photon"].axis_order == ("x", "y", "z")
+    assert "F_CO_pdes_photon_bands" not in model.gas
+    assert rad.uv_products["F_CO_pdes_photon_bands"].magnitude.shape[1:] == (1, 1, 1)
 
 
 def test_segment_uv_products_assign_draine_equivalent_outer_policy():
