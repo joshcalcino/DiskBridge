@@ -15,8 +15,13 @@ Implement the requested feature with the smallest clean design that fits DiskBri
 
 1. Identify whether the change affects physics, units, performance, file I/O, configuration, validation, or plotting/diagnostics.
 2. Check existing modules before creating new ones.
-3. Avoid adding new dependencies unless the user explicitly approves.
-4. If the task belongs to an active project, update the relevant file in `projects/` before editing code.
+3. Identify likely capability keywords and inspect existing tagged code with
+   `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
+4. Prefer extending tagged canonical/entrypoint code over creating a parallel
+   implementation. If new discoverable code is added, add sparse
+   `db-keywords` / `db-role` tags using the registry.
+5. Avoid adding new dependencies unless the user explicitly approves.
+6. If the task belongs to an active project, update the relevant file in `projects/` before editing code.
 
 ## Design Rules
 

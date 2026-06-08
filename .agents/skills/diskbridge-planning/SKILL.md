@@ -25,14 +25,17 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
 
 1. Identify the scientific or code-development goal.
 2. Identify affected modules.
-3. Separate structural changes from physics changes.
-4. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
-5. Define implementation steps.
-6. Define fast pytest tests, including simple objective physics invariants when appropriate.
-7. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
-8. Define documentation updates.
-9. Define risks and human decisions.
-10. Define completion criteria.
+3. Identify likely capability keywords and inspect existing tagged code with
+   `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
+4. State whether the change reuses, extends, merges, or adds code.
+5. Separate structural changes from physics changes.
+6. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
+7. Define implementation steps.
+8. Define fast pytest tests, including simple objective physics invariants when appropriate.
+9. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
+10. Define documentation updates.
+11. Define risks and human decisions.
+12. Define completion criteria.
 
 ## RADMC-3D I/O Invariant
 
@@ -52,6 +55,7 @@ Every plan must include:
 - Affected code areas
 - Current behavior
 - Proposed behavior
+- Capability map review
 - Implementation steps
 - Tests
 - Validations

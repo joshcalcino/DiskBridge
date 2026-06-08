@@ -371,6 +371,8 @@ def _run_variant(
     return summary
 
 
+# db-keywords: validation, gow17, photodesorption, uv-products
+# db-role: validation
 def run_validation() -> Path:
     """Run the outer-disk CO phase validation with defaults from config files."""
 

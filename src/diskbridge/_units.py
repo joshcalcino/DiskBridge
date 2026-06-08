@@ -12,6 +12,8 @@ units = pint.UnitRegistry(system='cgs')
 Quantity = units.Quantity
 
 
+# db-keywords: units, config
+# db-role: canonical
 def add_units(config: Union[str, Path, None] = None) -> None:
     """Add units to the unit registry from a config file.
 
@@ -113,4 +115,3 @@ def _dimensionality_comparison(dim1, dim2):
     _dim1 = {key: float(val) for key, val in dim1.items()}
     _dim2 = {key: float(val) for key, val in dim2.items()}
     return _dim1 == _dim2
-

@@ -122,6 +122,8 @@ def _stage_clipped_gas_temperature(
     }
 
 
+# db-keywords: nonlte, line-transfer, radmc3d
+# db-role: entrypoint
 def prepare_nonlte_line_run(
     *,
     source_inputs_dir: str | Path,
@@ -281,6 +283,8 @@ def prepare_nonlte_line_run(
     return work
 
 
+# db-keywords: nonlte, line-transfer, radmc3d
+# db-role: entrypoint
 def prepare_external_population_line_run(
     *,
     source_inputs_dir: str | Path,

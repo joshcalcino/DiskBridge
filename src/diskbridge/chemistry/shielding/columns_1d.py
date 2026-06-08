@@ -260,6 +260,8 @@ def compute_pdr_shielding_1d(
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
 
 
+# db-keywords: shielding, co-shielding
+# db-role: canonical
 def compute_co_shielding_1d(
     mesh,
     nH: np.ndarray,

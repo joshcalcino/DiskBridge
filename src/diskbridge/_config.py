@@ -76,6 +76,8 @@ def write_config(filename: Union[str, Path]) -> None:
         toml.dump(config, f)
 
 
+# db-keywords: config
+# db-role: canonical
 def resolve_model_config(
     config_path: Tuple[str, ...],
     overrides: Union[dict, None] = None,
@@ -114,4 +116,3 @@ def resolve_model_config(
         return dict(section)
     
     return _deep_merge(dict(section), overrides)
-

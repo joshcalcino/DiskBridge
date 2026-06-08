@@ -899,6 +899,8 @@ def compute_column_rays_healpix(
     return candidate_idx, dirs, out
 
 
+# db-keywords: shielding, co-shielding, healpix-columns
+# db-role: canonical
 def compute_co_shielding_healpix(
     mesh,
     nH: np.ndarray,

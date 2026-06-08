@@ -698,6 +698,8 @@ def compute_chi_broad(
     )["chi_broad"]
 
 
+# db-keywords: uv-products, photodesorption, radmc3d
+# db-role: canonical
 def compute_uv_products(
     freq_hz,
     Jnu_flat,

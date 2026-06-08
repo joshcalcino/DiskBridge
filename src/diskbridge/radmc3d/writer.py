@@ -38,6 +38,8 @@ from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_micro
 G_CGS = units('G')
 SIGMA_SB = units('sigma_SB')
 
+# db-keywords: radmc3d
+# db-role: canonical
 class RadWriter:
     """Write RADMC-3D input files from a DiskBridge Model.
     

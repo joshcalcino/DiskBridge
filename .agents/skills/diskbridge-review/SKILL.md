@@ -18,6 +18,8 @@ Check whether the plan:
 - has a clear goal;
 - separates refactoring from physics changes;
 - identifies affected modules;
+- identifies relevant capability keywords, tagged code inspected, and the
+  reuse/extend/merge/add decision;
 - identifies public APIs and config keys;
 - identifies file outputs and array-shape assumptions;
 - identifies whether RADMC-3D I/O remains binary-only with one supported
@@ -35,6 +37,7 @@ Check whether the plan:
 Check whether the implementation:
 
 - follows the plan;
+- checked existing capability tags before adding new code;
 - changed more files than necessary;
 - changed scientific behavior intentionally or accidentally;
 - introduced duplicate logic;
@@ -43,6 +46,8 @@ Check whether the implementation:
 - added ASCII/text RADMC-3D fallbacks, broad extension discovery, or parallel
   data structures for the same RADMC-3D quantity;
 - added useful tests;
+- added or updated sparse capability tags when new discoverable canonical code
+  was added or moved;
 - added or proposed required validations;
 - updated documentation;
 - updated the project plan;

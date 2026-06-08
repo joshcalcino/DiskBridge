@@ -23,7 +23,9 @@ Improve structure without changing scientific behavior unless the user explicitl
    - visualization
    - validation/test infrastructure
 2. Find public entry points and internal helpers.
-3. Identify what must remain stable:
+3. Identify relevant capability keywords and inspect tagged canonical code with
+   `python tools/diskbridge_agent/capability_map.py list --keyword <keyword>`.
+4. Identify what must remain stable:
    - public API signatures
    - output file names
    - array shapes/order
@@ -31,12 +33,13 @@ Improve structure without changing scientific behavior unless the user explicitl
    - config keys
    - validation expectations
    - existing tests
-4. Do not delete code only because it has no obvious static caller. Some code may be used by examples, validation drivers, or external workflows.
+5. Do not delete code only because it has no obvious static caller. Some code may be used by examples, validation drivers, or external workflows.
 
 ## Refactor Rules
 
 - Prefer one clear public entry point over many parallel pathways.
 - Remove duplicated logic only after identifying the canonical implementation.
+- Keep or update sparse capability tags when canonical implementations move.
 - Do not create fallback branches unless the user explicitly requests them.
 - Do not mix physics changes with structural cleanup.
 - Keep Pint quantities at public boundaries.

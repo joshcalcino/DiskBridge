@@ -600,6 +600,8 @@ def _compute_cell_criteria_mask(
     return _apply_hard_midplane_connectivity(criteria.hard_pass, disk_frame, valid)
 
 
+# db-keywords: disk-mask
+# db-role: canonical
 def set_mask_from_joos_disk(
     model: "Model",
     rho_disk_min: Quantity,

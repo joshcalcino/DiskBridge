@@ -1837,6 +1837,8 @@ def _compute_shielding_and_gph(
     )
 
 
+# db-keywords: gow17, gas-temperature, dust-gas-coupling, photodesorption
+# db-role: entrypoint
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
     checkpoint_cfg = _gow17_checkpoint_config(rad, cfg)
