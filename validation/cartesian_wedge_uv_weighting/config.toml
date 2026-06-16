@@ -1,0 +1,64 @@
+[grid]
+nx = 100
+ny = 90
+nz = 70
+x_min_au = -2500.0
+x_max_au = 2500.0
+y_min_au = -500.0
+y_max_au = 4000.0
+z_min_au = -1750.0
+z_max_au = 1750.0
+
+[geometry]
+circle_center_x_au = 0.0
+circle_center_y_au = 2250.0
+circle_center_z_au = 0.0
+circle_radius_au = 1750.0
+star_x_au = 0.0
+star_y_au = 0.0
+star_z_au = 0.0
+wedge_half_angle_deg = 14.0
+wedge_inner_radius_au = 0.0
+wedge_outer_radius_au = 1750.0
+
+[density]
+ambient_nH_cm3 = 30.0
+cloud_nH_cm3 = 1.0e6
+wedge_nH_cm3 = 30.0
+mean_particle_mass_per_H = 1.4
+
+[dust]
+dust_to_gas_ratio = 1.0e-2
+dust_nbins = 10
+dust_amin_um = 0.01
+dust_amax_um = 0.25
+dust_pindex = 3.5
+
+[radiation]
+external_chi = 1.0
+
+[star]
+rstar_rsun = 2.0
+teff_K = 10000.0
+mstar_msun = 1.0
+mdot_msun_per_yr = 0.0
+
+[radmc3d]
+nphot_thermal = 2000000000
+nphot_mono = 200000000
+nphot_scat = 0
+scat_mode = 0
+nbcores = 18
+lambda_min_um = 0.05
+uv_min_nm = 91.2
+uv_max_nm = 206.7
+uv_n_wavelengths = 10
+
+[chemistry]
+nside = 4
+shielding_max_iter = 8
+b_kms = 0.3
+temperature_mode = "dust"
+
+[outputs]
+default_dir = "outputs/default"
