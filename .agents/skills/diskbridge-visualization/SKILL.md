@@ -34,6 +34,11 @@ visualization module and call it from the validation.
   depths, and other fields that span orders of magnitude.
 - Do not plot abundance or rate tails down to meaningless numerical junk. Use a
   physically useful floor and cap the displayed dynamic range when appropriate.
+- Never let log-scale colorbar limits follow numerical zeros or machine-float
+  floors down to values such as `1e-300`. Use a plotting floor and a reasonable
+  capped dynamic range, normally via `diskbridge.visualization.scales`
+  (`log10_display_values` and `log10_display_limits`), so the visible scale
+  emphasizes physically interpretable variation.
 - Use percentile-aware limits, but never let percentiles hide true extrema that
   are scientifically important for the diagnostic.
 - Use ratio maps for comparisons and make the denominator/floor policy explicit.

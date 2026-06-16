@@ -14,6 +14,7 @@ import traceback
 
 import numpy as np
 
+import diskbridge
 import diskbridge._gow17 as _gow17
 
 
@@ -134,19 +135,6 @@ def _initial_conditions(temp_K: float) -> tuple[np.ndarray, np.ndarray]:
     return y0, abstol
 
 
-def _write_inputs(out_dir: Path, cfg: Gow17Fig2Config, *, slab_id: int, rtol_fail: float) -> None:
-    inputs = {
-        "job": "gow17_fig2",
-        "time": datetime.now().isoformat(timespec="seconds"),
-        "slab_id": int(slab_id),
-        "rtol_fail": float(rtol_fail),
-        "config": cfg.__dict__,
-    }
-    (out_dir / "inputs.json").write_text(
-        json.dumps(inputs, indent=2, sort_keys=True), encoding="utf-8"
-    )
-
-
 def _placeholder_error_plot(out_dir: Path, title: str, text: str) -> None:
     plt = _setup_matplotlib()
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
@@ -164,7 +152,11 @@ def run(out_dir: Path, *, slab_id: int = 0, rtol_fail: float = 1.0e-5) -> None:
 
     cfg = Gow17Fig2Config()
 
-    _write_inputs(out_dir, cfg, slab_id=slab_id, rtol_fail=rtol_fail)
+    diskbridge.write_run_manifest(
+        out_dir / "inputs.json",
+        config=cfg.__dict__,
+        extra={"job": "gow17_fig2", "slab_id": int(slab_id), "rtol_fail": float(rtol_fail)},
+    )
 
     error: str | None = None
     max_rel_all: float | None = None

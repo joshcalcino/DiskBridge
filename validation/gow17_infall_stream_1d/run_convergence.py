@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -18,9 +17,7 @@ from driver import (
 )
 from run import DEFAULT_PRESET_TEFF_K, PMS_STELLAR_PRESETS
 
-
-def _write_json(path: Path, obj: dict) -> None:
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
+from _common import write_json
 
 
 def main() -> int:
@@ -202,7 +199,7 @@ def main() -> int:
     )
     sweep_dir.mkdir(parents=True, exist_ok=True)
 
-    _write_json(
+    write_json(
         sweep_dir / "sweep_inputs.json",
         {
             "job": "gow17_infall_stream_1d_convergence",
@@ -242,7 +239,7 @@ def main() -> int:
             )
             overall_status = max(overall_status, status)
 
-    _write_json(sweep_dir / "sweep_summary.json", {"rows": rows})
+    write_json(sweep_dir / "sweep_summary.json", {"rows": rows})
     return int(overall_status)
 
 

@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 import traceback
 from types import SimpleNamespace
@@ -38,7 +36,10 @@ from diskbridge.radmc3d.uv_products import (
     draine_reference_for_product,
     partitions_for_product,
 )
+import diskbridge
 import diskbridge._gow17 as _gow17
+from _common import write_json
+from _common import setup_matplotlib as _setup_matplotlib
 
 I_CO = _gow17.I_CO
 I_CO_ICE = _gow17.I_CO_ICE
@@ -114,15 +115,6 @@ class InfallStream1DConfig:
     verbose: bool = False
 
     shielding_outer_1d: str = "min"
-
-
-def _setup_matplotlib():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    return plt
 
 
 def _build_stream_model(cfg: InfallStream1DConfig, *, nH_cm3: float) -> tuple[RadModel, np.ndarray]:
@@ -496,8 +488,6 @@ def _freefall_radius_from_time(r0_cm: float, t_s: float, M_g: float) -> float:
     return float(term ** (2.0 / 3.0))
 
 
-def _write_json(path: Path, obj: dict) -> None:
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _neutral_c_abundance(y: np.ndarray, Zg: float) -> np.ndarray:
@@ -1214,13 +1204,10 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
 def run(out_root: Path, cfg: InfallStream1DConfig) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
-    _write_json(
+    diskbridge.write_run_manifest(
         out_root / "inputs.json",
-        {
-            "job": "gow17_infall_stream_1d",
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "config": cfg.__dict__,
-        },
+        config=cfg.__dict__,
+        extra={"job": "gow17_infall_stream_1d"},
     )
 
     scan_rows = []
@@ -1230,7 +1217,7 @@ def run(out_root: Path, cfg: InfallStream1DConfig) -> None:
         row = _run_one_density(cfg, nH_cm3=float(nH), out_dir=case_dir)
         scan_rows.append(row)
 
-    _write_json(out_root / "scan_summary.json", {"rows": scan_rows})
+    write_json(out_root / "scan_summary.json", {"rows": scan_rows})
 
     plt = _setup_matplotlib()
     nH = np.array([r["nH_cm3"] for r in scan_rows], dtype=float)

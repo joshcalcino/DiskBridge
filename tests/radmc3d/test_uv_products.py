@@ -46,7 +46,7 @@ def _draine_jnu_on_grid(lam_nm: np.ndarray, chi: float = 1.0) -> tuple[Quantity,
     return Quantity(freq_hz, "Hz"), Quantity(j_nu[None, :], "erg/(s*cm^2*Hz*sr)")
 
 
-def test_loglinear_interp_strict_reconstructs_power_law_and_rejects_bad_values():
+def test_loglinear_interp_strict_reconstructs_power_law_and_handles_zero_values():
     lam_sample = np.array([90.0, 120.0, 180.0, 240.0])
     lam_quad = np.array([100.0, 150.0, 210.0])
     J_sample = np.vstack([lam_sample**2, 3.0 * lam_sample**2])
@@ -55,8 +55,17 @@ def test_loglinear_interp_strict_reconstructs_power_law_and_rejects_bad_values()
 
     np.testing.assert_allclose(J_quad[0], lam_quad**2, rtol=1.0e-14)
     np.testing.assert_allclose(J_quad[1], 3.0 * lam_quad**2, rtol=1.0e-14)
-    with pytest.raises(ValueError, match="non-positive or non-finite"):
-        _loglinear_interp_strict(lam_sample, np.array([[1.0, 0.0, 2.0, 3.0]]), lam_quad)
+
+    J_zero = _loglinear_interp_strict(
+        lam_sample,
+        np.array([[1.0, 0.0, 2.0, 3.0]]),
+        lam_quad,
+    )
+    assert np.all(np.isfinite(J_zero))
+    assert np.all(J_zero >= 0.0)
+
+    with pytest.raises(ValueError, match="negative or non-finite"):
+        _loglinear_interp_strict(lam_sample, np.array([[1.0, -1.0, 2.0, 3.0]]), lam_quad)
 
 
 def test_uv_products_normalize_to_scaled_draine_field():

@@ -13,6 +13,7 @@ from ._logging import logger_init as _logger_init
 from .model import Model
 from .model import downsample_model, load_model, puff_up_model
 from .serialization import jsonable
+from .provenance import write_run_manifest, build_run_manifest
 from . import _params as _params_module
 from ._params import canonicalize_line_params, read_params
 
@@ -81,4 +82,6 @@ __all__ = [
     "load_model",
     "puff_up_model",
     "jsonable",
+    "write_run_manifest",
+    "build_run_manifest",
     ]

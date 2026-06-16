@@ -90,6 +90,12 @@ from .nonlte import (
     plot_moment_maps,
     plot_solver_history,
 )
+from .scales import (
+    DEFAULT_LOG10_FLOOR,
+    DEFAULT_LOG10_MAX_DECADES,
+    log10_display_limits,
+    log10_display_values,
+)
 
 # Unit conversion utilities
 from .units import (
@@ -123,6 +129,10 @@ __all__ = [
     'make_chemistry_diagnostic_plots',
     'make_dust_component_diagnostic_plots',
     'make_segmented_rt_diagnostic_plots',
+    'DEFAULT_LOG10_FLOOR',
+    'DEFAULT_LOG10_MAX_DECADES',
+    'log10_display_limits',
+    'log10_display_values',
     # Quick functions
     'quick_slice',
     'quick_projection',

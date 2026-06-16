@@ -24,8 +24,8 @@ from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.model.dust import Dust, DustDistribution
 from diskbridge.radmc3d.model import RadModel
-from diskbridge.radmc3d.writer import RadWriter
 from diskbridge.radmc3d.cache import find_cached_output
+from diskbridge.visualization.scales import log10_display_limits, log10_display_values
 
 
 @dataclass(frozen=True)
@@ -37,9 +37,12 @@ class CubeTestConfig:
     L_au: float = 1000000.0
 
     # Turbulent lognormal density: rho = rho0 * exp(s), where s is correlated Gaussian
-    rho0_g_cm3_list: tuple[float, ...] = (2.0e-18,)
+    rho0_g_cm3_list: tuple[float, ...] = (2.0e-20,)
     sigma_s: float = 1.0
     peak_boost: float = 5.0
+    clump_density_boost: float = 100.0
+    clump_boost_quantile: float = 0.99
+    clump_boost_exponent: float = 2.0
     p: float = 11.0 / 3.0
     k_min: float = 1.0
     k_max: float = 4.0
@@ -49,7 +52,9 @@ class CubeTestConfig:
     # Dust/chemistry
     dust_nbins: int = 10
     dust_to_gas_ratio: float = 1.0e-2
-    Tdust_K: float = 20.0
+    dust_amin_um: float = 0.01
+    dust_amax_um: float = 0.25
+    dust_pindex: float = 3.5
 
     chi0: float = 1.0
 
@@ -59,10 +64,10 @@ class CubeTestConfig:
     b_kms: float = 0.3
 
     # RADMC
-    nphot_thermal: int = 200000000
+    nphot_thermal: int = 2000000000
     nphot_mono: int = 200000000
     scat_mode: int = 0
-    nbcores: int = 12
+    nbcores: int = 18
 
 
 @contextmanager
@@ -76,13 +81,13 @@ def _using_diskbridge_params(params):
         diskbridge.params = prev_params
 
 
-def _setup_matplotlib():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    return plt
+from _fields import (
+    boost_lognormal_clumps as _boost_lognormal_clumps,
+    make_correlated_gaussian_field as _make_correlated_gaussian_field,
+    make_lognormal_density as _make_lognormal_density,
+    setup_matplotlib as _setup_matplotlib,
+    sigma_for_peak_boost as _sigma_for_peak_boost,
+)
 
 
 def _annotate(ax, lines: list[str]) -> None:
@@ -95,24 +100,6 @@ def _annotate(ax, lines: list[str]) -> None:
         va="top",
         fontsize=8,
         bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "0.6"},
-    )
-
-
-def _write_inputs(out_dir: Path, cfg: CubeTestConfig) -> None:
-    inputs = {
-        "job": "cube_test",
-        "time": datetime.now().isoformat(timespec="seconds"),
-        "config": cfg.__dict__,
-        "diskbridge_params": {
-            "lambda_min_micron": float(diskbridge.params.lambda_min.to("micron").magnitude),
-            "lambda_max_micron": float(diskbridge.params.lambda_max.to("micron").magnitude),
-            "n_lambda": int(diskbridge.params.n_lambda),
-            "species": diskbridge.params.species,
-            "opacity_dir": str(diskbridge.params.opacity_dir),
-        },
-    }
-    (out_dir / "inputs.json").write_text(
-        json.dumps(inputs, indent=2, sort_keys=True), encoding="utf-8"
     )
 
 
@@ -144,92 +131,6 @@ def _build_cube_mesh(cfg: CubeTestConfig) -> Mesh:
     return mesh
 
 
-def _make_correlated_gaussian_field(
-    *,
-    shape: tuple[int, int, int],
-    p: float,
-    k_min: float,
-    k_max: float,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    nx, ny, nz = (int(shape[0]), int(shape[1]), int(shape[2]))
-
-    # Use integer Fourier mode indices so k_min/k_max map to visually intuitive
-    # structure sizes. For nx=32, k=1 is box-scale, k=2 is half-box, ...
-    kx = np.fft.fftfreq(nx) * float(nx)
-    ky = np.fft.fftfreq(ny) * float(ny)
-    kz = np.fft.fftfreq(nz) * float(nz)
-    kkx, kky, kkz = np.meshgrid(kx, ky, kz, indexing="ij")
-    k = np.sqrt(kkx * kkx + kky * kky + kkz * kkz)
-
-    kmin = float(k_min)
-    kmax = float(k_max)
-
-    amp = np.zeros_like(k, dtype=float)
-    m = (k >= kmin) & (k <= kmax) & (k > 0.0)
-    amp[m] = k[m] ** (-0.5 * float(p))
-
-    g = rng.normal(size=shape)
-    h = rng.normal(size=shape)
-
-    fk = (g + 1j * h) * amp
-    fk[0, 0, 0] = 0.0
-
-    s = np.fft.ifftn(fk).real
-    s = (s - float(np.mean(s))) / float(np.std(s))
-    return s
-
-
-def _make_lognormal_density(
-    *,
-    rho0_g_cm3: float,
-    sigma_s: float,
-    s: np.ndarray,
-) -> np.ndarray:
-    sigma_s = float(sigma_s)
-    s_scaled = sigma_s * np.asarray(s, dtype=float)
-
-    # Ensure mean density is rho0 by subtracting 0.5*sigma^2 (lognormal property)
-    mu = -0.5 * sigma_s * sigma_s
-    rho = float(rho0_g_cm3) * np.exp(mu + s_scaled)
-    return np.asarray(rho, dtype=float)
-
-
-def _sigma_for_peak_boost(*, s: np.ndarray, sigma0: float, boost: float) -> float:
-    sigma0 = float(sigma0)
-    boost = float(boost)
-    if sigma0 <= 0.0:
-        raise ValueError("sigma_s must be > 0")
-    if boost <= 0.0:
-        raise ValueError("peak_boost must be > 0")
-    if boost == 1.0:
-        return sigma0
-
-    smax = float(np.nanmax(np.asarray(s, dtype=float)))
-    if not np.isfinite(smax) or smax <= 0.0:
-        raise ValueError("Cannot determine peak boost: non-finite or non-positive s_max")
-
-    # Baseline peak ratio relative to rho0 for lognormal with mean fixed to rho0.
-    # rho_max / rho0 = exp(-0.5*sigma^2 + sigma*smax)
-    log_r0 = (-0.5 * sigma0 * sigma0) + (sigma0 * smax)
-    log_r1 = log_r0 + np.log(boost)
-
-    disc = (smax * smax) - (2.0 * log_r1)
-    if disc <= 0.0:
-        raise ValueError(
-            "Requested peak_boost is too large for this realization; "
-            "increase grid size or reduce peak_boost"
-        )
-
-    root = float(np.sqrt(disc))
-    sigma1 = smax - root
-    if sigma1 <= 0.0:
-        sigma1 = smax + root
-    if sigma1 <= 0.0:
-        raise ValueError("Failed to compute a positive sigma for peak boost")
-    return float(sigma1)
-
-
 def _build_model_with_density(mesh: Mesh, rho_g_cm3: np.ndarray) -> Model:
     model = Model()
     model.coord_system = mesh.coord_system
@@ -243,6 +144,53 @@ def _build_model_with_density(mesh: Mesh, rho_g_cm3: np.ndarray) -> Model:
     )
 
     return model
+
+
+def _build_density_seed_field(
+    cfg: CubeTestConfig,
+    *,
+    shape: tuple[int, int, int],
+) -> tuple[np.ndarray, float]:
+    """Return the shared Gaussian seed field and effective lognormal sigma."""
+
+    rng = np.random.default_rng(int(cfg.seed))
+    s = _make_correlated_gaussian_field(
+        shape=shape,
+        p=float(cfg.p),
+        k_min=float(cfg.k_min) * float(cfg.k_multiplier),
+        k_max=float(cfg.k_max) * float(cfg.k_multiplier),
+        rng=rng,
+    )
+
+    sigma_eff = _sigma_for_peak_boost(
+        s=s,
+        sigma0=float(cfg.sigma_s),
+        boost=float(cfg.peak_boost),
+    )
+    return s, float(sigma_eff)
+
+
+def _build_density_for_rho0(
+    cfg: CubeTestConfig,
+    *,
+    rho0_g_cm3: float,
+    s: np.ndarray,
+    sigma_eff: float,
+) -> np.ndarray:
+    """Return the configured cube density for one reference density."""
+
+    rho = _make_lognormal_density(
+        rho0_g_cm3=float(rho0_g_cm3),
+        sigma_s=float(sigma_eff),
+        s=s,
+    )
+    return _boost_lognormal_clumps(
+        rho_g_cm3=rho,
+        s=s,
+        boost=float(cfg.clump_density_boost),
+        quantile=float(cfg.clump_boost_quantile),
+        exponent=float(cfg.clump_boost_exponent),
+    )
 
 
 def _register_gas_quantity(model: Model, name: str, data: Quantity) -> None:
@@ -263,7 +211,10 @@ def _ensure_dust_setup(cfg: CubeTestConfig, model: Model) -> None:
         model.dust = Dust(model)
 
     model.dust.set_distribution(
+        amin=Quantity(float(cfg.dust_amin_um), "micrometer"),
+        amax=Quantity(float(cfg.dust_amax_um), "micrometer"),
         nbin=int(cfg.dust_nbins),
+        power_index=float(cfg.dust_pindex),
         dust_to_gas_ratio=float(cfg.dust_to_gas_ratio),
         mode="proportional",
     )
@@ -295,6 +246,9 @@ def _write_radmc3d_params_txt(
         "external_uv": "T",
         "external_uv_chi": str(float(cfg.chi0)),
         "nside": str(int(cfg.nside)),
+        "amin": str(float(cfg.dust_amin_um)),
+        "amax": str(float(cfg.dust_amax_um)),
+        "pindex": str(float(cfg.dust_pindex)),
         "nbins": str(int(cfg.dust_nbins)),
         "dust_to_gas_ratio": str(float(cfg.dust_to_gas_ratio)),
         "microturbulence": str(float(cfg.b_kms)),
@@ -359,6 +313,7 @@ def _run_radmc3d_external_uv(
     cfg: CubeTestConfig,
     rad: RadModel,
     model_dir: Path,
+    run_transport: bool = True,
 ) -> None:
     model_dir = Path(model_dir)
     inputs_dir = model_dir / "radmc3d_inputs"
@@ -397,27 +352,18 @@ def _run_radmc3d_external_uv(
 
             rad.writer.write_external_source(model_dir, chi=float(cfg.chi0))
 
-            # Provide a fixed dust temperature, written in the location mcmono expects.
-            temp = Quantity(
-                np.full(rad.model.mesh.shape, float(cfg.Tdust_K), dtype=float),
-                "K",
-            )
-            rad.dust_temperature = temp
-            _register_gas_quantity(rad.model, "dust_temperature", temp)
+            if run_transport:
+                rad.compute_temperature(
+                    nphot=int(new_params.nphot_thermal),
+                    output_dir=outputs_dir,
+                    force=True,
+                )
 
-            writer = RadWriter(rad.model, organize_files=True)
-            writer.params = new_params
-            writer.write_dust_temperature(
-                temperature=temp,
-                output_dir=outputs_dir,
-                nspec=int(rad.model.dust.nbin),
-            )
-
-            rad.compute_mcmono(
-                force=False,
-                setthreads=int(new_params.nbcores),
-                compute_uv_products=True,
-            )
+                rad.compute_mcmono(
+                    force=True,
+                    setthreads=int(new_params.nbcores),
+                    compute_uv_products=True,
+                )
     finally:
         rad.params = prev_rad_params
         rad.writer.params = prev_writer_params
@@ -427,6 +373,12 @@ def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     num = np.asarray(num, dtype=float)
     den = np.asarray(den, dtype=float)
     return np.divide(num, den, out=np.full_like(num, np.nan), where=(den > 0.0))
+
+
+def _shared_log_limits(*arrays: np.ndarray) -> tuple[float, float]:
+    """Return cube-validation log10 display limits without numerical tails."""
+
+    return log10_display_limits(*arrays, floor=1.0e-30, max_decades=8.0)
 
 
 def _midplane_slice(a: np.ndarray) -> np.ndarray:
@@ -455,8 +407,6 @@ def _write_cube_plots(
     network: str = "gow17",
 ) -> None:
     plt = _setup_matplotlib()
-
-    tiny = float(np.finfo(np.float64).tiny)
 
     rho = np.asarray(rho_g_cm3, dtype=float)
     chi_arr = np.asarray(chi.to("dimensionless").magnitude, dtype=float)
@@ -494,13 +444,13 @@ def _write_cube_plots(
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
     ax.hist(
-        np.log10(np.maximum(Xco_off_arr.reshape(-1), tiny)),
+        log10_display_values(Xco_off_arr.reshape(-1)),
         bins=60,
         alpha=0.7,
         label="shielding off",
     )
     ax.hist(
-        np.log10(np.maximum(Xco_on_arr.reshape(-1), tiny)),
+        log10_display_values(Xco_on_arr.reshape(-1)),
         bins=60,
         alpha=0.7,
         label="shielding on",
@@ -515,13 +465,13 @@ def _write_cube_plots(
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
     ax.hist(
-        np.log10(np.maximum(nco_off_arr.reshape(-1), tiny)),
+        log10_display_values(nco_off_arr.reshape(-1)),
         bins=60,
         alpha=0.7,
         label="shielding off",
     )
     ax.hist(
-        np.log10(np.maximum(nco_on_arr.reshape(-1), tiny)),
+        log10_display_values(nco_on_arr.reshape(-1)),
         bins=60,
         alpha=0.7,
         label="shielding on",
@@ -535,7 +485,7 @@ def _write_cube_plots(
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
-    ax.hist(np.log10(np.maximum(ratio.reshape(-1), tiny)), bins=60, color="tab:blue", alpha=0.8)
+    ax.hist(log10_display_values(ratio.reshape(-1)), bins=60, color="tab:blue", alpha=0.8)
     ax.set_xlabel("log10(Xco_on / Xco_off)")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
@@ -544,7 +494,7 @@ def _write_cube_plots(
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
-    ax.hist(np.log10(np.maximum(nco_ratio.reshape(-1), tiny)), bins=60, color="tab:blue", alpha=0.8)
+    ax.hist(log10_display_values(nco_ratio.reshape(-1)), bins=60, color="tab:blue", alpha=0.8)
     ax.set_xlabel("log10(nCO_on / nCO_off)")
     ax.set_ylabel("count")
     ax.grid(True, alpha=0.3)
@@ -555,14 +505,14 @@ def _write_cube_plots(
     def _imshow(ax, img, title, cbar_label, vmin=None, vmax=None, log=False):
         arr = np.asarray(img, dtype=float)
         if log:
-            arr = np.log10(np.maximum(arr, tiny))
+            arr = log10_display_values(arr)
         im = ax.imshow(arr.T, origin="lower", vmin=vmin, vmax=vmax)
         ax.set_title(title)
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cb.set_label(cbar_label)
 
     def _log10_img(a: np.ndarray) -> np.ndarray:
-        return np.log10(np.maximum(np.asarray(a, dtype=float), tiny))
+        return log10_display_values(np.asarray(a, dtype=float))
 
     rho_img = _log10_img(_midplane_slice(rho))
     xco_off_img = _log10_img(_midplane_slice(Xco_off_arr))
@@ -575,18 +525,18 @@ def _write_cube_plots(
     theta_co_off_img = np.asarray(_midplane_slice(theta_co_off_arr), dtype=float)
     theta_co_on_img = np.asarray(_midplane_slice(theta_co_on_arr), dtype=float)
 
-    xco_vmin = float(np.nanmin([np.nanmin(xco_off_img), np.nanmin(xco_on_img)]))
-    xco_vmax = float(np.nanmax([np.nanmax(xco_off_img), np.nanmax(xco_on_img)]))
-
-    chi_eff_vmin = float(
-        np.nanmin([np.nanmin(chi_eff_off_img), np.nanmin(chi_eff_on_img)])
+    xco_vmin, xco_vmax = _shared_log_limits(
+        _midplane_slice(Xco_off_arr),
+        _midplane_slice(Xco_on_arr),
     )
-    chi_eff_vmax = float(
-        np.nanmax([np.nanmax(chi_eff_off_img), np.nanmax(chi_eff_on_img)])
+    chi_eff_vmin, chi_eff_vmax = _shared_log_limits(
+        _midplane_slice(chi_eff_off_arr),
+        _midplane_slice(chi_eff_on_arr),
     )
-
-    nco_vmin = float(np.nanmin([np.nanmin(nco_off_img), np.nanmin(nco_on_img)]))
-    nco_vmax = float(np.nanmax([np.nanmax(nco_off_img), np.nanmax(nco_on_img)]))
+    nco_vmin, nco_vmax = _shared_log_limits(
+        _midplane_slice(nco_off_arr),
+        _midplane_slice(nco_on_arr),
+    )
 
     theta_vmin = float(np.nanmin([np.nanmin(theta_co_off_img), np.nanmin(theta_co_on_img)]))
     theta_vmax = float(np.nanmax([np.nanmax(theta_co_off_img), np.nanmax(theta_co_on_img)]))
@@ -627,7 +577,7 @@ def _write_cube_plots(
             out=np.full_like(np.asarray(num, dtype=float), np.nan, dtype=float),
             where=(np.asarray(den, dtype=float) > 0.0),
         )
-        return np.log10(np.maximum(r, tiny))
+        return log10_display_values(r)
 
     nco_ratio_img = _log10_ratio_img(_midplane_slice(nco_on_arr), _midplane_slice(nco_off_arr))
     xco_ratio_img = _log10_ratio_img(_midplane_slice(Xco_on_arr), _midplane_slice(Xco_off_arr))
@@ -673,30 +623,30 @@ def _compare_midplane(
     label_b: str = "shielding on",
 ) -> None:
     plt = _setup_matplotlib()
-    tiny = float(np.finfo(np.float64).tiny)
 
     off = np.asarray(off, dtype=float)
     on = np.asarray(on, dtype=float)
 
     if log10:
-        off_img = np.log10(np.maximum(off, tiny))
-        on_img = np.log10(np.maximum(on, tiny))
+        off_img = log10_display_values(off)
+        on_img = log10_display_values(on)
+        vmin, vmax = _shared_log_limits(off, on)
     else:
         off_img = off
         on_img = on
-
-    vmin = float(np.nanmin([np.nanmin(off_img), np.nanmin(on_img)]))
-    vmax = float(np.nanmax([np.nanmax(off_img), np.nanmax(on_img)]))
+        vmin = float(np.nanmin([np.nanmin(off_img), np.nanmin(on_img)]))
+        vmax = float(np.nanmax([np.nanmax(off_img), np.nanmax(on_img)]))
 
     ratio = np.divide(
         on, off,
         out=np.full_like(on, np.nan, dtype=float),
         where=(off > 0.0),
     )
-    ratio_img = np.log10(np.maximum(ratio, tiny))
+    ratio_img = log10_display_values(ratio)
     maxabs = float(np.nanmax(np.abs(ratio_img[np.isfinite(ratio_img)])))
     if not np.isfinite(maxabs) or maxabs <= 0.0:
         maxabs = 1.0
+    maxabs = min(maxabs, 8.0)
 
     fig, axs = plt.subplots(1, 3, figsize=(12.0, 4.0))
     im0 = axs[0].imshow(off_img.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
@@ -1028,7 +978,10 @@ def _load_case(mesh: Mesh, case_dir: Path, cfg: CubeTestConfig):
         if model.dust is None:
             model.dust = Dust(model)
         model.dust.set_distribution(
+            amin=Quantity(float(cfg.dust_amin_um), "micrometer"),
+            amax=Quantity(float(cfg.dust_amax_um), "micrometer"),
             nbin=int(new_params.nbins),
+            power_index=float(cfg.dust_pindex),
             dust_to_gas_ratio=float(cfg.dust_to_gas_ratio),
             mode="proportional",
         )
@@ -1037,12 +990,15 @@ def _load_case(mesh: Mesh, case_dir: Path, cfg: CubeTestConfig):
         rad.params = new_params
         rad.writer.params = new_params
 
-        temp = Quantity(
-            np.full(model.mesh.shape, float(cfg.Tdust_K), dtype=float),
-            "K",
+        temp_file = find_cached_output(
+            case_dir / "radmc3d_outputs",
+            ["dust_temperature.bdat"],
         )
-        rad.dust_temperature = temp
-        _register_gas_quantity(rad.model, "dust_temperature", temp)
+        if temp_file is None:
+            raise FileNotFoundError(
+                f"Missing mctherm dust_temperature.bdat in {case_dir / 'radmc3d_outputs'}"
+            )
+        rad.read_dust_temperature(fname=str(temp_file))
 
         chi = _load_chi_from_outputs(rad=rad, case_dir=case_dir, params=new_params)
     return rad, rho, chi, new_params
@@ -1080,6 +1036,115 @@ def _build_chemistry_config(
     return base
 
 
+def prepare_only(out_dir: Path) -> None:
+    """Prepare RADMC-3D inputs for the cube chemistry pipeline without running it."""
+
+    network = "gow17"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = CubeTestConfig()
+    diskbridge.write_run_manifest(
+        out_dir / "inputs.json",
+        config=cfg.__dict__,
+        extra={"job": "cube_test", "mode": "prepare_only"},
+    )
+    for stale_path in (out_dir / f"{network}_summary.json", out_dir / "error.png"):
+        if stale_path.exists():
+            stale_path.unlink()
+
+    mesh = _build_cube_mesh(cfg)
+    s, sigma_eff = _build_density_seed_field(cfg, shape=mesh.shape)
+
+    cases: list[dict] = []
+    mH_g = 1.6735575e-24
+
+    for rho0 in cfg.rho0_g_cm3_list:
+        case_dir = out_dir / ("rho0_%0.3e" % float(rho0))
+        case_dir.mkdir(parents=True, exist_ok=True)
+        for stale_path in (case_dir / f"{network}_summary.json", case_dir / "error.png"):
+            if stale_path.exists():
+                stale_path.unlink()
+
+        rho = _build_density_for_rho0(
+            cfg,
+            rho0_g_cm3=float(rho0),
+            s=s,
+            sigma_eff=float(sigma_eff),
+        )
+        nH = rho / (1.4 * mH_g)
+
+        model = _build_model_with_density(mesh, rho)
+        _ensure_dust_setup(cfg, model)
+        model.validate_canonical_axis_orders(include_dust=False)
+
+        rad = RadModel(model, model_dir=case_dir)
+        _run_radmc3d_external_uv(
+            cfg=cfg,
+            rad=rad,
+            model_dir=case_dir,
+            run_transport=False,
+        )
+
+        params_path = case_dir / "params.txt"
+        setup_summary = {
+            "status": "prepared",
+            "will_run": {
+                "radmc3d": ["mctherm", "mcmono"],
+                "chemistry": [f"{network} shielding off", f"{network} shielding on"],
+            },
+            "not_run": ["mctherm", "mcmono", "W_rays", network],
+            "rho0_g_cm3": float(rho0),
+            "sigma_eff": float(sigma_eff),
+            "peak_ratio_rho_over_rho0": float(np.nanmax(rho) / float(rho0)),
+            "rho_stats": _summary_stats(rho.reshape(-1)),
+            "nH_stats": _summary_stats(nH.reshape(-1)),
+            "clump_boost": {
+                "boost": float(cfg.clump_density_boost),
+                "quantile": float(cfg.clump_boost_quantile),
+                "exponent": float(cfg.clump_boost_exponent),
+                "boosted_volume_fraction": float(
+                    np.mean(s.reshape(-1) > np.nanquantile(s, cfg.clump_boost_quantile))
+                ),
+            },
+            "radmc3d": {
+                "params_path": str(params_path),
+                "inputs_dir": str(case_dir / "radmc3d_inputs"),
+                "outputs_dir": str(case_dir / "radmc3d_outputs"),
+                "nbcores": int(cfg.nbcores),
+                "nphot_thermal": int(cfg.nphot_thermal),
+                "nphot_mono": int(cfg.nphot_mono),
+                "external_uv_chi": float(cfg.chi0),
+            },
+            "chemistry": {
+                "network": str(network),
+                "shielding_off": _build_chemistry_config(cfg, skip_shielding=True),
+                "shielding_on": _build_chemistry_config(cfg, skip_shielding=False),
+            },
+        }
+        (case_dir / "setup_summary.json").write_text(
+            json.dumps(setup_summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        cases.append(setup_summary)
+
+    summary = {
+        "job": "cube_test",
+        "mode": "prepare_only",
+        "network": str(network),
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "config": cfg.__dict__,
+        "prepared": True,
+        "ran_transport": False,
+        "ran_chemistry": False,
+        "cases": cases,
+    }
+    (out_dir / "setup_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def run_plots_only(out_dir: Path) -> None:
     out_dir = Path(out_dir)
     err_path = out_dir / "error.png"
@@ -1088,6 +1153,8 @@ def run_plots_only(out_dir: Path) -> None:
     cfg = _load_cfg_from_inputs(out_dir)
     network = "gow17"
     _clean_plot_artifacts(out_dir)
+    _, sigma_eff = _build_density_seed_field(cfg, shape=_build_cube_mesh(cfg).shape)
+    cases: list[dict] = []
 
     for case_dir, rad, rho, chi in _iter_cases(out_dir, cfg):
         print(f"[{case_dir.name}] Computing UV weights ...")
@@ -1118,6 +1185,25 @@ def run_plots_only(out_dir: Path) -> None:
         )
         theta_co_on = _safe_ratio(chi_eff_on_arr, chi_arr)
 
+        Xco_off_arr = np.asarray(
+            chem_off.abundances["co"].to("dimensionless").magnitude,
+            dtype=float,
+        )
+        Xco_on_arr = np.asarray(
+            chem_on.abundances["co"].to("dimensionless").magnitude,
+            dtype=float,
+        )
+        nco_off_arr = np.asarray(
+            chem_off.number_densities["co"].to("cm^-3").magnitude,
+            dtype=float,
+        )
+        nco_on_arr = np.asarray(
+            chem_on.number_densities["co"].to("cm^-3").magnitude,
+            dtype=float,
+        )
+        Xco_ratio = _safe_ratio(Xco_on_arr, Xco_off_arr)
+        nco_ratio = _safe_ratio(nco_on_arr, nco_off_arr)
+
         _write_cube_plots(
             out_dir=case_dir, cfg=cfg, sigma_eff=float("nan"),
             rho_g_cm3=rho, chi=chi,
@@ -1131,6 +1217,47 @@ def run_plots_only(out_dir: Path) -> None:
             nco_on=chem_on.number_densities["co"],
             network=network,
         )
+
+        rho0 = float(case_dir.name.split("_", 1)[1])
+        case_summary = {
+            "rho0_g_cm3": rho0,
+            "network": str(network),
+            "mode": "plots_only",
+            "sigma_eff": float(sigma_eff),
+            "peak_ratio_rho_over_rho0": float(np.nanmax(rho) / rho0),
+            "rho_stats": _summary_stats(rho.reshape(-1)),
+            "chi_stats": _summary_stats(chi_arr.reshape(-1)),
+            "Xco_off_stats": _summary_stats(Xco_off_arr.reshape(-1)),
+            "Xco_on_stats": _summary_stats(Xco_on_arr.reshape(-1)),
+            "Xco_ratio_stats": _summary_stats(Xco_ratio.reshape(-1)),
+            "nCO_off_stats": _summary_stats(nco_off_arr.reshape(-1)),
+            "nCO_on_stats": _summary_stats(nco_on_arr.reshape(-1)),
+            "nCO_ratio_stats": _summary_stats(nco_ratio.reshape(-1)),
+            "theta_co_on_stats": _summary_stats(theta_co_on.reshape(-1)),
+            "volume_fractions": {
+                "Xco_ratio_gt_1p1": float(np.mean(Xco_ratio.reshape(-1) > 1.1)),
+                "Xco_ratio_gt_2": float(np.mean(Xco_ratio.reshape(-1) > 2.0)),
+            },
+        }
+        (case_dir / f"{network}_summary.json").write_text(
+            json.dumps(case_summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        cases.append(case_summary)
+
+    summary = {
+        "job": "cube_test",
+        "mode": "plots_only",
+        "network": str(network),
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "config": cfg.__dict__,
+        "pass": True,
+        "cases": cases,
+    }
+    (out_dir / f"{network}_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def run(out_dir: Path) -> None:
@@ -1150,7 +1277,9 @@ def run(out_dir: Path) -> None:
         err_path.unlink()
 
     cfg = CubeTestConfig()
-    _write_inputs(out_dir, cfg)
+    diskbridge.write_run_manifest(
+        out_dir / "inputs.json", config=cfg.__dict__, extra={"job": "cube_test"}
+    )
     _clean_plot_artifacts(out_dir)
 
     error: str | None = None
@@ -1158,20 +1287,7 @@ def run(out_dir: Path) -> None:
 
     try:
         mesh = _build_cube_mesh(cfg)
-        rng = np.random.default_rng(int(cfg.seed))
-        s = _make_correlated_gaussian_field(
-            shape=mesh.shape,
-            p=float(cfg.p),
-            k_min=float(cfg.k_min) * float(cfg.k_multiplier),
-            k_max=float(cfg.k_max) * float(cfg.k_multiplier),
-            rng=rng,
-        )
-
-        sigma_eff = _sigma_for_peak_boost(
-            s=s,
-            sigma0=float(cfg.sigma_s),
-            boost=float(cfg.peak_boost),
-        )
+        s, sigma_eff = _build_density_seed_field(cfg, shape=mesh.shape)
 
         cases: list[dict] = []
 
@@ -1179,7 +1295,12 @@ def run(out_dir: Path) -> None:
             case_dir = out_dir / ("rho0_%0.3e" % float(rho0))
             case_dir.mkdir(parents=True, exist_ok=True)
 
-            rho = _make_lognormal_density(rho0_g_cm3=float(rho0), sigma_s=float(sigma_eff), s=s)
+            rho = _build_density_for_rho0(
+                cfg,
+                rho0_g_cm3=float(rho0),
+                s=s,
+                sigma_eff=float(sigma_eff),
+            )
             peak_ratio = float(np.nanmax(rho) / float(rho0))
 
             model = _build_model_with_density(mesh, rho)
@@ -1341,11 +1462,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="cube_test")
     parser.add_argument("--out-dir", type=str, default=str(Path(__file__).resolve().parent))
     parser.add_argument("--plots-only", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     try:
-        if bool(args.plots_only):
+        if bool(args.plots_only) and bool(args.prepare_only):
+            raise ValueError("--plots-only and --prepare-only are mutually exclusive")
+        if bool(args.prepare_only):
+            prepare_only(out_dir)
+        elif bool(args.plots_only):
             run_plots_only(out_dir)
         else:
             run(out_dir)

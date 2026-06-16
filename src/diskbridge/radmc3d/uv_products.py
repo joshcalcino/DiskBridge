@@ -373,15 +373,20 @@ def integrate_partitioned(
 
 def _loglinear_interp_strict(lam_sample, J_sample, lam_quad):
     """
-    Interpolate J_nu onto lam_quad using linear interpolation in
-    log(J_nu)-log(lambda) space.
+    Interpolate J_nu onto lam_quad.
+
+    Positive intervals use linear interpolation in log(J_nu)-log(lambda)
+    space. Intervals touching exact zero use linear interpolation in J_nu so
+    optically thick cells with no sampled UV photons remain valid instead of
+    forcing an artificial floor.
+
     lam_sample: shape (nwave,)
     J_sample:   shape (ncell, nwave)
     lam_quad:   shape (nquad,)
     """
-    if np.any(J_sample <= 0.0) or np.any(~np.isfinite(J_sample)):
+    if np.any(J_sample < 0.0) or np.any(~np.isfinite(J_sample)):
         raise ValueError(
-            "UV mean intensity contains non-positive or non-finite values. "
+            "UV mean intensity contains negative or non-finite values. "
             "Increase mcmono photons or check RADMC-3D output."
         )
     x = np.log(lam_sample)
@@ -389,12 +394,18 @@ def _loglinear_interp_strict(lam_sample, J_sample, lam_quad):
     idx = np.searchsorted(x, xq) - 1
     idx = np.clip(idx, 0, len(x) - 2)
     w = (xq - x[idx]) / (x[idx + 1] - x[idx])
-    logJ = np.log(J_sample)
-    logJq = (
-        (1.0 - w[None, :]) * logJ[:, idx]
-        + w[None, :] * logJ[:, idx + 1]
+
+    left = J_sample[:, idx]
+    right = J_sample[:, idx + 1]
+    linear = (1.0 - w[None, :]) * left + w[None, :] * right
+    out = linear
+
+    positive = (left > 0.0) & (right > 0.0)
+    logJq = (1.0 - w[None, :]) * np.log(left, where=positive, out=np.zeros_like(left)) + (
+        w[None, :] * np.log(right, where=positive, out=np.zeros_like(right))
     )
-    return np.exp(logJq)
+    out[positive] = np.exp(logJq[positive])
+    return out
 
 
 def integrate_partitions_loglinear(

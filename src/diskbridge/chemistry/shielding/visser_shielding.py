@@ -426,8 +426,9 @@ class VisserShielding:
           - Header lines: 'n[N(12CO)] = <nNco>', 'n[N(H2)] = <nNh2>'
           - 'N(12CO)' label, then nNco column density values (one per line)
           - 'N(H2)' label, then nNh2 column density values (one per line)
-          - Isotopologue blocks: label (e.g. '12C16O'), then theta matrix
-            (nNco rows x nNh2 cols, values may span multiple lines)
+          - Isotopologue blocks: label (e.g. '12C16O'), then theta matrix.
+            The Leiden files list one H2 row at a time, with N(CO) varying
+            fastest inside each row.
         """
         text = path.read_text()
         lines = text.splitlines()
@@ -535,8 +536,9 @@ class VisserShielding:
                     f"expected {nNco * nNh2}, got {len(all_values)}"
                 )
             
-            # Reshape into (nNco, nNh2) matrix
-            theta_grid = np.array(all_values[:nNco * nNh2]).reshape(nNco, nNh2)
+            # Leiden stores the matrix as nNh2 rows of nNco values.  The
+            # interpolator expects axes ordered as (Nco, Nh2), so transpose.
+            theta_grid = np.array(all_values[:nNco * nNh2]).reshape(nNh2, nNco).T
             
             # Normalize label
             label_norm = (

@@ -121,6 +121,21 @@ class Params:
     prepend_name: str
     append_name: str
 
+    def to_dict(self) -> Dict[str, object]:
+        """Return a complete, JSON-serializable snapshot of these parameters.
+
+        Every dataclass field is included. Pint quantities render as
+        ``{"value": <magnitude>, "unit": <unit>}`` using the canonical unit from
+        :data:`PARAM_UNITS` when known, otherwise the quantity's own unit. Lists
+        render element-wise, ``Path`` becomes ``str``, and ``None`` stays null.
+        The result is deterministic for a given ``Params`` and suitable for run
+        provenance manifests.
+        """
+
+        return {
+            f.name: _param_value_to_jsonable(f.name, getattr(self, f.name))
+            for f in fields(self)
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +184,37 @@ PARAM_UNITS = {
     'mstar': 'solar_mass',
     'segmented_r_clip_min': 'au',
 }
+
+
+def _quantity_to_jsonable(name: str, q) -> Dict[str, object]:
+    """Render a Pint quantity as ``{"value", "unit"}`` in its canonical unit.
+
+    The canonical unit is taken from :data:`PARAM_UNITS` when ``name`` is known,
+    otherwise the quantity's own unit is used.
+    """
+
+    unit = PARAM_UNITS.get(name)
+    if unit is not None:
+        return {"value": float(q.to(unit).magnitude), "unit": unit}
+    return {"value": float(q.magnitude), "unit": str(q.units)}
+
+
+def _param_value_to_jsonable(name: str, value):
+    """Render one ``Params`` field value as a JSON-serializable object."""
+
+    if value is None:
+        return None
+    # Duck-type Pint quantities (matches diskbridge.serialization.jsonable).
+    if hasattr(value, "magnitude") and hasattr(value, "units"):
+        return _quantity_to_jsonable(name, value)
+    if isinstance(value, (list, tuple)):
+        return [_param_value_to_jsonable(name, v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
 
 # ---------------------------------------------------------------------------
 # Type casting

@@ -29,11 +29,11 @@ posangle         = 0.0       # position angle of the source in degrees
 scat_mode        = 0           # radmc3d scattering mode 
 
 # Dust sizes 
-amin             = [0.01, 0.01]      # min grain size in micron 
-amax             = [1000.0, 1.0]     # max grain size in micron 
-pindex           = [3.0, 3.5]        # slope of the power law size distribution 
-dust_to_gas_ratio = 1e-2      # dust to gas ratio 
-nbins            = [10, 10]   # number of dust bins in the distribution 
+amin             = 0.01        # min grain size in micron
+amax             = 0.25        # max grain size in micron
+pindex           = 3.5         # slope of the power law size distribution
+dust_to_gas_ratio = 1e-2      # dust to gas ratio
+nbins            = 10         # number of dust bins in the distribution
 disk_dust_mode   = proportional # disk dust mode: proportional|settling
 disk_dust_settling_alpha = 1e-2 # settling alpha used when disk_dust_mode=settling
 
