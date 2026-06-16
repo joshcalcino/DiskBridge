@@ -16,7 +16,10 @@ _MODEL_SPECS: dict[str, tuple[str, str]] = {
     "pinte_switches": ("diskbridge.chemistry.models.pinte_switches", "run_pinte_switches"),
     "layered_column_switches": ("diskbridge.chemistry.models.abundance_switches", "run_abundance_switches"),
     "gow17": ("diskbridge.chemistry.models.gow17", "run_gow17"),
-    "gow17_slab": ("diskbridge.chemistry.models.gow17_slab", "run_gow17_slab"),
+    "gow17_slab_equilibrium": (
+        "diskbridge.chemistry.models.gow17_slab",
+        "run_gow17_slab_equilibrium",
+    ),
 }
 
 

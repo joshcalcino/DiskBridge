@@ -358,7 +358,7 @@ def run_chemistry(
             model_config.setdefault("_output_dir", str(output_path))
             result = model_fn(rad, model_config)
 
-    if model_lower in {"gow17", "gow17_slab"}:
+    if model_lower in {"gow17", "gow17_slab_equilibrium"}:
         result = add_default_line_colliders_from_gow17(
             result,
             rad=rad,

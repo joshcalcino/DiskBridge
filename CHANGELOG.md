@@ -8,6 +8,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- GOW17 now accepts `shielding_ray_average = "weighted" | "uniform"` so
+  HEALPix shielding can explicitly use RADMC-derived directional UV weights or
+  direct uniform ray averaging.
 - Run-provenance API: `diskbridge.write_run_manifest()` writes a deterministic, human-readable JSON manifest recording the complete active parameter set (`Params.to_dict()`), the DiskBridge version, and a best-effort git commit and timestamp, so a run can be reproduced and audited. `Params.to_dict()` serializes every parameter field with Pint quantities rendered as `{"value", "unit"}` in canonical units.
 - Sphinx documentation site (myst-parser, autodoc/autosummary, numpydoc, sphinxcontrib-bibtex, pydata-sphinx-theme) with a written documentation standard at `docs/contributing/documentation.md`, a literature bibliography at `docs/refs.bib` with ADS links, a shielding user guide at `docs/guides/shielding.md`, and a generated shielding API reference. Build with `sphinx-build -W -b html docs docs/_build/html`.
 - Getting-started documentation under `docs/getting_started/` (overview, installation, quickstart, workflow), covering the FARGO snapshot -> model -> RADMC-3D -> chemistry -> imaging pipeline, verified against the `examples/3d_disk/` example.
@@ -28,6 +31,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Added `validation/cartesian_wedge_uv_weighting`, a Cartesian sphere-plus-cone
+  UV validation comparing no shielding, uniform HEALPix shielding, and
+  weighted HEALPix shielding chemistry from one shared RADMC-3D transport run
+  with an explicit `2 R_sun`, `10000 K` blackbody source.
 - Updated the cube validation workflow for current GOW17/RADMC-3D UV products, mctherm-derived dust temperatures, explicit shielding-off comparisons, and current GOW17 diagnostic plots.
 - Adjusted the high-resolution cube validation density setup to use a 100x lower base density with a localized 100x boost of the densest clumps.
 - Added a cube validation `--prepare-only` mode that writes RADMC-3D inputs and setup summaries without launching transport or GOW17 chemistry.

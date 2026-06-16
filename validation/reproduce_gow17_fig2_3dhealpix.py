@@ -1455,7 +1455,7 @@ def _run_slab_reference(
         "enable_co_phase": False,
     }
 
-    run_chemistry(radm, model="gow17_slab", config=gow17_cfg)
+    run_chemistry(radm, model="gow17_slab_equilibrium", config=gow17_cfg)
 
     y_slab = np.asarray(radm.gow17_y, dtype=float)
     Av_out = np.asarray(radm.Av.to("dimensionless").magnitude, dtype=float).ravel()

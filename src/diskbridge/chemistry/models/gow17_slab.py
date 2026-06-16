@@ -50,16 +50,21 @@ if TYPE_CHECKING:
     from diskbridge.radmc3d.model import RadModel
 
 
+_MODEL_NAME = "gow17_slab_equilibrium"
+
+
 def _require_slab_shape(shape: tuple[int, ...]) -> None:
     if sum(int(n) > 1 for n in shape) != 1:
-        raise ValueError(f"gow17_slab requires exactly one varying mesh axis; got shape={shape}")
+        raise ValueError(
+            f"{_MODEL_NAME} requires exactly one varying mesh axis; got shape={shape}"
+        )
 
 
 def _uniform_scalar(name: str, values: np.ndarray) -> float:
     flat = np.asarray(values, dtype=np.float64).reshape(-1)
     value = float(flat[0])
     if not np.allclose(flat, value, rtol=0.0, atol=0.0):
-        raise ValueError(f"gow17_slab requires uniform {name}")
+        raise ValueError(f"{_MODEL_NAME} requires uniform {name}")
     return value
 
 
@@ -80,7 +85,7 @@ def _default_y0(*, const_temp: bool, Tgas: float) -> np.ndarray:
     return y0
 
 
-def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
+def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
 
     Tdust = rad.ensure_dust_temperature()
@@ -88,7 +93,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     chi = rad.ensure_chi()
     Av_q = getattr(rad, "Av", None)
     if Av_q is None:
-        raise ValueError("gow17_slab requires rad.Av")
+        raise ValueError(f"{_MODEL_NAME} requires rad.Av")
 
     nH_cm3 = _as_cgs_f64(nH, "cm^-3")
     shape = nH_cm3.shape
@@ -112,7 +117,9 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     chi_arr = _as_cgs_f64(chi, "dimensionless")
     Av_arr = _as_cgs_f64(Av_q, "dimensionless")
     if Av_arr.shape != shape:
-        raise ValueError(f"gow17_slab rad.Av shape {Av_arr.shape} does not match nH shape {shape}")
+        raise ValueError(
+            f"{_MODEL_NAME} rad.Av shape {Av_arr.shape} does not match nH shape {shape}"
+        )
 
     nH0 = _uniform_scalar("nH", nH_cm3)
     chi0 = _uniform_scalar("incident chi", chi_arr)
@@ -122,7 +129,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     NH_grid = Av_flat * 1.87e21
     positive_NH = NH_grid[np.isfinite(NH_grid) & (NH_grid > 0.0)]
     if positive_NH.size == 0:
-        raise ValueError("gow17_slab requires positive finite Av values")
+        raise ValueError(f"{_MODEL_NAME} requires positive finite Av values")
     NH_min = _maybe_quantity_to_float(cfg.get("NH_min", float(np.min(positive_NH))), "cm^-2")
     NH_total = _maybe_quantity_to_float(cfg.get("NH_total", float(np.max(positive_NH))), "cm^-2")
 
@@ -130,7 +137,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     _warn_if_co_phase_settings_ignored(
         cfg,
         enable_co_phase=enable_co_phase,
-        context="gow17_slab",
+        context=_MODEL_NAME,
     )
 
     ensure_microturbulence_field(rad.model, diskbridge.params)
@@ -328,7 +335,7 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
         number_densities=number_densities,
         fields=fields,
         meta={
-            "model": "gow17_slab",
+            "model": _MODEL_NAME,
             "enable_co_phase": bool(enable_co_phase),
             "radiation_mode": "incident_slab",
             "b_H2_kms_scalar": float(b_H2_kms),
@@ -350,4 +357,4 @@ def run_gow17_slab(rad: "RadModel", config: dict) -> ChemistryResult:
     )
 
 
-__all__ = ["run_gow17_slab"]
+__all__ = ["run_gow17_slab_equilibrium"]

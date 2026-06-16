@@ -57,6 +57,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
+    _slab_av_flat_or_none,
     _shielding_b_grid_or_none,
     _warn_if_co_phase_settings_ignored,
     _model_microturbulence_grid_kms,
@@ -123,6 +124,7 @@ class Gow17TimeStepper:
 
         self.rad = rad
         self.nside = int(diskbridge.params.nside)
+        self.shielding_outer_1d = str(cfg.get("shielding_outer_1d", "max"))
 
         nH = rad.ensure_nH()
         chi = rad.ensure_chi()
@@ -370,6 +372,11 @@ class Gow17TimeStepper:
             self.b_CO_kms,
             self.shielding_linewidth_meta,
         )
+        slab_Av_flat = _slab_av_flat_or_none(
+            rad,
+            self.radiation_mode,
+            ncells=self.ncells,
+        )
 
         theta_h2, theta_co, theta_c, Gph, GPE, GISRF = _compute_shielding_and_gph(
             y_flat=y_state,
@@ -393,6 +400,8 @@ class Gow17TimeStepper:
             b_H2_kms_grid=self.b_H2_kms_grid,
             b_CO_kms_grid=self.b_CO_kms_grid,
             nside=self.nside,
+            shielding_outer_1d=self.shielding_outer_1d,
+            slab_Av_flat=slab_Av_flat,
         )
         return (
             chi_dust_arr,

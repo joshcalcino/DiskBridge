@@ -31,6 +31,32 @@ from diskbridge.chemistry.shielding.healpix_columns import (
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
 
+def _write_minimal_visser_table(path, *, tex: float, carbon_ratio: int) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "b(CO,H2,H) (km/s)    =   0.30  3.00  5.00",
+                f"Tex(CO,H2) (K)       =   {tex:.2f} 11.18",
+                f"[12C]/[13C]          =  {carbon_ratio}",
+                "[16O]/[18O]          = 557",
+                "[18O]/[17O]          =   3.6",
+                "n[N(12CO)]           =  2",
+                "n[N(H2)]             =  2",
+                "N(12CO)",
+                " 1.000E+10",
+                " 1.000E+11",
+                "N(H2)",
+                " 1.000E+15",
+                " 1.000E+16",
+                "12C16O",
+                " 9.000E-01 8.000E-01",
+                " 7.000E-01 6.000E-01",
+            ]
+        )
+        + "\n"
+    )
+
+
 def _make_uniform_cartesian_mesh(ncells: int = 4, L_cm: float = 1e17):
     """Build a small uniform Cartesian mesh centred on the origin."""
     edges = np.linspace(-L_cm, L_cm, ncells + 1)
@@ -43,6 +69,77 @@ def _make_uniform_cartesian_mesh(ncells: int = 4, L_cm: float = 1e17):
             "z": Axis(edges=edges_q),
         },
     )
+
+
+def test_visser_parser_transposes_h2_major_theta_blocks(tmp_path):
+    """Visser files store shielding blocks with N(CO) varying fastest."""
+    table = tmp_path / "shield.03.5.35-557-36.dat"
+    table.write_text(
+        "\n".join(
+            [
+                "b(CO,H2,H) (km/s)    =   0.30  3.00  5.00",
+                "Tex(CO,H2) (K)       =   5.00 11.18",
+                "[12C]/[13C]          =  35",
+                "[16O]/[18O]          = 557",
+                "[18O]/[17O]          =   3.6",
+                "n[N(12CO)]           =  3",
+                "n[N(H2)]             =  2",
+                "N(12CO)",
+                " 1.000E+10",
+                " 1.000E+11",
+                " 1.000E+12",
+                "N(H2)",
+                " 1.000E+15",
+                " 1.000E+16",
+                "12C16O",
+                " 9.000E-01 8.000E-01 7.000E-01",
+                " 6.000E-01 5.000E-01 4.000E-01",
+            ]
+        )
+        + "\n"
+    )
+
+    visser = VisserShielding(
+        data_dir=tmp_path,
+        filename=table.name,
+        b_kms=0.3,
+        auto_download=False,
+    )
+
+    np.testing.assert_allclose(
+        visser.theta(
+            "co",
+            np.array([[1.0e10, 1.0e11, 1.0e12], [1.0e10, 1.0e11, 1.0e12]]),
+            np.array([[1.0e15, 1.0e15, 1.0e15], [1.0e16, 1.0e16, 1.0e16]]),
+            b_kms=0.3,
+        ),
+        np.array([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]]),
+        rtol=0.0,
+        atol=1.0e-14,
+    )
+
+
+def test_visser_default_prefers_original_gow17_table_family(tmp_path):
+    """Same-b ties should choose Visser Table 5, matching original GOW17."""
+    _write_minimal_visser_table(
+        tmp_path / "shield.03.100.35-557-36.dat",
+        tex=100.0,
+        carbon_ratio=35,
+    )
+    _write_minimal_visser_table(
+        tmp_path / "shield.03.5.35-557-36.dat",
+        tex=5.0,
+        carbon_ratio=35,
+    )
+    _write_minimal_visser_table(
+        tmp_path / "shield.03.5.69-557-36.dat",
+        tex=5.0,
+        carbon_ratio=69,
+    )
+
+    visser = VisserShielding(data_dir=tmp_path, b_kms=0.3, auto_download=False)
+
+    assert visser.filepath.name == "shield.03.5.69-557-36.dat"
 
 
 # ---- planck_band_luminosity ------------------------------------------------

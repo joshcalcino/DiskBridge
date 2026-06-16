@@ -148,6 +148,19 @@ def _build_stream_model(cfg: InfallStream1DConfig, *, nH_cm3: float) -> tuple[Ra
         "sigma_d_per_H",
         Field(quantity="sigma_d_per_H", data=sigma, axis_order=("x", "y", "z")),
     )
+    model.gas_register(
+        "microturbulence",
+        Field(
+            quantity="microturbulence",
+            data=Quantity(np.full(shape, float(cfg.b_kms)), "km/s"),
+            axis_order=("x", "y", "z"),
+            attrs={
+                "mode": "constant",
+                "spatially_constant": True,
+                "value": f"{float(cfg.b_kms)} km/s",
+            },
+        ),
+    )
 
     rad = RadModel(model)
     rad.nH = Quantity(np.full(shape, float(nH_cm3)), "cm^-3")
@@ -722,6 +735,12 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "Zg": float(cfg.Zg),
         "enable_co_phase": bool(cfg.enable_co_phase),
         "temperature": {"mode": "computed" if bool(cfg.evolve_energy) else "dust"},
+        "dust_cooling": {
+            "mode": "gow17_original",
+            "sigma_d_H_ref": "1.0e-21 cm^2",
+            "gow17_original_Zd": 1.0,
+            "gow17_original_Tdust": f"{float(cfg.Tdust_const_K)} K",
+        },
         "reltol": float(cfg.reltol),
         "abstol0": float(cfg.abstol0),
         "mxsteps": int(cfg.mxsteps),
@@ -729,7 +748,6 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "tolfac": float(cfg.tolfac),
         "userJac": bool(cfg.userJac),
         "verbose": bool(cfg.verbose),
-        "isDust_cooling": True,
         "isCoolingCOThin": False,
         "gradv": 1.0e-14,
         "Leff_CO_max": 3.0e20,

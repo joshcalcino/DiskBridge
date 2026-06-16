@@ -337,23 +337,58 @@ class VisserShielding:
                 break
         return np.nan
 
+    @staticmethod
+    def _parse_co_tex_from_file(path: Path) -> float:
+        text = path.read_text()
+        for line in text.splitlines():
+            if "Tex(CO,H2)" in line:
+                m = re.search(r"=\s*([0-9.]+)", line)
+                if m:
+                    return float(m.group(1))
+                break
+        return np.nan
+
+    @staticmethod
+    def _canonical_isotope_family_score(name: str) -> int:
+        # The original GOW17 shielding table is Visser Table 5:
+        # [12C]/[13C]=69, [16O]/[18O]=557, [18O]/[17O]=3.6.
+        return 0 if name.endswith(".69-557-36.dat") else 1
+
     def _select_nearest_b_file(self, b_kms: float) -> str:
         files = self.available_files()
         if not files:
             raise FileNotFoundError(f"No shield.*.dat files found in {self.data_dir}")
 
-        bvals_list: list[float] = []
+        candidates: list[tuple[float, float, int, str]] = []
         for fname in files:
             path = self.data_dir / fname
             try:
-                val = self._parse_co_b_from_file(path)
+                b_val = self._parse_co_b_from_file(path)
             except Exception:
-                val = np.nan
-            bvals_list.append(val)
+                b_val = np.nan
+            if not np.isfinite(b_val):
+                continue
+            try:
+                tex_val = self._parse_co_tex_from_file(path)
+            except Exception:
+                tex_val = np.nan
+            tex_score = abs(tex_val - 5.0) if np.isfinite(tex_val) else np.inf
+            candidates.append(
+                (
+                    abs(b_val - b_kms),
+                    tex_score,
+                    self._canonical_isotope_family_score(fname),
+                    fname,
+                )
+            )
 
-        bvals = np.array(bvals_list, float)
-        j = np.nanargmin(np.abs(bvals - b_kms))
-        return files[j]
+        if not candidates:
+            raise FileNotFoundError(
+                f"No shield.*.dat files with parseable b(CO,H2,H) found in {self.data_dir}"
+            )
+
+        candidates.sort()
+        return candidates[0][3]
 
     @staticmethod
     def _table_family(name: str) -> str:

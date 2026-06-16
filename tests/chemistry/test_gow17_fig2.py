@@ -120,7 +120,7 @@ def build_model(nH_cm3: float, NH: np.ndarray, chi0: float = 2.0):
     return radm, Av_db
 
 
-def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
+def run_gow17_slab_equilibrium(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
     """Run GOW17 chemistry with shielding iterations."""
     radm.nco_gas = Quantity(np.full(radm.model.mesh.shape, 1e-12 * nH), "cm^-3")
 
@@ -177,7 +177,12 @@ def run_gow17_slab(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
 
     res = None
     for _ in range(n_iter):
-        res = run_chemistry(radm, model="gow17_slab", config=config, write=False)
+        res = run_chemistry(
+            radm,
+            model="gow17_slab_equilibrium",
+            config=config,
+            write=False,
+        )
         radm.nco_gas = res.number_densities["co"]
 
     return res
@@ -200,7 +205,7 @@ def diskbridge_nH100(reference_nH100):
     nH = 100.0
     radm, Av_db = build_model(nH, NH, chi0=1.0)
     assert sum(int(n) > 1 for n in radm.ensure_nH().shape) == 1
-    res = run_gow17_slab(radm, nH, chi0=1.0, n_iter=1)
+    res = run_gow17_slab_equilibrium(radm, nH, chi0=1.0, n_iter=1)
 
     Y = np.asarray(radm.gow17_y).reshape(-1, N_Y)
     return Av_db, Y, res
