@@ -89,7 +89,33 @@ def main() -> int:
         type=int,
         choices=(0, 1),
         default=int(InfallStream1DConfig.track_infall_equilibrium),
-        help="Also solve the chemistry to local equilibrium at each infall output snapshot.",
+        help="Also solve the chemistry to local equilibrium at selected infall snapshots.",
+    )
+    parser.add_argument(
+        "--equilibrium-movie-frames-only",
+        "--equilibrium_movie_frames_only",
+        dest="equilibrium_movie_frames_only",
+        type=int,
+        choices=(0, 1),
+        default=int(InfallStream1DConfig.equilibrium_movie_frames_only),
+        help="When equilibrium tracking is enabled, solve equilibrium only for movie frames plus endpoints.",
+    )
+    parser.add_argument(
+        "--equilibrium-fast-presentation",
+        "--equilibrium_fast_presentation",
+        dest="equilibrium_fast_presentation",
+        type=int,
+        choices=(0, 1),
+        default=int(InfallStream1DConfig.equilibrium_fast_presentation),
+        help="Use looser equilibrium-only iteration settings for presentation movies.",
+    )
+    parser.add_argument(
+        "--equilibrium-fast-movie-frames",
+        "--equilibrium_fast_movie_frames",
+        dest="equilibrium_fast_movie_frames",
+        type=int,
+        default=int(InfallStream1DConfig.equilibrium_fast_movie_frames),
+        help="Maximum equilibrium/movie frames in presentation-fast mode.",
     )
     parser.add_argument(
         "--teff-k",
@@ -150,6 +176,9 @@ def main() -> int:
         evolve_energy=bool(args.evolve_energy),
         estimate_tdust=bool(args.estimate_tdust),
         track_infall_equilibrium=bool(args.track_infall_equilibrium),
+        equilibrium_movie_frames_only=bool(args.equilibrium_movie_frames_only),
+        equilibrium_fast_presentation=bool(args.equilibrium_fast_presentation),
+        equilibrium_fast_movie_frames=int(args.equilibrium_fast_movie_frames),
         mstar_msun=float(stellar["mstar_msun"]),
         rstar_rsun=float(stellar["rstar_rsun"]),
         teff_K=float(stellar["teff_K"]),

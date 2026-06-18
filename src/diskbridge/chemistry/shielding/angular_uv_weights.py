@@ -430,7 +430,9 @@ def compute_uv_direction_weights_healpix(
         Cartesian cell center positions (cm).
     debug : dict
         Diagnostic arrays when ``keep_debug_arrays`` is true. In normal runs
-        only small scalar summaries are returned.
+        only small scalar summaries are returned. When a stellar source is
+        present, ``debug["stellar"]`` contains compact per-cell metadata for
+        the direct stellar contribution.
 
     Raises
     ------
@@ -494,6 +496,9 @@ def compute_uv_direction_weights_healpix(
     W_rays = np.full((n_candidates, npix), uniform, dtype=np.float64)
 
     dust_fields_stack = None
+    star_k_all = None
+    star_w_all = None
+    star_valid_all = None
     if float(star_uv_luminosity_erg_s) > 0.0:
         dust_fields_stack = np.ascontiguousarray(
             np.stack(
@@ -502,6 +507,9 @@ def compute_uv_direction_weights_healpix(
             ),
             dtype=np.float64,
         )
+        star_k_all = np.zeros(n_candidates, dtype=np.intp)
+        star_w_all = np.zeros(n_candidates, dtype=np.float64)
+        star_valid_all = np.zeros(n_candidates, dtype=bool)
 
     debug_chunks: dict[str, list[np.ndarray]] = {}
     if keep_debug_arrays:
@@ -591,6 +599,7 @@ def compute_uv_direction_weights_healpix(
         chi_star_unatt = np.zeros(n_chunk, dtype=np.float64)
         tau_star = np.zeros(n_chunk, dtype=np.float64)
         k_star = np.zeros(n_chunk, dtype=np.intp)
+        valid_star = np.zeros(n_chunk, dtype=bool)
 
         if dust_fields_stack is not None:
             star_cols = integrate_starward_rays_multi(
@@ -604,9 +613,11 @@ def compute_uv_direction_weights_healpix(
             for ibin in range(nbin):
                 tau_star += kext_uv[ibin] * star_cols[:, ibin]
 
-            r_cell = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
-            r_cell = np.maximum(r_cell, 1e-30)
-            F_uv = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
+            r_raw = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
+            valid_star = r_raw > max(float(star_inner_radius_cm), 0.0)
+            r_cell = np.maximum(r_raw[valid_star], 1e-30)
+            F_uv = np.zeros(n_chunk, dtype=np.float64)
+            F_uv[valid_star] = float(star_uv_luminosity_erg_s) / (4.0 * np.pi * r_cell**2)
             ref = max(float(star_uv_reference_energy_density), np.finfo(np.float64).tiny)
             if str(star_uv_weighting).lower() == "photon":
                 chi_star_unatt = F_uv / ref
@@ -614,10 +625,16 @@ def compute_uv_direction_weights_healpix(
                 chi_star_unatt = F_uv / (C_LIGHT * ref)
             chi_star_dir_att = chi_star_unatt * np.exp(-tau_star)
 
-            star_dir_x = -cell_centers_chunk[:, 0] / r_cell
-            star_dir_y = -cell_centers_chunk[:, 1] / r_cell
-            star_dir_z = -cell_centers_chunk[:, 2] / r_cell
-            k_star = hp.vec2pix(int(nside), star_dir_x, star_dir_y, star_dir_z)
+            if np.any(valid_star):
+                star_dir_x = -cell_centers_chunk[valid_star, 0] / r_cell
+                star_dir_y = -cell_centers_chunk[valid_star, 1] / r_cell
+                star_dir_z = -cell_centers_chunk[valid_star, 2] / r_cell
+                k_star[valid_star] = hp.vec2pix(
+                    int(nside),
+                    star_dir_x,
+                    star_dir_y,
+                    star_dir_z,
+                )
 
             max_chi_star_unatt = max(max_chi_star_unatt, float(np.max(chi_star_unatt)))
             max_tau_star = max(max_tau_star, float(np.max(tau_star)))
@@ -678,6 +695,7 @@ def compute_uv_direction_weights_healpix(
             + float(npix) * chi_star_dir_att
         )
         mask_nonzero = sum_uv_contrib > 0.0
+        w_star_chunk = np.zeros(n_chunk, dtype=np.float64)
 
         W_chunk = W_rays[start:end]
         W_chunk[:, :] = uniform
@@ -687,13 +705,17 @@ def compute_uv_direction_weights_healpix(
             W_chunk[rows_nonzero, :] += chi_iso[rows_nonzero, None]
             W_chunk[rows_nonzero, :] /= sum_uv_contrib[rows_nonzero, None]
             if dust_fields_stack is not None:
-                W_chunk[rows_nonzero, k_star[rows_nonzero]] += (
+                star_rows = rows_nonzero[valid_star[rows_nonzero]]
+                w_star_chunk[star_rows] = (
                     float(npix)
-                    * chi_star_dir_att[rows_nonzero]
-                    / sum_uv_contrib[rows_nonzero]
+                    * chi_star_dir_att[star_rows]
+                    / sum_uv_contrib[star_rows]
                 )
+                W_chunk[star_rows, k_star[star_rows]] += w_star_chunk[star_rows]
 
         if isotropic_outside_r_cm is not None:
+            radii_cm = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
+            outer_overridden = radii_cm >= float(isotropic_outside_r_cm)
             _apply_outer_weights_to_chunk(
                 W_chunk,
                 tau_ext_rays,
@@ -701,6 +723,12 @@ def compute_uv_direction_weights_healpix(
                 isotropic_outside_r_cm=float(isotropic_outside_r_cm),
                 mode=outer_weight_mode,
             )
+            w_star_chunk[outer_overridden] = 0.0
+
+        if star_k_all is not None and star_w_all is not None and star_valid_all is not None:
+            star_k_all[start:end] = k_star
+            star_w_all[start:end] = w_star_chunk
+            star_valid_all[start:end] = valid_star & (w_star_chunk > 0.0)
 
         if keep_debug_arrays:
             uv_star_contrib = np.zeros((n_chunk, npix), dtype=np.float64)
@@ -730,6 +758,16 @@ def compute_uv_direction_weights_healpix(
         "n_chunks": int(n_chunks),
         "median_chi_iso": float(np.median(chi_iso_medians)) if chi_iso_medians else 0.0,
     }
+    if star_k_all is not None and star_w_all is not None and star_valid_all is not None:
+        debug["stellar"] = {
+            "k_star": star_k_all,
+            "w_star": star_w_all,
+            "valid_star": star_valid_all,
+            "shape": tuple(int(v) for v in chi_arr.shape),
+            "nside": int(nside),
+            "npix": int(npix),
+            "star_inner_radius_cm": float(star_inner_radius_cm),
+        }
     if keep_debug_arrays:
         debug.update({
             name: np.concatenate(parts, axis=0)

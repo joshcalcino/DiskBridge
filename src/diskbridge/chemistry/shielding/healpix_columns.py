@@ -41,6 +41,7 @@ from diskbridge.chemistry.shielding._array_utils import _as_f64
 from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
     integrate_rays_multi,
+    integrate_starward_rays_multi,
 )
 
 from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
@@ -298,6 +299,96 @@ def _average_rays(theta_rays: np.ndarray, W_rays: Optional[np.ndarray]) -> np.nd
     if W_rays is not None:
         return (W_rays * theta_rays).sum(axis=1)
     return theta_rays.mean(axis=1)
+
+
+def _normalise_stellar_metadata(
+    stellar_metadata: Optional[dict],
+    *,
+    n_candidates: int,
+    npix: int,
+    nside: int,
+) -> Optional[dict[str, np.ndarray | float]]:
+    """Validate compact direct-stellar metadata for weighted shielding."""
+    if stellar_metadata is None:
+        return None
+    if int(stellar_metadata.get("nside", nside)) != int(nside):
+        raise ValueError("stellar_metadata nside does not match shielding nside")
+    if int(stellar_metadata.get("npix", npix)) != int(npix):
+        raise ValueError("stellar_metadata npix does not match shielding npix")
+
+    k_star = np.asarray(stellar_metadata.get("k_star"), dtype=np.intp)
+    w_star = _as_f64("stellar_metadata['w_star']", stellar_metadata.get("w_star"))
+    valid = np.asarray(
+        stellar_metadata.get("valid_star", w_star > 0.0),
+        dtype=bool,
+    )
+    expected = (int(n_candidates),)
+    if k_star.shape != expected or w_star.shape != expected or valid.shape != expected:
+        raise ValueError(
+            "stellar_metadata k_star, w_star, and valid_star must have shape "
+            f"{expected}"
+        )
+
+    active = valid & (w_star > 0.0)
+    if np.any((k_star[active] < 0) | (k_star[active] >= int(npix))):
+        raise ValueError("stellar_metadata k_star contains out-of-range pixels")
+
+    return {
+        "k_star": k_star,
+        "w_star": np.where(active, w_star, 0.0),
+        "valid_star": active,
+        "star_inner_radius_cm": float(stellar_metadata.get("star_inner_radius_cm", 0.0)),
+    }
+
+
+def _apply_stellar_weight_correction(
+    theta_mean: np.ndarray,
+    theta_rays: np.ndarray,
+    theta_star: np.ndarray,
+    *,
+    stellar: Optional[dict[str, np.ndarray | float]],
+    start: int,
+    end: int,
+) -> np.ndarray:
+    """Replace only the direct-stellar fraction of a weighted shielding average."""
+    if stellar is None:
+        return theta_mean
+    k_star = np.asarray(stellar["k_star"][start:end], dtype=np.intp)
+    w_star = np.asarray(stellar["w_star"][start:end], dtype=np.float64)
+    active = w_star > 0.0
+    if not np.any(active):
+        return theta_mean
+
+    out = np.asarray(theta_mean, dtype=np.float64).copy()
+    rows = np.arange(out.size, dtype=np.intp)
+    out[active] += w_star[active] * (
+        np.asarray(theta_star, dtype=np.float64)[active]
+        - np.asarray(theta_rays, dtype=np.float64)[rows[active], k_star[active]]
+    )
+    return out
+
+
+def _starward_columns_for_chunk(
+    tracer,
+    cell_centers_chunk: np.ndarray,
+    fields: dict[str, np.ndarray],
+    candidate_idx_chunk: np.ndarray,
+    *,
+    stop_radius_cm: float,
+) -> dict[str, np.ndarray]:
+    names = list(fields)
+    fields_stack = np.ascontiguousarray(
+        np.stack([_as_f64(name, fields[name]) for name in names], axis=0),
+        dtype=np.float64,
+    )
+    cols = integrate_starward_rays_multi(
+        tracer,
+        cell_centers_chunk,
+        fields_stack,
+        candidate_idx=candidate_idx_chunk,
+        stop_radius_cm=float(stop_radius_cm),
+    )
+    return {name: cols[:, i] for i, name in enumerate(names)}
 
 
 
@@ -912,6 +1003,7 @@ def compute_co_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     W_rays: Optional[np.ndarray] = None,
+    stellar_metadata: Optional[dict] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute CO self-shielding factors and effective UV field via HEALPix rays.
 
@@ -956,6 +1048,10 @@ def compute_co_shielding_healpix(
         Directory for caching ray geometry and column results.
     W_rays : ndarray of shape (n_candidates, npix) or None, optional
         Per-direction UV weights. If None, uniform (isotropic) averaging.
+    stellar_metadata : dict or None, optional
+        Compact direct-stellar metadata from the W-ray builder. When supplied
+        with ``W_rays``, the direct stellar fraction uses exact cell-to-star
+        CO/H2 columns instead of the HEALPix pixel-center boundary column.
 
     Returns
     -------
@@ -983,13 +1079,42 @@ def compute_co_shielding_healpix(
         shape=nH_cgs.shape,
     )
 
-    candidate_idx, dirs, cols = compute_column_rays_healpix(
+    tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
+        mesh,
+        nside=int(nside),
+        candidate_mask=candidate_mask_arr,
+        cache_dir=cache_dir,
+    )
+    npix = int(dirs.shape[0])
+    n_candidates = int(candidate_idx.shape[0])
+    if W_rays is not None:
+        W_rays = _as_f64("W_rays", W_rays)
+        if W_rays.shape != (n_candidates, npix):
+            raise ValueError(
+                f"W_rays must have shape ({n_candidates}, {npix}), got {W_rays.shape}"
+            )
+    stellar = (
+        _normalise_stellar_metadata(
+            stellar_metadata,
+            n_candidates=n_candidates,
+            npix=npix,
+            nside=int(nside),
+        )
+        if W_rays is not None
+        else None
+    )
+
+    _candidate_idx, _dirs, cols = compute_column_rays_healpix(
         mesh,
         fields=fields,
         nside=int(nside),
         candidate_mask=candidate_mask_arr,
         progress_chunks=progress_chunks,
         cache_dir=cache_dir,
+        tracer=tracer,
+        dirs=dirs,
+        candidate_idx=candidate_idx,
+        cell_centers=cell_centers,
     )
 
     theta_co = np.ones_like(nH_cgs, dtype=np.float64)
@@ -1009,6 +1134,35 @@ def compute_co_shielding_healpix(
             theta_rays = visser.theta("co", N_CO_rays, N_H2_rays, b_kms=float(b_CO_kms))
 
         theta_eff = _average_rays(theta_rays, W_rays)
+        if stellar is not None:
+            star_cols = _starward_columns_for_chunk(
+                tracer,
+                cell_centers,
+                fields,
+                candidate_idx,
+                stop_radius_cm=float(stellar["star_inner_radius_cm"]),
+            )
+            N_CO_star = star_cols["co"]
+            N_H2_star = star_cols["h2"]
+            if b_CO_kms_grid is not None:
+                b_star = _effective_b_from_columns(
+                    star_cols["co_b2"], N_CO_star, fallback_kms=float(b_CO_kms)
+                )
+                theta_star = visser.theta_interpolated_b(
+                    "co", N_CO_star, N_H2_star, b_star
+                )
+            else:
+                theta_star = visser.theta(
+                    "co", N_CO_star, N_H2_star, b_kms=float(b_CO_kms)
+                )
+            theta_eff = _apply_stellar_weight_correction(
+                theta_eff,
+                theta_rays,
+                theta_star,
+                stellar=stellar,
+                start=0,
+                end=n_candidates,
+            )
 
         _scatter_candidates_3d(theta_co, candidate_idx, theta_eff)
 
@@ -1033,6 +1187,7 @@ def compute_pdr_shielding_healpix(
     progress_chunks: Optional[int] = None,
     cache_dir: Optional[Path | str] = None,
     W_rays: Optional[np.ndarray] = None,
+    stellar_metadata: Optional[dict] = None,
     chunk_size: Optional[int] = None,
     memory_budget_gib: Optional[float] = None,
 ) -> tuple[np.ndarray, ...]:
@@ -1087,6 +1242,10 @@ def compute_pdr_shielding_healpix(
         Directory for caching ray geometry and column results.
     W_rays : ndarray of shape (n_candidates, npix) or None, optional
         Per-direction UV weights. If None, uniform (isotropic) averaging.
+    stellar_metadata : dict or None, optional
+        Compact direct-stellar metadata from the W-ray builder. When supplied
+        with ``W_rays``, only the direct stellar fraction is reduced with exact
+        cell-to-star H2/C/CO columns.
     chunk_size : int or None, optional
         Number of candidate cells to process per shielding chunk. If omitted,
         a chunk size is derived from ``memory_budget_gib``.
@@ -1155,6 +1314,16 @@ def compute_pdr_shielding_healpix(
             raise ValueError(
                 f"W_rays must have shape ({n_candidates}, {npix}), got {W_rays.shape}"
             )
+    stellar = (
+        _normalise_stellar_metadata(
+            stellar_metadata,
+            n_candidates=n_candidates,
+            npix=npix,
+            nside=int(nside),
+        )
+        if W_rays is not None
+        else None
+    )
 
     if n_candidates > 0:
         # Dense ray maps alive in a chunk: integrated columns, H2 factors, C
@@ -1217,6 +1386,15 @@ def compute_pdr_shielding_healpix(
 
         N_H2_rays = cols["h2"]
         N_C_rays = cols["c"]
+        star_cols = None
+        if stellar is not None and np.any(np.asarray(stellar["w_star"][start:end]) > 0.0):
+            star_cols = _starward_columns_for_chunk(
+                tracer,
+                cell_centers_chunk,
+                fields,
+                candidate_idx_chunk,
+                stop_radius_cm=float(stellar["star_inner_radius_cm"]),
+            )
 
         if b_H2_kms_grid is not None:
             b_H2_eff = _effective_b_from_columns(
@@ -1229,6 +1407,24 @@ def compute_pdr_shielding_healpix(
         # H2 shielding
         W_chunk = None if W_rays is None else W_rays[start:end]
         theta_h2_mean = _average_rays(f_sh_rays, W_chunk)
+        if star_cols is not None:
+            if b_H2_kms_grid is not None:
+                b_H2_star = _effective_b_from_columns(
+                    star_cols["h2_b2"],
+                    star_cols["h2"],
+                    fallback_kms=float(b_H2_kms),
+                )
+            else:
+                b_H2_star = float(b_H2_kms)
+            theta_h2_star = h2_self_shielding_db96(star_cols["h2"], b5=b_H2_star)
+            theta_h2_mean = _apply_stellar_weight_correction(
+                theta_h2_mean,
+                f_sh_rays,
+                theta_h2_star,
+                stellar=stellar,
+                start=start,
+                end=end,
+            )
         _scatter_candidates_3d(theta_h2, candidate_idx_chunk, theta_h2_mean)
 
         # C self-shielding 
@@ -1243,6 +1439,20 @@ def compute_pdr_shielding_healpix(
         theta_c_rays = rc * ry
 
         theta_c_mean = _average_rays(theta_c_rays, W_chunk)
+        if star_cols is not None:
+            tau_H2_star = 1.2e-14 * 2.0 * star_cols["h2"]
+            y_star = AH2 * tau_H2_star
+            ry_star = np.exp(-y_star) / (1.0 + y_star)
+            rc_star = np.exp(-1.6e-17 * star_cols["c"])
+            theta_c_star = rc_star * ry_star
+            theta_c_mean = _apply_stellar_weight_correction(
+                theta_c_mean,
+                theta_c_rays,
+                theta_c_star,
+                stellar=stellar,
+                start=start,
+                end=end,
+            )
         _scatter_candidates_3d(theta_c, candidate_idx_chunk, theta_c_mean)
 
         theta_pdr_mean = theta_h2_mean
@@ -1266,10 +1476,47 @@ def compute_pdr_shielding_healpix(
                 )
 
             theta_co_mean = _average_rays(theta_co_rays, W_chunk)
+            if star_cols is not None:
+                N_CO_star = star_cols["co"]
+                N_H2_star = star_cols["h2"]
+                if b_CO_kms_grid is not None:
+                    b_CO_star = _effective_b_from_columns(
+                        star_cols["co_b2"],
+                        N_CO_star,
+                        fallback_kms=float(b_CO_kms),
+                    )
+                    theta_co_star = visser.theta_interpolated_b(
+                        "co",
+                        N_CO_star,
+                        N_H2_star,
+                        b_CO_star,
+                    )
+                else:
+                    theta_co_star = visser.theta(
+                        "co", N_CO_star, N_H2_star, b_kms=float(b_CO_kms)
+                    )
+                theta_co_mean = _apply_stellar_weight_correction(
+                    theta_co_mean,
+                    theta_co_rays,
+                    theta_co_star,
+                    stellar=stellar,
+                    start=start,
+                    end=end,
+                )
             _scatter_candidates_3d(theta_co, candidate_idx_chunk, theta_co_mean)
 
             theta_pdr_rays = f_sh_rays * theta_co_rays
             theta_pdr_mean = _average_rays(theta_pdr_rays, W_chunk)
+            if star_cols is not None:
+                theta_pdr_star = theta_h2_star * theta_co_star
+                theta_pdr_mean = _apply_stellar_weight_correction(
+                    theta_pdr_mean,
+                    theta_pdr_rays,
+                    theta_pdr_star,
+                    stellar=stellar,
+                    start=start,
+                    end=end,
+                )
             _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_pdr_mean)
 
     chi_eff_pdr = chi_arr * theta_pdr

@@ -25,7 +25,8 @@ The default geometry and physical parameters live in `config.toml`:
 - Dense spherical cloud centered above the coordinate origin.
 - Point-like `2 R_sun`, `10000 K` blackbody source below the circle, at the
   coordinate origin.
-- External isotropic UV background with `chi = 1`.
+- No external isotropic UV background by default (`chi = 0`); the UV field is
+  dominated by the origin-centered stellar source.
 - Conical cavity with its narrow apex at the cloud center, widening downward
   toward the source; the cavity uses the same density as the ambient gas.
 - Low-density ambient gas outside the circle.

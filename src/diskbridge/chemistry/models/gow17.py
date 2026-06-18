@@ -1380,6 +1380,8 @@ def _shielding_b_grid_or_none(
 def _resolve_visser_table_linewidth(
     b_kms: float,
     shielding_linewidth_meta: dict,
+    *,
+    log_info: bool = True,
 ) -> tuple[float, VisserShielding, dict]:
     """Load the nearest Visser table and align the scalar shielding b value."""
     b_requested = float(b_kms)
@@ -1396,18 +1398,27 @@ def _resolve_visser_table_linewidth(
         meta["b_CO_table_interpolation"] = True
 
     if abs(b_table - b_requested) > 1.0e-6:
-        logger.info(
-            "gow17: requested representative CO shielding b_kms=%.6g km/s; "
-            "loaded nearest Visser family at %.6g km/s for table interpolation. "
-            "Ray-wise CO b values are interpolated across the available Visser tables.",
-            b_requested,
-            b_table,
-        )
+        if log_info:
+            logger.info(
+                "gow17: requested representative CO shielding b_kms=%.6g km/s; "
+                "loaded nearest Visser family at %.6g km/s for table interpolation. "
+                "Ray-wise CO b values are interpolated across the available Visser tables.",
+                b_requested,
+                b_table,
+            )
         meta["b_CO_scalar_approximation"] = True
 
     meta["b_CO_scalar_kms"] = b_table
     meta["b_CO_bins_used"] = [b_table]
     return b_table, visser, meta
+
+
+def _should_log_visser_linewidth_info(rad: "RadModel", shape: tuple[int, ...]) -> bool:
+    """Keep the linewidth table INFO logs for multidimensional shielding runs."""
+    try:
+        return not is_effectively_1d(rad.model.mesh, shape)
+    except AttributeError:
+        return True
 
 
 def _dominant_process_id(rates: list[np.ndarray]) -> np.ndarray:
@@ -1844,6 +1855,11 @@ def _compute_shielding_and_gph(
             )
 
             W_rays = getattr(rad, "W_rays", None) if use_directional_weights else None
+            stellar_metadata = (
+                getattr(rad, "W_rays_stellar_metadata", None)
+                if use_directional_weights
+                else None
+            )
             (
                 theta_h2_arr,
                 theta_co_arr,
@@ -1864,6 +1880,7 @@ def _compute_shielding_and_gph(
                 b_H2_kms_grid=b_H2_kms_grid,
                 b_CO_kms_grid=b_CO_kms_grid,
                 W_rays=W_rays,
+                stellar_metadata=stellar_metadata,
                 chunk_size=getattr(diskbridge.params, "pdr_shielding_chunk_size", None),
                 memory_budget_gib=getattr(
                     diskbridge.params,
@@ -2263,6 +2280,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     b_CO_kms, visser, shielding_linewidth_meta = _resolve_visser_table_linewidth(
         b_CO_kms,
         shielding_linewidth_meta,
+        log_info=_should_log_visser_linewidth_info(rad, shape),
     )
 
     y0_single = np.zeros(N_Y, dtype=np.float64)
@@ -3257,6 +3275,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         "directional_weights_available": bool(getattr(rad, "W_rays", None) is not None),
         "directional_weights_used": bool(
             use_directional_weights and getattr(rad, "W_rays", None) is not None
+        ),
+        "exact_stellar_shielding_available": bool(
+            getattr(rad, "W_rays_stellar_metadata", None) is not None
+        ),
+        "exact_stellar_shielding_used": bool(
+            use_directional_weights
+            and getattr(rad, "W_rays", None) is not None
+            and getattr(rad, "W_rays_stellar_metadata", None) is not None
         ),
         "d_h2_hist": np.asarray(d_h2_hist, dtype=np.float64),
         "d_co_hist": np.asarray(d_co_hist, dtype=np.float64),

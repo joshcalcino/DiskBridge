@@ -57,6 +57,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
+    _should_log_visser_linewidth_info,
     _slab_av_flat_or_none,
     _shielding_b_grid_or_none,
     _warn_if_co_phase_settings_ignored,
@@ -137,6 +138,10 @@ class Gow17TimeStepper:
         self.shape = _as_cgs_f64(nH, "cm^-3").shape
         self.ncells = int(np.prod(self.shape))
         self.radiation_mode = _infer_gow17_radiation_mode(rad)
+        self._log_visser_linewidth_info = _should_log_visser_linewidth_info(
+            rad,
+            self.shape,
+        )
 
         self.nH_cm3 = _as_cgs_f64(nH, "cm^-3")
         self.nH_flat = self.nH_cm3.reshape(self.ncells)
@@ -220,6 +225,7 @@ class Gow17TimeStepper:
         self.b_CO_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
             self.b_CO_kms,
             self.shielding_linewidth_meta,
+            log_info=self._log_visser_linewidth_info,
         )
         self.co_phase_params = _resolve_co_phase_runtime_params(cfg)
 
@@ -371,6 +377,7 @@ class Gow17TimeStepper:
         self.b_CO_kms, self.visser, self.shielding_linewidth_meta = _resolve_visser_table_linewidth(
             self.b_CO_kms,
             self.shielding_linewidth_meta,
+            log_info=self._log_visser_linewidth_info,
         )
         slab_Av_flat = _slab_av_flat_or_none(
             rad,

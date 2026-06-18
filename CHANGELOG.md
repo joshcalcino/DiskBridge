@@ -23,6 +23,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Weighted HEALPix shielding now uses exact cell-to-star H2/C/CO columns for
+  the direct stellar contribution, avoiding point-source artifacts from pairing
+  stellar UV weights with HEALPix pixel-center boundary columns.
 - `examples/3d_disk/run_workflow.py` called the non-existent `chemistry.compute_abundance`; updated it to the real `run_chemistry` entry point.
 
 ### Removed
@@ -41,6 +44,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - Corrected the cube validation dust setup to scalar `0.01-0.25 micron`,
   `p=3.5` grains and allowed UV product interpolation through exact-zero
   mean-intensity samples in fully shielded cells.
+- Added a PPDwind 400 au spherical-model RADMC-3D/GOW17/CO validation with
+  normalized `R/R0`, `z/R0` Joos-mask and dust overview plots, depleted
+  wind-side small grains, stellar plus accretion UV with the accretion rate
+  derived from the selected PPDwind solution, RADMC-3D dust temperature and UV
+  products, PRIZMO-style gas-temperature diagnostics, GOW17 CO abundance fields
+  using RADMC dust surface areas, and 30 degree LTE CO 3-2 channel maps.
 
 ### Internal
 

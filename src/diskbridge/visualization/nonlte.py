@@ -231,15 +231,16 @@ def plot_moment_maps(
         where=denom > 0.0,
     )
 
+    bunit = meta.get("bunit", "")
     maps = [
-        (moment0, f"moment 0 [{meta.get('bunit', '')} km/s]", cmap, True),
-        (peak, f"peak [{meta.get('bunit', '')}]", cmap, True),
+        (moment0, f"moment 0\n[{bunit} km/s]", cmap, True),
+        (peak, f"peak\n[{bunit}]", cmap, True),
         (centroid, "centroid [km/s]", "RdBu_r", False),
     ]
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.8), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2), constrained_layout=True)
     for ax, (arr, label, cm, use_log) in zip(axes, maps):
         vmin, vmax = _finite_limits(arr, 1.0, 99.0)
         if use_log:

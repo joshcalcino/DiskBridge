@@ -90,11 +90,18 @@ class InfallStream1DConfig:
     init_relax_dt_frac: float = 1.0
     init_relax_rtol: float = 1e-8
     track_infall_equilibrium: bool = False
+    equilibrium_movie_frames_only: bool = True
+    equilibrium_fast_presentation: bool = True
     equilibrium_astrochem_n_updates: int = 500
     equilibrium_shielding_max_iter: int = 1000
     equilibrium_shielding_reltol: float = 1e-6
     equilibrium_shielding_abstol: float = 1e-15
     equilibrium_astrochem_t_end_yr: float = 1.0e6
+    equilibrium_fast_movie_frames: int = 240
+    equilibrium_fast_astrochem_n_updates: int = 16
+    equilibrium_fast_shielding_max_iter: int = 32
+    equilibrium_fast_shielding_reltol: float = 1.0e-3
+    equilibrium_fast_solver_reltol: float = 1.0e-4
 
     evolve_energy: bool = False
     estimate_tdust: bool = False
@@ -567,6 +574,57 @@ def _movie_frame_indices(n_frames: int, fps: int, max_duration_s: float | None) 
     return np.unique(idx)
 
 
+def _equilibrium_sample_indices(n_history_samples: int, cfg: InfallStream1DConfig) -> np.ndarray:
+    n = int(n_history_samples)
+    if n <= 0:
+        raise ValueError("n_history_samples must be > 0")
+    if not bool(cfg.equilibrium_movie_frames_only):
+        return np.arange(n, dtype=int)
+
+    idx = _movie_frame_indices(
+        n,
+        int(cfg.movie_fps),
+        float(cfg.movie_max_duration_s),
+    )
+    if bool(cfg.equilibrium_fast_presentation):
+        n_fast = int(cfg.equilibrium_fast_movie_frames)
+        if n_fast > 0 and idx.size > n_fast:
+            idx = np.rint(np.linspace(0.0, float(n - 1), n_fast, dtype=float)).astype(int)
+    idx = np.concatenate([idx, np.array([0, n - 1], dtype=int)])
+    return np.unique(np.clip(idx, 0, n - 1))
+
+
+def _effective_equilibrium_controls(cfg: InfallStream1DConfig) -> dict:
+    controls = {
+        "astrochem_n_updates": int(cfg.equilibrium_astrochem_n_updates),
+        "shielding_max_iter": int(cfg.equilibrium_shielding_max_iter),
+        "shielding_reltol": float(cfg.equilibrium_shielding_reltol),
+        "solver_reltol": float(cfg.reltol),
+    }
+    if bool(cfg.equilibrium_fast_presentation):
+        controls["astrochem_n_updates"] = min(
+            controls["astrochem_n_updates"],
+            int(cfg.equilibrium_fast_astrochem_n_updates),
+        )
+        controls["shielding_max_iter"] = min(
+            controls["shielding_max_iter"],
+            int(cfg.equilibrium_fast_shielding_max_iter),
+        )
+        controls["shielding_max_iter"] = max(
+            controls["shielding_max_iter"],
+            controls["astrochem_n_updates"],
+        )
+        controls["shielding_reltol"] = max(
+            controls["shielding_reltol"],
+            float(cfg.equilibrium_fast_shielding_reltol),
+        )
+        controls["solver_reltol"] = max(
+            controls["solver_reltol"],
+            float(cfg.equilibrium_fast_solver_reltol),
+        )
+    return controls
+
+
 def _fmt_compact(value: float, precision: int = 3) -> str:
     s = f"{float(value):.{int(precision)}g}"
     return s.replace("e+0", "e").replace("e-0", "e-").replace("e+", "e")
@@ -714,6 +772,16 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         raise ValueError("equilibrium_shielding_abstol must be > 0")
     if not (float(cfg.equilibrium_astrochem_t_end_yr) > 0.0):
         raise ValueError("equilibrium_astrochem_t_end_yr must be > 0")
+    if int(cfg.equilibrium_fast_astrochem_n_updates) < 1:
+        raise ValueError("equilibrium_fast_astrochem_n_updates must be >= 1")
+    if int(cfg.equilibrium_fast_shielding_max_iter) < 1:
+        raise ValueError("equilibrium_fast_shielding_max_iter must be >= 1")
+    if int(cfg.equilibrium_fast_movie_frames) < 1:
+        raise ValueError("equilibrium_fast_movie_frames must be >= 1")
+    if not (float(cfg.equilibrium_fast_shielding_reltol) > 0.0):
+        raise ValueError("equilibrium_fast_shielding_reltol must be > 0")
+    if not (float(cfg.equilibrium_fast_solver_reltol) > 0.0):
+        raise ValueError("equilibrium_fast_solver_reltol must be > 0")
     if not (0.0 < r_stop_cm < r_face_start_cm):
         raise ValueError("r_face_stop_au must satisfy 0 < r_face_stop_au < r_face_start_au")
 
@@ -727,6 +795,12 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     t_end = _freefall_time_to_radius(r_face_start_cm, r_stop_cm, M_g)
     t_output = _build_output_times(t_end, n_output_steps, cfg.output_time_power)
     dt_output_ref = float(t_end) / float(n_output_steps)
+    equilibrium_indices = None
+    equilibrium_mask = None
+    if cfg.track_infall_equilibrium:
+        equilibrium_indices = _equilibrium_sample_indices(n_output_steps + 1, cfg)
+        equilibrium_mask = np.zeros(n_output_steps + 1, dtype=bool)
+        equilibrium_mask[equilibrium_indices] = True
 
     gow_cfg = {
         "shielding_outer_1d": str(cfg.shielding_outer_1d),
@@ -752,12 +826,14 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "gradv": 1.0e-14,
         "Leff_CO_max": 3.0e20,
     }
+    eq_controls = _effective_equilibrium_controls(cfg)
     gow_cfg_eq = {
         **gow_cfg,
-        "astrochem_n_updates": int(cfg.equilibrium_astrochem_n_updates),
+        "reltol": float(eq_controls["solver_reltol"]),
+        "astrochem_n_updates": int(eq_controls["astrochem_n_updates"]),
         "astrochem_t_end_yr": float(cfg.equilibrium_astrochem_t_end_yr),
-        "shielding_max_iter": int(cfg.equilibrium_shielding_max_iter),
-        "shielding_reltol": float(cfg.equilibrium_shielding_reltol),
+        "shielding_max_iter": int(eq_controls["shielding_max_iter"]),
+        "shielding_reltol": float(eq_controls["shielding_reltol"]),
         "shielding_abstol": float(cfg.equilibrium_shielding_abstol),
     }
 
@@ -904,15 +980,14 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         stepper_eq = Gow17TimeStepper(rad_eq, gow_cfg_eq)
         stepper_eq.y_state[:, :] = np.asarray(stepper.y_state, dtype=float)
         rad_eq.gow17_y = np.asarray(stepper_eq.y_state, dtype=float).reshape(shape + (N_Y,))
-        stepper_eq.solve_equilibrium()
 
-        xco_eq_hist = np.zeros_like(xco_hist)
-        xc_eq_hist = np.zeros_like(xco_hist)
-        xcp_eq_hist = np.zeros_like(xco_hist)
-        xchx_eq_hist = np.zeros_like(xco_hist)
-        xhcop_eq_hist = np.zeros_like(xco_hist)
-        Tgas_front_eq = np.zeros_like(t_hist)
-        Tdust_front_eq = np.zeros_like(t_hist)
+        xco_eq_hist = np.full_like(xco_hist, np.nan)
+        xc_eq_hist = np.full_like(xco_hist, np.nan)
+        xcp_eq_hist = np.full_like(xco_hist, np.nan)
+        xchx_eq_hist = np.full_like(xco_hist, np.nan)
+        xhcop_eq_hist = np.full_like(xco_hist, np.nan)
+        Tgas_front_eq = np.full_like(t_hist, np.nan)
+        Tdust_front_eq = np.full_like(t_hist, np.nan)
 
     def _record_branch(
         rad_local: RadModel,
@@ -939,7 +1014,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         else:
             Tgas_store[k] = float(rad_local.gas_temperature.to("K").magnitude.reshape(-1)[i_front])
 
-    def _record(k: int):
+    def _record(k: int, *, record_equilibrium: bool = False):
         _record_branch(
             rad,
             xco_store=xco_hist,
@@ -952,7 +1027,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             k=k,
         )
 
-        if cfg.track_infall_equilibrium:
+        if cfg.track_infall_equilibrium and record_equilibrium:
             _record_branch(
                 rad_eq,
                 xco_store=xco_eq_hist,
@@ -968,7 +1043,10 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         r_face_hist[k] = r_face_cm
         chi_face_hist[k] = float(chi_cells[i_front])
 
-    _record(0)
+    record_equilibrium = bool(cfg.track_infall_equilibrium and equilibrium_mask[0])
+    if record_equilibrium:
+        stepper_eq.solve_equilibrium()
+    _record(0, record_equilibrium=record_equilibrium)
 
     t_evolve = 0.0
     x_front_cm = float(x_cent_cm[i_front])
@@ -1085,16 +1163,21 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 t_s=t_evolve,
             )
             _assign_environment(rad, shape, chi_cells=chi_cells, td_cells=td_cells)
-        if cfg.track_infall_equilibrium:
+        is_final_output = bool(t_next >= t_end or r_face_cm <= r_stop_cm)
+        record_equilibrium = bool(
+            cfg.track_infall_equilibrium
+            and (equilibrium_mask[k] or is_final_output)
+        )
+        if record_equilibrium:
             if radiation_mode == RADIATION_MODE_STELLAR_PRODUCTS:
                 _assign_product_environment(rad_eq, shape, uv_products=uv_products, td_cells=td_cells)
             else:
                 _assign_environment(rad_eq, shape, chi_cells=chi_cells, td_cells=td_cells)
             stepper_eq.solve_equilibrium()
         t_hist[k] = t_next
-        _record(k)
+        _record(k, record_equilibrium=record_equilibrium)
 
-        if t_hist[k] >= t_end or r_face_cm <= r_stop_cm:
+        if is_final_output:
             t_hist = t_hist[: k + 1]
             r_face_hist = r_face_hist[: k + 1]
             chi_face_hist = chi_face_hist[: k + 1]
@@ -1134,8 +1217,27 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "Tdust_front": Tdust_front,
     }
     if cfg.track_infall_equilibrium:
+        equilibrium_solved_indices = np.flatnonzero(np.isfinite(Tdust_front_eq))
         history_data.update(
             {
+                "equilibrium_sample_indices": equilibrium_solved_indices,
+                "equilibrium_movie_frames_only": np.asarray(bool(cfg.equilibrium_movie_frames_only)),
+                "equilibrium_fast_presentation": np.asarray(bool(cfg.equilibrium_fast_presentation)),
+                "equilibrium_astrochem_n_updates_effective": np.asarray(
+                    int(eq_controls["astrochem_n_updates"])
+                ),
+                "equilibrium_fast_movie_frames": np.asarray(
+                    int(cfg.equilibrium_fast_movie_frames)
+                ),
+                "equilibrium_shielding_max_iter_effective": np.asarray(
+                    int(eq_controls["shielding_max_iter"])
+                ),
+                "equilibrium_shielding_reltol_effective": np.asarray(
+                    float(eq_controls["shielding_reltol"])
+                ),
+                "equilibrium_solver_reltol_effective": np.asarray(
+                    float(eq_controls["solver_reltol"])
+                ),
                 "xco_eq_hist": xco_eq_hist,
                 "xc_eq_hist": xc_eq_hist,
                 "xcp_eq_hist": xcp_eq_hist,
@@ -1150,24 +1252,55 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     x_au = x_cent_cm / float(AU)
 
     if cfg.make_movies:
+        movie_row_idx = None
+        if cfg.track_infall_equilibrium and bool(cfg.equilibrium_movie_frames_only):
+            movie_row_idx = np.flatnonzero(np.isfinite(Tdust_front_eq))
+        if movie_row_idx is None:
+            movie_t_hist = t_hist
+            movie_r_face_hist = r_face_hist
+            movie_chi_face_hist = chi_face_hist
+            movie_xco_hist = xco_hist
+            movie_xc_hist = xc_hist
+            movie_xcp_hist = xcp_hist
+            movie_xchx_hist = xchx_hist
+            movie_xhcop_hist = xhcop_hist
+            movie_xco_eq_hist = xco_eq_hist
+            movie_xc_eq_hist = xc_eq_hist
+            movie_xcp_eq_hist = xcp_eq_hist
+            movie_xchx_eq_hist = xchx_eq_hist
+            movie_xhcop_eq_hist = xhcop_eq_hist
+        else:
+            movie_t_hist = t_hist[movie_row_idx]
+            movie_r_face_hist = r_face_hist[movie_row_idx]
+            movie_chi_face_hist = chi_face_hist[movie_row_idx]
+            movie_xco_hist = xco_hist[movie_row_idx]
+            movie_xc_hist = xc_hist[movie_row_idx]
+            movie_xcp_hist = xcp_hist[movie_row_idx]
+            movie_xchx_hist = xchx_hist[movie_row_idx]
+            movie_xhcop_hist = xhcop_hist[movie_row_idx]
+            movie_xco_eq_hist = xco_eq_hist[movie_row_idx]
+            movie_xc_eq_hist = xc_eq_hist[movie_row_idx]
+            movie_xcp_eq_hist = xcp_eq_hist[movie_row_idx]
+            movie_xchx_eq_hist = xchx_eq_hist[movie_row_idx]
+            movie_xhcop_eq_hist = xhcop_eq_hist[movie_row_idx]
         _render_abundance_movie(
             out_dir / f"abundances_vs_time_{density_tag}.mp4",
             nH_cm3=float(nH_cm3),
             x_au=x_au,
-            t_hist=t_hist,
-            r_face_hist=r_face_hist,
-            chi_face_hist=chi_face_hist,
+            t_hist=movie_t_hist,
+            r_face_hist=movie_r_face_hist,
+            chi_face_hist=movie_chi_face_hist,
             teff_K=float(cfg.teff_K),
-            xco_hist=xco_hist,
-            xc_hist=xc_hist,
-            xcp_hist=xcp_hist,
-            xchx_hist=xchx_hist,
-            xhcop_hist=xhcop_hist,
-            xco_eq_hist=xco_eq_hist,
-            xc_eq_hist=xc_eq_hist,
-            xcp_eq_hist=xcp_eq_hist,
-            xchx_eq_hist=xchx_eq_hist,
-            xhcop_eq_hist=xhcop_eq_hist,
+            xco_hist=movie_xco_hist,
+            xc_hist=movie_xc_hist,
+            xcp_hist=movie_xcp_hist,
+            xchx_hist=movie_xchx_hist,
+            xhcop_hist=movie_xhcop_hist,
+            xco_eq_hist=movie_xco_eq_hist,
+            xc_eq_hist=movie_xc_eq_hist,
+            xcp_eq_hist=movie_xcp_eq_hist,
+            xchx_eq_hist=movie_xchx_eq_hist,
+            xhcop_eq_hist=movie_xhcop_eq_hist,
             fps=int(cfg.movie_fps),
             max_duration_s=float(cfg.movie_max_duration_s),
         )
@@ -1202,8 +1335,17 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "xco_back_rel_change": float(xco_back_change),
     }
     if cfg.track_infall_equilibrium:
+        n_equilibrium_solves = int(np.count_nonzero(np.isfinite(Tdust_front_eq)))
         out.update(
             {
+                "n_equilibrium_solves": n_equilibrium_solves,
+                "equilibrium_movie_frames_only": bool(cfg.equilibrium_movie_frames_only),
+                "equilibrium_fast_presentation": bool(cfg.equilibrium_fast_presentation),
+                "equilibrium_fast_movie_frames": int(cfg.equilibrium_fast_movie_frames),
+                "equilibrium_astrochem_n_updates_effective": int(eq_controls["astrochem_n_updates"]),
+                "equilibrium_shielding_max_iter_effective": int(eq_controls["shielding_max_iter"]),
+                "equilibrium_shielding_reltol_effective": float(eq_controls["shielding_reltol"]),
+                "equilibrium_solver_reltol_effective": float(eq_controls["solver_reltol"]),
                 "xco_front_eq_end": float(xco_eq_hist[-1, i_front]),
                 "xco_back_eq_end": float(xco_eq_hist[-1, i_back]),
                 "xco_front_vs_eq_end_rel_diff": float(

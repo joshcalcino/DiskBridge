@@ -156,6 +156,8 @@ def _estimate_w_rays_memory_bytes(
             + nbin * cell_scalar_bytes  # star_cols
             + 6 * cell_scalar_bytes  # tau/r/F/chi/star-dir helper arrays
             + n_cells * index_bytes  # k_star
+            + cell_scalar_bytes  # w_star
+            + n_cells * bool_bytes  # valid_star
         )
 
     retained_debug_ray_map_count = 5 if keep_debug_arrays else 0
@@ -361,13 +363,20 @@ def ensure_W_rays(
     existing = getattr(rad, "W_rays", None)
     existing_key = getattr(rad, "W_rays_key", None)
     existing_closure = getattr(rad, "W_rays_closure_diagnostics", None)
+    existing_stellar = getattr(rad, "W_rays_stellar_metadata", None)
+    needs_stellar = float(star_uv_luminosity_erg_s) > 0.0
     if existing is not None and existing_key == key:
-        if (not keep_closure_diagnostics) or existing_closure is not None:
+        has_requested_closure = (not keep_closure_diagnostics) or existing_closure is not None
+        has_requested_stellar = (not needs_stellar) or existing_stellar is not None
+        if has_requested_closure and has_requested_stellar:
             logger.info("W_rays cache hit (nside=%d); reusing existing array", nside)
             return existing
-        logger.info(
-            "W_rays cache hit lacks requested closure diagnostics; recomputing diagnostics"
-        )
+        if not has_requested_closure:
+            logger.info(
+                "W_rays cache hit lacks requested closure diagnostics; recomputing diagnostics"
+            )
+        if not has_requested_stellar:
+            logger.info("W_rays cache hit lacks stellar metadata; recomputing weights")
     if chunk_size is not None:
         chunk_size = int(chunk_size)
         if chunk_size <= 0:
@@ -460,13 +469,15 @@ def ensure_W_rays(
     )
 
     closure_diagnostics = _debug.get("closure_diagnostics")
+    stellar_metadata = _debug.get("stellar")
 
     # Discard debug dict to save memory; keep only W_rays and optional
-    # lightweight scalar closure diagnostics.
+    # lightweight scalar closure diagnostics and stellar component metadata.
     del _debug, _candidate_idx, _dirs, _cell_centers
 
     rad.W_rays = W_rays
     rad.W_rays_key = key
+    rad.W_rays_stellar_metadata = stellar_metadata
     if keep_closure_diagnostics and closure_diagnostics is not None:
         rad.W_rays_closure_diagnostics = closure_diagnostics
     elif hasattr(rad, "W_rays_closure_diagnostics"):

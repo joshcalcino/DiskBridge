@@ -59,9 +59,11 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_pah_scaling,
     _resolve_dust_cooling_controls,
     _resolve_temperature_config,
+    _resolve_visser_table_linewidth,
     _summarize_equilibrium_solver_diagnostics,
     run_gow17,
 )
+import diskbridge.chemistry.models.gow17_timestep as gow17_timestep_module
 from diskbridge.chemistry.models.gow17_timestep import Gow17TimeStepper
 from diskbridge.chemistry.registry import available_models, get_model_callable
 from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d
@@ -84,6 +86,24 @@ def test_default_gow17_shielding_ray_average_is_weighted():
     cfg = resolve_model_config(("chemistry", "gow17"), overrides={})
 
     assert cfg["shielding_ray_average"] == "weighted"
+
+
+def test_visser_linewidth_info_logging_can_be_suppressed(monkeypatch):
+    calls = []
+
+    def record_info(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        "diskbridge.chemistry.models.gow17.logger.info",
+        record_info,
+    )
+
+    _resolve_visser_table_linewidth(0.319038, {}, log_info=False)
+    assert calls == []
+
+    _resolve_visser_table_linewidth(0.319038, {}, log_info=True)
+    assert calls
 
 
 def test_invalid_gow17_shielding_ray_average_raises(tmp_path):
@@ -885,6 +905,18 @@ def test_timestepper_uses_1d_shielding_for_effectively_1d_mesh(monkeypatch):
         "diskbridge.chemistry.shielding.healpix_columns.compute_pdr_shielding_healpix",
         fail_compute_pdr_shielding_healpix,
     )
+    linewidth_log_flags = []
+    resolve_visser_table_linewidth = gow17_timestep_module._resolve_visser_table_linewidth
+
+    def record_resolve_visser_table_linewidth(*args, **kwargs):
+        linewidth_log_flags.append(kwargs.get("log_info"))
+        return resolve_visser_table_linewidth(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gow17_timestep_module,
+        "_resolve_visser_table_linewidth",
+        record_resolve_visser_table_linewidth,
+    )
 
     rad = RadModel(model)
     rad.nH = Quantity(nH, "cm^-3")
@@ -906,6 +938,7 @@ def test_timestepper_uses_1d_shielding_for_effectively_1d_mesh(monkeypatch):
             },
         },
     )
+    assert linewidth_log_flags == [False]
 
     stepper.y_state[:, :] = 0.0
     stepper.y_state[:, I_H2] = 0.5
@@ -936,6 +969,7 @@ def test_timestepper_uses_1d_shielding_for_effectively_1d_mesh(monkeypatch):
     _chi, _Tdust, _T, theta_h2, theta_co, theta_c, Gph, _GPE, _GISRF = (
         stepper._prepare_environment(y_state=y)
     )
+    assert linewidth_log_flags == [False, False]
 
     np.testing.assert_allclose(theta_h2, theta_h2_ref.reshape(-1))
     np.testing.assert_allclose(theta_co, theta_co_ref.reshape(-1))

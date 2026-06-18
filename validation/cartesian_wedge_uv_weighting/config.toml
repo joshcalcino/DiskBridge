@@ -35,7 +35,7 @@ dust_amax_um = 0.25
 dust_pindex = 3.5
 
 [radiation]
-external_chi = 1.0
+external_chi = 0.0
 
 [star]
 rstar_rsun = 2.0
