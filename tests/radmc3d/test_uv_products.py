@@ -9,6 +9,8 @@ synthetic RADMC workflows to protect deterministic UV-band product behavior.
 # db-scope: test
 # db-purpose: Tests for RADMC-3D UV product normalization and partition contracts.
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -341,3 +343,72 @@ def test_measured_segment_requires_all_uv_products():
     }
     products = SegmentedRadRunner._segment_uv_product_fields(runner, rad, measured=True)
     assert set(products) == set(UV_PRODUCT_MERGED_FIELD_NAMES)
+
+
+def test_segmented_uv_merge_preserves_leading_band_axis():
+    rad = RadModel.__new__(RadModel)
+    rad.chi = Quantity(np.full((3, 2, 2), 2.0), "dimensionless")
+    rad.model = type("DummyModel", (), {"gas": {}})()
+    rad.uv_products = {}
+    for name in UV_PRODUCT_MERGED_FIELD_NAMES:
+        if name == "F_CO_pdes_photon_bands":
+            rad.uv_products[name] = Quantity(np.full((3, 3, 2, 2), 2.0), "1/(cm^2 s)")
+        elif name == "F_CO_pdes_photon":
+            rad.uv_products[name] = Quantity(np.full((3, 2, 2), 2.0), "1/(cm^2 s)")
+        else:
+            rad.uv_products[name] = Quantity(np.full((3, 2, 2), 2.0), "dimensionless")
+
+    merged_uv_products = {}
+    for name in UV_PRODUCT_MERGED_FIELD_NAMES:
+        if name == "F_CO_pdes_photon_bands":
+            merged_uv_products[name] = Quantity(np.zeros((3, 5, 2, 2)), "1/(cm^2 s)")
+        elif name == "F_CO_pdes_photon":
+            merged_uv_products[name] = Quantity(np.zeros((5, 2, 2)), "1/(cm^2 s)")
+        else:
+            merged_uv_products[name] = Quantity(np.zeros((5, 2, 2)), "dimensionless")
+
+    runner = SegmentedRadRunner.__new__(SegmentedRadRunner)
+    indexer = SimpleNamespace(axis_slices={"r": slice(1, 4)})
+    products, measured_mask, segment_id = runner._merge_segment_uv_products(
+        merged_uv_products=merged_uv_products,
+        uv_product_measured_mask=np.zeros((5, 2, 2), dtype=bool),
+        segment_id=np.zeros((5, 2, 2), dtype=np.int32),
+        rad=rad,
+        indexer=indexer,
+        axis_order=("r", "theta", "phi"),
+        segment_level=4,
+        measured=True,
+    )
+
+    bands = products["F_CO_pdes_photon_bands"].magnitude
+    assert bands.shape == (3, 5, 2, 2)
+    np.testing.assert_allclose(bands[:, 1:4, :, :], 2.0)
+    np.testing.assert_allclose(bands[:, [0, 4], :, :], 0.0)
+    np.testing.assert_array_equal(measured_mask[1:4, :, :], True)
+    np.testing.assert_array_equal(measured_mask[[0, 4], :, :], False)
+    np.testing.assert_array_equal(segment_id[1:4, :, :], 4)
+    np.testing.assert_array_equal(segment_id[[0, 4], :, :], 0)
+
+
+def test_segmented_uv_registration_skips_non_mesh_shaped_products():
+    class FakeModel:
+        mesh = SimpleNamespace(shape=(5, 2, 2))
+
+        def __init__(self):
+            self.gas = {}
+
+        def gas_register(self, name, field):
+            self.gas[name] = field
+
+    model = FakeModel()
+    runner = SegmentedRadRunner.__new__(SegmentedRadRunner)
+    runner.base_model = model
+
+    products = {
+        "chi_broad": Quantity(np.ones((5, 2, 2)), "dimensionless"),
+        "F_CO_pdes_photon_bands": Quantity(np.ones((3, 5, 2, 2)), "1/(cm^2 s)"),
+    }
+    runner._register_mesh_shaped_uv_products(products, ("r", "theta", "phi"))
+
+    assert set(model.gas) == {"chi_broad"}
+    assert model.gas["chi_broad"].axis_order == ("r", "theta", "phi")

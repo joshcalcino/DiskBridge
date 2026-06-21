@@ -362,11 +362,7 @@ class SegmentedRadRunner:
             Field(quantity="chi", data=merged_chi, axis_order=axis_order),
         )
         if merged_uv_products is not None:
-            for name, product in merged_uv_products.items():
-                self.base_model.gas_register(
-                    name,
-                    Field(quantity=name, data=product, axis_order=axis_order),
-                )
+            self._register_mesh_shaped_uv_products(merged_uv_products, axis_order)
         if uv_product_measured_mask is not None:
             self.base_model.gas_register(
                 "uv_product_measured_mask",
@@ -513,15 +509,55 @@ class SegmentedRadRunner:
         indexer: ClipIndexer,
         axis_order: Tuple[str, ...],
     ) -> Quantity:
-        merged_mag = np.asarray(merged.magnitude)
+        merged_mag = np.array(merged.magnitude, copy=True)
         child_mag = np.asarray(child.magnitude)
 
-        slicer = []
+        spatial_ndim = len(axis_order)
+        if merged_mag.ndim < spatial_ndim or child_mag.ndim < spatial_ndim:
+            raise ValueError(
+                f"Cannot merge field with shape {child_mag.shape} into {merged_mag.shape} "
+                f"for axis order {axis_order}"
+            )
+
+        leading_ndim = merged_mag.ndim - spatial_ndim
+        if child_mag.ndim != merged_mag.ndim:
+            raise ValueError(
+                f"Cannot merge field with shape {child_mag.shape} into {merged_mag.shape}: "
+                "segment and merged field must have the same number of axes"
+            )
+        if child_mag.shape[:leading_ndim] != merged_mag.shape[:leading_ndim]:
+            raise ValueError(
+                f"Cannot merge field with leading shape {child_mag.shape[:leading_ndim]} "
+                f"into {merged_mag.shape[:leading_ndim]}"
+            )
+
+        slicer = [slice(None)] * leading_ndim
         for ax in axis_order:
             slicer.append(indexer.axis_slices.get(ax, slice(None)))
 
+        target_shape = merged_mag[tuple(slicer)].shape
+        if child_mag.shape != target_shape:
+            raise ValueError(
+                f"Cannot merge field with shape {child_mag.shape} into target slice "
+                f"with shape {target_shape}"
+            )
+
         merged_mag[tuple(slicer)] = child_mag
         return Quantity(merged_mag, merged.units)
+
+    def _register_mesh_shaped_uv_products(
+        self,
+        uv_products: Dict[str, Quantity],
+        axis_order: Tuple[str, ...],
+    ) -> None:
+        mesh_shape = tuple(self.base_model.mesh.shape)
+        for name, product in uv_products.items():
+            if np.asarray(product.magnitude).shape != mesh_shape:
+                continue
+            self.base_model.gas_register(
+                name,
+                Field(quantity=name, data=product, axis_order=axis_order),
+            )
 
     def _merge_segment_fields(
         self,
@@ -1348,11 +1384,7 @@ class SegmentedRadRunner:
             if uv_product_measured_mask is None or segment_id is None:
                 raise ValueError("Segmented RT produced incomplete UV product metadata")
 
-            for name, product in merged_uv_products.items():
-                self.base_model.gas_register(
-                    name,
-                    Field(quantity=name, data=product, axis_order=axis_order),
-                )
+            self._register_mesh_shaped_uv_products(merged_uv_products, axis_order)
             self.base_model.gas_register(
                 'uv_product_measured_mask',
                 Field(
