@@ -20,6 +20,7 @@ from diskbridge._units import units, Quantity
 from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
+from diskbridge.serialization import jsonable
 
 from diskbridge.model.profiles import (
     compute_volume_weighted_mean_radial_profile,
@@ -178,6 +179,170 @@ class SegmentedRadRunner:
         if value is None:
             return None
         return int(value)
+
+    def _resolve_segment_work_dir(self, segment_entry: dict[str, Any]) -> Path:
+        """Return an absolute segment working directory from metadata."""
+        work_dir = segment_entry.get("work_dir")
+        if not work_dir:
+            raise ValueError(f"Segment metadata is missing work_dir: {segment_entry}")
+        segment_dir = Path(str(work_dir))
+        if not segment_dir.is_absolute():
+            segment_dir = self.base_model_dir / segment_dir
+        return segment_dir
+
+    def _segment_uv_band_for_diagnostics(self) -> tuple[Quantity, Quantity]:
+        """Return the broad UV-product band used by final segment diagnostics."""
+        cfg = get_config()
+        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
+        active_specs = uv_product_specs_from_config(uv_cfg)
+        broad_spec = next(spec for spec in active_specs if spec.field_name == "chi_broad")
+        return (
+            Quantity(float(broad_spec.band.lam_min_nm), "nm"),
+            Quantity(float(broad_spec.band.lam_max_nm), "nm"),
+        )
+
+    def _load_segment_rad_for_diagnostics(
+        self,
+        segment_entry: dict[str, Any],
+        *,
+        disc_uv_min: Quantity,
+        disc_uv_max: Quantity,
+    ) -> tuple["RadModel", dict[str, Any]]:
+        """Load one saved segment into an isolated ``RadModel`` for plotting.
+
+        Parameters
+        ----------
+        segment_entry : dict
+            Segment metadata emitted by the segmented RT runner.
+        disc_uv_min, disc_uv_max : Quantity
+            UV band used for final/product segment diagnostics.
+
+        Returns
+        -------
+        tuple
+            Segment ``RadModel`` and JSON-ready metadata.
+        """
+        from diskbridge.radmc3d.model import RadModel
+
+        segment_dir = self._resolve_segment_work_dir(segment_entry)
+        parsed_level, parsed_rmax_au, parsed_is_final = self._parse_segment_dir(segment_dir)
+        level = int(segment_entry.get("level", parsed_level))
+        is_final = bool(segment_entry.get("is_final", parsed_is_final))
+        rmax_au = segment_entry.get("r_max_au", parsed_rmax_au)
+        if rmax_au is None:
+            rmax_au = parsed_rmax_au
+
+        if level == 0 and parsed_rmax_au is None:
+            seg_model = self.base_model.clip_mesh()
+        else:
+            if rmax_au is None:
+                raise ValueError(f"Segment {segment_dir} is missing an outer radius")
+            segment = SegmentDefinition(
+                name=f"segment_{level:02d}",
+                bounds={"r": (None, float(rmax_au) * units("au"))},
+                work_dir=segment_dir,
+            )
+            seg_model, _ = self._build_segment_model_and_indexer(segment)
+
+        rad = RadModel(seg_model, model_dir=segment_dir)
+        temp_path = segment_dir / "radmc3d_outputs" / "temperature" / "dust_temperature.bdat"
+        mean_path = segment_dir / "radmc3d_outputs" / "mcmono" / "mean_intensity.bout"
+        if not temp_path.exists():
+            raise FileNotFoundError(f"Missing saved segment dust temperature: {temp_path}")
+        if not mean_path.exists():
+            raise FileNotFoundError(f"Missing saved segment mean intensity: {mean_path}")
+
+        rad.read_dust_temperature(fname=temp_path)
+        rad._postprocess_chi(
+            mean_path,
+            disc_uv_min if is_final else rad.params.uv_min,
+            disc_uv_max if is_final else rad.params.uv_max,
+        )
+        rad.model.validate_canonical_axis_orders(include_dust=False)
+
+        mesh = rad.model.mesh
+        r_min_au: float | None = None
+        r_max_au_actual: float | None = None
+        if mesh is not None and "r" in mesh.axes:
+            r_edges_au = mesh.edges("r").to("au").magnitude
+            r_min_au = float(np.min(r_edges_au))
+            r_max_au_actual = float(np.max(r_edges_au))
+
+        metadata = {
+            "segment_name": segment_dir.name,
+            "work_dir": str(segment_dir),
+            "level": int(level),
+            "is_final": bool(is_final),
+            "r_min_au": r_min_au,
+            "r_max_au": r_max_au_actual,
+            "mesh_shape": list(mesh.shape) if mesh is not None else None,
+            "nphot_thermal": segment_entry.get(
+                "nphot_thermal",
+                self._read_segment_cache_int(segment_dir, "temperature", "nphot"),
+            ),
+            "nphot_mono": segment_entry.get(
+                "nphot_mono",
+                self._read_segment_cache_int(segment_dir, "mcmono", "nphot"),
+            ),
+            "has_temperature": True,
+            "has_mcmono": True,
+            "temperature_file": str(temp_path),
+            "mean_intensity_file": str(mean_path),
+        }
+        return rad, metadata
+
+    def _make_segmented_rt_diagnostics(
+        self,
+        base_rad: "RadModel",
+        segmented_result: dict[str, Any],
+        plot_output_dir: Path,
+    ) -> list[Path]:
+        """Write merged and per-segment segmented RT diagnostics."""
+        from diskbridge.visualization.diagnostics import (
+            make_segmented_rt_diagnostic_plots,
+            make_segmented_rt_segment_diagnostic_plots,
+        )
+
+        plot_output_dir = Path(plot_output_dir)
+        made = list(make_segmented_rt_diagnostic_plots(base_rad, segmented_result, plot_output_dir))
+        disc_uv_min, disc_uv_max = self._segment_uv_band_for_diagnostics()
+
+        segment_summaries: list[dict[str, Any]] = []
+        for segment_entry in list(segmented_result.get("segments", [])):
+            try:
+                segment_dir = self._resolve_segment_work_dir(segment_entry)
+                segment_rad, metadata = self._load_segment_rad_for_diagnostics(
+                    segment_entry,
+                    disc_uv_min=disc_uv_min,
+                    disc_uv_max=disc_uv_max,
+                )
+                segment_plot_dir = plot_output_dir / "segments" / segment_dir.name
+                summary = make_segmented_rt_segment_diagnostic_plots(
+                    segment_rad,
+                    metadata,
+                    segment_plot_dir,
+                )
+                segment_summaries.append(summary)
+                made.extend(Path(path) for path in summary.get("plots", []))
+            except Exception as exc:
+                segment_name = str(segment_entry.get("work_dir", "unknown"))
+                logger.warning("Failed to make segmented RT segment diagnostics for %s: %s", segment_name, exc)
+                segment_summaries.append(
+                    {
+                        "segment": jsonable(segment_entry),
+                        "plots": [],
+                        "error": str(exc),
+                    }
+                )
+
+        manifest = {
+            "plots_dir": str(plot_output_dir / "segments"),
+            "segments": segment_summaries,
+        }
+        (plot_output_dir / "segments_summary.json").write_text(
+            json.dumps(jsonable(manifest), indent=2, sort_keys=True) + "\n"
+        )
+        return made
 
     def load_segmented_rt_outputs(
         self,
@@ -406,14 +571,12 @@ class SegmentedRadRunner:
             "segment_id": segment_id,
         }
         if diagnostic_plots:
-            from diskbridge.visualization.diagnostics import make_segmented_rt_diagnostic_plots
-
             plot_output_dir = (
                 Path(plots_dir)
                 if plots_dir is not None
                 else self.base_model_dir / "plots" / "segmented_rt"
             )
-            made = make_segmented_rt_diagnostic_plots(base_rad, out, plot_output_dir)
+            made = self._make_segmented_rt_diagnostics(base_rad, out, plot_output_dir)
             out["diagnostic_plots"] = [str(path) for path in made]
         return out
 
@@ -1470,13 +1633,11 @@ class SegmentedRadRunner:
             'segment_id': segment_id,
         }
         if diagnostic_plots:
-            from diskbridge.visualization.diagnostics import make_segmented_rt_diagnostic_plots
-
             plot_output_dir = (
                 Path(plots_dir)
                 if plots_dir is not None
                 else self.base_model_dir / "plots" / "segmented_rt"
             )
-            made = make_segmented_rt_diagnostic_plots(base_rad, out, plot_output_dir)
+            made = self._make_segmented_rt_diagnostics(base_rad, out, plot_output_dir)
             out["diagnostic_plots"] = [str(path) for path in made]
         return out

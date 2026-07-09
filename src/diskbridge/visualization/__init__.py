@@ -81,6 +81,7 @@ from .diagnostics import (
     make_chemistry_diagnostic_plots,
     make_dust_component_diagnostic_plots,
     make_segmented_rt_diagnostic_plots,
+    make_segmented_rt_segment_diagnostic_plots,
 )
 from .nonlte import (
     make_external_nonlte_diagnostic_plots,
@@ -129,6 +130,7 @@ __all__ = [
     'make_chemistry_diagnostic_plots',
     'make_dust_component_diagnostic_plots',
     'make_segmented_rt_diagnostic_plots',
+    'make_segmented_rt_segment_diagnostic_plots',
     'DEFAULT_LOG10_FLOOR',
     'DEFAULT_LOG10_MAX_DECADES',
     'log10_display_limits',

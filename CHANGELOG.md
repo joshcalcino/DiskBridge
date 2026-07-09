@@ -8,6 +8,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- Segmented RADMC-3D diagnostics now include native per-segment plots and a
+  `segments_summary.json` manifest whenever segmented RT diagnostics are
+  enabled.
 - GOW17 now accepts `shielding_ray_average = "weighted" | "uniform"` so
   HEALPix shielding can explicitly use RADMC-derived directional UV weights or
   direct uniform ray averaging.

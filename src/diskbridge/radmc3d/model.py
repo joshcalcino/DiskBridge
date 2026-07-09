@@ -1423,7 +1423,9 @@ class RadModel:
         force : bool, optional
             Recompute outputs even when cached outputs are available.
         diagnostic_plots : bool, optional
-            Whether to write diagnostic plots after the merged fields are built.
+            Whether to write diagnostic plots after the merged fields are
+            built. When enabled, writes merged plots plus per-segment plots
+            under ``plots_dir / "segments"``.
         plots_dir : str or pathlib.Path, optional
             Diagnostic plot directory. Defaults to
             ``model_dir / "plots" / "segmented_rt"``.
@@ -1476,7 +1478,9 @@ class RadModel:
         Parameters
         ----------
         diagnostic_plots : bool, optional
-            Whether to write diagnostic plots after the merged fields are built.
+            Whether to write diagnostic plots after the merged fields are
+            built. When enabled, writes merged plots plus per-segment plots
+            under ``plots_dir / "segments"``.
         plots_dir : str or pathlib.Path, optional
             Diagnostic plot directory. Defaults to
             ``model_dir / "plots" / "segmented_rt"``.
