@@ -68,15 +68,12 @@ external_cmb = T                   # include CMB boundary intensity
 w_rays_keep_closure_diagnostics = F # opt-in scalar UV closure diagnostics for W_rays
  
 # Segmented RT (two-run outer/inner workflow)
-segmented_tol              = 0.01  # fractional tolerance for T and chi asymptote (R_split criterion)
-segmented_window_fraction  = 0.1   # fraction of radial domain for asymptote window
-segmented_shell_ncells     = 3     # number of radial cells for shell spectrum extraction
+segmented_tol              = 0.01  # UV scout uncertainty limit and join warning threshold
 segmented_r_clip_min       = 1.0   # minimum allowed R_split in au
 segmented_max_splits        = 1
 segmented_stop_factor       = 0.9
 segmented_nphot_ratio       = 1.0
 segmented_final_nphot_multiplier = 1.0 # multiplier for the terminal segment only
-segmented_external_source_mode = shell # shell|initial; shell inherits split-shell spectrum, initial reuses original external field
 segmented_outer_weight_mode = tau   # outer segmented W_rays: tau|uniform
 
 # Star 

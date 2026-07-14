@@ -11,6 +11,12 @@ Use this skill to review plans or completed implementations.
 
 Review first. Do not edit code unless explicitly asked.
 
+DiskBridge is single-user development code. Flag unsolicited aliases,
+deprecations, migrations, compatibility readers, ignored old parameters, and
+fallback branches as defects. A change should leave one canonical current
+interface unless the user explicitly requested compatibility for a specific
+surface.
+
 ## Plan Review
 
 Check whether the plan:
@@ -30,6 +36,7 @@ Check whether the plan:
 - includes simple objective physics tests when they are cheap and deterministic;
 - includes validation work when physical behavior changes need slower, broader, or human-interpreted checks;
 - avoids fallback branches and duplicate pathways;
+- removes superseded APIs, config keys, outputs, documentation, and tests;
 - respects DiskBridge module boundaries;
 - respects Pint/public API and raw-array/internal-kernel separation;
 - has clear completion criteria.
@@ -45,6 +52,8 @@ Check whether the implementation:
 - changed more files than necessary;
 - changed scientific behavior intentionally or accidentally;
 - introduced duplicate logic;
+- retained superseded behavior through aliases, ignored parameters,
+  compatibility loaders, migrations, or deprecation paths;
 - silently changed defaults;
 - changed units, shapes, or file outputs;
 - added ASCII/text RADMC-3D fallbacks, broad extension discovery, or parallel

@@ -22,10 +22,19 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- The segmented-UV validation retains 128 radial cells while using a `24 x 24`
+  angular grid; its tenfold full-domain reference multiplier now applies only
+  to `mcmono`.
+- Segmented RADMC-3D UV transport now uses paired seeded scouts, measured
+  shell/P99 Monte Carlo uncertainty, conservative stellar screening,
+  one-shell inherited UV boundaries that preserve the original IR/CMB field,
+  warning-only parent-child join checks, and one full-budget terminal run.
 - Brought the public `diskbridge.chemistry.shielding` docstrings (HEALPix and 1-D shielding, the Draine & Bertoldi H2 function, and the Visser table loader) to the NumPy-style + References standard.
 
 ### Fixed
 
+- RADMC-3D thermal, monochromatic, and resolved segmented photon counts are now
+  rejected before execution when they exceed the signed 32-bit counter range.
 - Weighted HEALPix shielding now uses exact cell-to-star H2/C/CO columns for
   the direct stellar contribution, avoiding point-source artifacts from pairing
   stellar UV weights with HEALPix pixel-center boundary columns.
@@ -33,6 +42,8 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Removed superseded segmented RT split controls and output discovery paths;
+  `segmented_tol` is the sole scout-uncertainty and join-warning tolerance.
 - Relocated historical plan/progress notes out of `docs/` into `projects/`, and retired `docs/healpix_shielding.md` in favor of the verified shielding guide.
 
 ### Validation

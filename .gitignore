@@ -26,7 +26,6 @@ examples/leon_hpc/
 examples/leon_sim6/data/
 examples/leon_sim6/*.png
 examples/mwc758_comp/
-examples/testbed/
 examples/validation/
 examples/leon_laptop_test/
 examples/bondi_all_stars/
@@ -58,6 +57,12 @@ validation/reproduce_gow17_fig2_3dhealpix/
 validation/prodimo_diana/
 validation/rac2d_disk/
 validation/prizmo_disk/params.txt
+validation/segmented_uv/baseline_run/
+validation/segmented_uv/segmented_run/
+validation/segmented_uv/baseline_gow17*/
+validation/segmented_uv/gow17_comparison/
+validation/segmented_uv/plots/
+validation/segmented_uv/plots_postprocess/
 
 # Local dependency builds and caches
 dependencies/

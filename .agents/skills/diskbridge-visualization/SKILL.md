@@ -8,6 +8,11 @@ description: Create, refactor, or review DiskBridge plotting and visualization c
 Use this skill when the user asks for plots, figure-quality diagnostics,
 colormap/scale fixes, plot layout cleanup, or reusable visualization helpers.
 
+DiskBridge is single-user development code. Plotters and diagnostic loaders
+support the canonical current outputs only. Replace superseded names and
+formats directly rather than retaining aliases or compatibility discovery,
+unless the user explicitly requests it.
+
 ## Main Boundary
 
 Reusable plotting code belongs in `src/diskbridge/visualization/`.

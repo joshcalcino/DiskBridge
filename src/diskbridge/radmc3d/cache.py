@@ -13,11 +13,17 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
-from typing import Sequence, Optional, Any
+from typing import TYPE_CHECKING, Sequence, Optional, Any
+
+import numpy as np
 
 from diskbridge._logging import logger
 from diskbridge.serialization import jsonable
+from diskbridge.utils import sha256_array
 from .utils import _read_params_snapshot, _params_signature
+
+if TYPE_CHECKING:
+    from diskbridge.model.mesh import Mesh
 
 
 def stable_json_hash(value: Any) -> str:
@@ -28,6 +34,41 @@ def stable_json_hash(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def build_mesh_cache_context(mesh: "Mesh") -> dict[str, Any]:
+    """Return the canonical mesh identity used by RADMC-3D caches.
+
+    Parameters
+    ----------
+    mesh : diskbridge.model.mesh.Mesh
+        Mesh written to the RADMC-3D calculation.
+
+    Returns
+    -------
+    dict
+        Coordinate system, shape, axis order, units, sizes, and exact SHA256
+        hashes of axis edges expressed in base units.
+    """
+    axis_order = tuple(mesh.axis_names())
+    edge_units: dict[str, str] = {}
+    edge_sizes: dict[str, int] = {}
+    edge_hashes: dict[str, str] = {}
+    for axis_name in axis_order:
+        edges = mesh.edges(axis_name).to_base_units()
+        values = np.ascontiguousarray(edges.magnitude, dtype=np.float64)
+        edge_units[axis_name] = str(edges.units)
+        edge_sizes[axis_name] = int(values.size)
+        edge_hashes[axis_name] = sha256_array(values)
+
+    return {
+        "mesh_coord_system": str(mesh.coord_system),
+        "mesh_shape": [int(value) for value in mesh.shape],
+        "mesh_axis_order": list(axis_order),
+        "mesh_edge_units": edge_units,
+        "mesh_edge_sizes": edge_sizes,
+        "mesh_edge_sha256": edge_hashes,
+    }
 
 
 def write_cache_context(output_dir: Path | str, context: dict[str, Any]) -> Path:

@@ -19,6 +19,11 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 ## General Rules
 
 - Preserve physical meaning before making code prettier.
+- Treat DiskBridge as single-user development code. Replace obsolete APIs,
+  parameter names, config keys, execution paths, and output formats directly;
+  do not add aliases, deprecations, migrations, compatibility loaders, or
+  fallback branches unless the user explicitly requests them for a specific
+  interface.
 - Keep public APIs concise.
 - Avoid duplicate code paths and fallback branches unless explicitly requested.
 - Do not add unnecessary abstraction.

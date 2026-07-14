@@ -11,6 +11,12 @@ Use this skill when the user asks to refactor, simplify, clean up bloat, remove 
 
 Improve structure without changing scientific behavior unless the user explicitly requests a physics change.
 
+DiskBridge is single-user development code. Refactors must remove superseded
+APIs, config keys, output formats, and execution paths rather than preserving
+them through aliases, deprecations, migrations, compatibility loaders, or
+fallback branches. Add such behavior only when the user explicitly requests it
+for a specific interface.
+
 ## Before Editing
 
 1. Identify the affected subsystem:
@@ -30,14 +36,14 @@ Improve structure without changing scientific behavior unless the user explicitl
 5. Check `.agents/code_index/` and
    `diskbridge_code_map/UTILITY_CONSOLIDATION_GUIDE.md` for known duplicate
    helper families, proposed canonical homes, and risks.
-6. Identify what must remain stable:
+6. Identify the canonical contract after the refactor:
    - public API signatures
    - output file names
    - array shapes/order
    - units
    - config keys
    - validation expectations
-   - existing tests
+   - tests that protect current behavior
 7. Do not delete code only because it has no obvious static caller. Some code may be used by examples, validation drivers, or external workflows.
 
 ## Refactor Rules
@@ -51,7 +57,8 @@ Improve structure without changing scientific behavior unless the user explicitl
 - Do not mix physics changes with structural cleanup.
 - Keep Pint quantities at public boundaries.
 - Keep Numba/performance kernels unitless and array-oriented.
-- Preserve existing file formats unless the user explicitly requests a format change.
+- Replace superseded file formats directly and update their writers, readers,
+  documentation, and tests together.
 - For RADMC-3D I/O, preserve the binary-only policy and one supported internal
   file-backed data representation. Do not introduce ASCII/text fallback paths,
   broad extension discovery, or parallel shape/unit/axis-order representations

@@ -7,6 +7,11 @@ description: Add, fix, organize, run, or review fast pytest tests for DiskBridge
 
 Use this skill when the task is to add or update fast tests under `tests/`.
 
+DiskBridge is single-user development code. Tests protect only the canonical
+current interface. When an API, config key, output format, or execution path is
+replaced, delete tests for the superseded form rather than adding compatibility
+coverage, unless the user explicitly requests that compatibility.
+
 ## Definition Of A Test
 
 A DiskBridge test is a fast, deterministic pytest check that can run on ordinary development changes. It should verify code behavior or a simple objective physics invariant. It should answer questions like:
@@ -75,7 +80,7 @@ Good file names:
 
 Poor file names:
 
-- `test_radmc3d_external_i_nu_legacy_dust_normalization_path.py`
+- `test_radmc3d_external_i_nu_previous_normalization_implementation.py`
 - `test_gow17_this_specific_previous_bug_with_config_mode.py`
 
 ## Test Documentation

@@ -13,6 +13,11 @@ A non-trivial change includes any change that touches multiple files; changes pu
 
 Before editing code, create or update a markdown plan in `projects/active/`. Do not put implementation plans inside `.agents/skills/`.
 
+DiskBridge is single-user development code. Plans must replace obsolete APIs,
+config keys, output formats, and execution paths directly. Do not plan aliases,
+deprecations, migrations, compatibility readers, or fallback branches unless
+the user explicitly requests them for a specific interface.
+
 Use this filename form:
 
 ```text
@@ -34,7 +39,9 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
    duplication-prone helpers before proposing new helpers.
 6. State whether the change reuses, extends, merges, or adds code.
 7. Separate structural changes from physics changes.
-8. Identify public APIs, config keys, file outputs, and array shapes that must remain stable.
+8. Identify the canonical public APIs, config keys, file outputs, and array
+   shapes after the change. Do not assume superseded interfaces must remain
+   accepted.
 9. Define implementation steps.
 10. Define fast pytest tests, including simple objective physics invariants when appropriate.
 11. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
@@ -48,7 +55,8 @@ For any plan that touches RADMC-3D I/O, data loading, data writing, cached
 RADMC-3D outputs, UV products, or line-transfer staging, require one supported
 binary-only RADMC-3D data representation. Do not plan broad ASCII/text fallback
 discovery or parallel data structures for the same RADMC-3D quantity. Plans
-must state how binary file names, units, shapes, and axis order remain stable.
+must state the canonical binary file names, units, shapes, and axis order after
+the change.
 
 ## Required Sections
 

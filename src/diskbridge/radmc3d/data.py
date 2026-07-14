@@ -25,6 +25,159 @@ from diskbridge._logging import logger
 from diskbridge._units import Quantity, units
 
 
+def combine_mean_intensity_files(
+    first: str | Path,
+    second: str | Path,
+    output: str | Path,
+    *,
+    first_weight: float = 0.5,
+    chunk_values: int = 1_000_000,
+) -> dict[str, int | float]:
+    """Write the weighted mean of two binary RADMC-3D intensity files.
+
+    The payload is combined in chunks so a full production radiation field is
+    never duplicated in memory.
+
+    Parameters
+    ----------
+    first, second : str or pathlib.Path
+        Input ``mean_intensity.bout`` files with identical headers and
+        frequency grids.
+    output : str or pathlib.Path
+        Destination ``mean_intensity.bout`` file.
+    first_weight : float, optional
+        Weight assigned to ``first``. The second weight is its complement.
+    chunk_values : int, optional
+        Maximum number of intensity values combined at once.
+
+    Returns
+    -------
+    dict
+        Binary format, precision, cell count, wavelength count, and weights.
+    """
+    first = Path(first)
+    second = Path(second)
+    output = Path(output)
+    if output == first or output == second:
+        raise ValueError("output must differ from both mean-intensity inputs")
+    temporary_output = output.with_name(output.name + ".tmp")
+    weight1 = float(first_weight)
+    weight2 = 1.0 - weight1
+    if not 0.0 <= weight1 <= 1.0:
+        raise ValueError("first_weight must be in [0, 1]")
+    if int(chunk_values) < 1:
+        raise ValueError("chunk_values must be positive")
+
+    with first.open("rb") as f1, second.open("rb") as f2:
+        header1 = np.fromfile(f1, dtype=np.int64, count=4)
+        header2 = np.fromfile(f2, dtype=np.int64, count=4)
+        if header1.size != 4 or header2.size != 4:
+            raise ValueError("Mean-intensity input has an incomplete binary header")
+        if not np.array_equal(header1, header2):
+            raise ValueError("Mean-intensity binary headers do not match")
+        if int(header1[0]) != 2:
+            raise ValueError(f"Unsupported mean-intensity format {int(header1[0])}")
+
+        precision = int(header1[1])
+        dtype = dtype_from_radmc_precision(first, precision)
+        ncells = int(header1[2])
+        nwav = int(header1[3])
+        frequencies1 = np.fromfile(f1, dtype=np.float64, count=nwav)
+        frequencies2 = np.fromfile(f2, dtype=np.float64, count=nwav)
+        if frequencies1.size != nwav or frequencies2.size != nwav:
+            raise ValueError("Mean-intensity input has an incomplete frequency grid")
+        if not np.array_equal(frequencies1, frequencies2):
+            raise ValueError("Mean-intensity frequency grids do not match")
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        remaining = int(ncells * nwav)
+        with temporary_output.open("wb") as fout:
+            header1.tofile(fout)
+            frequencies1.tofile(fout)
+            while remaining:
+                count = min(remaining, int(chunk_values))
+                values1 = np.fromfile(f1, dtype=dtype, count=count)
+                values2 = np.fromfile(f2, dtype=dtype, count=count)
+                if values1.size != count or values2.size != count:
+                    raise ValueError("Mean-intensity input has an incomplete data payload")
+                combined = weight1 * values1.astype(np.float64) + weight2 * values2.astype(
+                    np.float64
+                )
+                if not np.all(np.isfinite(combined)):
+                    raise ValueError("Combined mean intensity contains non-finite values")
+                combined.astype(dtype).tofile(fout)
+                remaining -= count
+
+        if f1.read(1) or f2.read(1):
+            raise ValueError("Mean-intensity input has trailing payload data")
+    temporary_output.replace(output)
+
+    return {
+        "format": int(header1[0]),
+        "precision": precision,
+        "ncells": ncells,
+        "nwavelengths": nwav,
+        "first_weight": weight1,
+        "second_weight": weight2,
+    }
+
+
+def radial_shell_mean_intensity(
+    path: str | Path,
+    volumes: np.ndarray,
+    *,
+    wavelength_chunk: int = 32,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read volume-weighted radial spectra from a binary intensity file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Binary ``mean_intensity.bout`` file.
+    volumes : ndarray
+        Spherical cell volumes with shape ``(nr, ntheta, nphi)``.
+    wavelength_chunk : int, optional
+        Number of wavelengths reduced per memory-mapped chunk.
+
+    Returns
+    -------
+    frequencies_hz, shell_mean : tuple of ndarray
+        Frequency grid and radial shell spectra with shape ``(nr, nwav)``.
+    """
+    path = Path(path)
+    volumes = np.asarray(volumes, dtype=np.float64)
+    if volumes.ndim != 3:
+        raise ValueError("volumes must have shape (nr, ntheta, nphi)")
+    with path.open("rb") as f:
+        header = np.fromfile(f, dtype=np.int64, count=4)
+        if header.size != 4:
+            raise ValueError(f"{path} has an incomplete binary header")
+        if int(header[0]) != 2:
+            raise ValueError(f"{path} has unsupported format {int(header[0])}")
+        dtype = dtype_from_radmc_precision(path, int(header[1]))
+        ncells = int(header[2])
+        nwav = int(header[3])
+        if ncells != int(volumes.size):
+            raise ValueError(
+                f"{path} contains {ncells} cells but volumes contain {volumes.size}"
+            )
+        frequencies = np.fromfile(f, dtype=np.float64, count=nwav)
+        if frequencies.size != nwav:
+            raise ValueError(f"{path} has an incomplete frequency grid")
+    offset = 4 * np.dtype(np.int64).itemsize + nwav * np.dtype(np.float64).itemsize
+    payload = np.memmap(path, mode="r", dtype=dtype, offset=offset, shape=(nwav, ncells))
+    radial_volume = np.sum(volumes, axis=(1, 2))
+    if np.any(radial_volume <= 0.0):
+        raise ValueError("Radial shell volumes must be positive")
+    result = np.empty((volumes.shape[0], nwav), dtype=np.float64)
+    for start in range(0, nwav, int(wavelength_chunk)):
+        stop = min(start + int(wavelength_chunk), nwav)
+        block = np.asarray(payload[start:stop], dtype=np.float64)
+        spatial = block.T.reshape(volumes.shape + (stop - start,), order="F")
+        result[:, start:stop] = np.sum(spatial * volumes[..., None], axis=(1, 2)) / radial_volume[:, None]
+    return frequencies, result
+
+
 def read_amr_grid_cell_count(path: str | Path) -> int:
     """Return the regular-grid cell count declared by ``amr_grid.inp``."""
 

@@ -1337,6 +1337,179 @@ def make_segmented_rt_segment_diagnostic_plots(
     else:
         skipped_fields.extend(["dust_temperature", "chi"])
 
+    metrics_path_value = segment_metadata.get("scout_metrics_file")
+    if metrics_path_value:
+        metrics_path = Path(str(metrics_path_value))
+        if metrics_path.exists():
+            try:
+                import matplotlib.pyplot as plt
+
+                metrics = np.load(metrics_path)
+                r_au = np.asarray(metrics["r_au"], dtype=float)
+                scout_metadata = segment_metadata.get("scout") or {}
+                noise_tolerance = float(scout_metadata.get("noise_tolerance", 0.01))
+                stellar_tolerance = float(
+                    segment_metadata.get("stellar_fraction_threshold") or 0.01
+                )
+                product_names = sorted(
+                    key.removesuffix("__shell_fractional")
+                    for key in metrics.files
+                    if key.endswith("__shell_fractional")
+                )
+
+                fig, axes = plt.subplots(4, 1, figsize=(8.5, 12.0), sharex=True)
+                chi_mean = np.asarray(metrics["chi_broad__shell_mean"], dtype=float)
+                chi_sigma = chi_mean * np.asarray(
+                    metrics["chi_broad__shell_fractional"], dtype=float
+                )
+                axes[0].plot(r_au, chi_mean, color="black", linewidth=1.5)
+                axes[0].fill_between(
+                    r_au,
+                    np.maximum(chi_mean - chi_sigma, np.finfo(float).tiny),
+                    chi_mean + chi_sigma,
+                    color="tab:blue",
+                    alpha=0.3,
+                )
+                axes[0].set_yscale("log")
+                axes[0].set_ylabel("chi broad")
+
+                axes[1].plot(
+                    r_au,
+                    np.max(np.asarray(metrics["j_shell_fractional"]), axis=1),
+                    color="black",
+                    linewidth=1.8,
+                    label="Jnu max wavelength",
+                )
+                for name in product_names:
+                    line = axes[1].plot(
+                        r_au,
+                        metrics[f"{name}__shell_fractional"],
+                        linewidth=1.1,
+                        label=f"{name} shell mean",
+                    )[0]
+                    axes[1].plot(
+                        r_au,
+                        metrics[f"{name}__cell_fractional_p99"],
+                        linewidth=0.9,
+                        linestyle=":",
+                        color=line.get_color(),
+                        label=f"{name} cell P99",
+                    )
+                    axes[1].plot(
+                        r_au,
+                        metrics[f"{name}__cell_fractional_max"],
+                        linewidth=0.7,
+                        linestyle="--",
+                        color=line.get_color(),
+                        alpha=0.55,
+                    )
+                    axes[2].plot(
+                        r_au,
+                        metrics[f"{name}__failing_volume_fraction"],
+                        linewidth=1.0,
+                        label=name,
+                    )
+                axes[1].axhline(noise_tolerance, color="0.35", linestyle="--")
+                axes[1].set_yscale("log")
+                axes[1].set_ylabel("paired fractional uncertainty")
+                axes[1].legend(fontsize=6.5, ncol=2)
+                axes[2].set_ylabel("volume fraction above tolerance")
+                axes[2].set_ylim(-0.02, 1.02)
+
+                for name in product_names:
+                    key = f"{name}__stellar_fraction"
+                    if key in metrics:
+                        line = axes[3].plot(r_au, metrics[key], linewidth=1.2, label=name)[0]
+                        axes[3].plot(
+                            r_au,
+                            metrics[f"{name}__stellar_fraction_p99"],
+                            color=line.get_color(),
+                            linestyle=":",
+                            linewidth=0.9,
+                        )
+                        axes[3].plot(
+                            r_au,
+                            metrics[f"{name}__stellar_fraction_max"],
+                            color=line.get_color(),
+                            linestyle="--",
+                            linewidth=0.7,
+                            alpha=0.55,
+                        )
+                axes[3].axhline(stellar_tolerance, color="0.35", linestyle="--")
+                axes[3].set_xscale("log")
+                axes[3].set_yscale("log")
+                axes[3].set_xlabel("radius [au]")
+                axes[3].set_ylabel("unattenuated stellar fraction")
+                axes[3].legend(fontsize=7, ncol=2)
+
+                split = segment_metadata.get("split") or {}
+                for index_key, color in (
+                    ("comparison_shell_idx", "tab:blue"),
+                    ("source_shell_idx", "tab:orange"),
+                ):
+                    index = split.get(index_key)
+                    if index is not None and 0 <= int(index) < r_au.size:
+                        for axis in axes:
+                            axis.axvline(r_au[int(index)], color=color, alpha=0.75)
+                fig.tight_layout()
+                quality_path = plots_dir / "uv_scout_quality.png"
+                fig.savefig(quality_path, dpi=180)
+                plt.close(fig)
+                made.append(quality_path)
+
+                join = segment_metadata.get("join") or {}
+                if join:
+                    labels = ["Jnu max"] + sorted((join.get("products") or {}).keys())
+                    values = [float(join.get("j_fractional_max", np.nan))] + [
+                        float(join["products"][name]["delta"]) for name in labels[1:]
+                    ]
+                    frequency_hz = np.asarray(join["frequency_hz"], dtype=float)
+                    wavelength_nm = 1.0e7 * 2.99792458e10 / frequency_hz
+                    order = np.argsort(wavelength_nm)
+                    fig, join_axes = plt.subplots(3, 1, figsize=(8.0, 9.0))
+                    join_axes[0].plot(
+                        wavelength_nm[order], np.asarray(join["parent_j"])[order], label="parent"
+                    )
+                    join_axes[0].plot(
+                        wavelength_nm[order], np.asarray(join["child_j"])[order], label="child"
+                    )
+                    join_axes[0].set_yscale("log")
+                    join_axes[0].set_ylabel("shell mean Jnu")
+                    join_axes[0].legend()
+                    join_axes[1].plot(
+                        wavelength_nm[order], np.asarray(join["j_fractional"])[order], label="join"
+                    )
+                    join_axes[1].plot(
+                        wavelength_nm[order], np.asarray(join["j_sigma_rel"])[order], label="paired sigma"
+                    )
+                    join_axes[1].axhline(
+                        float(join.get("tolerance", 0.01)), color="0.25", linestyle="--"
+                    )
+                    join_axes[1].set_yscale("log")
+                    join_axes[1].set_xlabel("wavelength [nm]")
+                    join_axes[1].set_ylabel("fractional difference")
+                    join_axes[1].legend()
+                    join_axes[2].bar(np.arange(len(labels)), values, color="tab:blue")
+                    join_axes[2].axhline(
+                        float(join.get("tolerance", 0.01)), color="0.25", linestyle="--"
+                    )
+                    join_axes[2].set_yscale("log")
+                    join_axes[2].set_ylabel("product discrepancy")
+                    join_axes[2].set_xticks(
+                        np.arange(len(labels)), labels, rotation=35, ha="right"
+                    )
+                    fig.tight_layout()
+                    join_path = plots_dir / "uv_join_diagnostics.png"
+                    fig.savefig(join_path, dpi=180)
+                    plt.close(fig)
+                    made.append(join_path)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to plot segmented UV scout diagnostics for %s: %s",
+                    segment_metadata.get("segment_name", segment_metadata.get("work_dir")),
+                    exc,
+                )
+
     for field_name, cmap, dyn_range in (
         ("density", "magma", 8.0),
         ("dust_temperature", "inferno", 3.0),

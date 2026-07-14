@@ -94,14 +94,11 @@ class Params:
 
     # segmented RT
     segmented_tol: float
-    segmented_window_fraction: float
-    segmented_shell_ncells: int
     segmented_r_clip_min: Quantity
     segmented_max_splits: int
     segmented_stop_factor: float
     segmented_nphot_ratio: float
     segmented_final_nphot_multiplier: float
-    segmented_external_source_mode: str
     segmented_outer_weight_mode: str
 
     # star

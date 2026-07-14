@@ -11,6 +11,11 @@ Use this skill when documentation should be created or updated.
 
 Documentation should describe the current behavior of DiskBridge. Do not write documentation as a history of previous mistakes, corrections, or implementation changes.
 
+DiskBridge is single-user development code. Document only the canonical current
+API, config keys, execution path, and output format. When one is replaced,
+remove the superseded documentation instead of adding migration, deprecation,
+alias, or compatibility guidance unless the user explicitly requests it.
+
 Development history belongs in `projects/`. Release-facing summaries belong in `CHANGELOG.md`. Stable user-facing explanations belong in `docs/`.
 
 ## Documentation Standard
@@ -54,7 +59,8 @@ single supported internal file-backed RADMC-3D data representation when that
 surface is relevant. Do not document ASCII/text fallback paths or parallel data
 structures as supported behavior.
 
-Do not document temporary implementation details, old behavior unless needed for migration, previous failed attempts, or "we fixed X by doing Y" language in stable docs.
+Do not document temporary implementation details, old behavior, previous
+failed attempts, or "we fixed X by doing Y" language in stable docs.
 
 ## Docstring Rules
 

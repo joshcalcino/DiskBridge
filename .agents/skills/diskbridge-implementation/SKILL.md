@@ -11,6 +11,11 @@ Use this skill when the user asks to add new functionality, implement a physics 
 
 Implement the requested feature with the smallest clean design that fits DiskBridge's existing architecture.
 
+DiskBridge is single-user development code. Update the canonical API, config,
+execution path, and output format in place, and delete superseded forms. Do not
+add aliases, deprecations, migrations, compatibility loaders, or fallback
+branches unless the user explicitly requests them for a specific interface.
+
 ## Before Coding
 
 1. Identify whether the change affects physics, units, performance, file I/O, configuration, validation, or plotting/diagnostics.
@@ -37,6 +42,8 @@ Implement the requested feature with the smallest clean design that fits DiskBri
 - Keep physical assumptions close to the code that uses them.
 - Do not duplicate existing config parsing.
 - Do not add broad fallback behavior.
+- Remove superseded parameters and code paths instead of retaining ignored or
+  translated forms.
 - Do not silently change defaults.
 - Document new user-facing options in the relevant docstring or config comments.
 

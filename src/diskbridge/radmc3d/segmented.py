@@ -21,10 +21,14 @@ from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
 from diskbridge.serialization import jsonable
+from diskbridge.utils import sha256_file
 
 from diskbridge.model.profiles import (
+    compute_cell_volumes,
     compute_volume_weighted_mean_radial_profile,
-    find_r_split,
+    find_noise_aware_split,
+    paired_radial_uncertainty_metrics,
+    weighted_quantile,
 )
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
 from diskbridge.radmc3d.uv_products import (
@@ -36,6 +40,7 @@ from diskbridge.radmc3d.uv_products import (
     validate_uv_chemistry_config,
 )
 from .wavelengths import build_mcmono_wavelengths
+from .data import combine_mean_intensity_files, radial_shell_mean_intensity
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,17 @@ class SegmentDefinition:
     name: str
     bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]]
     work_dir: Path
+
+
+@dataclass
+class PairedScoutResult:
+    """In-memory paired-estimator products needed by split and join checks."""
+
+    metadata: dict[str, Any]
+    products: dict[str, dict[str, np.ndarray]]
+    wavelength_metrics: dict[str, np.ndarray]
+    reliable_shells: np.ndarray
+    estimator_dirs: tuple[Path, Path]
 
 
 class SegmentedRadRunner:
@@ -61,62 +77,7 @@ class SegmentedRadRunner:
         cfg = get_config()
         return validate_uv_chemistry_config(cfg, segmented=True).products_enabled
 
-    def _stellar_product_threshold_radius_au(
-        self,
-        product_specs,
-        threshold: float,
-    ) -> Optional[float]:
-        """Return radius where stellar UV reaches the configured product fraction."""
-        import diskbridge
-
-        params = diskbridge.params
-        threshold = float(threshold)
-        if threshold <= 0.0:
-            return None
-
-        chi_ext0 = 0.0
-        if getattr(params, "external_uv", False):
-            chi_ext0 = float(getattr(params, "external_uv_chi", 0.0))
-        chi_ext0 = max(chi_ext0, np.finfo(np.float64).tiny)
-
-        c_cgs = float(units("c").to("cm/s").magnitude)
-        radii_cm: list[float] = []
-        for spec in product_specs:
-            lam_min_cm = float(spec.band.lam_min_nm) * 1.0e-7
-            lam_max_cm = float(spec.band.lam_max_nm) * 1.0e-7
-            source_strength = compute_star_uv_source_strength(
-                params,
-                lam_min_cm,
-                lam_max_cm,
-                weighting=spec.band.weight,
-            )
-            if source_strength <= 0.0:
-                continue
-
-            if spec.band.weight == "photon":
-                ref_flux = float(
-                    draine_reference_for_product(spec.field_name, product_specs)
-                    .to("1/(cm^2 s)")
-                    .magnitude
-                )
-            else:
-                ref_flux = c_cgs * float(
-                    draine_reference_for_product(spec.field_name, product_specs)
-                    .to("erg/cm^3")
-                    .magnitude
-                )
-            if ref_flux <= 0.0:
-                continue
-
-            radii_cm.append(
-                float(np.sqrt(source_strength / (4.0 * np.pi * ref_flux * chi_ext0 * threshold)))
-            )
-
-        if not radii_cm:
-            return None
-        return max(radii_cm) * units("cm").to("au").magnitude
-
-    def _parse_segment_dir(self, segment_dir: Path) -> tuple[int, float | None, bool]:
+    def _parse_segment_dir(self, segment_dir: Path) -> tuple[int, float | None]:
         """Parse a segmented-run directory name.
 
         Parameters
@@ -127,8 +88,7 @@ class SegmentedRadRunner:
         Returns
         -------
         tuple
-            Segment level, outer radius in au if present, and whether this is
-            a final full-photon segment.
+            Segment level and outer radius in au if present.
 
         Raises
         ------
@@ -138,18 +98,14 @@ class SegmentedRadRunner:
         name = segment_dir.name
         full_match = re.fullmatch(r"segment_(\d+)_full", name)
         if full_match:
-            return int(full_match.group(1)), None, False
+            return int(full_match.group(1)), None
 
         rmax_match = re.fullmatch(
-            r"segment_(\d+)_rmax_([0-9.eE+-]+)au(_final)?",
+            r"segment_(\d+)_rmax_([0-9.eE+-]+)au",
             name,
         )
         if rmax_match:
-            return (
-                int(rmax_match.group(1)),
-                float(rmax_match.group(2)),
-                bool(rmax_match.group(3)),
-            )
+            return int(rmax_match.group(1)), float(rmax_match.group(2))
 
         raise ValueError(f"Not a segmented-run directory: {segment_dir}")
 
@@ -225,9 +181,9 @@ class SegmentedRadRunner:
         from diskbridge.radmc3d.model import RadModel
 
         segment_dir = self._resolve_segment_work_dir(segment_entry)
-        parsed_level, parsed_rmax_au, parsed_is_final = self._parse_segment_dir(segment_dir)
+        parsed_level, parsed_rmax_au = self._parse_segment_dir(segment_dir)
         level = int(segment_entry.get("level", parsed_level))
-        is_final = bool(segment_entry.get("is_final", parsed_is_final))
+        is_final = bool(segment_entry.get("is_final", False))
         rmax_au = segment_entry.get("r_max_au", parsed_rmax_au)
         if rmax_au is None:
             rmax_au = parsed_rmax_au
@@ -288,6 +244,13 @@ class SegmentedRadRunner:
             "has_mcmono": True,
             "temperature_file": str(temp_path),
             "mean_intensity_file": str(mean_path),
+            "scout_metrics_file": str(
+                segment_dir / "radmc3d_outputs" / "mcmono" / "uv_scout_metrics.npz"
+            ),
+            "scout": segment_entry.get("scout"),
+            "split": segment_entry.get("split"),
+            "join": segment_entry.get("join"),
+            "stellar_fraction_threshold": segment_entry.get("stellar_fraction_threshold"),
         }
         return rad, metadata
 
@@ -377,56 +340,44 @@ class SegmentedRadRunner:
             raise FileNotFoundError(f"No segmented RT directory found: {segments_root}")
 
         parsed_segments: list[tuple[int, float | None, bool, Path]] = []
-        summary_path = self.base_model_dir / "plots" / "segmented_rt" / "diagnostic_summary.json"
-        if summary_path.exists():
-            try:
-                with summary_path.open("r") as f:
-                    summary = json.load(f)
-                manifest_segments = summary.get("segmented_rt", {}).get("segments", [])
-            except Exception as exc:
-                logger.warning(
-                    "Could not read segmented RT manifest %s; falling back to directory scan: %s",
-                    summary_path,
-                    exc,
-                )
-                manifest_segments = []
-            for entry in manifest_segments:
-                work_dir = entry.get("work_dir")
-                if not work_dir:
-                    continue
-                segment_dir = Path(work_dir)
-                if not segment_dir.is_absolute():
-                    segment_dir = self.base_model_dir / segment_dir
-                if not segment_dir.exists():
-                    logger.warning("Skipping missing segmented RT manifest entry: %s", segment_dir)
-                    continue
-                try:
-                    level, rmax_au, parsed_is_final = self._parse_segment_dir(segment_dir)
-                except ValueError:
-                    logger.warning("Skipping invalid segmented RT manifest entry: %s", segment_dir)
-                    continue
-                parsed_segments.append(
-                    (
-                        level,
-                        rmax_au,
-                        bool(entry.get("is_final", parsed_is_final)),
-                        segment_dir,
-                    )
-                )
+        summary_path = segments_root / "segmented_rt_summary.json"
+        if not summary_path.exists():
+            raise FileNotFoundError(f"Missing segmented RT manifest: {summary_path}")
 
-        if not parsed_segments:
-            for segment_dir in segments_root.iterdir():
-                if not segment_dir.is_dir():
-                    continue
-                try:
-                    level, rmax_au, is_final = self._parse_segment_dir(segment_dir)
-                except ValueError:
-                    continue
-                parsed_segments.append((level, rmax_au, is_final, segment_dir))
+        with summary_path.open("r") as f:
+            summary = json.load(f)
+        summary_mode = summary.get("mode")
+        if summary_mode != "noise_aware_inherited_uv":
+            raise ValueError(
+                "Unsupported segmented RT manifest mode "
+                f"{summary_mode!r}; expected 'noise_aware_inherited_uv'"
+            )
+        manifest_segments = summary.get("segments")
+        if not isinstance(manifest_segments, list) or not manifest_segments:
+            raise ValueError(f"Segmented RT manifest has no segments: {summary_path}")
 
-        parsed_segments.sort(key=lambda item: (item[0], item[2]))
-        if not parsed_segments:
-            raise FileNotFoundError(f"No segmented RT outputs found in {segments_root}")
+        manifest_by_level: dict[int, dict[str, Any]] = {}
+        for entry in manifest_segments:
+            if not isinstance(entry, dict):
+                raise ValueError(f"Invalid segmented RT manifest entry: {entry!r}")
+            segment_dir = self._resolve_segment_work_dir(entry)
+            if not segment_dir.exists():
+                raise FileNotFoundError(f"Missing segmented RT output directory: {segment_dir}")
+            parsed_level, rmax_au = self._parse_segment_dir(segment_dir)
+            level = int(entry.get("level", parsed_level))
+            if level != parsed_level:
+                raise ValueError(
+                    f"Segment level mismatch for {segment_dir}: "
+                    f"manifest={level}, directory={parsed_level}"
+                )
+            if level in manifest_by_level:
+                raise ValueError(f"Duplicate segment level in {summary_path}: {level}")
+            manifest_by_level[level] = entry
+            parsed_segments.append(
+                (level, rmax_au, bool(entry.get("is_final", False)), segment_dir)
+            )
+
+        parsed_segments.sort(key=lambda item: item[0])
 
         mesh = self.base_model.mesh
         if mesh is None:
@@ -448,7 +399,6 @@ class SegmentedRadRunner:
         disc_uv_max = Quantity(float(broad_spec.band.lam_max_nm), "nm")
         segments: list[dict[str, Any]] = []
         split_radii_au: list[float] = []
-
         for level, rmax_au, is_final, segment_dir in parsed_segments:
             temp_path = segment_dir / "radmc3d_outputs" / "temperature" / "dust_temperature.bdat"
             mean_path = segment_dir / "radmc3d_outputs" / "mcmono" / "mean_intensity.bout"
@@ -473,11 +423,12 @@ class SegmentedRadRunner:
 
             rad = RadModel(seg_model, model_dir=segment_dir)
             rad.read_dust_temperature(fname=temp_path)
+            measured_segment = bool(uv_products_enabled)
             rad._postprocess_chi(
                 mean_path,
                 disc_uv_min if is_final else rad.params.uv_min,
                 disc_uv_max if is_final else rad.params.uv_max,
-                compute_products=bool(uv_products_enabled and is_final),
+                compute_products=measured_segment,
             )
 
             merged_T, merged_chi = self._merge_segment_fields(
@@ -497,11 +448,12 @@ class SegmentedRadRunner:
                         indexer=seg_indexer,
                         axis_order=axis_order,
                         segment_level=level,
-                        measured=bool(is_final),
+                        measured=measured_segment,
                     )
                 )
 
-            segments.append(
+            loaded_entry = dict(manifest_by_level.get(int(level), {}))
+            loaded_entry.update(
                 {
                     "level": int(level),
                     "work_dir": str(segment_dir),
@@ -514,6 +466,7 @@ class SegmentedRadRunner:
                     "loaded_existing": True,
                 }
             )
+            segments.append(loaded_entry)
 
         if merged_T is None or merged_chi is None:
             raise ValueError("Segmented RT saved outputs produced no merged fields")
@@ -561,12 +514,14 @@ class SegmentedRadRunner:
             "loaded_existing": True,
             "split_radii_au": split_radii_au,
             "segments": segments,
-            "scout_runs": [],
+            "scout_runs": summary.get("scout_runs", []),
+            "joins": summary.get("joins", []),
             "temperature": merged_T,
             "chi": merged_chi,
             "uv_products": merged_uv_products,
-            "uv_product_mode": "disc_segment_only",
-            "outer_product_policy": runtime_mode.outer_product_policy,
+            "mode": summary_mode,
+            "uv_product_mode": "all_segments_measured",
+            "outer_product_policy": None,
             "uv_product_measured_mask": uv_product_measured_mask,
             "segment_id": segment_id,
         }
@@ -624,20 +579,352 @@ class SegmentedRadRunner:
         outer_rad: 'RadModel',
         inner_rad: 'RadModel',
         r_split_au: float,
-        shell_ncells: int,
+        uv_min: Quantity,
+        uv_max: Quantity,
     ) -> None:
-        """Extract shell spectrum from outer and write as external source for inner."""
+        """Inherit one parent source shell while retaining original non-UV flux."""
         wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
             r_split_au=r_split_au,
-            shell_ncells=shell_ncells,
+            shell_ncells=1,
             mcmono_dir=outer_rad.outputs_dir / 'mcmono',
         )
-        inner_rad.write_effective_external_source(
+        inner_rad.write_inherited_uv_external_source(
             wavelengths_um=wavelengths_um,
             spectrum=shell_spectrum,
             output_dir=inner_rad.inputs_dir,
-            require_coverage=True,
+            uv_min=uv_min,
+            uv_max=uv_max,
         )
+
+    @staticmethod
+    def _copy_uv_products(rad: "RadModel") -> dict[str, Quantity]:
+        """Copy scalar UV products before the next estimator overwrites them."""
+        return {
+            name: Quantity(np.array(value.magnitude, copy=True), value.units)
+            for name, value in rad.uv_products.items()
+            if np.asarray(value.magnitude).ndim == 3
+        }
+
+    def _run_paired_uv_scout(
+        self,
+        rad: "RadModel",
+        *,
+        nphot_total: int,
+        wavelengths_um: np.ndarray,
+        uv_min: Quantity,
+        uv_max: Quantity,
+        noise_tolerance: float,
+        level: int,
+        force: bool,
+    ) -> PairedScoutResult:
+        """Run two independent UV estimators and create the canonical mean field."""
+        nphot_total = int(nphot_total)
+        if nphot_total < 2:
+            raise ValueError("Paired mcmono scouts require at least two photon packets")
+        counts = (nphot_total // 2, nphot_total - nphot_total // 2)
+        seeds = (104729 + 2 * int(level), 104730 + 2 * int(level))
+        estimator_dirs = (
+            rad.outputs_dir / "mcmono_estimator_1",
+            rad.outputs_dir / "mcmono_estimator_2",
+        )
+        estimator_products: list[dict[str, Quantity]] = []
+        hashes: list[str] = []
+        for count, seed, output_dir in zip(counts, seeds, estimator_dirs):
+            rad.compute_mcmono(
+                nphot=count,
+                output_dir=output_dir,
+                force=force,
+                wavelengths_um=wavelengths_um,
+                uv_min=uv_min,
+                uv_max=uv_max,
+                compute_uv_products=True,
+                iseed=seed,
+            )
+            estimator_products.append(self._copy_uv_products(rad))
+            intensity_path = output_dir / "mean_intensity.bout"
+            hashes.append(sha256_file(intensity_path))
+
+        canonical_dir = rad.outputs_dir / "mcmono"
+        canonical_dir.mkdir(parents=True, exist_ok=True)
+        first_weight = counts[0] / float(sum(counts))
+        binary_metadata = combine_mean_intensity_files(
+            estimator_dirs[0] / "mean_intensity.bout",
+            estimator_dirs[1] / "mean_intensity.bout",
+            canonical_dir / "mean_intensity.bout",
+            first_weight=first_weight,
+        )
+        shutil.copy2(
+            estimator_dirs[0] / "mcmono_wavelength_micron.inp",
+            canonical_dir / "mcmono_wavelength_micron.inp",
+        )
+        rad._postprocess_chi(
+            canonical_dir / "mean_intensity.bout",
+            uv_min,
+            uv_max,
+            compute_products=True,
+        )
+        volumes = compute_cell_volumes(rad.model)
+        product_metrics: dict[str, dict[str, np.ndarray]] = {}
+        for name in sorted(set(estimator_products[0]) & set(estimator_products[1])):
+            first = estimator_products[0][name]
+            second = estimator_products[1][name].to(first.units)
+            metrics = paired_radial_uncertainty_metrics(
+                first.magnitude,
+                second.magnitude,
+                volumes,
+                first_weight=first_weight,
+                tolerance=noise_tolerance,
+            )
+            metrics.pop("sigma")
+            if name != "chi_broad":
+                metrics.pop("mean")
+            product_metrics[name] = metrics
+
+        frequencies1, shell_j1 = radial_shell_mean_intensity(
+            estimator_dirs[0] / "mean_intensity.bout", volumes
+        )
+        frequencies2, shell_j2 = radial_shell_mean_intensity(
+            estimator_dirs[1] / "mean_intensity.bout", volumes
+        )
+        if not np.array_equal(frequencies1, frequencies2):
+            raise ValueError("Paired scout frequency grids differ")
+        shell_j_mean = first_weight * shell_j1 + (1.0 - first_weight) * shell_j2
+        shell_j_sigma = 0.5 * np.abs(shell_j1 - shell_j2)
+        shell_j_fractional = np.divide(
+            shell_j_sigma,
+            np.abs(shell_j_mean),
+            out=np.where(shell_j_sigma == 0.0, 0.0, np.inf),
+            where=np.abs(shell_j_mean) > 0.0,
+        )
+        wavelength_metrics = {
+            "frequencies_hz": frequencies1,
+            "shell_mean": shell_j_mean,
+            "shell_sigma": shell_j_sigma,
+            "shell_fractional": shell_j_fractional,
+            "shell_fractional_max": np.max(shell_j_fractional, axis=1),
+        }
+
+        reliable = np.all(shell_j_fractional <= float(noise_tolerance), axis=1)
+        for metrics in product_metrics.values():
+            reliable &= metrics["shell_fractional"] <= float(noise_tolerance)
+            reliable &= metrics["cell_fractional_p99"] <= float(noise_tolerance)
+
+        metadata = {
+            "seeds": list(seeds),
+            "nphot_estimators": list(counts),
+            "nphot_total": int(sum(counts)),
+            "estimator_sha256": hashes,
+            "canonical_scout_sha256": sha256_file(
+                canonical_dir / "mean_intensity.bout"
+            ),
+            "first_weight": float(first_weight),
+            "binary": binary_metadata,
+            "noise_tolerance": float(noise_tolerance),
+        }
+        (canonical_dir / "paired_scout.json").write_text(
+            json.dumps(jsonable(metadata), indent=2, sort_keys=True) + "\n"
+        )
+        return PairedScoutResult(
+            metadata=metadata,
+            products=product_metrics,
+            wavelength_metrics=wavelength_metrics,
+            reliable_shells=reliable,
+            estimator_dirs=estimator_dirs,
+        )
+
+    @staticmethod
+    def _remove_scout_estimators(scout: PairedScoutResult) -> None:
+        """Remove temporary paired intensity outputs after diagnostics are saved."""
+        for directory in scout.estimator_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def _stellar_screen_profiles(
+        self,
+        rad: "RadModel",
+        scout: PairedScoutResult,
+        product_specs,
+    ) -> tuple[np.ndarray, dict[str, dict[str, np.ndarray]]]:
+        """Return unattenuated direct-stellar fractions of measured UV products."""
+        import diskbridge
+
+        radii_cm = np.asarray(rad.model.mesh.centers("r").to("cm").magnitude, dtype=np.float64)
+        c_cgs = float(units("c").to("cm/s").magnitude)
+        profiles: dict[str, dict[str, np.ndarray]] = {}
+        volumes = compute_cell_volumes(rad.model)
+        for spec in product_specs:
+            source_strength = compute_star_uv_source_strength(
+                diskbridge.params,
+                float(spec.band.lam_min_nm) * 1.0e-7,
+                float(spec.band.lam_max_nm) * 1.0e-7,
+                weighting=spec.band.weight,
+            )
+            if spec.band.weight == "photon":
+                reference_flux = float(
+                    draine_reference_for_product(spec.field_name, product_specs)
+                    .to("1/(cm^2 s)")
+                    .magnitude
+                )
+            else:
+                reference_flux = c_cgs * float(
+                    draine_reference_for_product(spec.field_name, product_specs)
+                    .to("erg/cm^3")
+                    .magnitude
+                )
+            stellar_product = source_strength / (4.0 * np.pi * radii_cm**2 * reference_flux)
+            measured = scout.products[spec.field_name]["shell_mean"]
+            shell_fraction = np.divide(
+                stellar_product,
+                measured,
+                out=np.full_like(stellar_product, np.inf),
+                where=measured > 0.0,
+            )
+            measured_cells = np.asarray(
+                rad.uv_products[spec.field_name].to("dimensionless").magnitude,
+                dtype=np.float64,
+            )
+            cell_fraction = np.divide(
+                stellar_product[:, None, None],
+                measured_cells,
+                out=np.full_like(measured_cells, np.inf),
+                where=measured_cells > 0.0,
+            )
+            cell_p99 = np.empty(radii_cm.size, dtype=np.float64)
+            cell_max = np.empty(radii_cm.size, dtype=np.float64)
+            for ir in range(radii_cm.size):
+                cell_p99[ir] = weighted_quantile(cell_fraction[ir], volumes[ir], 0.99)
+                cell_max[ir] = float(np.nanmax(cell_fraction[ir]))
+            profiles[spec.field_name] = {
+                "shell_mean": shell_fraction,
+                "cell_p99": cell_p99,
+                "cell_max": cell_max,
+            }
+        return (
+            np.stack([profiles[spec.field_name]["shell_mean"] for spec in product_specs]),
+            profiles,
+        )
+
+    def _write_scout_diagnostics(
+        self,
+        rad: "RadModel",
+        scout: PairedScoutResult,
+        stellar_profiles: dict[str, dict[str, np.ndarray]],
+    ) -> Path:
+        """Persist paired-estimator radial diagnostics without full 3-D duplicates."""
+        output = rad.outputs_dir / "mcmono" / "uv_scout_metrics.npz"
+        arrays: dict[str, np.ndarray] = {
+            "r_au": np.asarray(rad.model.mesh.centers("r").to("au").magnitude),
+            "reliable_shells": scout.reliable_shells,
+            "frequency_hz": scout.wavelength_metrics["frequencies_hz"],
+            "j_shell_mean": scout.wavelength_metrics["shell_mean"],
+            "j_shell_sigma": scout.wavelength_metrics["shell_sigma"],
+            "j_shell_fractional": scout.wavelength_metrics["shell_fractional"],
+        }
+        for name, metrics in scout.products.items():
+            for metric_name in (
+                "shell_mean",
+                "shell_fractional",
+                "cell_fractional_p99",
+                "cell_fractional_max",
+                "cell_fractional_max_flat_index",
+                "failing_volume_fraction",
+            ):
+                arrays[f"{name}__{metric_name}"] = metrics[metric_name]
+        for name, metrics in stellar_profiles.items():
+            arrays[f"{name}__stellar_fraction"] = metrics["shell_mean"]
+            arrays[f"{name}__stellar_fraction_p99"] = metrics["cell_p99"]
+            arrays[f"{name}__stellar_fraction_max"] = metrics["cell_max"]
+        np.savez_compressed(output, **arrays)
+        return output
+
+    def _join_diagnostics(
+        self,
+        parent: PairedScoutResult,
+        child: PairedScoutResult,
+        *,
+        parent_comparison_idx: int,
+        child_comparison_idx: int,
+        volumes: np.ndarray,
+        tolerance: float,
+    ) -> dict[str, Any]:
+        """Compare one shared parent-child shell and warn on scientific mismatch."""
+        tiny = np.finfo(np.float64).tiny
+
+        def discrepancy(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            denominator = np.abs(a) + np.abs(b)
+            return np.divide(
+                2.0 * np.abs(a - b),
+                denominator,
+                out=np.zeros_like(denominator, dtype=np.float64),
+                where=denominator > tiny,
+            )
+
+        parent_j = parent.wavelength_metrics["shell_mean"][parent_comparison_idx]
+        child_j = child.wavelength_metrics["shell_mean"][child_comparison_idx]
+        parent_j_sigma = parent.wavelength_metrics["shell_sigma"][parent_comparison_idx]
+        child_j_sigma = child.wavelength_metrics["shell_sigma"][child_comparison_idx]
+        j_delta = discrepancy(parent_j, child_j)
+        j_sigma_rel = np.divide(
+            2.0 * np.sqrt(parent_j_sigma**2 + child_j_sigma**2),
+            np.abs(parent_j) + np.abs(child_j),
+            out=np.zeros_like(parent_j),
+            where=(np.abs(parent_j) + np.abs(child_j)) > tiny,
+        )
+
+        products: dict[str, dict[str, float]] = {}
+        warning = bool(np.any(j_delta > float(tolerance)))
+        common_products = sorted(set(parent.products) & set(child.products))
+        for name in common_products:
+            parent_mean = float(parent.products[name]["shell_mean"][parent_comparison_idx])
+            child_mean = float(child.products[name]["shell_mean"][child_comparison_idx])
+            delta = float(discrepancy(np.asarray(parent_mean), np.asarray(child_mean)))
+            parent_sigma = abs(parent_mean) * float(
+                parent.products[name]["shell_fractional"][parent_comparison_idx]
+            )
+            child_sigma = abs(child_mean) * float(
+                child.products[name]["shell_fractional"][child_comparison_idx]
+            )
+            denominator = abs(parent_mean) + abs(child_mean)
+            sigma_rel = (
+                2.0 * np.sqrt(parent_sigma**2 + child_sigma**2) / denominator
+                if denominator > tiny
+                else 0.0
+            )
+            products[name] = {"delta": delta, "sigma_rel": float(sigma_rel)}
+            warning |= delta > float(tolerance)
+
+        parent_cells = parent.products["chi_broad"]["mean"][parent_comparison_idx]
+        child_cells = child.products["chi_broad"]["mean"][child_comparison_idx]
+        if parent_cells.shape != child_cells.shape:
+            raise ValueError("Parent-child comparison shells have incompatible angular grids")
+        cell_delta = discrepancy(parent_cells, child_cells)
+        shell_weights = np.asarray(volumes[child_comparison_idx], dtype=np.float64)
+        cell_p99 = weighted_quantile(cell_delta, shell_weights, 0.99)
+        result = {
+            "parent_comparison_shell_idx": int(parent_comparison_idx),
+            "child_comparison_shell_idx": int(child_comparison_idx),
+            "tolerance": float(tolerance),
+            "warning": bool(warning),
+            "j_fractional_max": float(np.max(j_delta)),
+            "j_sigma_rel_max": float(np.max(j_sigma_rel)),
+            "frequency_hz": parent.wavelength_metrics["frequencies_hz"],
+            "parent_j": parent_j,
+            "child_j": child_j,
+            "parent_j_sigma": parent_j_sigma,
+            "child_j_sigma": child_j_sigma,
+            "j_fractional": j_delta,
+            "j_sigma_rel": j_sigma_rel,
+            "chi_cell_fractional_p99": float(cell_p99),
+            "products": products,
+        }
+        if warning:
+            logger.warning(
+                "Segmented UV join exceeds tolerance %.3g: max J discrepancy=%.3g, "
+                "chi cell P99=%.3g; continuing with the child field",
+                float(tolerance),
+                result["j_fractional_max"],
+                result["chi_cell_fractional_p99"],
+            )
+        return result
     
     def _run_segment_rt(
         self,
@@ -923,721 +1210,429 @@ class SegmentedRadRunner:
         )
         return merged_uv_products, uv_product_measured_mask, segment_id
 
-    def _run_final_segment_rt(
-        self,
-        *,
-        rad: 'RadModel',
-        indexer: Optional[ClipIndexer],
-        axis_order: Tuple[str, ...],
-        merged_T: Optional[Quantity],
-        merged_chi: Optional[Quantity],
-        nphot_therm_final: int,
-        nphot_mono_final: int,
-        mcmono_wav_um: np.ndarray,
-        force: bool,
-        compute_uv_products: bool = False,
-        uv_min: Optional[Quantity] = None,
-        uv_max: Optional[Quantity] = None,
-    ) -> tuple[Quantity, Quantity]:
-        self._run_segment_rt(
-            rad,
-            nphot_therm_final,
-            nphot_mono_final,
-            mcmono_wav_um,
-            force,
-            compute_uv_products=compute_uv_products,
-            uv_min=uv_min,
-            uv_max=uv_max,
-        )
-        return self._merge_segment_fields(
-            merged_T=merged_T,
-            merged_chi=merged_chi,
-            rad=rad,
-            indexer=indexer,
-            axis_order=axis_order,
-        )
-
     def run_segmented_rt(
         self,
         nphot_therm: Optional[int] = None,
         nphot_mono: Optional[int] = None,
         mcmono_n_wavelengths: Optional[int] = None,
         mcmono_uv_n_wavelengths: Optional[int] = None,
-        mcmono_wavelength_spacing: str = 'log',
+        mcmono_wavelength_spacing: str = "log",
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
-        segmented_external_source_mode: Optional[str] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
         diagnostic_plots: bool = False,
         plots_dir: Optional[str | Path] = None,
     ) -> Dict[str, Any]:
-        """Run segmented RADMC-3D and optionally make diagnostics.
+        """Run noise-aware segmented UV radiative transfer.
+
+        Scout UV calculations use two independent estimators whose total
+        packet count is the configured intermediate budget. Each child inherits
+        the parent source-shell UV spectrum while retaining the configured IR
+        and CMB spectrum. The selected terminal domain is then run once at the
+        configured final thermal and monochromatic packet budgets.
 
         Parameters
         ----------
-        nphot_therm : int, optional
-            Photon count for thermal Monte Carlo runs.
-        nphot_mono : int, optional
-            Photon count for monochromatic Monte Carlo runs.
-        mcmono_n_wavelengths : int, optional
-            Number of wavelengths to use for monochromatic transfer.
-        mcmono_uv_n_wavelengths : int, optional
-            Number of UV wavelengths to enforce.
-        mcmono_wavelength_spacing : str, optional
-            Wavelength spacing mode.
+        nphot_therm, nphot_mono : int, optional
+            Nominal thermal and monochromatic packet counts.
+        mcmono_n_wavelengths, mcmono_uv_n_wavelengths : int, optional
+            UV wavelength-grid controls. The UV-specific value takes
+            precedence when both are supplied.
+        mcmono_wavelength_spacing : {"log", "linear"}, optional
+            UV wavelength spacing.
         mcmono_wavelengths_um : ndarray, optional
-            Explicit monochromatic wavelengths in micron.
+            Explicit UV wavelengths in micron.
         max_splits : int, optional
-            Maximum number of radial split updates.
-        segmented_external_source_mode : str, optional
-            External source mode for inner segments.
+            Maximum number of child boundaries.
         segmented_final_nphot_multiplier : float, optional
-            Multiplier for the terminal segment photon count.
+            Packet multiplier for the terminal science calculation.
         force : bool, optional
-            Recompute outputs even when cached outputs are available.
+            Recompute cached RADMC-3D outputs.
         diagnostic_plots : bool, optional
-            Whether to write diagnostic plots after merged fields are built.
+            Write merged and per-segment diagnostics.
         plots_dir : str or pathlib.Path, optional
-            Diagnostic plot directory. Defaults to
-            ``base_model_dir / "plots" / "segmented_rt"``.
+            Diagnostic output directory.
 
         Returns
         -------
         dict
-            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+            Segment metadata, diagnostics, and merged radiation fields.
         """
-        from diskbridge.radmc3d.model import RadModel
+        from diskbridge.radmc3d.model import RadModel, _validate_radmc_photon_count
         from diskbridge.radmc3d.writer import RadWriter
-        
         import diskbridge
+
         params = diskbridge.params
-
-        tol = params.segmented_tol
-        window_fraction = params.segmented_window_fraction
-        shell_ncells = params.segmented_shell_ncells
-        r_clip_min_au = params.segmented_r_clip_min.to('au').magnitude
-        external_source_mode = (
-            getattr(params, "segmented_external_source_mode", "shell")
-            if segmented_external_source_mode is None
-            else segmented_external_source_mode
-        )
-        external_source_mode = str(external_source_mode).strip().lower()
-        if external_source_mode not in {"shell", "initial"}:
-            raise ValueError(
-                "segmented_external_source_mode must be 'shell' or 'initial', "
-                f"got {external_source_mode!r}"
-            )
-
-        wavelength_source_use = "uv" if external_source_mode == "initial" else "external"
+        tolerance = float(params.segmented_tol)
+        if tolerance <= 0.0:
+            raise ValueError("segmented_tol must be positive")
+        r_clip_min_au = float(params.segmented_r_clip_min.to("au").magnitude)
         stop_factor = float(params.segmented_stop_factor)
-        if stop_factor <= 0.0 or stop_factor >= 1.0:
+        if not 0.0 < stop_factor < 1.0:
             raise ValueError("segmented_stop_factor must be in (0, 1)")
 
-        nphot_therm_nominal = int(params.nphot_thermal) if nphot_therm is None else int(nphot_therm)
-        nphot_mono_nominal = int(params.nphot_mono) if nphot_mono is None else int(nphot_mono)
-
-        final_nphot_multiplier = float(
+        nominal_thermal = int(params.nphot_thermal if nphot_therm is None else nphot_therm)
+        nominal_mono = int(params.nphot_mono if nphot_mono is None else nphot_mono)
+        ratio = float(params.segmented_nphot_ratio)
+        if ratio <= 0.0:
+            raise ValueError("segmented_nphot_ratio must be positive")
+        scout_thermal = int(ratio * nominal_thermal)
+        scout_mono = int(ratio * nominal_mono)
+        if scout_thermal < 1 or scout_mono < 2:
+            raise ValueError(
+                "Resolved scout budgets require at least one thermal and two mcmono packets"
+            )
+        final_multiplier = float(
             getattr(params, "segmented_final_nphot_multiplier", 1.0)
             if segmented_final_nphot_multiplier is None
             else segmented_final_nphot_multiplier
         )
-        if final_nphot_multiplier < 1.0:
+        if final_multiplier < 1.0:
             raise ValueError("segmented_final_nphot_multiplier must be >= 1")
-
-        nphot_therm_final = int(final_nphot_multiplier * nphot_therm_nominal)
-        nphot_mono_final = int(final_nphot_multiplier * nphot_mono_nominal)
-        if nphot_therm_final < 1:
-            raise ValueError(
-                f"segmented_final_nphot_multiplier={final_nphot_multiplier} yields "
-                f"nphot_therm_final={nphot_therm_final}. Increase the multiplier or nphot_thermal."
+        final_thermal = int(final_multiplier * nominal_thermal)
+        final_mono = int(final_multiplier * nominal_mono)
+        if final_thermal < 1 or final_mono < 1:
+            raise ValueError("Resolved final packet budgets must be positive")
+        _validate_radmc_photon_count(scout_thermal, name="segmented scout nphot_thermal")
+        scout_counts = (scout_mono // 2, scout_mono - scout_mono // 2)
+        for estimator, count in enumerate(scout_counts, start=1):
+            _validate_radmc_photon_count(
+                count,
+                name=f"segmented scout estimator {estimator} nphot_mono",
             )
-        if nphot_mono_final < 1:
-            raise ValueError(
-                f"segmented_final_nphot_multiplier={final_nphot_multiplier} yields "
-                f"nphot_mono_final={nphot_mono_final}. Increase the multiplier or nphot_mono."
-            )
+        _validate_radmc_photon_count(final_thermal, name="segmented final nphot_thermal")
+        _validate_radmc_photon_count(final_mono, name="segmented final nphot_mono")
 
-        nphot_ratio = float(params.segmented_nphot_ratio)
-        if nphot_ratio <= 0.0:
-            raise ValueError("segmented_nphot_ratio must be > 0")
-
-        nphot_therm_intermediate = int(nphot_ratio * nphot_therm_nominal)
-        nphot_mono_intermediate = int(nphot_ratio * nphot_mono_nominal)
-        if nphot_therm_intermediate < 1:
-            raise ValueError(
-                f"segmented_nphot_ratio={nphot_ratio} yields nphot_therm_intermediate={nphot_therm_intermediate}. "
-                "Increase segmented_nphot_ratio or nphot_thermal."
-            )
-        if nphot_mono_intermediate < 1:
-            raise ValueError(
-                f"segmented_nphot_ratio={nphot_ratio} yields nphot_mono_intermediate={nphot_mono_intermediate}. "
-                "Increase segmented_nphot_ratio or nphot_mono."
-            )
-
-        logger.info(
-            "Segmented RT photons: ratio=%.6g, final_multiplier=%.6g, "
-            "mctherm=%d/%d/%d, mcmono=%d/%d/%d"
-            % (
-                float(nphot_ratio),
-                float(final_nphot_multiplier),
-                int(nphot_therm_intermediate),
-                int(nphot_therm_nominal),
-                int(nphot_therm_final),
-                int(nphot_mono_intermediate),
-                int(nphot_mono_nominal),
-                int(nphot_mono_final),
-            )
-        )
-
-        if max_splits is None:
-            max_splits = int(params.segmented_max_splits)
-        max_splits = int(max_splits)
+        max_splits = int(params.segmented_max_splits if max_splits is None else max_splits)
         if max_splits < 0:
-            raise ValueError("max_splits must be >= 0")
-
+            raise ValueError("max_splits must be non-negative")
         mesh = self.base_model.mesh
-        if mesh is None:
-            raise ValueError("Base model has no mesh")
+        if mesh is None or mesh.coord_system != "spherical":
+            raise ValueError("Segmented RT requires a spherical base mesh")
         axis_order = mesh.axis_names()
 
-        segments: list[dict[str, Any]] = []
-        scout_runs: list[dict[str, Any]] = []
-        split_radii_au: list[float] = []
-        r_edges_base_au = self.base_model.mesh.edges('r').to('au').magnitude  # type: ignore[union-attr]
-        current_outer_rmax_au = float(np.max(r_edges_base_au))
-        outer_rad: Optional[RadModel] = None
-        merged_T: Optional[Quantity] = None
-        merged_chi: Optional[Quantity] = None
-        merged_uv_products: Optional[dict[str, Quantity]] = None
-        uv_product_measured_mask: Optional[np.ndarray] = None
-        segment_id: Optional[np.ndarray] = None
-        mcmono_wav_um_use: Optional[np.ndarray] = None
-        mcmono_wav_um_disc: Optional[np.ndarray] = None
         cfg = get_config()
         runtime_mode = validate_uv_chemistry_config(cfg, segmented=True)
-        uv_products_enabled = runtime_mode.products_enabled
-        uv_cfg = cfg.get("radmc3d", {}).get("uv_products", {})
-        active_specs = uv_product_specs_from_config(uv_cfg)
-        active_edges_nm = uv_product_edges_from_specs(active_specs)
-        broad_spec = next(spec for spec in active_specs if spec.field_name == "chi_broad")
-        disc_uv_min = Quantity(float(broad_spec.band.lam_min_nm), "nm")
-        disc_uv_max = Quantity(float(broad_spec.band.lam_max_nm), "nm")
-        product_threshold_r_au = (
-            self._stellar_product_threshold_radius_au(
-                active_specs,
-                runtime_mode.stellar_fraction_threshold,
-            )
-            if uv_products_enabled
-            else None
+        product_specs = uv_product_specs_from_config(
+            cfg.get("radmc3d", {}).get("uv_products", {})
         )
-        if product_threshold_r_au is not None:
-            logger.info(
-                "UV product stellar-fraction threshold radius: %.6g au "
-                "(threshold=%.3g)",
-                float(product_threshold_r_au),
-                float(runtime_mode.stellar_fraction_threshold),
-            )
+        product_edges_nm = uv_product_edges_from_specs(product_specs)
+        broad_spec = next(spec for spec in product_specs if spec.field_name == "chi_broad")
+        uv_min = Quantity(float(broad_spec.band.lam_min_nm), "nm")
+        uv_max = Quantity(float(broad_spec.band.lam_max_nm), "nm")
+        n_uv = int(
+            params.uv_n_wavelengths
+            if mcmono_uv_n_wavelengths is None
+            else mcmono_uv_n_wavelengths
+        )
+        n_wavelengths = (
+            int(mcmono_uv_n_wavelengths)
+            if mcmono_uv_n_wavelengths is not None
+            else int(mcmono_n_wavelengths)
+            if mcmono_n_wavelengths is not None
+            else n_uv
+        )
+        wavelengths_um = build_mcmono_wavelengths(
+            wavelength_source="uv",
+            wavelength_file=None,
+            uv_min_um=float(uv_min.to("micron").magnitude),
+            uv_max_um=float(uv_max.to("micron").magnitude),
+            n_wavelengths=n_wavelengths,
+            n_uv_enforce=0,
+            spacing=mcmono_wavelength_spacing,
+            provided_wavelengths=mcmono_wavelengths_um,
+            extra_enforced_wavelengths_um=product_edges_nm * 1.0e-3,
+        )
 
-        base_opacity_dir = self.base_model_dir / 'radmc3d_inputs'
+        logger.info(
+            "Noise-aware segmented RT: scout mctherm=%d, paired mcmono total=%d, "
+            "final mctherm=%d, final mcmono=%d, segmented_tol=%.3g",
+            scout_thermal,
+            scout_mono,
+            final_thermal,
+            final_mono,
+            tolerance,
+        )
+
+        base_opacity_dir = self.base_model_dir / "radmc3d_inputs"
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
-
-        if not list(base_opacity_dir.glob('dustkappa_*.inp')):
+        if not list(base_opacity_dir.glob("dustkappa_*.inp")):
             RadWriter(self.base_model, organize_files=True).compute_and_write_dust_opacities(
                 self.base_model_dir
             )
-            if not list(base_opacity_dir.glob('dustkappa_*.inp')):
-                raise RuntimeError(
-                    f"No dustkappa_*.inp files found in {base_opacity_dir} after computing dust opacities"
-                )
+        if not list(base_opacity_dir.glob("dustkappa_*.inp")):
+            raise RuntimeError(f"No dustkappa_*.inp files found in {base_opacity_dir}")
+
+        merged_temperature: Optional[Quantity] = None
+        merged_chi: Optional[Quantity] = None
+        merged_uv_products: Optional[dict[str, Quantity]] = None
+        measured_mask: Optional[np.ndarray] = None
+        segment_id: Optional[np.ndarray] = None
+        segments: list[dict[str, Any]] = []
+        split_radii_au: list[float] = []
+        joins: list[dict[str, Any]] = []
+        scout_runs: list[dict[str, Any]] = []
+
+        current_outer_rmax_au = float(np.max(mesh.edges("r").to("au").magnitude))
+        parent_rad: Optional[RadModel] = None
+        parent_scout: Optional[PairedScoutResult] = None
+        parent_split_info: Optional[dict[str, Any]] = None
 
         for level in range(max_splits + 1):
             if level == 0:
-                seg_bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
-                seg_work_dir = self.base_model_dir / 'segments' / f'segment_{level:02d}_full'
+                bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
+                work_dir = self.base_model_dir / "segments" / "segment_00_full"
+                segment_model = self.base_model
+                segment_indexer = None
             else:
-                seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
-                seg_work_dir = self.base_model_dir / 'segments' / f'segment_{level:02d}_rmax_{current_outer_rmax_au:.6g}au'
+                bounds = {"r": (None, current_outer_rmax_au * units("au"))}
+                work_dir = (
+                    self.base_model_dir
+                    / "segments"
+                    / f"segment_{level:02d}_rmax_{current_outer_rmax_au:.6g}au"
+                )
+                definition = SegmentDefinition(f"segment_{level:02d}", bounds, work_dir)
+                segment_model, segment_indexer = self._build_segment_model_and_indexer(definition)
 
-            segment = SegmentDefinition(
-                name=f'segment_{level:02d}',
-                bounds=seg_bounds,
-                work_dir=seg_work_dir,
+            rad = self._setup_segment(segment_model, work_dir, base_opacity_dir)
+            if level > 0:
+                if parent_rad is None:
+                    raise RuntimeError("Missing parent segment for inherited UV source")
+                self._inherit_external_source(
+                    parent_rad,
+                    rad,
+                    current_outer_rmax_au,
+                    uv_min,
+                    uv_max,
+                )
+
+            rad.compute_temperature(
+                nphot=scout_thermal,
+                output_dir=rad.outputs_dir / "temperature",
+                force=force,
             )
+            scout = self._run_paired_uv_scout(
+                rad,
+                nphot_total=scout_mono,
+                wavelengths_um=wavelengths_um,
+                uv_min=uv_min,
+                uv_max=uv_max,
+                noise_tolerance=tolerance,
+                level=level,
+                force=force,
+            )
+            stellar_array, stellar_profiles = self._stellar_screen_profiles(
+                rad, scout, product_specs
+            )
+            metrics_file = self._write_scout_diagnostics(rad, scout, stellar_profiles)
 
-            if level == 0:
-                seg_model = self.base_model
-                seg_indexer = None
+            join: Optional[dict[str, Any]] = None
+            if parent_scout is not None and parent_split_info is not None:
+                child_comparison_idx = int(rad.model.mesh.shape[0] - 1)
+                join = self._join_diagnostics(
+                    parent_scout,
+                    scout,
+                    parent_comparison_idx=int(parent_split_info["comparison_shell_idx"]),
+                    child_comparison_idx=child_comparison_idx,
+                    volumes=compute_cell_volumes(rad.model),
+                    tolerance=tolerance,
+                )
+                (rad.outputs_dir / "mcmono" / "join_diagnostics.json").write_text(
+                    json.dumps(jsonable(join), indent=2, sort_keys=True) + "\n"
+                )
+                joins.append(join)
+
+            self._remove_scout_estimators(scout)
+
+            split_info: Optional[dict[str, Any]] = None
+            terminal_reason: Optional[str] = None
+            if level >= max_splits:
+                terminal_reason = "maximum_splits"
             else:
-                seg_model, seg_indexer = self._build_segment_model_and_indexer(segment)
+                try:
+                    split_radius, raw_split_info = find_noise_aware_split(
+                        rad.model.mesh.edges("r").to("au").magnitude,
+                        scout.reliable_shells,
+                        stellar_array,
+                        stellar_fraction_threshold=runtime_mode.stellar_fraction_threshold,
+                        r_clip_min_au=r_clip_min_au,
+                    )
+                    split_info = {
+                        key: value
+                        for key, value in raw_split_info.items()
+                        if key.endswith("_idx")
+                    }
+                    split_info["r_split_au"] = float(split_radius)
+                    radial_centers_au = np.asarray(
+                        rad.model.mesh.centers("r").to("au").magnitude,
+                        dtype=np.float64,
+                    )
+                    split_info["comparison_shell_r_au"] = float(
+                        radial_centers_au[int(split_info["comparison_shell_idx"])]
+                    )
+                    split_info["source_shell_r_au"] = float(
+                        radial_centers_au[int(split_info["source_shell_idx"])]
+                    )
+                    if float(split_radius) >= stop_factor * current_outer_rmax_au:
+                        terminal_reason = "insufficient_radial_reduction"
+                except ValueError as exc:
+                    terminal_reason = str(exc)
 
-            rad = self._setup_segment(seg_model, segment.work_dir, base_opacity_dir)
+            segment_entry: dict[str, Any] = {
+                "level": int(level),
+                "work_dir": str(work_dir),
+                "r_max_au": float(current_outer_rmax_au),
+                "nphot_thermal": int(scout_thermal),
+                "nphot_mono": int(scout_mono),
+                "scout": jsonable(scout.metadata),
+                "scout_metrics_file": str(metrics_file),
+                "noise_reliable_shell_count": int(np.count_nonzero(scout.reliable_shells)),
+                "noise_shell_count": int(scout.reliable_shells.size),
+                "split": split_info,
+                "join": join,
+                "stellar_fraction_threshold": float(
+                    runtime_mode.stellar_fraction_threshold
+                ),
+                "has_temperature": True,
+                "has_mcmono": True,
+                "is_final": terminal_reason is not None,
+            }
+            scout_runs.append(dict(segment_entry))
 
-            if mcmono_wav_um_use is None:
-                n_uv = params.uv_n_wavelengths if mcmono_uv_n_wavelengths is None else int(mcmono_uv_n_wavelengths)
-                n_wavelengths_use = mcmono_n_wavelengths
-                if wavelength_source_use == "uv" and n_wavelengths_use is None:
-                    n_wavelengths_use = n_uv
-                n_uv_enforce_use = 0 if wavelength_source_use == "uv" else n_uv
-                mcmono_wav_um_use = build_mcmono_wavelengths(
-                    wavelength_source=wavelength_source_use,
-                    wavelength_file=rad.inputs_dir / 'wavelength_micron.inp',
-                    uv_min_um=params.uv_min.to('micron').magnitude,
-                    uv_max_um=params.uv_max.to('micron').magnitude,
-                    n_wavelengths=n_wavelengths_use,
-                    n_uv_enforce=n_uv_enforce_use,
-                    spacing=mcmono_wavelength_spacing,
-                    provided_wavelengths=mcmono_wavelengths_um,
+            if terminal_reason is not None:
+                self._run_segment_rt(
+                    rad,
+                    final_thermal,
+                    final_mono,
+                    wavelengths_um,
+                    True,
+                    compute_uv_products=True,
+                    uv_min=uv_min,
+                    uv_max=uv_max,
                 )
-                mcmono_wav_um_disc = build_mcmono_wavelengths(
-                    wavelength_source=wavelength_source_use,
-                    wavelength_file=rad.inputs_dir / 'wavelength_micron.inp',
-                    uv_min_um=disc_uv_min.to('micron').magnitude,
-                    uv_max_um=disc_uv_max.to('micron').magnitude,
-                    n_wavelengths=n_wavelengths_use,
-                    n_uv_enforce=n_uv_enforce_use,
-                    spacing=mcmono_wavelength_spacing,
-                    provided_wavelengths=mcmono_wavelengths_um,
-                    extra_enforced_wavelengths_um=active_edges_nm * 1.0e-3,
-                )
+                segment_entry["nphot_thermal"] = int(final_thermal)
+                segment_entry["nphot_mono"] = int(final_mono)
+                segment_entry["terminal_reason"] = terminal_reason
+                segment_entry["scout_canonical_replaced_by_final"] = True
+            else:
+                split_radius = float(split_info["r_split_au"])
+                split_radii_au.append(split_radius)
 
-            if external_source_mode == "shell" and level > 0 and outer_rad is not None:
-                self._inherit_external_source(outer_rad, rad, current_outer_rmax_au, shell_ncells)
-
-            self._run_segment_rt(rad, nphot_therm_intermediate, nphot_mono_intermediate, mcmono_wav_um_use, force)
-
-            merged_T, merged_chi = self._merge_segment_fields(
-                merged_T=merged_T,
+            merged_temperature, merged_chi = self._merge_segment_fields(
+                merged_T=merged_temperature,
                 merged_chi=merged_chi,
                 rad=rad,
-                indexer=seg_indexer,
+                indexer=segment_indexer,
                 axis_order=axis_order,
             )
-            if uv_products_enabled:
-                merged_uv_products, uv_product_measured_mask, segment_id = (
-                    self._merge_segment_uv_products(
-                        merged_uv_products=merged_uv_products,
-                        uv_product_measured_mask=uv_product_measured_mask,
-                        segment_id=segment_id,
-                        rad=rad,
-                        indexer=seg_indexer,
-                        axis_order=axis_order,
-                        segment_level=level,
-                        measured=False,
-                    )
-                )
-
-            segments.append(
-                {
-                    'level': int(level),
-                    'work_dir': str(segment.work_dir),
-                    'r_max_au': float(current_outer_rmax_au),
-                    'nphot_thermal': int(nphot_therm_intermediate),
-                    'nphot_mono': int(nphot_mono_intermediate),
-                    'has_temperature': True,
-                    'has_mcmono': True,
-                    'is_final': False,
-                }
-            )
-
-            force_product_final = (
-                product_threshold_r_au is not None
-                and float(current_outer_rmax_au) <= float(product_threshold_r_au)
-            )
-            if force_product_final:
-                logger.info(
-                    "UV product threshold reached at level=%d "
-                    "(segment r_max=%.6g au <= threshold radius %.6g au); "
-                    "rerunning as product-measured final segment",
-                    int(level),
-                    float(current_outer_rmax_au),
-                    float(product_threshold_r_au),
-                )
-
-            if level >= max_splits or force_product_final:
-                if (
-                    nphot_therm_intermediate != nphot_therm_final
-                    or nphot_mono_intermediate != nphot_mono_final
-                    or uv_products_enabled
-                ):
-                    if (
-                        nphot_therm_intermediate != nphot_therm_final
-                        or nphot_mono_intermediate != nphot_mono_final
-                    ):
-                        scout_runs.append(dict(segments[-1]))
-                    merged_T, merged_chi = self._run_final_segment_rt(
-                        rad=rad,
-                        indexer=seg_indexer,
-                        axis_order=axis_order,
-                        merged_T=merged_T,
-                        merged_chi=merged_chi,
-                        nphot_therm_final=nphot_therm_final,
-                        nphot_mono_final=nphot_mono_final,
-                        mcmono_wav_um=mcmono_wav_um_disc,
-                        force=force,
-                        compute_uv_products=uv_products_enabled,
-                        uv_min=disc_uv_min,
-                        uv_max=disc_uv_max,
-                    )
-                    if uv_products_enabled:
-                        merged_uv_products, uv_product_measured_mask, segment_id = (
-                            self._merge_segment_uv_products(
-                                merged_uv_products=merged_uv_products,
-                                uv_product_measured_mask=uv_product_measured_mask,
-                                segment_id=segment_id,
-                                rad=rad,
-                                indexer=seg_indexer,
-                                axis_order=axis_order,
-                                segment_level=level,
-                                measured=True,
-                            )
-                        )
-                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
-                segments[-1]['nphot_mono'] = int(nphot_mono_final)
-                segments[-1]['is_final'] = True
-                outer_rad = rad
-                break
-
-            if merged_T is None or merged_chi is None:
-                raise ValueError("Internal error: missing merged fields")
-
-            rad.model.gas_register(
-                'temperature',
-                Field(quantity='temperature', data=rad.dust_temperature, axis_order=rad.model.mesh.axis_names()),
-            )
-            rad.model.gas_register(
-                'chi',
-                Field(quantity='chi', data=rad.chi, axis_order=rad.model.mesh.axis_names()),
-            )
-            rad.model.validate_canonical_axis_orders(include_dust=False)
-
-            r_au, chi_profile = compute_volume_weighted_mean_radial_profile(rad.model, 'chi')
-            _, T_profile = compute_volume_weighted_mean_radial_profile(rad.model, 'temperature')
-            r_edges_au = rad.model.mesh.edges('r').to('au').magnitude
-
-            try:
-                r_split_au, r_split_info = find_r_split(
-                    r_au=r_au,
-                    r_edges_au=r_edges_au,
-                    chi_profile=chi_profile,
-                    T_profile=T_profile,
-                    tol_chi=tol,
-                    tol_T=tol,
-                    window_fraction=window_fraction,
-                    r_clip_min_au=float(r_clip_min_au),
-                )
-                if product_threshold_r_au is not None and r_split_au > product_threshold_r_au:
-                    logger.info(
-                        "UV product threshold caps r_split from %.6g au to %.6g au",
-                        float(r_split_au),
-                        float(product_threshold_r_au),
-                    )
-                    r_split_au = max(float(product_threshold_r_au), float(r_clip_min_au))
-                    r_split_info = dict(r_split_info)
-                    r_split_info["uv_product_threshold_r_au"] = float(product_threshold_r_au)
-                logger.info(
-                    "find_r_split: level=%d current_outer_rmax_au=%.6g r_split_au=%.6g "
-                    "r_split_cell_idx=%s window_r_min=%.6g chi_asymptote=%.6g T_asymptote=%.6g "
-                    "chi_dev_at_split=%.6g T_dev_at_split=%.6g"
-                    % (
-                        int(level),
-                        float(current_outer_rmax_au),
-                        float(r_split_au),
-                        str(r_split_info.get('r_split_cell_idx')),
-                        float(r_split_info.get('window_r_min', np.nan)),
-                        float(r_split_info.get('chi_asymptote', np.nan)),
-                        float(r_split_info.get('T_asymptote', np.nan)),
-                        float(r_split_info.get('chi_dev_at_split', np.nan)),
-                        float(r_split_info.get('T_dev_at_split', np.nan)),
-                    )
-                )
-            except ValueError:
-                if (
-                    nphot_therm_intermediate != nphot_therm_final
-                    or nphot_mono_intermediate != nphot_mono_final
-                    or uv_products_enabled
-                ):
-                    if (
-                        nphot_therm_intermediate != nphot_therm_final
-                        or nphot_mono_intermediate != nphot_mono_final
-                    ):
-                        scout_runs.append(dict(segments[-1]))
-                    merged_T, merged_chi = self._run_final_segment_rt(
-                        rad=rad,
-                        indexer=seg_indexer,
-                        axis_order=axis_order,
-                        merged_T=merged_T,
-                        merged_chi=merged_chi,
-                        nphot_therm_final=nphot_therm_final,
-                        nphot_mono_final=nphot_mono_final,
-                        mcmono_wav_um=mcmono_wav_um_disc,
-                        force=force,
-                        compute_uv_products=uv_products_enabled,
-                        uv_min=disc_uv_min,
-                        uv_max=disc_uv_max,
-                    )
-                    if uv_products_enabled:
-                        merged_uv_products, uv_product_measured_mask, segment_id = (
-                            self._merge_segment_uv_products(
-                                merged_uv_products=merged_uv_products,
-                                uv_product_measured_mask=uv_product_measured_mask,
-                                segment_id=segment_id,
-                                rad=rad,
-                                indexer=seg_indexer,
-                                axis_order=axis_order,
-                                segment_level=level,
-                                measured=True,
-                            )
-                        )
-                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
-                segments[-1]['nphot_mono'] = int(nphot_mono_final)
-                segments[-1]['is_final'] = True
-                outer_rad = rad
-                break
-
-            if float(r_split_au) >= float(current_outer_rmax_au):
-                if (
-                    nphot_therm_intermediate != nphot_therm_final
-                    or nphot_mono_intermediate != nphot_mono_final
-                    or uv_products_enabled
-                ):
-                    if (
-                        nphot_therm_intermediate != nphot_therm_final
-                        or nphot_mono_intermediate != nphot_mono_final
-                    ):
-                        scout_runs.append(dict(segments[-1]))
-                    merged_T, merged_chi = self._run_final_segment_rt(
-                        rad=rad,
-                        indexer=seg_indexer,
-                        axis_order=axis_order,
-                        merged_T=merged_T,
-                        merged_chi=merged_chi,
-                        nphot_therm_final=nphot_therm_final,
-                        nphot_mono_final=nphot_mono_final,
-                        mcmono_wav_um=mcmono_wav_um_disc,
-                        force=force,
-                        compute_uv_products=uv_products_enabled,
-                        uv_min=disc_uv_min,
-                        uv_max=disc_uv_max,
-                    )
-                    if uv_products_enabled:
-                        merged_uv_products, uv_product_measured_mask, segment_id = (
-                            self._merge_segment_uv_products(
-                                merged_uv_products=merged_uv_products,
-                                uv_product_measured_mask=uv_product_measured_mask,
-                                segment_id=segment_id,
-                                rad=rad,
-                                indexer=seg_indexer,
-                                axis_order=axis_order,
-                                segment_level=level,
-                                measured=True,
-                            )
-                        )
-                segments[-1]['nphot_thermal'] = int(nphot_therm_final)
-                segments[-1]['nphot_mono'] = int(nphot_mono_final)
-                segments[-1]['is_final'] = True
-                outer_rad = rad
-                break
-
-            if float(r_split_au) >= stop_factor * float(current_outer_rmax_au):
-                if (
-                    nphot_therm_intermediate == nphot_therm_final
-                    and nphot_mono_intermediate == nphot_mono_final
-                    and not uv_products_enabled
-                ):
-                    segments[-1]['is_final'] = True
-                    outer_rad = rad
-                    break
-
-                if (
-                    nphot_therm_intermediate != nphot_therm_final
-                    or nphot_mono_intermediate != nphot_mono_final
-                ):
-                    scout_runs.append(dict(segments.pop()))
-                else:
-                    segments.pop()
-                final_work_dir = self.base_model_dir / 'segments' / f'segment_{level + 1:02d}_rmax_{current_outer_rmax_au:.6g}au_final'
-                final_seg_bounds = {'r': (None, current_outer_rmax_au * units('au'))}
-                final_segment = SegmentDefinition(
-                    name=f'segment_{level + 1:02d}_final',
-                    bounds=final_seg_bounds,
-                    work_dir=final_work_dir,
-                )
-                final_model, final_indexer = self._build_segment_model_and_indexer(final_segment)
-                
-                final_rad = self._setup_segment(final_model, final_work_dir, base_opacity_dir)
-                
-                if external_source_mode == "shell" and outer_rad is not None:
-                    self._inherit_external_source(outer_rad, final_rad, current_outer_rmax_au, shell_ncells)
-                
-                self._run_segment_rt(
-                    final_rad,
-                    nphot_therm_final,
-                    nphot_mono_final,
-                    mcmono_wav_um_disc,
-                    force,
-                    compute_uv_products=uv_products_enabled,
-                    uv_min=disc_uv_min,
-                    uv_max=disc_uv_max,
-                )
-
-                merged_T = self._merge_field(
-                    merged=merged_T,
-                    child=final_rad.dust_temperature,
-                    indexer=final_indexer,
+            if runtime_mode.products_enabled:
+                merged_uv_products, measured_mask, segment_id = self._merge_segment_uv_products(
+                    merged_uv_products=merged_uv_products,
+                    uv_product_measured_mask=measured_mask,
+                    segment_id=segment_id,
+                    rad=rad,
+                    indexer=segment_indexer,
                     axis_order=axis_order,
+                    segment_level=level,
+                    measured=True,
                 )
-                merged_chi = self._merge_field(
-                    merged=merged_chi,
-                    child=final_rad.chi,
-                    indexer=final_indexer,
-                    axis_order=axis_order,
-                )
-                if uv_products_enabled:
-                    merged_uv_products, uv_product_measured_mask, segment_id = (
-                        self._merge_segment_uv_products(
-                            merged_uv_products=merged_uv_products,
-                            uv_product_measured_mask=uv_product_measured_mask,
-                            segment_id=segment_id,
-                            rad=final_rad,
-                            indexer=final_indexer,
-                            axis_order=axis_order,
-                            segment_level=level + 1,
-                            measured=True,
-                        )
-                    )
-                segments.append(
-                    {
-                        'level': int(level + 1),
-                        'work_dir': str(final_segment.work_dir),
-                        'r_max_au': float(current_outer_rmax_au),
-                        'nphot_thermal': int(nphot_therm_final),
-                        'nphot_mono': int(nphot_mono_final),
-                        'has_temperature': True,
-                        'has_mcmono': True,
-                        'is_final': True,
-                    }
-                )
+            segments.append(segment_entry)
 
-                outer_rad = final_rad
+            if terminal_reason is not None:
                 break
+            parent_rad = rad
+            parent_scout = scout
+            parent_split_info = split_info
+            current_outer_rmax_au = float(split_info["r_split_au"])
 
-            split_radii_au.append(float(r_split_au))
-
-            outer_rad = rad
-            current_outer_rmax_au = float(r_split_au)
-
-        if merged_T is None or merged_chi is None:
-            raise ValueError("Segmented RT produced no results")
-
-        # Finalize: attach merged fields to the *base* model in canonical names.
-        # Downstream chemistry and imaging should not need any manual plumbing.
+        if merged_temperature is None or merged_chi is None:
+            raise RuntimeError("Segmented RT produced no merged fields")
         self.base_model.gas_register(
-            'dust_temperature',
-            Field(quantity='dust_temperature', data=merged_T, axis_order=axis_order),
+            "dust_temperature",
+            Field("dust_temperature", merged_temperature, axis_order=axis_order),
         )
         self.base_model.gas_register(
-            'chi',
-            Field(quantity='chi', data=merged_chi, axis_order=axis_order),
+            "chi", Field("chi", merged_chi, axis_order=axis_order)
         )
-
-        if uv_products_enabled:
-            if merged_uv_products is None:
-                raise ValueError("Segmented RT produced no merged UV products")
-            if uv_product_measured_mask is None or segment_id is None:
-                raise ValueError("Segmented RT produced incomplete UV product metadata")
-
+        if runtime_mode.products_enabled:
+            if merged_uv_products is None or measured_mask is None or segment_id is None:
+                raise RuntimeError("Segmented RT produced incomplete UV-product state")
             self._register_mesh_shaped_uv_products(merged_uv_products, axis_order)
             self.base_model.gas_register(
-                'uv_product_measured_mask',
+                "uv_product_measured_mask",
                 Field(
-                    quantity='uv_product_measured_mask',
-                    data=Quantity(uv_product_measured_mask, "dimensionless"),
+                    "uv_product_measured_mask",
+                    Quantity(measured_mask, "dimensionless"),
                     axis_order=axis_order,
                 ),
             )
             self.base_model.gas_register(
-                'segment_id',
-                Field(
-                    quantity='segment_id',
-                    data=Quantity(segment_id, "dimensionless"),
-                    axis_order=axis_order,
-                ),
+                "segment_id",
+                Field("segment_id", Quantity(segment_id, "dimensionless"), axis_order=axis_order),
             )
-
         self.base_model.validate_canonical_axis_orders(include_dust=False)
 
-        # Write merged dust temperature into the base model_dir outputs so RadImage
-        # (and any external RADMC-3D calls) can find dust_temperature.* without
-        # workflow-level custom file writing.
         base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
-        base_rad.dust_temperature = merged_T
-        if uv_products_enabled and merged_uv_products is not None:
-            base_rad.uv_products = merged_uv_products
-            base_rad.chi = merged_uv_products["chi_broad"]
-            base_rad.radiation_mode = "local_uv_products"
-        else:
-            base_rad.uv_products = {"chi_broad": merged_chi}
-            base_rad.chi = merged_chi
-            base_rad.radiation_mode = "local_chi"
+        base_rad.dust_temperature = merged_temperature
+        base_rad.chi = merged_uv_products["chi_broad"] if merged_uv_products else merged_chi
+        base_rad.uv_products = merged_uv_products or {"chi_broad": merged_chi}
+        base_rad.radiation_mode = (
+            "local_uv_products" if runtime_mode.products_enabled else "local_chi"
+        )
+        if self.base_model.dust is None or int(self.base_model.dust.nbin) < 1:
+            raise ValueError("Segmented RT requires at least one dust species")
         base_rad.outputs_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.base_model.dust is None:
-            raise ValueError("Segmented RT requires dust model to write dust_temperature")
-        nspec = int(self.base_model.dust.nbin)
-        if nspec <= 0:
-            raise ValueError(f"Invalid dust nbin={nspec}")
-
-        dustopac_path = base_rad.inputs_dir / 'dustopac.inp'
-        if dustopac_path.exists():
-            with open(dustopac_path, 'r') as f:
-                _fmt = f.readline().strip()
-                nbin_line = f.readline().strip()
-            try:
-                nbin_file = int(nbin_line)
-            except Exception as e:
-                raise ValueError(f"Could not parse dustopac.inp nbin from {dustopac_path}: {e}")
-            if nbin_file != nspec:
-                raise ValueError(
-                    "dust species mismatch: model.dust.nbin=%d but dustopac.inp declares %d" % (int(nspec), int(nbin_file))
-                )
-
         base_rad.writer.write_dust_temperature(
-            merged_T,
+            merged_temperature,
             output_dir=base_rad.outputs_dir,
-            nspec=nspec,
+            nspec=int(self.base_model.dust.nbin),
         )
 
-        logger.info(
-            f"Segmented RT complete. splits={len(split_radii_au)} max_splits={max_splits}"
-        )
-
-        out = {
-            'mode': external_source_mode,
-            'segmented_external_source_mode': external_source_mode,
-            'mcmono_wavelength_source': wavelength_source_use,
-            'segmented_final_nphot_multiplier': float(final_nphot_multiplier),
-            'nphot_thermal_nominal': int(nphot_therm_nominal),
-            'nphot_mono_nominal': int(nphot_mono_nominal),
-            'nphot_thermal_final': int(nphot_therm_final),
-            'nphot_mono_final': int(nphot_mono_final),
-            'split_radii_au': split_radii_au,
-            'segments': segments,
-            'scout_runs': scout_runs,
-            'temperature': merged_T,
-            'chi': base_rad.chi,
-            'uv_products': merged_uv_products,
-            'uv_product_mode': 'disc_segment_only',
-            'outer_product_policy': runtime_mode.outer_product_policy,
-            'uv_product_measured_mask': uv_product_measured_mask,
-            'segment_id': segment_id,
+        result = {
+            "mode": "noise_aware_inherited_uv",
+            "mcmono_wavelength_source": "uv",
+            "segmented_final_nphot_multiplier": final_multiplier,
+            "segmented_tol": tolerance,
+            "stellar_fraction_threshold": runtime_mode.stellar_fraction_threshold,
+            "nphot_thermal_nominal": nominal_thermal,
+            "nphot_mono_nominal": nominal_mono,
+            "nphot_thermal_final": final_thermal,
+            "nphot_mono_final": final_mono,
+            "split_radii_au": split_radii_au,
+            "segments": segments,
+            "scout_runs": scout_runs,
+            "joins": joins,
+            "temperature": merged_temperature,
+            "chi": base_rad.chi,
+            "uv_products": merged_uv_products,
+            "uv_product_mode": "all_segments_measured",
+            "outer_product_policy": None,
+            "uv_product_measured_mask": measured_mask,
+            "segment_id": segment_id,
         }
+        summary_path = self.base_model_dir / "segments" / "segmented_rt_summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps(
+                jsonable(
+                    {
+                        key: value
+                        for key, value in result.items()
+                        if key not in {"temperature", "chi", "uv_products", "uv_product_measured_mask", "segment_id"}
+                    }
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         if diagnostic_plots:
             plot_output_dir = (
                 Path(plots_dir)
                 if plots_dir is not None
                 else self.base_model_dir / "plots" / "segmented_rt"
             )
-            made = self._make_segmented_rt_diagnostics(base_rad, out, plot_output_dir)
-            out["diagnostic_plots"] = [str(path) for path in made]
-        return out
+            made = self._make_segmented_rt_diagnostics(base_rad, result, plot_output_dir)
+            result["diagnostic_plots"] = [str(path) for path in made]
+        return result

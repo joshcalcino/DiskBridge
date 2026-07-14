@@ -7,6 +7,11 @@ description: Design, create, run, or review larger DiskBridge physics validation
 
 Use this skill when the user asks to validate physics with a larger workflow, compare against another code, reproduce a paper result, run a full pipeline, generate diagnostic plots, or decide whether new physics behaves plausibly.
 
+DiskBridge is single-user development code. Validation workflows use the
+canonical current API, config, and output format. Update a maintained workflow
+in place and remove superseded modes; do not add migration or compatibility
+paths unless the user explicitly requests them.
+
 ## Definition Of A Validation
 
 A DiskBridge validation is a physics-oriented workflow that is too slow, broad, data-heavy, interpretive, or workflow-oriented to run on every ordinary code change. It may be multi-step, subjective, or require human interpretation.

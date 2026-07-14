@@ -34,7 +34,7 @@ from diskbridge.model.field import Field
 from diskbridge._config import get_config
 from diskbridge.model.utils import field_data_as_order
 from .data import RadData
-from .cache import should_use_cache, find_cached_output
+from .cache import build_mesh_cache_context, should_use_cache, find_cached_output
 from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperature_symlink
 from .wavelengths import build_mcmono_wavelengths, write_wavelength_file, validate_wavelength_array, check_wavelength_range
 from .uv_products import (
@@ -62,6 +62,17 @@ from diskbridge._constants import (
 )
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
+RADMC_PHOTON_COUNT_MAX = int(np.iinfo(np.int32).max)
+
+
+def _validate_radmc_photon_count(value: int, *, name: str) -> int:
+    """Return a RADMC-3D photon count that fits its signed 32-bit counter."""
+    count = int(value)
+    if count < 1 or count > RADMC_PHOTON_COUNT_MAX:
+        raise ValueError(
+            f"{name} must be between 1 and {RADMC_PHOTON_COUNT_MAX}; got {count}"
+        )
+    return count
  
 _MCTHERM_PARAM_KEYS = (
     'nphot_thermal',
@@ -458,6 +469,84 @@ class RadModel:
 
         logger.info(f"Wrote external_source.inp file: {ext_path}")
         return ext_path
+
+    def write_inherited_uv_external_source(
+        self,
+        wavelengths_um: np.ndarray,
+        spectrum: np.ndarray,
+        output_dir: Path,
+        *,
+        uv_min: Quantity,
+        uv_max: Quantity,
+    ) -> Path:
+        """Replace only the UV interval of the configured external spectrum.
+
+        Parameters
+        ----------
+        wavelengths_um, spectrum : ndarray
+            Parent-shell UV wavelength grid and mean intensity.
+        output_dir : pathlib.Path
+            Child RADMC-3D input directory.
+        uv_min, uv_max : Quantity
+            Inclusive wavelength interval replaced by the inherited spectrum.
+
+        Returns
+        -------
+        pathlib.Path
+            Updated ``external_source.inp`` path.
+        """
+        output_dir = Path(output_dir)
+        ext_path = output_dir / "external_source.inp"
+        if not ext_path.exists():
+            self.writer.write_external_source(self.model_dir)
+        lines = ext_path.read_text().split()
+        if len(lines) < 2:
+            raise ValueError(f"Invalid external source file: {ext_path}")
+        if int(lines[0]) != 2:
+            raise ValueError(f"Unsupported external source format in {ext_path}")
+        nlam = int(lines[1])
+        if len(lines) != 2 + 2 * nlam:
+            raise ValueError(f"Invalid external source value count in {ext_path}")
+        target_wavelengths = np.asarray(lines[2 : 2 + nlam], dtype=np.float64)
+        original = np.asarray(lines[2 + nlam :], dtype=np.float64)
+
+        source_wavelengths = np.asarray(wavelengths_um, dtype=np.float64)
+        source_spectrum = np.asarray(spectrum, dtype=np.float64)
+        if source_wavelengths.ndim != 1 or source_spectrum.shape != source_wavelengths.shape:
+            raise ValueError("Inherited wavelengths and spectrum must be matching 1-D arrays")
+        order = np.argsort(source_wavelengths)
+        source_wavelengths = source_wavelengths[order]
+        source_spectrum = source_spectrum[order]
+        if np.any(source_spectrum <= 0.0) or not np.all(np.isfinite(source_spectrum)):
+            raise ValueError("Inherited UV spectrum must be positive and finite")
+
+        lo = float(uv_min.to("micron").magnitude)
+        hi = float(uv_max.to("micron").magnitude)
+        uv_mask = (target_wavelengths >= lo) & (target_wavelengths <= hi)
+        if not np.any(uv_mask):
+            raise ValueError("External wavelength grid does not contain the inherited UV band")
+        uv_target = target_wavelengths[uv_mask]
+        if source_wavelengths[0] > uv_target[0] or source_wavelengths[-1] < uv_target[-1]:
+            raise ValueError("Inherited spectrum does not cover the child UV wavelength interval")
+
+        inherited = np.exp(
+            np.interp(
+                np.log(uv_target),
+                np.log(source_wavelengths),
+                np.log(source_spectrum),
+            )
+        )
+        combined = original.copy()
+        combined[uv_mask] = inherited
+        with ext_path.open("w") as f:
+            f.write("2\n")
+            f.write(f"{nlam}\n")
+            for wavelength in target_wavelengths:
+                f.write(f"{wavelength:13.6e}\n")
+            for value in combined:
+                f.write(f"{value:13.6e}\n")
+        logger.info("Wrote inherited UV external source: %s", ext_path)
+        return ext_path
     
     def _update_radmc3d_inp_int_params(self, updates: dict[str, int]) -> None:
         radmc_inp_path = self.inputs_dir / 'radmc3d.inp'
@@ -851,13 +940,14 @@ class RadModel:
         Quantity
             Dust temperature field in K
         """
-        use_params_nphot = nphot is None
         if nphot is None:
             nphot = int(self.params.nphot_thermal)
+        nphot = _validate_radmc_photon_count(nphot, name="nphot_thermal")
         
         cache_context = {
             'nphot': int(nphot),
         }
+        cache_context.update(build_mesh_cache_context(self.model.mesh))
         cache_context.update(_external_source_cache_context(self.params))
         
         countwrite = max(1, int(nphot // 100))
@@ -1257,6 +1347,7 @@ class RadModel:
         n_wavelengths: int = None,
         setthreads: Optional[int] = None,
         compute_uv_products: bool = False,
+        iseed: Optional[int] = None,
     ) -> Quantity:
         """Run RADMC-3D monochromatic Monte Carlo for UV field.
         
@@ -1276,6 +1367,8 @@ class RadModel:
             Number of wavelengths
         compute_uv_products : bool, optional
             Compute process-specific UV products from this mcmono spectrum.
+        iseed : int, optional
+            Deterministic RADMC-3D random seed.
             
         Returns
         -------
@@ -1285,6 +1378,7 @@ class RadModel:
         nphot, uv_min, uv_max, n_wavelengths, all_params_used = self._resolve_mcmono_config(
             nphot, uv_min, uv_max, n_wavelengths, wavelengths_um
         )
+        nphot = _validate_radmc_photon_count(nphot, name="nphot_mono")
         
         mcmono_lam_um = self._build_mcmono_wavelengths(
             wavelengths_um,
@@ -1306,6 +1400,12 @@ class RadModel:
             'wavelengths_min_um': float(np.min(mcmono_lam_um)),
             'wavelengths_max_um': float(np.max(mcmono_lam_um)),
         }
+        cache_context.update(build_mesh_cache_context(self.model.mesh))
+        if iseed is not None:
+            iseed = int(iseed)
+            if iseed <= 0:
+                raise ValueError("iseed must be positive")
+            cache_context["iseed"] = iseed
         cache_context.update(_external_source_cache_context(self.params))
 
         if compute_uv_products:
@@ -1355,7 +1455,10 @@ class RadModel:
         output_dir.mkdir(parents=True, exist_ok=True)
         countwrite = max(1, min(int(nphot // 100), int(np.iinfo(np.int32).max)))
 
-        self._update_radmc3d_inp_int_params({'nphot_mono': int(nphot)})
+        inp_updates = {'nphot_mono': int(nphot)}
+        if iseed is not None:
+            inp_updates['iseed'] = iseed
+        self._update_radmc3d_inp_int_params(inp_updates)
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         self._write_mcmono_wavelengths(mcmono_lam_um)
@@ -1392,7 +1495,6 @@ class RadModel:
         mcmono_wavelength_spacing: str = 'log',
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
-        segmented_external_source_mode: Optional[str] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
         force: bool = False,
         diagnostic_plots: bool = False,
@@ -1416,8 +1518,6 @@ class RadModel:
             Explicit monochromatic wavelengths in micron.
         max_splits : int, optional
             Maximum number of radial split updates.
-        segmented_external_source_mode : str, optional
-            External source mode for inner segments.
         segmented_final_nphot_multiplier : float, optional
             Multiplier for the terminal segment photon count.
         force : bool, optional
@@ -1446,7 +1546,6 @@ class RadModel:
             mcmono_wavelength_spacing=mcmono_wavelength_spacing,
             mcmono_wavelengths_um=mcmono_wavelengths_um,
             max_splits=max_splits,
-            segmented_external_source_mode=segmented_external_source_mode,
             segmented_final_nphot_multiplier=segmented_final_nphot_multiplier,
             force=force,
             diagnostic_plots=diagnostic_plots,
