@@ -1306,6 +1306,78 @@ def test_budget_projection_clips_negative_and_overbudget_species():
     assert np.all(o_sum <= xOtot * (1.0 + 1e-14))
 
 
+def test_budget_projection_preserves_shape_and_broadcasts_cell_budgets():
+    y = np.zeros((2, 3, N_Y), dtype=np.float64)
+    y[..., I_CO] = 2.0e-4
+    y[..., I_CP] = 1.0e-4
+    y[..., I_OHX] = 3.0e-4
+    y[..., I_OP] = 1.0e-4
+    y[..., I_HP] = -1.0e-3
+    xCtot = np.array([[1.0e-4], [2.0e-4]])
+
+    y_proj = project_gow17_state_to_budgets(
+        y,
+        xCtot=xCtot,
+        xOtot=2.5e-4,
+    )
+
+    assert y_proj.shape == y.shape
+    assert np.all(
+        y_proj[..., I_CO] + y_proj[..., I_CP]
+        <= np.broadcast_to(xCtot, y.shape[:-1])
+    )
+    np.testing.assert_allclose(
+        y_proj[..., I_OHX]
+        + y_proj[..., I_CO]
+        + y_proj[..., I_OP],
+        2.5e-4,
+    )
+    assert np.all(y_proj[..., I_HP] == 0.0)
+
+
+def test_budget_projection_rejects_invalid_state_width():
+    with pytest.raises(ValueError, match="15 species"):
+        project_gow17_state_to_budgets(np.zeros((2, 14)), xCtot=1.0e-4)
+
+
+def test_budget_projection_matches_serial_numpy_reference():
+    rng = np.random.default_rng(20260714)
+    y = rng.normal(8.0e-5, 1.2e-4, size=(5, 7, N_Y))
+    xCtot = np.linspace(8.0e-5, 2.0e-4, 5)[:, None]
+    xOtot = 2.5e-4
+    expected = np.maximum(y, 0.0)
+
+    carbon_species = [I_HCOP, I_CHX, I_CO, I_CO_ICE, I_CP]
+    c_sum = np.zeros(y.shape[:-1], dtype=np.float64)
+    for index in carbon_species:
+        c_sum += expected[..., index]
+    c_scale = np.divide(
+        xCtot,
+        c_sum,
+        out=np.ones_like(c_sum),
+        where=(c_sum > xCtot) & (c_sum > 0.0),
+    )
+    for index in carbon_species:
+        expected[..., index] *= c_scale
+
+    oxygen_species = [I_OHX, I_HCOP, I_CO, I_CO_ICE, I_OP]
+    o_sum = np.zeros(y.shape[:-1], dtype=np.float64)
+    for index in oxygen_species:
+        o_sum += expected[..., index]
+    o_scale = np.divide(
+        xOtot,
+        o_sum,
+        out=np.ones_like(o_sum),
+        where=(o_sum > xOtot) & (o_sum > 0.0),
+    )
+    for index in oxygen_species:
+        expected[..., index] *= o_scale
+
+    actual = project_gow17_state_to_budgets(y, xCtot=xCtot, xOtot=xOtot)
+
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_oxygen_budget_diagnostics_report_valid_and_violating_states():
     y = np.zeros((2, N_Y), dtype=np.float64)
     y[0, I_CO] = 1.0e-5

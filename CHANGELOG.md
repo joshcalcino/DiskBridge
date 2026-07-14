@@ -22,6 +22,18 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Variable-linewidth Visser CO shielding, effective linewidths, H2/C shielding
+  algebra, and directional reductions now use parallel array kernels. Fused
+  H2*CO reductions and in-place linewidth storage remove ray-sized
+  temporaries, and GOW17 elemental-budget projection is parallel over cells.
+- Native GOW17 batch solves reuse one SUNDIALS/CVODE solver per OpenMP worker
+  and report aggregate failures without emitting per-cell `t+h=t` warning
+  floods. Coupled updates also pass their already-projected state directly to
+  the solver instead of allocating an immediate duplicate projection.
+- GOW17 AstroChem restart state is stored in the compact atomic
+  `checkpoint/gow17_state.h5` format. Checkpoints contain chemistry state,
+  shielding, status, histories, and mesh provenance rather than a complete
+  model snapshot.
 - The segmented-UV validation retains 128 radial cells while using a `24 x 24`
   angular grid; its tenfold full-domain reference multiplier now applies only
   to `mcmono`.
@@ -42,12 +54,18 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Removed the GOW17 `checkpoint.include_dust` setting; restart checkpoints do
+  not serialize model dust fields.
 - Removed superseded segmented RT split controls and output discovery paths;
   `segmented_tol` is the sole scout-uncertainty and join-warning tolerance.
 - Relocated historical plan/progress notes out of `docs/` into `projects/`, and retired `docs/healpix_shielding.md` in favor of the verified shielding guide.
 
 ### Validation
 
+- Added `validation/gow17_healpix_performance`, a provenance-rich sustained
+  scaling and numerical-comparison workflow for the Bondi All-Stars `nside=4`
+  interpolation and complete post-ray shielding stages, plus the native GOW17
+  batch solver.
 - Added `validation/cartesian_wedge_uv_weighting`, a Cartesian sphere-plus-cone
   UV validation comparing no shielding, uniform HEALPix shielding, and
   weighted HEALPix shielding chemistry from one shared RADMC-3D transport run

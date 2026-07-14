@@ -18,6 +18,228 @@ def _as_f64(name: str, x) -> np.ndarray:
     return a
 
 
+@njit(cache=True, parallel=True)
+def _mean_rays_parallel(theta_rays: np.ndarray) -> np.ndarray:
+    """Reduce shielding factors uniformly without a ray-sized temporary."""
+    n_cells, n_rays = theta_rays.shape
+    out = np.empty(n_cells, dtype=np.float64)
+    for i in prange(n_cells):
+        total = 0.0
+        for j in range(n_rays):
+            total += theta_rays[i, j]
+        out[i] = total / n_rays
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _weighted_mean_rays_parallel(
+    theta_rays: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Reduce weighted shielding factors without materializing their product."""
+    n_cells, n_rays = theta_rays.shape
+    out = np.empty(n_cells, dtype=np.float64)
+    for i in prange(n_cells):
+        total = 0.0
+        for j in range(n_rays):
+            total += weights[i, j] * theta_rays[i, j]
+        out[i] = total
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _mean_product_rays_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+) -> np.ndarray:
+    """Uniformly reduce a per-ray product without materializing it."""
+    n_cells, n_rays = left.shape
+    out = np.empty(n_cells, dtype=np.float64)
+    for i in prange(n_cells):
+        total = 0.0
+        for j in range(n_rays):
+            total += left[i, j] * right[i, j]
+        out[i] = total / n_rays
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _weighted_mean_product_rays_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Weight and reduce a per-ray product without materializing it."""
+    n_cells, n_rays = left.shape
+    out = np.empty(n_cells, dtype=np.float64)
+    for i in prange(n_cells):
+        total = 0.0
+        for j in range(n_rays):
+            total += weights[i, j] * (left[i, j] * right[i, j])
+        out[i] = total
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _effective_b_rays_inplace_parallel(
+    weighted_b2_column: np.ndarray,
+    density_column: np.ndarray,
+    fallback2: float,
+    minimum_column: float,
+    tiny: float,
+) -> None:
+    """Replace a 2-D integrated ``n*b^2`` column with effective ``b``."""
+    n_cells, n_rays = weighted_b2_column.shape
+    for i in prange(n_cells):
+        for j in range(n_rays):
+            if density_column[i, j] > minimum_column:
+                value = weighted_b2_column[i, j] / density_column[i, j]
+            else:
+                value = fallback2
+            if value < tiny:
+                value = tiny
+            weighted_b2_column[i, j] = np.sqrt(value)
+
+
+@njit(cache=True, parallel=True)
+def _effective_b_cells_inplace_parallel(
+    weighted_b2_column: np.ndarray,
+    density_column: np.ndarray,
+    fallback2: float,
+    minimum_column: float,
+    tiny: float,
+) -> None:
+    """Replace a 1-D integrated ``n*b^2`` column with effective ``b``."""
+    for i in prange(weighted_b2_column.size):
+        if density_column[i] > minimum_column:
+            value = weighted_b2_column[i] / density_column[i]
+        else:
+            value = fallback2
+        if value < tiny:
+            value = tiny
+        weighted_b2_column[i] = np.sqrt(value)
+
+
+@njit(cache=True, parallel=True)
+def _c_shielding_rays_parallel(
+    carbon_column: np.ndarray,
+    h2_column: np.ndarray,
+) -> np.ndarray:
+    """Evaluate C shielding over a 2-D cell/ray map in parallel."""
+    n_cells, n_rays = carbon_column.shape
+    out = np.empty((n_cells, n_rays), dtype=np.float64)
+    for i in prange(n_cells):
+        for j in range(n_rays):
+            tau_h2 = 1.2e-14 * 2.0 * h2_column[i, j]
+            y = 1.17e-8 * tau_h2
+            ry = np.exp(-y) / (1.0 + y)
+            rc = np.exp(-1.6e-17 * carbon_column[i, j])
+            out[i, j] = rc * ry
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _c_shielding_cells_parallel(
+    carbon_column: np.ndarray,
+    h2_column: np.ndarray,
+) -> np.ndarray:
+    """Evaluate C shielding over a 1-D cell array in parallel."""
+    out = np.empty(carbon_column.size, dtype=np.float64)
+    for i in prange(carbon_column.size):
+        tau_h2 = 1.2e-14 * 2.0 * h2_column[i]
+        y = 1.17e-8 * tau_h2
+        ry = np.exp(-y) / (1.0 + y)
+        rc = np.exp(-1.6e-17 * carbon_column[i])
+        out[i] = rc * ry
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _stellar_weight_correction_parallel(
+    theta_mean: np.ndarray,
+    theta_rays: np.ndarray,
+    theta_star: np.ndarray,
+    star_pixel: np.ndarray,
+    star_weight: np.ndarray,
+) -> np.ndarray:
+    """Replace a direct-stellar ray contribution in parallel by cell."""
+    out = np.empty(theta_mean.size, dtype=np.float64)
+    for i in prange(theta_mean.size):
+        value = theta_mean[i]
+        if star_weight[i] > 0.0:
+            value += star_weight[i] * (
+                theta_star[i] - theta_rays[i, star_pixel[i]]
+            )
+        out[i] = value
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _stellar_product_weight_correction_parallel(
+    theta_mean: np.ndarray,
+    left_rays: np.ndarray,
+    right_rays: np.ndarray,
+    theta_star: np.ndarray,
+    star_pixel: np.ndarray,
+    star_weight: np.ndarray,
+) -> np.ndarray:
+    """Replace a direct-stellar product contribution without a product map."""
+    out = np.empty(theta_mean.size, dtype=np.float64)
+    for i in prange(theta_mean.size):
+        value = theta_mean[i]
+        if star_weight[i] > 0.0:
+            ray_value = left_rays[i, star_pixel[i]] * right_rays[i, star_pixel[i]]
+            value += star_weight[i] * (theta_star[i] - ray_value)
+        out[i] = value
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _scatter_candidates_3d_parallel(
+    target: np.ndarray,
+    candidate_idx: np.ndarray,
+    values: np.ndarray,
+) -> None:
+    """Scatter values at unique 3-D candidate indices in parallel."""
+    for i in prange(values.size):
+        target[
+            candidate_idx[i, 0],
+            candidate_idx[i, 1],
+            candidate_idx[i, 2],
+        ] = values[i]
+
+
+@njit(cache=True, parallel=True)
+def _multiply_3d_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+) -> np.ndarray:
+    """Multiply equally shaped 3-D fields in parallel over the first axis."""
+    n0, n1, n2 = left.shape
+    out = np.empty((n0, n1, n2), dtype=np.float64)
+    for i in prange(n0):
+        for j in range(n1):
+            for k in range(n2):
+                out[i, j, k] = left[i, j, k] * right[i, j, k]
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _weighted_b2_3d_parallel(
+    density: np.ndarray,
+    linewidth: np.ndarray,
+) -> np.ndarray:
+    """Form ``density * linewidth**2`` without an intermediate field."""
+    n0, n1, n2 = density.shape
+    out = np.empty((n0, n1, n2), dtype=np.float64)
+    for i in prange(n0):
+        for j in range(n1):
+            for k in range(n2):
+                b_value = linewidth[i, j, k]
+                out[i, j, k] = density[i, j, k] * b_value * b_value
+    return out
+
+
 @njit(cache=True)
 def _next_positive_quadratic_root(a: float, b: float, c: float) -> float:
     if a == 0.0:

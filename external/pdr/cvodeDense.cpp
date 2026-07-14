@@ -88,6 +88,8 @@ CvodeDense::CvodeDense(Ode &ode,
    * Backward Differentiation Formula and the use of a Newton iteration */
   cvode_mem_ = CVodeCreate(CV_BDF, sunctx_);
   CheckFlag((void *)cvode_mem_, "CVodeCreate", 0);
+  flag = CVodeSetMaxHnilWarns(cvode_mem_, -1);
+  CheckFlag(&flag, "CVodeSetMaxHnilWarns", 1);
 
   /* Set the user data pointer to ode*/
   flag = CVodeSetUserData(cvode_mem_, &ode_);

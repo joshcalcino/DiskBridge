@@ -27,8 +27,18 @@ from diskbridge.chemistry.shielding.angular_uv_weights import (
 )
 from diskbridge.chemistry.shielding.w_rays_cache import _estimate_w_rays_memory_bytes
 from diskbridge.chemistry.shielding.healpix_columns import (
+    _average_product_rays,
+    _average_rays,
+    _c_shielding,
+    _effective_b_from_columns,
+    _scatter_candidates_3d,
     compute_co_shielding_healpix,
     compute_pdr_shielding_healpix,
+)
+from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
+from diskbridge.chemistry.shielding.healpix_utils import (
+    _multiply_3d_parallel,
+    _weighted_b2_3d_parallel,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
@@ -57,6 +67,84 @@ def _write_minimal_visser_table(path, *, tex: float, carbon_ratio: int) -> None:
         )
         + "\n"
     )
+
+
+def _write_visser_b_table(path, *, b_kms: float, scale: float) -> None:
+    """Write one small, non-separable table for linewidth interpolation tests."""
+    theta = np.array(
+        [
+            [0.99, 0.91, 0.73],
+            [0.83, 0.52, 0.21],
+            [0.62, 0.24, 0.015],
+        ],
+        dtype=np.float64,
+    ) ** scale
+    rows = [" ".join(f"{value:.16e}" for value in theta[:, j]) for j in range(3)]
+    path.write_text(
+        "\n".join(
+            [
+                f"b(CO,H2,H) (km/s)    =   {b_kms:.2f}  3.00  5.00",
+                "Tex(CO,H2) (K)       =   5.00 11.18",
+                "[12C]/[13C]          =  69",
+                "[16O]/[18O]          = 557",
+                "[18O]/[17O]          =   3.6",
+                "n[N(12CO)]           =  3",
+                "n[N(H2)]             =  3",
+                "N(12CO)",
+                " 1.000E+10",
+                " 1.000E+12",
+                " 1.000E+15",
+                "N(H2)",
+                " 1.000E+10",
+                " 1.000E+14",
+                " 1.000E+18",
+                "12C16O",
+                *rows,
+            ]
+        )
+        + "\n"
+    )
+
+
+def _reference_theta_interpolated_b(visser, isotop, Nco, Nh2, b_kms):
+    """Evaluate the unchanged SciPy/list-grouping implementation."""
+    bvals, filenames = visser._available_b_family()
+    Nco_b, Nh2_b, b_b = np.broadcast_arrays(
+        np.asarray(Nco, float),
+        np.asarray(Nh2, float),
+        np.asarray(b_kms, float),
+    )
+    out = np.ones_like(Nco_b, dtype=float)
+    need_interp = ~((Nco_b < 1.0e10) & (Nh2_b < 1.0e10))
+    if not np.any(need_interp):
+        return out
+
+    Nco_work = Nco_b[need_interp]
+    Nh2_work = Nh2_b[need_interp]
+    b_work = np.nan_to_num(b_b[need_interp], nan=float(visser.b_kms))
+    b_work = np.clip(b_work, float(bvals[0]), float(bvals[-1]))
+    hi_idx = np.searchsorted(bvals, b_work, side="right")
+    lo_idx = np.maximum(hi_idx - 1, 0)
+    hi_idx = np.minimum(hi_idx, bvals.size - 1)
+    theta_work = np.empty_like(b_work, dtype=float)
+    for lo, hi in sorted(set(zip(lo_idx.tolist(), hi_idx.tolist()))):
+        selected = (lo_idx == lo) & (hi_idx == hi)
+        theta_lo = visser._theta_from_file(
+            filenames[lo], isotop, Nco_work[selected], Nh2_work[selected]
+        )
+        if lo == hi:
+            theta_work[selected] = theta_lo
+            continue
+        theta_hi = visser._theta_from_file(
+            filenames[hi], isotop, Nco_work[selected], Nh2_work[selected]
+        )
+        frac = (b_work[selected] - bvals[lo]) / (bvals[hi] - bvals[lo])
+        theta_work[selected] = np.exp(
+            (1.0 - frac) * np.log(np.clip(theta_lo, 1.0e-300, 1.0))
+            + frac * np.log(np.clip(theta_hi, 1.0e-300, 1.0))
+        )
+    out[need_interp] = np.clip(theta_work, 0.0, 1.0)
+    return np.clip(out, 0.0, 1.0)
 
 
 def _make_uniform_cartesian_mesh(ncells: int = 4, L_cm: float = 1e17):
@@ -194,6 +282,199 @@ def test_visser_default_prefers_original_gow17_table_family(tmp_path):
     visser = VisserShielding(data_dir=tmp_path, b_kms=0.3, auto_download=False)
 
     assert visser.filepath.name == "shield.03.5.69-557-36.dat"
+
+
+def test_visser_parallel_linewidth_interpolation_matches_scipy_reference(tmp_path):
+    """The optimized kernel must preserve the unchanged interpolation result."""
+    for b_kms, label, scale in (
+        (0.3, "03", 1.0),
+        (1.0, "10", 0.8),
+        (3.0, "30", 0.6),
+    ):
+        _write_visser_b_table(
+            tmp_path / f"shield.{label}.5.69-557-36.dat",
+            b_kms=b_kms,
+            scale=scale,
+        )
+    visser = VisserShielding(
+        data_dir=tmp_path,
+        filename="shield.03.5.69-557-36.dat",
+        auto_download=False,
+    )
+
+    rng = np.random.default_rng(20260714)
+    nco = 10.0 ** rng.uniform(8.0, 17.0, 20_000)
+    nh2 = 10.0 ** rng.uniform(8.0, 20.0, 20_000)
+    b_kms = rng.uniform(-0.5, 4.0, 20_000)
+    nco[:10] = [1.0e9, 1.0e10, 1.0e12, 1.0e15, 1.0e18] * 2
+    nh2[:10] = [1.0e9, 1.0e10, 1.0e14, 1.0e18, 1.0e21] * 2
+    b_kms[:10] = [np.nan, -np.inf, 0.3, 1.0, np.inf] * 2
+
+    expected = _reference_theta_interpolated_b(visser, "co", nco, nh2, b_kms)
+    actual = visser.theta_interpolated_b("co", nco, nh2, b_kms)
+
+    np.testing.assert_allclose(actual, expected, rtol=5.0e-14, atol=1.0e-15)
+    assert np.all((actual >= 0.0) & (actual <= 1.0))
+    np.testing.assert_allclose(
+        visser.theta_interpolated_b(
+            "co",
+            nco[:24].reshape(2, 3, 4),
+            nh2[:24].reshape(2, 3, 4),
+            b_kms[:24].reshape(2, 3, 4),
+        ),
+        expected[:24].reshape(2, 3, 4),
+        rtol=5.0e-14,
+        atol=1.0e-15,
+    )
+    np.testing.assert_allclose(
+        visser.theta_interpolated_b("co", 1.0e12, 1.0e14, 0.65),
+        _reference_theta_interpolated_b(visser, "co", 1.0e12, 1.0e14, 0.65),
+        rtol=5.0e-14,
+        atol=1.0e-15,
+    )
+
+
+def test_parallel_ray_averages_match_numpy_reference():
+    """Parallel uniform and weighted reductions preserve shielding averages."""
+    rng = np.random.default_rng(9876)
+    theta = rng.random((257, 192))
+    weights = rng.random((257, 192))
+    weights /= weights.sum(axis=1, keepdims=True)
+
+    np.testing.assert_allclose(
+        _average_rays(theta, None),
+        theta.mean(axis=1),
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+    np.testing.assert_allclose(
+        _average_rays(theta, weights),
+        (weights * theta).sum(axis=1),
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+
+
+def test_parallel_product_ray_averages_match_numpy_reference():
+    """Fused H2/CO reductions preserve multiplication and sum ordering."""
+    rng = np.random.default_rng(3214)
+    left = rng.random((257, 192))
+    right = rng.random((257, 192))
+    weights = rng.random((257, 192))
+    weights /= weights.sum(axis=1, keepdims=True)
+
+    np.testing.assert_allclose(
+        _average_product_rays(left, right, None),
+        (left * right).mean(axis=1),
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+    np.testing.assert_allclose(
+        _average_product_rays(left, right, weights),
+        (weights * (left * right)).sum(axis=1),
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+
+
+def test_parallel_effective_linewidth_matches_reference_in_place():
+    """Effective b preserves the formula while reusing the weighted column."""
+    density_column = np.array(
+        [[0.0, 1.0e9, 2.0e10], [4.0e10, 8.0e12, 1.6e15]],
+        dtype=np.float64,
+    )
+    weighted_b2 = density_column * np.array(
+        [[0.2, 0.3, 0.4], [0.8, 1.2, 2.4]],
+        dtype=np.float64,
+    ) ** 2
+    original = weighted_b2.copy()
+    fallback = 0.65
+    expected = np.sqrt(
+        np.maximum(
+            np.divide(
+                original,
+                density_column,
+                out=np.full_like(density_column, fallback**2),
+                where=density_column > 1.0e10,
+            ),
+            np.finfo(np.float64).tiny,
+        )
+    )
+
+    result = _effective_b_from_columns(
+        weighted_b2,
+        density_column,
+        fallback_kms=fallback,
+    )
+
+    assert np.shares_memory(result, weighted_b2)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_parallel_h2_and_c_shielding_match_numpy_formulas():
+    """Parallel analytic shielding kernels retain scalar and array linewidths."""
+    h2_column = np.logspace(8.0, 24.0, 24).reshape(3, 8)
+    carbon_column = np.logspace(7.0, 20.0, 24).reshape(3, 8)
+    b5 = np.linspace(0.03, 3.0, 24).reshape(3, 8)
+
+    x = np.maximum(h2_column / 5.0e14, 0.0)
+    root = np.sqrt(1.0 + x)
+    expected_h2 = np.clip(
+        0.965 / (1.0 + x / b5) ** 2
+        + 0.035 / root * np.exp(-8.5e-4 * root),
+        0.0,
+        1.0,
+    )
+    y = 1.17e-8 * (1.2e-14 * 2.0 * h2_column)
+    expected_c = np.exp(-1.6e-17 * carbon_column) * np.exp(-y) / (1.0 + y)
+
+    np.testing.assert_allclose(
+        h2_self_shielding_db96(h2_column, b5=b5),
+        expected_h2,
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+    np.testing.assert_allclose(
+        h2_self_shielding_db96(h2_column, b5=0.7),
+        0.965 / (1.0 + x / 0.7) ** 2
+        + 0.035 / root * np.exp(-8.5e-4 * root),
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+    np.testing.assert_allclose(
+        _c_shielding(carbon_column, h2_column),
+        expected_c,
+        rtol=5.0e-15,
+        atol=5.0e-16,
+    )
+    with pytest.raises(ValueError, match="finite positive"):
+        h2_self_shielding_db96(h2_column, b5=np.nan)
+
+
+def test_parallel_scatter_and_field_multiply_match_numpy():
+    """Remaining full-grid kernels preserve candidate order and field values."""
+    target = np.ones((5, 6, 7), dtype=np.float64)
+    candidate_idx = np.array([[0, 0, 0], [2, 3, 4], [4, 5, 6]], dtype=np.int64)
+    values = np.array([0.2, 0.4, 0.6])
+    expected = target.copy()
+    expected[
+        candidate_idx[:, 0],
+        candidate_idx[:, 1],
+        candidate_idx[:, 2],
+    ] = values
+
+    _scatter_candidates_3d(target, candidate_idx, values)
+
+    np.testing.assert_array_equal(target, expected)
+    np.testing.assert_array_equal(
+        _multiply_3d_parallel(target, expected),
+        target * expected,
+    )
+    linewidth = np.linspace(0.1, 2.0, target.size).reshape(target.shape)
+    np.testing.assert_array_equal(
+        _weighted_b2_3d_parallel(target, linewidth),
+        target * linewidth * linewidth,
+    )
 
 
 # ---- planck_band_luminosity ------------------------------------------------

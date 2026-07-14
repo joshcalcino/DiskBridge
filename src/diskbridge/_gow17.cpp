@@ -314,91 +314,94 @@ static py::dict solve_batch_equilibrium(
     /* Release the GIL so threads can run in parallel. */
     py::gil_scoped_release release;
 
-    #pragma omp parallel for schedule(dynamic)
-    for (py::ssize_t i = 0; i < Ncells; ++i) {
+    #pragma omp parallel
+    {
         gow17 ode;
         CvodeDense solver(ode, reltol, abstol_ptr, userJac);
-
-        ode.SetInit(0.0, y0_ptr + i * N_Y);
-        ode.SetnH(nH_ptr[i]);
-        ode.SetIonRate(ion_rate_ptr[i]);
-        ode.SetZg(Zg_ptr[i]);
-        ode.SetZd(Zd_ptr[i]);
-        ode.SetDpah(Dpah_ptr[i]);
-        ode.SetDh2gr(Dh2gr_ptr[i]);
-        ode.SetZgd(Zgd_ptr[i]);
-
-        ode.SetfH2gr(fH2gr);
-        ode.SetfHplusgr(fHplusgr);
-        ode.SetfCplusgr(fCplusgr);
-        ode.SetfHeplusgr(fHeplusgr);
-        ode.SetfSplusgr(fSplusgr);
-        ode.SetfSiplusgr(fSiplusgr);
-        ode.SetfCplusCR(fCplusCR);
-        ode.SetGradv(gradv_ptr[i]);
-        ode.SetTdust(Tdust_ptr[i]);
-
-        ode.SetCOPhaseParams(
-            sigma_d_CO_per_H_ptr[i],
-            co_E_bind_co,
-            co_nu0_co,
-            co_Y_CO,
-            co_N_SURF,
-            co_N_LAY,
-            co_S_CO,
-            co_F_CRUV_CO_pdes_ptr[i],
-            co_k_crdes_CO_ptr[i]);
-
-        ode.Leff_CO_max(Leff_CO_max_ptr[i]);
-        ode.IsDustCooling(isDust_cooling);
-        ode.SetCoolingCOThin(isCoolingCOThin);
-
-        if (const_temp) {
-            ode.SetConstTemp(Tgas_ptr[i]);
-        }
-
-        double GPE_cell = GPE_ptr[i];
-        double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
-        double Gph_cell[N_PH];
-        for (int j = 0; j < N_PH; ++j) {
-            Gph_cell[j] = Gph_ptr[i * N_PH + j];
-        }
-        ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
-
-        solver.ReInit();
         solver.SetMxsteps(mxsteps);
         solver.SetMaxOrd(maxord);
 
-        try {
-            solver.SolveEq(tolfac, tmax, verbose, tmin);
-            const long long n_negative = solver.GetNegativeCorrectionCount();
-            if (n_negative > 0) {
-                n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
-                n_negative_abundance_corrections.fetch_add(
-                    n_negative, std::memory_order_relaxed);
+        #pragma omp for schedule(dynamic)
+        for (py::ssize_t i = 0; i < Ncells; ++i) {
+            ode.SetInit(0.0, y0_ptr + i * N_Y);
+            ode.SetnH(nH_ptr[i]);
+            ode.SetIonRate(ion_rate_ptr[i]);
+            ode.SetZg(Zg_ptr[i]);
+            ode.SetZd(Zd_ptr[i]);
+            ode.SetDpah(Dpah_ptr[i]);
+            ode.SetDh2gr(Dh2gr_ptr[i]);
+            ode.SetZgd(Zgd_ptr[i]);
+
+            ode.SetfH2gr(fH2gr);
+            ode.SetfHplusgr(fHplusgr);
+            ode.SetfCplusgr(fCplusgr);
+            ode.SetfHeplusgr(fHeplusgr);
+            ode.SetfSplusgr(fSplusgr);
+            ode.SetfSiplusgr(fSiplusgr);
+            ode.SetfCplusCR(fCplusCR);
+            ode.SetGradv(gradv_ptr[i]);
+            ode.SetTdust(Tdust_ptr[i]);
+
+            ode.SetCOPhaseParams(
+                sigma_d_CO_per_H_ptr[i],
+                co_E_bind_co,
+                co_nu0_co,
+                co_Y_CO,
+                co_N_SURF,
+                co_N_LAY,
+                co_S_CO,
+                co_F_CRUV_CO_pdes_ptr[i],
+                co_k_crdes_CO_ptr[i]);
+
+            ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            ode.IsDustCooling(isDust_cooling);
+            ode.SetCoolingCOThin(isCoolingCOThin);
+
+            if (const_temp) {
+                ode.SetConstTemp(Tgas_ptr[i]);
             }
-            if (solver.ReachedTevolMax()) {
-                n_tevol_max_cells.fetch_add(1, std::memory_order_relaxed);
-                const double residual = solver.GetTevolMaxResidual();
-                #pragma omp critical(gow17_tevol_max_residual)
-                {
-                    if (residual > tevol_max_residual_max) {
-                        tevol_max_residual_max = residual;
+
+            double GPE_cell = GPE_ptr[i];
+            double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
+            double Gph_cell[N_PH];
+            for (int j = 0; j < N_PH; ++j) {
+                Gph_cell[j] = Gph_ptr[i * N_PH + j];
+            }
+            ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
+
+            solver.ReInit();
+
+            try {
+                solver.SolveEq(tolfac, tmax, verbose, tmin);
+                const long long n_negative = solver.GetNegativeCorrectionCount();
+                if (n_negative > 0) {
+                    n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
+                    n_negative_abundance_corrections.fetch_add(
+                        n_negative, std::memory_order_relaxed);
+                }
+                if (solver.ReachedTevolMax()) {
+                    n_tevol_max_cells.fetch_add(1, std::memory_order_relaxed);
+                    const double residual = solver.GetTevolMaxResidual();
+                    #pragma omp critical(gow17_tevol_max_residual)
+                    {
+                        if (residual > tevol_max_residual_max) {
+                            tevol_max_residual_max = residual;
+                        }
                     }
                 }
-            }
-            ode.CopyAbd(y_out_ptr + i * N_Y);
-            status_out_ptr[i] = 0;
-        } catch (const std::exception &e) {
-            for (int j = 0; j < N_Y; ++j) {
-                y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
-            }
-            status_out_ptr[i] = -1;
-            n_fail.fetch_add(1, std::memory_order_relaxed);
-            if (is_cvode_integration_failure(e)) {
-                n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+                ode.CopyAbd(y_out_ptr + i * N_Y);
+                status_out_ptr[i] = 0;
+            } catch (const std::exception &e) {
+                for (int j = 0; j < N_Y; ++j) {
+                    y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
+                }
+                status_out_ptr[i] = -1;
+                n_fail.fetch_add(1, std::memory_order_relaxed);
+                if (is_cvode_integration_failure(e)) {
+                    n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -594,81 +597,84 @@ static py::dict solve_batch_time(
     /* Release the GIL so threads can run in parallel. */
     py::gil_scoped_release release;
 
-    #pragma omp parallel for schedule(dynamic)
-    for (py::ssize_t i = 0; i < Ncells; ++i) {
+    #pragma omp parallel
+    {
         gow17 ode;
         CvodeDense solver(ode, reltol, abstol_ptr, userJac);
-
-        ode.SetInit(0.0, y0_ptr + i * N_Y);
-        ode.SetnH(nH_ptr[i]);
-        ode.SetIonRate(ion_rate_ptr[i]);
-        ode.SetZg(Zg_ptr[i]);
-        ode.SetZd(Zd_ptr[i]);
-        ode.SetDpah(Dpah_ptr[i]);
-        ode.SetDh2gr(Dh2gr_ptr[i]);
-        ode.SetZgd(Zgd_ptr[i]);
-
-        ode.SetfH2gr(fH2gr);
-        ode.SetfHplusgr(fHplusgr);
-        ode.SetfCplusgr(fCplusgr);
-        ode.SetfHeplusgr(fHeplusgr);
-        ode.SetfSplusgr(fSplusgr);
-        ode.SetfSiplusgr(fSiplusgr);
-        ode.SetfCplusCR(fCplusCR);
-        ode.SetGradv(gradv_ptr[i]);
-        ode.SetTdust(Tdust_ptr[i]);
-
-        ode.SetCOPhaseParams(
-            sigma_d_CO_per_H_ptr[i],
-            co_E_bind_co,
-            co_nu0_co,
-            co_Y_CO,
-            co_N_SURF,
-            co_N_LAY,
-            co_S_CO,
-            co_F_CRUV_CO_pdes_ptr[i],
-            co_k_crdes_CO_ptr[i]);
-
-        ode.Leff_CO_max(Leff_CO_max_ptr[i]);
-        ode.IsDustCooling(isDust_cooling);
-        ode.SetCoolingCOThin(isCoolingCOThin);
-
-        if (const_temp) {
-            ode.SetConstTemp(Tgas_ptr[i]);
-        }
-
-        double GPE_cell = GPE_ptr[i];
-        double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
-        double Gph_cell[N_PH];
-        for (int j = 0; j < N_PH; ++j) {
-            Gph_cell[j] = Gph_ptr[i * N_PH + j];
-        }
-        ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
-
-        solver.ReInit();
         solver.SetMxsteps(mxsteps);
         solver.SetMaxOrd(maxord);
 
-        try {
-            solver.Solve(t_end);
-            const long long n_negative = solver.GetNegativeCorrectionCount();
-            if (n_negative > 0) {
-                n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
-                n_negative_abundance_corrections.fetch_add(
-                    n_negative, std::memory_order_relaxed);
+        #pragma omp for schedule(dynamic)
+        for (py::ssize_t i = 0; i < Ncells; ++i) {
+            ode.SetInit(0.0, y0_ptr + i * N_Y);
+            ode.SetnH(nH_ptr[i]);
+            ode.SetIonRate(ion_rate_ptr[i]);
+            ode.SetZg(Zg_ptr[i]);
+            ode.SetZd(Zd_ptr[i]);
+            ode.SetDpah(Dpah_ptr[i]);
+            ode.SetDh2gr(Dh2gr_ptr[i]);
+            ode.SetZgd(Zgd_ptr[i]);
+
+            ode.SetfH2gr(fH2gr);
+            ode.SetfHplusgr(fHplusgr);
+            ode.SetfCplusgr(fCplusgr);
+            ode.SetfHeplusgr(fHeplusgr);
+            ode.SetfSplusgr(fSplusgr);
+            ode.SetfSiplusgr(fSiplusgr);
+            ode.SetfCplusCR(fCplusCR);
+            ode.SetGradv(gradv_ptr[i]);
+            ode.SetTdust(Tdust_ptr[i]);
+
+            ode.SetCOPhaseParams(
+                sigma_d_CO_per_H_ptr[i],
+                co_E_bind_co,
+                co_nu0_co,
+                co_Y_CO,
+                co_N_SURF,
+                co_N_LAY,
+                co_S_CO,
+                co_F_CRUV_CO_pdes_ptr[i],
+                co_k_crdes_CO_ptr[i]);
+
+            ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            ode.IsDustCooling(isDust_cooling);
+            ode.SetCoolingCOThin(isCoolingCOThin);
+
+            if (const_temp) {
+                ode.SetConstTemp(Tgas_ptr[i]);
             }
-            ode.CopyAbd(y_out_ptr + i * N_Y);
-            status_out_ptr[i] = 0;
-        } catch (const std::exception &e) {
-            for (int j = 0; j < N_Y; ++j) {
-                y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
+
+            double GPE_cell = GPE_ptr[i];
+            double F_CO_pdes_photon_cell = F_CO_pdes_photon_ptr[i];
+            double Gph_cell[N_PH];
+            for (int j = 0; j < N_PH; ++j) {
+                Gph_cell[j] = Gph_ptr[i * N_PH + j];
             }
-            status_out_ptr[i] = -1;
-            n_fail.fetch_add(1, std::memory_order_relaxed);
-            if (is_cvode_integration_failure(e)) {
-                n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+            ode.SetRadField(&GPE_cell, Gph_cell, &F_CO_pdes_photon_cell);
+
+            solver.ReInit();
+
+            try {
+                solver.Solve(t_end);
+                const long long n_negative = solver.GetNegativeCorrectionCount();
+                if (n_negative > 0) {
+                    n_negative_abundance_cells.fetch_add(1, std::memory_order_relaxed);
+                    n_negative_abundance_corrections.fetch_add(
+                        n_negative, std::memory_order_relaxed);
+                }
+                ode.CopyAbd(y_out_ptr + i * N_Y);
+                status_out_ptr[i] = 0;
+            } catch (const std::exception &e) {
+                for (int j = 0; j < N_Y; ++j) {
+                    y_out_ptr[i * N_Y + j] = y0_ptr[i * N_Y + j];
+                }
+                status_out_ptr[i] = -1;
+                n_fail.fetch_add(1, std::memory_order_relaxed);
+                if (is_cvode_integration_failure(e)) {
+                    n_cvode_fail.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    n_other_exception_fail.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }

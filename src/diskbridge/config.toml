@@ -245,7 +245,6 @@ resume = true
 mode = "latest"
 directory = "checkpoint"
 every = 1
-include_dust = true
 
 [chemistry.gow17.co_phase]
 S_CO = 1.0

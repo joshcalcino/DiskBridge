@@ -11,6 +11,7 @@ Ensures consistency between computed abundances and conservation laws.
 from __future__ import annotations
 
 import numpy as np
+from numba import njit, prange
 
 from diskbridge._units import Quantity
 
@@ -317,6 +318,48 @@ def gow17_budget_diagnostics(
     }
 
 
+@njit(cache=True, parallel=True)
+def _project_gow17_state_to_budgets_parallel(
+    y: np.ndarray,
+    xCtot: np.ndarray,
+    xOtot: np.ndarray,
+    carbon_species: np.ndarray,
+    oxygen_species: np.ndarray,
+    carbon_budget_scalar: bool,
+    oxygen_budget_scalar: bool,
+    project_oxygen: bool,
+) -> np.ndarray:
+    """Project flattened states independently across cells."""
+    n_cells, n_species = y.shape
+    y_proj = np.empty((n_cells, n_species), dtype=np.float64)
+    for i in prange(n_cells):
+        for j in range(n_species):
+            value = y[i, j]
+            y_proj[i, j] = 0.0 if value <= 0.0 else value
+
+        c_sum = 0.0
+        for j in range(carbon_species.size):
+            c_sum += y_proj[i, carbon_species[j]]
+        xC_cell = xCtot[0] if carbon_budget_scalar else xCtot[i]
+        if c_sum > xC_cell and c_sum > 0.0:
+            c_scale = xC_cell / c_sum
+            for j in range(carbon_species.size):
+                index = carbon_species[j]
+                y_proj[i, index] *= c_scale
+
+        if project_oxygen:
+            xO_cell = xOtot[0] if oxygen_budget_scalar else xOtot[i]
+            o_sum = 0.0
+            for j in range(oxygen_species.size):
+                o_sum += y_proj[i, oxygen_species[j]]
+            if o_sum > xO_cell and o_sum > 0.0:
+                o_scale = xO_cell / o_sum
+                for j in range(oxygen_species.size):
+                    index = oxygen_species[j]
+                    y_proj[i, index] *= o_scale
+    return y_proj
+
+
 def project_gow17_state_to_budgets(
     y: np.ndarray,
     *,
@@ -332,51 +375,63 @@ def project_gow17_state_to_budgets(
     """
     import diskbridge._gow17 as _g
 
-    y_proj = np.asarray(y, dtype=np.float64).copy()
-    y_proj[...] = np.maximum(y_proj, 0.0)
-
+    y_arr = np.asarray(y, dtype=np.float64)
+    if y_arr.ndim == 0 or y_arr.shape[-1] != int(_g.N_Y):
+        raise ValueError(f"y must have {int(_g.N_Y)} species on its last axis")
+    leading_shape = y_arr.shape[:-1]
+    y_flat = np.ascontiguousarray(y_arr.reshape(-1, y_arr.shape[-1]))
     xCtot_arr = np.asarray(xCtot, dtype=np.float64)
-    carbon_species = [
+    carbon_budget_scalar = xCtot_arr.ndim == 0
+    xCtot_flat = (
+        xCtot_arr.reshape(1)
+        if carbon_budget_scalar
+        else np.ascontiguousarray(
+            np.broadcast_to(xCtot_arr, leading_shape).reshape(-1)
+        )
+    )
+    carbon_species = np.asarray([
         _g.I_HCOP,
         _g.I_CHX,
         _g.I_CO,
         _g.I_CO_ICE,
         _g.I_CP,
-    ]
-    c_sum = np.zeros(y_proj.shape[:-1], dtype=np.float64)
-    for idx in carbon_species:
-        c_sum += y_proj[..., idx]
-    c_scale = np.divide(
-        xCtot_arr,
-        c_sum,
-        out=np.ones_like(c_sum, dtype=np.float64),
-        where=(c_sum > xCtot_arr) & (c_sum > 0.0),
-    )
-    for idx in carbon_species:
-        y_proj[..., idx] *= c_scale
+    ], dtype=np.int64)
 
     if xOtot is not None:
         xOtot_arr = np.asarray(xOtot, dtype=np.float64)
-        oxygen_species = [
+        oxygen_budget_scalar = xOtot_arr.ndim == 0
+        xOtot_flat = (
+            xOtot_arr.reshape(1)
+            if oxygen_budget_scalar
+            else np.ascontiguousarray(
+                np.broadcast_to(xOtot_arr, leading_shape).reshape(-1)
+            )
+        )
+        oxygen_species = np.asarray([
             _g.I_OHX,
             _g.I_HCOP,
             _g.I_CO,
             _g.I_CO_ICE,
             _g.I_OP,
-        ]
-        o_sum = np.zeros(y_proj.shape[:-1], dtype=np.float64)
-        for idx in oxygen_species:
-            o_sum += y_proj[..., idx]
-        o_scale = np.divide(
-            xOtot_arr,
-            o_sum,
-            out=np.ones_like(o_sum, dtype=np.float64),
-            where=(o_sum > xOtot_arr) & (o_sum > 0.0),
-        )
-        for idx in oxygen_species:
-            y_proj[..., idx] *= o_scale
+        ], dtype=np.int64)
+        project_oxygen = True
+    else:
+        xOtot_flat = np.empty(0, dtype=np.float64)
+        oxygen_species = np.empty(0, dtype=np.int64)
+        oxygen_budget_scalar = False
+        project_oxygen = False
 
-    return y_proj
+    projected = _project_gow17_state_to_budgets_parallel(
+        y_flat,
+        xCtot_flat,
+        xOtot_flat,
+        carbon_species,
+        oxygen_species,
+        carbon_budget_scalar,
+        oxygen_budget_scalar,
+        project_oxygen,
+    )
+    return projected.reshape(y_arr.shape)
 
 
 def validate_chemistry_state(

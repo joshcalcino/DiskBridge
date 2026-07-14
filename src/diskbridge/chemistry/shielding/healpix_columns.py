@@ -40,6 +40,19 @@ from diskbridge._logging import logger
 from diskbridge.chemistry.shielding._array_utils import _as_f64
 from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
+    _c_shielding_cells_parallel,
+    _c_shielding_rays_parallel,
+    _effective_b_cells_inplace_parallel,
+    _effective_b_rays_inplace_parallel,
+    _mean_rays_parallel,
+    _mean_product_rays_parallel,
+    _multiply_3d_parallel,
+    _scatter_candidates_3d_parallel,
+    _stellar_product_weight_correction_parallel,
+    _stellar_weight_correction_parallel,
+    _weighted_mean_rays_parallel,
+    _weighted_mean_product_rays_parallel,
+    _weighted_b2_3d_parallel,
     integrate_rays_multi,
     integrate_starward_rays_multi,
 )
@@ -249,10 +262,7 @@ def _scatter_candidates_3d(
         raise ValueError(
             f"values must have length {int(idx.shape[0])}, got {int(v.size)}"
         )
-    i0 = idx[:, 0]
-    i1 = idx[:, 1]
-    i2 = idx[:, 2]
-    target[i0, i1, i2] = v
+    _scatter_candidates_3d_parallel(target, idx, v)
 
 
 def _add_weighted_b2_field(
@@ -269,7 +279,7 @@ def _add_weighted_b2_field(
     b_arr = _as_f64(f"b_{name}_kms_grid", b_grid)
     if b_arr.shape != tuple(shape):
         raise ValueError(f"b_{name}_kms_grid must match nH shape")
-    fields[f"{name}_b2"] = np.ascontiguousarray(density * b_arr * b_arr, dtype=np.float64)
+    fields[f"{name}_b2"] = _weighted_b2_3d_parallel(density, b_arr)
 
 
 def _effective_b_from_columns(
@@ -278,27 +288,72 @@ def _effective_b_from_columns(
     *,
     fallback_kms: float,
 ) -> np.ndarray:
-    """Column-weighted effective Doppler b from integrated ``n*b^2``.
+    """Replace integrated ``n*b^2`` with column-weighted Doppler b in place.
 
     The fallback is used for optically negligible columns so array-valued H2
-    shielding never sees b=0 in cells with no H2 along a ray.
+    shielding never sees b=0 in cells with no H2 along a ray. The weighted
+    column is dead after this calculation in the shielding workflow, so the
+    in-place result avoids another ray-sized array.
     """
     n_arr = np.asarray(n_col, dtype=np.float64)
+    b2_arr = np.asarray(b2_col, dtype=np.float64)
+    if b2_arr.shape != n_arr.shape:
+        raise ValueError("b2_col and n_col must have the same shape")
     fallback2 = float(fallback_kms) * float(fallback_kms)
-    b2_eff = np.divide(
-        np.asarray(b2_col, dtype=np.float64),
-        n_arr,
-        out=np.full_like(n_arr, fallback2),
-        where=n_arr > N_SHIELD_MIN,
-    )
-    return np.sqrt(np.maximum(b2_eff, np.finfo(np.float64).tiny))
+    tiny = float(np.finfo(np.float64).tiny)
+    if b2_arr.ndim == 2:
+        _effective_b_rays_inplace_parallel(
+            b2_arr,
+            n_arr,
+            fallback2,
+            float(N_SHIELD_MIN),
+            tiny,
+        )
+    elif b2_arr.ndim == 1:
+        _effective_b_cells_inplace_parallel(
+            b2_arr,
+            n_arr,
+            fallback2,
+            float(N_SHIELD_MIN),
+            tiny,
+        )
+    else:
+        raise ValueError("b2_col and n_col must be one- or two-dimensional")
+    return b2_arr
 
 
 def _average_rays(theta_rays: np.ndarray, W_rays: Optional[np.ndarray]) -> np.ndarray:
     """Average ray shielding factors using directional weights or uniformly."""
     if W_rays is not None:
-        return (W_rays * theta_rays).sum(axis=1)
-    return theta_rays.mean(axis=1)
+        return _weighted_mean_rays_parallel(theta_rays, W_rays)
+    return _mean_rays_parallel(theta_rays)
+
+
+def _average_product_rays(
+    left: np.ndarray,
+    right: np.ndarray,
+    W_rays: Optional[np.ndarray],
+) -> np.ndarray:
+    """Average the product of two ray factors without allocating that product."""
+    if W_rays is not None:
+        return _weighted_mean_product_rays_parallel(left, right, W_rays)
+    return _mean_product_rays_parallel(left, right)
+
+
+def _c_shielding(
+    carbon_column: np.ndarray,
+    h2_column: np.ndarray,
+) -> np.ndarray:
+    """Evaluate C shielding through the dimension-specific parallel kernel."""
+    carbon_arr = np.asarray(carbon_column, dtype=np.float64)
+    h2_arr = np.asarray(h2_column, dtype=np.float64)
+    if carbon_arr.shape != h2_arr.shape:
+        raise ValueError("carbon_column and h2_column must have the same shape")
+    if carbon_arr.ndim == 2:
+        return _c_shielding_rays_parallel(carbon_arr, h2_arr)
+    if carbon_arr.ndim == 1:
+        return _c_shielding_cells_parallel(carbon_arr, h2_arr)
+    raise ValueError("carbon_column and h2_column must be one- or two-dimensional")
 
 
 def _normalise_stellar_metadata(
@@ -359,13 +414,40 @@ def _apply_stellar_weight_correction(
     if not np.any(active):
         return theta_mean
 
-    out = np.asarray(theta_mean, dtype=np.float64).copy()
-    rows = np.arange(out.size, dtype=np.intp)
-    out[active] += w_star[active] * (
-        np.asarray(theta_star, dtype=np.float64)[active]
-        - np.asarray(theta_rays, dtype=np.float64)[rows[active], k_star[active]]
+    return _stellar_weight_correction_parallel(
+        np.asarray(theta_mean, dtype=np.float64),
+        np.asarray(theta_rays, dtype=np.float64),
+        np.asarray(theta_star, dtype=np.float64),
+        k_star,
+        w_star,
     )
-    return out
+
+
+def _apply_stellar_product_weight_correction(
+    theta_mean: np.ndarray,
+    left_rays: np.ndarray,
+    right_rays: np.ndarray,
+    theta_star: np.ndarray,
+    *,
+    stellar: Optional[dict[str, np.ndarray | float]],
+    start: int,
+    end: int,
+) -> np.ndarray:
+    """Replace a direct-stellar product without allocating a product ray map."""
+    if stellar is None:
+        return theta_mean
+    k_star = np.asarray(stellar["k_star"][start:end], dtype=np.intp)
+    w_star = np.asarray(stellar["w_star"][start:end], dtype=np.float64)
+    if not np.any(w_star > 0.0):
+        return theta_mean
+    return _stellar_product_weight_correction_parallel(
+        np.asarray(theta_mean, dtype=np.float64),
+        np.asarray(left_rays, dtype=np.float64),
+        np.asarray(right_rays, dtype=np.float64),
+        np.asarray(theta_star, dtype=np.float64),
+        k_star,
+        w_star,
+    )
 
 
 def _starward_columns_for_chunk(
@@ -1166,7 +1248,7 @@ def compute_co_shielding_healpix(
 
         _scatter_candidates_3d(theta_co, candidate_idx, theta_eff)
 
-    chi_eff = chi_arr * theta_co
+    chi_eff = _multiply_3d_parallel(chi_arr, theta_co)
     return theta_co, chi_eff
 
 
@@ -1326,12 +1408,10 @@ def compute_pdr_shielding_healpix(
     )
 
     if n_candidates > 0:
-        # Dense ray maps alive in a chunk: integrated columns, H2 factors, C
-        # factors, optional CO/PDR factors, and W_rays multiplication inputs.
-        linewidth_field_count = int(b_H2_kms_grid is not None) + int(
-            visser is not None and b_CO_kms_grid is not None
-        )
-        dense_count = (8 if visser is None else 12) + 2 * linewidth_field_count
+        # Peak dense ray maps include the integrated fields, shielding factors,
+        # and one conservative scratch allowance. Fused reductions and in-place
+        # linewidth conversion avoid product and effective-linewidth maps.
+        dense_count = len(fields) + (3 if visser is None else 5)
         if chunk_size is None:
             chunk_size = _chunk_size_from_memory_budget(
                 n_candidates=n_candidates,
@@ -1356,7 +1436,7 @@ def compute_pdr_shielding_healpix(
         )
 
     if n_candidates == 0:
-        chi_eff_pdr = chi_arr * theta_pdr
+        chi_eff_pdr = _multiply_3d_parallel(chi_arr, theta_pdr)
         return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr
 
     for ichunk, start in enumerate(range(0, n_candidates, int(chunk_size)), start=1):
@@ -1427,24 +1507,15 @@ def compute_pdr_shielding_healpix(
             )
         _scatter_candidates_3d(theta_h2, candidate_idx_chunk, theta_h2_mean)
 
-        # C self-shielding 
+        # C self-shielding
         # References: van Dishoeck & Black 1988; Tielens & Hollenbach 1985
         # theta_c = exp(-sigma_C * N_C) * exp(-y)/(1+y)
         # where y = AH2 * tau_H2, tau_H2 = sigma_H2 * 2 * N_H2
-        AH2 = 1.17e-8
-        tau_H2 = 1.2e-14 * 2.0 * N_H2_rays
-        y = AH2 * tau_H2
-        ry = np.exp(-y) / (1.0 + y)
-        rc = np.exp(-1.6e-17 * N_C_rays)
-        theta_c_rays = rc * ry
+        theta_c_rays = _c_shielding(N_C_rays, N_H2_rays)
 
         theta_c_mean = _average_rays(theta_c_rays, W_chunk)
         if star_cols is not None:
-            tau_H2_star = 1.2e-14 * 2.0 * star_cols["h2"]
-            y_star = AH2 * tau_H2_star
-            ry_star = np.exp(-y_star) / (1.0 + y_star)
-            rc_star = np.exp(-1.6e-17 * star_cols["c"])
-            theta_c_star = rc_star * ry_star
+            theta_c_star = _c_shielding(star_cols["c"], star_cols["h2"])
             theta_c_mean = _apply_stellar_weight_correction(
                 theta_c_mean,
                 theta_c_rays,
@@ -1454,6 +1525,7 @@ def compute_pdr_shielding_healpix(
                 end=end,
             )
         _scatter_candidates_3d(theta_c, candidate_idx_chunk, theta_c_mean)
+        del theta_c_rays
 
         theta_pdr_mean = theta_h2_mean
         _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_h2_mean)
@@ -1505,13 +1577,17 @@ def compute_pdr_shielding_healpix(
                 )
             _scatter_candidates_3d(theta_co, candidate_idx_chunk, theta_co_mean)
 
-            theta_pdr_rays = f_sh_rays * theta_co_rays
-            theta_pdr_mean = _average_rays(theta_pdr_rays, W_chunk)
+            theta_pdr_mean = _average_product_rays(
+                f_sh_rays,
+                theta_co_rays,
+                W_chunk,
+            )
             if star_cols is not None:
                 theta_pdr_star = theta_h2_star * theta_co_star
-                theta_pdr_mean = _apply_stellar_weight_correction(
+                theta_pdr_mean = _apply_stellar_product_weight_correction(
                     theta_pdr_mean,
-                    theta_pdr_rays,
+                    f_sh_rays,
+                    theta_co_rays,
                     theta_pdr_star,
                     stellar=stellar,
                     start=start,
@@ -1519,5 +1595,5 @@ def compute_pdr_shielding_healpix(
                 )
             _scatter_candidates_3d(theta_pdr, candidate_idx_chunk, theta_pdr_mean)
 
-    chi_eff_pdr = chi_arr * theta_pdr
+    chi_eff_pdr = _multiply_3d_parallel(chi_arr, theta_pdr)
     return theta_h2, theta_co, theta_c, theta_pdr, chi_eff_pdr

@@ -31,6 +31,7 @@ import zipfile
 import urllib.request
 
 import numpy as np
+from numba import njit, prange
 from scipy.interpolate import RegularGridInterpolator
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +48,99 @@ LEIDEN_CO_ZIP = (
 ArrayLike = Union[float, np.ndarray]
 
 N_SHIELD_MIN = 1.0e10
+
+
+@njit(cache=True, inline="always")
+def _axis_bracket(axis: np.ndarray, value: float) -> tuple[int, float]:
+    """Return the lower cell index and interpolation fraction."""
+    if value <= axis[0]:
+        lo = 0
+    elif value >= axis[-1]:
+        lo = axis.size - 2
+    else:
+        lo = int(np.searchsorted(axis, value, side="right")) - 1
+    frac = (value - axis[lo]) / (axis[lo + 1] - axis[lo])
+    return lo, frac
+
+
+@njit(cache=True, inline="always")
+def _bilinear_log_theta(
+    log_theta: np.ndarray,
+    log_nco_axis: np.ndarray,
+    log_nh2_axis: np.ndarray,
+    log_nco: float,
+    log_nh2: float,
+) -> float:
+    """Evaluate one log-theta grid with linear extrapolation at its edges."""
+    i, tx = _axis_bracket(log_nco_axis, log_nco)
+    j, ty = _axis_bracket(log_nh2_axis, log_nh2)
+    low = (1.0 - tx) * log_theta[i, j] + tx * log_theta[i + 1, j]
+    high = (1.0 - tx) * log_theta[i, j + 1] + tx * log_theta[i + 1, j + 1]
+    return (1.0 - ty) * low + ty * high
+
+
+@njit(cache=True, parallel=True)
+def _theta_interpolated_b_kernel(
+    nco: np.ndarray,
+    nh2: np.ndarray,
+    b_kms: np.ndarray,
+    b_default: float,
+    b_axis: np.ndarray,
+    log_nco_axis: np.ndarray,
+    log_nh2_axis: np.ndarray,
+    log_theta_tables: np.ndarray,
+) -> np.ndarray:
+    """Evaluate Visser shielding for flattened, unitless input arrays."""
+    out = np.empty(nco.size, dtype=np.float64)
+    for idx in prange(nco.size):
+        nco_i = nco[idx]
+        nh2_i = nh2[idx]
+        if nco_i < N_SHIELD_MIN and nh2_i < N_SHIELD_MIN:
+            out[idx] = 1.0
+            continue
+
+        log_nco = np.log10(max(nco_i, N_SHIELD_MIN))
+        log_nh2 = np.log10(max(nh2_i, N_SHIELD_MIN))
+        b_i = b_kms[idx]
+        if np.isnan(b_i):
+            b_i = b_default
+        b_i = min(max(b_i, b_axis[0]), b_axis[-1])
+
+        if b_axis.size == 1:
+            log_theta = _bilinear_log_theta(
+                log_theta_tables[0],
+                log_nco_axis,
+                log_nh2_axis,
+                log_nco,
+                log_nh2,
+            )
+        else:
+            hi = int(np.searchsorted(b_axis, b_i, side="right"))
+            lo = max(hi - 1, 0)
+            hi = min(hi, b_axis.size - 1)
+            log_theta_lo = _bilinear_log_theta(
+                log_theta_tables[lo],
+                log_nco_axis,
+                log_nh2_axis,
+                log_nco,
+                log_nh2,
+            )
+            if lo == hi:
+                log_theta = log_theta_lo
+            else:
+                log_theta_hi = _bilinear_log_theta(
+                    log_theta_tables[hi],
+                    log_nco_axis,
+                    log_nh2_axis,
+                    log_nco,
+                    log_nh2,
+                )
+                frac = (b_i - b_axis[lo]) / (b_axis[hi] - b_axis[lo])
+                log_theta = (1.0 - frac) * log_theta_lo + frac * log_theta_hi
+
+        theta = np.exp(log_theta)
+        out[idx] = min(max(theta, 0.0), 1.0)
+    return out
 
 
 def ensure_visser_tables(
@@ -122,6 +216,7 @@ class ShieldingGrid2D:
             fill_value=self.fill_value,
         )
         object.__setattr__(self, "_interp", interp)
+        object.__setattr__(self, "_log_theta", log_th)
 
     def theta(self, logNco: ArrayLike, logNh2: ArrayLike) -> np.ndarray:
         logNco = np.asarray(logNco, float)
@@ -177,6 +272,10 @@ class VisserShielding:
         self._grid_cache: Dict[str, Dict[str, ShieldingGrid2D]] = {
             self.filepath.name: self._grids
         }
+        self._b_family_cache: dict[
+            str,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        ] = {}
 
     # --------- public API ----------
 
@@ -261,9 +360,29 @@ class VisserShielding:
         normal in-table interpolation over ``log10(Nco)`` and ``log10(Nh2)``.
         Files are restricted to the same table family as the loaded file
         (same excitation temperature and isotope-ratio suffix).
+
+        Parameters
+        ----------
+        isotop : str
+            Isotopologue name present in the selected table family.
+        Nco, Nh2 : float or ndarray
+            CO and H2 column densities [cm^-2]. Inputs are broadcast together.
+        b_kms : float or ndarray
+            CO Doppler parameter [km/s], broadcast with the column arrays.
+
+        Returns
+        -------
+        ndarray
+            Shielding factor in [0, 1], with the broadcast input shape.
+
+        References
+        ----------
+        Visser et al. 2009, A&A 503, 323; see the shielding guide.
         """
         iso = isotop.lower()
-        bvals, filenames = self._available_b_family()
+        bvals, log_nco_axis, log_nh2_axis, log_theta_tables = (
+            self._stacked_b_family(iso)
+        )
         if bvals.size == 0:
             return self.theta(iso, Nco, Nh2, b_kms=self.b_kms)
 
@@ -272,49 +391,17 @@ class VisserShielding:
         b_arr = np.asarray(b_kms, float)
         Nco_b, Nh2_b, b_b = np.broadcast_arrays(Nco_arr, Nh2_arr, b_arr)
 
-        out = np.ones_like(Nco_b, dtype=float)
-        unshielded = (Nco_b < N_SHIELD_MIN) & (Nh2_b < N_SHIELD_MIN)
-        need_interp = ~unshielded
-        if not np.any(need_interp):
-            return out
-
-        Nco_work = Nco_b[need_interp]
-        Nh2_work = Nh2_b[need_interp]
-        b_work = np.nan_to_num(b_b[need_interp], nan=float(self.b_kms))
-        b_work = np.clip(b_work, float(bvals[0]), float(bvals[-1]))
-
-        hi_idx = np.searchsorted(bvals, b_work, side="right")
-        lo_idx = np.maximum(hi_idx - 1, 0)
-        hi_idx = np.minimum(hi_idx, bvals.size - 1)
-
-        theta_work = np.empty_like(b_work, dtype=float)
-        for lo, hi in sorted(set(zip(lo_idx.tolist(), hi_idx.tolist()))):
-            sel = (lo_idx == lo) & (hi_idx == hi)
-            th_lo = self._theta_from_file(
-                filenames[lo],
-                iso,
-                Nco_work[sel],
-                Nh2_work[sel],
-            )
-            if lo == hi or bvals[lo] == bvals[hi]:
-                theta_work[sel] = th_lo
-                continue
-
-            th_hi = self._theta_from_file(
-                filenames[hi],
-                iso,
-                Nco_work[sel],
-                Nh2_work[sel],
-            )
-            frac = (b_work[sel] - bvals[lo]) / (bvals[hi] - bvals[lo])
-            log_th = (
-                (1.0 - frac) * np.log(np.clip(th_lo, 1.0e-300, 1.0))
-                + frac * np.log(np.clip(th_hi, 1.0e-300, 1.0))
-            )
-            theta_work[sel] = np.exp(log_th)
-
-        out[need_interp] = np.clip(theta_work, 0.0, 1.0)
-        return np.clip(out, 0.0, 1.0)
+        out = _theta_interpolated_b_kernel(
+            np.ascontiguousarray(Nco_b.reshape(-1), dtype=np.float64),
+            np.ascontiguousarray(Nh2_b.reshape(-1), dtype=np.float64),
+            np.ascontiguousarray(b_b.reshape(-1), dtype=np.float64),
+            float(self.b_kms),
+            bvals,
+            log_nco_axis,
+            log_nh2_axis,
+            log_theta_tables,
+        )
+        return out.reshape(Nco_b.shape)
 
     # --------- filename helpers ----------
 
@@ -425,6 +512,57 @@ class VisserShielding:
         if filename not in self._grid_cache:
             self._grid_cache[filename] = self._parse_visser_file(self.data_dir / filename)
         return self._grid_cache[filename]
+
+    def _stacked_b_family(
+        self,
+        isotop: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return contiguous arrays for the selected isotopologue table family."""
+        if isotop in self._b_family_cache:
+            return self._b_family_cache[isotop]
+
+        bvals, filenames = self._available_b_family()
+        if bvals.size == 0:
+            empty = np.empty(0, dtype=np.float64)
+            result = (empty, empty, empty, np.empty((0, 0, 0), dtype=np.float64))
+            self._b_family_cache[isotop] = result
+            return result
+
+        grids = []
+        for filename in filenames:
+            grids_for_file = self._grids_for_file(filename)
+            if isotop not in grids_for_file:
+                raise KeyError(
+                    f"Isotopologue {isotop} not in {filename}. "
+                    f"Available: {list(grids_for_file)}"
+                )
+            grids.append(grids_for_file[isotop])
+
+        log_nco_axis = np.ascontiguousarray(grids[0].logNco_grid, dtype=np.float64)
+        log_nh2_axis = np.ascontiguousarray(grids[0].logNh2_grid, dtype=np.float64)
+        if log_nco_axis.size < 2 or log_nh2_axis.size < 2:
+            raise ValueError("Visser shielding table axes must each have at least two points")
+        for filename, grid in zip(filenames[1:], grids[1:]):
+            if not (
+                np.array_equal(grid.logNco_grid, log_nco_axis)
+                and np.array_equal(grid.logNh2_grid, log_nh2_axis)
+            ):
+                raise ValueError(
+                    "Visser shielding tables in one b family must share column axes; "
+                    f"{filename} differs from {filenames[0]}"
+                )
+
+        result = (
+            np.ascontiguousarray(bvals, dtype=np.float64),
+            log_nco_axis,
+            log_nh2_axis,
+            np.ascontiguousarray(
+                np.stack([grid._log_theta for grid in grids], axis=0),
+                dtype=np.float64,
+            ),
+        )
+        self._b_family_cache[isotop] = result
+        return result
 
     def _theta_from_file(
         self,
