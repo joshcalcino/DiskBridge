@@ -588,10 +588,9 @@ class SegmentedRadRunner:
             shell_ncells=1,
             mcmono_dir=outer_rad.outputs_dir / 'mcmono',
         )
-        inner_rad.write_inherited_uv_external_source(
+        inner_rad.ensure_inherited_uv_external_source(
             wavelengths_um=wavelengths_um,
             spectrum=shell_spectrum,
-            output_dir=inner_rad.inputs_dir,
             uv_min=uv_min,
             uv_max=uv_max,
         )
@@ -1396,7 +1395,10 @@ class SegmentedRadRunner:
                 segment_model, segment_indexer = self._build_segment_model_and_indexer(definition)
 
             rad = self._setup_segment(segment_model, work_dir, base_opacity_dir)
-            if level > 0:
+            if level == 0:
+                if bool(getattr(rad.params, "external_uv", False)):
+                    rad.writer.ensure_external_source(work_dir)
+            else:
                 if parent_rad is None:
                     raise RuntimeError("Missing parent segment for inherited UV source")
                 self._inherit_external_source(

@@ -58,7 +58,6 @@ SIGMA_SB = units('sigma_SB')
 from diskbridge._constants import (
     EPS_CHI,
     LOG_CHI_OVER_NH_PDISS,
-    MMP83_IR_TABLE,
 )
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
@@ -114,13 +113,22 @@ _MCMONO_EXTRA_PARAM_KEYS = (
 )
 
 
-def _external_source_cache_context(params) -> dict[str, object]:
+def _external_source_cache_context(
+    params,
+    external_source_path: Optional[str | Path],
+) -> dict[str, object]:
     if not bool(getattr(params, "external_uv", False)):
         return {"external_source_enabled": False}
-    ir_path = Path(__file__).resolve().parents[3] / "data" / MMP83_IR_TABLE
+    if external_source_path is None:
+        raise ValueError(
+            "external_source_path is required when external radiation is enabled"
+        )
+    source_path = Path(external_source_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Missing external source input: {source_path}")
     return {
         "external_source_enabled": True,
-        "external_mmp83_ir_table_hash": file_sha256(ir_path) if ir_path.is_file() else "",
+        "external_source_sha256": file_sha256(source_path),
     }
 
 
@@ -470,36 +478,37 @@ class RadModel:
         logger.info(f"Wrote external_source.inp file: {ext_path}")
         return ext_path
 
-    def write_inherited_uv_external_source(
+    def ensure_inherited_uv_external_source(
         self,
         wavelengths_um: np.ndarray,
         spectrum: np.ndarray,
-        output_dir: Path,
         *,
         uv_min: Quantity,
         uv_max: Quantity,
     ) -> Path:
-        """Replace only the UV interval of the configured external spectrum.
+        """Write or validate the expected inherited-UV external spectrum.
 
         Parameters
         ----------
         wavelengths_um, spectrum : ndarray
             Parent-shell UV wavelength grid and mean intensity.
-        output_dir : pathlib.Path
-            Child RADMC-3D input directory.
         uv_min, uv_max : Quantity
             Inclusive wavelength interval replaced by the inherited spectrum.
 
         Returns
         -------
         pathlib.Path
-            Updated ``external_source.inp`` path.
+            Validated or newly written ``external_source.inp`` path.
+
+        Raises
+        ------
+        RuntimeError
+            If an existing source differs from the expected inherited spectrum.
         """
-        output_dir = Path(output_dir)
-        ext_path = output_dir / "external_source.inp"
-        if not ext_path.exists():
-            self.writer.write_external_source(self.model_dir)
-        lines = ext_path.read_text().split()
+        ext_path, configured_content = self.writer._external_source_content(
+            self.model_dir
+        )
+        lines = configured_content.split()
         if len(lines) < 2:
             raise ValueError(f"Invalid external source file: {ext_path}")
         if int(lines[0]) != 2:
@@ -538,13 +547,19 @@ class RadModel:
         )
         combined = original.copy()
         combined[uv_mask] = inherited
-        with ext_path.open("w") as f:
-            f.write("2\n")
-            f.write(f"{nlam}\n")
-            for wavelength in target_wavelengths:
-                f.write(f"{wavelength:13.6e}\n")
-            for value in combined:
-                f.write(f"{value:13.6e}\n")
+        expected_lines = ["2", str(nlam)]
+        expected_lines.extend(f"{value:13.6e}" for value in target_wavelengths)
+        expected_lines.extend(f"{value:13.6e}" for value in combined)
+        expected = "\n".join(expected_lines) + "\n"
+        if ext_path.exists():
+            if not ext_path.is_file() or ext_path.read_text() != expected:
+                raise RuntimeError(
+                    "Existing external source does not match the expected "
+                    f"inherited UV spectrum: {ext_path}. Remove the segment "
+                    "directory before rerunning."
+                )
+            return ext_path
+        ext_path.write_text(expected)
         logger.info("Wrote inherited UV external source: %s", ext_path)
         return ext_path
     
@@ -944,11 +959,14 @@ class RadModel:
             nphot = int(self.params.nphot_thermal)
         nphot = _validate_radmc_photon_count(nphot, name="nphot_thermal")
         
+        external_source_path = self._ensure_external_source_input()
         cache_context = {
             'nphot': int(nphot),
         }
         cache_context.update(build_mesh_cache_context(self.model.mesh))
-        cache_context.update(_external_source_cache_context(self.params))
+        cache_context.update(
+            _external_source_cache_context(self.params, external_source_path)
+        )
         
         countwrite = max(1, int(nphot // 100))
         countwrite = min(countwrite, int(np.iinfo(np.int32).max))
@@ -975,12 +993,6 @@ class RadModel:
         self._update_radmc3d_inp_int_params({'nphot': int(nphot)})
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
-        if getattr(self.params, 'external_uv', False):
-            external_source_path = self.inputs_dir / 'external_source.inp'
-            if not external_source_path.exists():
-                writer = RadWriter(self.model, organize_files=True)
-                writer.write_external_source(self.model_dir)
-
         stale = self.model_dir / 'dust_temperature.bdat'
         if stale.is_symlink():
             stale.unlink()
@@ -1278,13 +1290,19 @@ class RadModel:
         mcmono_wav_file = self.model_dir / 'mcmono_wavelength_micron.inp'
         write_wavelength_file(mcmono_wav_file, mcmono_lam_um, file_format='mcmono')
     
-    def _prepare_mcmono_run(self, output_dir: Path) -> None:
-        """Prepare environment for mcmono run (external source, temperature)."""
-        if getattr(self.params, 'external_uv', False):
-            external_source_path = self.inputs_dir / 'external_source.inp'
-            if not external_source_path.exists():
-                writer = RadWriter(self.model, organize_files=True)
-                writer.write_external_source(self.model_dir)
+    def _ensure_external_source_input(self) -> Optional[Path]:
+        """Return the configured external-source input, writing it if absent."""
+        if not bool(getattr(self.params, 'external_uv', False)):
+            return None
+        external_source_path = self.inputs_dir / 'external_source.inp'
+        if not external_source_path.exists():
+            writer = RadWriter(self.model, organize_files=True)
+            writer.write_external_source(self.model_dir)
+        if not external_source_path.is_file():
+            raise FileNotFoundError(
+                f"Missing external source input: {external_source_path}"
+            )
+        return external_source_path
     
     def _run_mcmono(
         self,
@@ -1387,6 +1405,7 @@ class RadModel:
             n_wavelengths,
             compute_uv_products,
         )
+        external_source_path = self._ensure_external_source_input()
 
         cache_context = {
             'nphot': int(nphot),
@@ -1406,7 +1425,9 @@ class RadModel:
             if iseed <= 0:
                 raise ValueError("iseed must be positive")
             cache_context["iseed"] = iseed
-        cache_context.update(_external_source_cache_context(self.params))
+        cache_context.update(
+            _external_source_cache_context(self.params, external_source_path)
+        )
 
         if compute_uv_products:
             isrf_path = default_isrf_path()
@@ -1462,7 +1483,6 @@ class RadModel:
         self._ensure_cntdump_ge_countwrite(countwrite, nphot)
         
         self._write_mcmono_wavelengths(mcmono_lam_um)
-        self._prepare_mcmono_run(output_dir)
         self._run_mcmono(
             output_dir,
             mcmono_lam_um,

@@ -45,6 +45,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- RADMC-3D thermal and monochromatic cache identity now includes the exact
+  `external_source.inp` content hash. Segmented setup writes missing configured
+  or inherited spectra, reuses exact matches, and rejects mismatches without
+  overwriting them.
 - RADMC-3D thermal, monochromatic, and resolved segmented photon counts are now
   rejected before execution when they exceed the signed 32-bit counter range.
 - Weighted HEALPix shielding now uses exact cell-to-star H2/C/CO columns for
@@ -62,6 +66,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Simplified `validation/segmented_uv` to one canonical diagnostic layout:
+  native per-segment and join diagnostics under `plots/segmented_rt/`, UV
+  product comparisons under `plots/uv_products/`, and root summary metrics and
+  radial comparison only. Plot regeneration no longer runs RADMC-3D.
 - Added `validation/gow17_healpix_performance`, a provenance-rich sustained
   scaling and numerical-comparison workflow for the Bondi All-Stars `nside=4`
   interpolation and complete post-ray shielding stages, plus the native GOW17

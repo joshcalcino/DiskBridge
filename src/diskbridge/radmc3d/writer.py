@@ -1005,12 +1005,12 @@ class RadWriter:
                 raise RuntimeError("Invalid wavelength_micron.inp format")
         return np.array(vals, dtype=float)
 
-    def write_external_source(
+    def _external_source_content(
         self,
         output_dir: str | Path = '.',
         chi: Optional[float] = None,
         isrf_path: str | Path = 'ISRF.dat',
-    ) -> None:
+    ) -> tuple[Path, str]:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'external')
         data_dir = Path(__file__).resolve().parents[3] / 'data'
@@ -1048,18 +1048,70 @@ class RadWriter:
             include_cmb=bool(getattr(self.params, "external_cmb", True)),
         )
         filepath = output_dir / 'external_source.inp'
-        with open(filepath, 'w') as f:
-            # RADMC-3D manual (sec-ext-src-inp): format 2, then nlam, then
-            # lambda[i] in micron (identical to wavelength_micron.inp), then
-            # intensity[i] in erg/cm^2/s/Hz/sr.
-            f.write('2\n')
-            f.write(f"{lam_um.size}\n")
-            for w in lam_um:
-                f.write(f"{w:13.6e}\n")
-            for val in i_nu_scaled:
-                f.write(f"{val:13.6e}\n")
+        lines = ['2', str(lam_um.size)]
+        lines.extend(f"{w:13.6e}" for w in lam_um)
+        lines.extend(f"{val:13.6e}" for val in i_nu_scaled)
+        return filepath, "\n".join(lines) + "\n"
+
+    def write_external_source(
+        self,
+        output_dir: str | Path = '.',
+        chi: Optional[float] = None,
+        isrf_path: str | Path = 'ISRF.dat',
+    ) -> None:
+        filepath, content = self._external_source_content(
+            output_dir,
+            chi=chi,
+            isrf_path=isrf_path,
+        )
+        filepath.write_text(content)
         self.written_files['external_source.inp'] = filepath
         logger.info(f"Wrote external_source.inp file: {filepath}")
+
+    def ensure_external_source(
+        self,
+        output_dir: str | Path = '.',
+        chi: Optional[float] = None,
+        isrf_path: str | Path = 'ISRF.dat',
+    ) -> Path:
+        """Write a missing configured external source or validate an existing one.
+
+        Parameters
+        ----------
+        output_dir : str or pathlib.Path, optional
+            RADMC-3D model directory or direct input directory.
+        chi : float, optional
+            External UV scaling. The configured value is used when omitted.
+        isrf_path : str or pathlib.Path, optional
+            Name of the packaged external UV spectrum.
+
+        Returns
+        -------
+        pathlib.Path
+            Validated or newly written external-source path.
+
+        Raises
+        ------
+        RuntimeError
+            If an existing source differs from the configured spectrum.
+        """
+        filepath, expected = self._external_source_content(
+            output_dir,
+            chi=chi,
+            isrf_path=isrf_path,
+        )
+        if filepath.exists():
+            if not filepath.is_file() or filepath.read_text() != expected:
+                raise RuntimeError(
+                    "Existing external source does not match the configured "
+                    f"spectrum: {filepath}. Remove the run directory before rerunning."
+                )
+            return filepath
+        filepath.write_text(expected)
+        self.written_files['external_source.inp'] = filepath
+        logger.info("Wrote external_source.inp file: %s", filepath)
+        return filepath
+
     def write_gas_temperature(
         self,
         temperature: Quantity,

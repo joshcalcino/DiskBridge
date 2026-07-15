@@ -164,6 +164,32 @@ def test_external_ir_background_requires_wavelength_grid_to_3000_micron(tmp_path
         w.write_external_source(tmp_path)
 
 
+def test_configured_external_source_rejects_existing_mismatch(tmp_path):
+    w = _writer()
+    w.organize_files = False
+    w.inputs_dir = "radmc3d_inputs"
+    w.written_files = {}
+    w.params = SimpleNamespace(
+        external_uv_chi=1.0,
+        external_ir_background=True,
+        external_ir_Tback=Quantity(10.0, "K"),
+        external_cmb=True,
+    )
+    wavelengths = np.logspace(np.log10(0.0912), np.log10(10000.0), 32)
+    with (tmp_path / "wavelength_micron.inp").open("w") as handle:
+        handle.write(f"{wavelengths.size}\n")
+        for wavelength in wavelengths:
+            handle.write(f"{wavelength:.16e}\n")
+
+    source_path = w.ensure_external_source(tmp_path)
+    expected = source_path.read_text()
+    assert w.ensure_external_source(tmp_path).read_text() == expected
+
+    source_path.write_text("different spectrum\n")
+    with pytest.raises(RuntimeError, match="Remove the run directory"):
+        w.ensure_external_source(tmp_path)
+
+
 def test_external_source_writer_no_longer_uses_legacy_dust_normalization_path():
     source = inspect.getsource(writer_mod.RadWriter)
 
