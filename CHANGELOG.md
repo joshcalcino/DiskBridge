@@ -59,6 +59,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Removed the unused shielding UV-boundary module and obsolete flat-profile
+  `find_r_split` helpers; calibrated noise-aware boundary selection is the sole
+  segmented-UV split implementation.
 - Removed the GOW17 `checkpoint.include_dust` setting; restart checkpoints do
   not serialize model dust fields.
 - Removed superseded segmented RT split controls and output discovery paths;

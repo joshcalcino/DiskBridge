@@ -60,6 +60,7 @@ validation/prizmo_disk/params.txt
 validation/segmented_uv/baseline_run/
 validation/segmented_uv/segmented_run/
 validation/segmented_uv/plots/
+validation/segmented_uv/validation.log
 
 # Local dependency builds and caches
 dependencies/
