@@ -58,7 +58,84 @@ class PairedScoutResult:
     products: dict[str, dict[str, np.ndarray]]
     wavelength_metrics: dict[str, np.ndarray]
     reliable_shells: np.ndarray
-    estimator_dirs: tuple[Path, Path]
+    estimator_dirs: tuple[Path, ...]
+
+
+def _calibrate_inherited_spectrum(
+    provisional_spectrum: np.ndarray,
+    parent_comparison_j: np.ndarray,
+    child_comparison_j: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one wavelength-resolved child boundary correction.
+
+    The monochromatic transfer problem is linear in the external source at
+    fixed density and opacity. Boundary selection keeps the stellar component
+    below the configured screening threshold, so the parent-to-child shell
+    ratio calibrates the external component without an analytic subtraction.
+    """
+    provisional = np.asarray(provisional_spectrum, dtype=np.float64)
+    parent = np.asarray(parent_comparison_j, dtype=np.float64)
+    child = np.asarray(child_comparison_j, dtype=np.float64)
+    if provisional.ndim != 1 or parent.shape != provisional.shape or child.shape != provisional.shape:
+        raise ValueError("Boundary calibration spectra must be matching 1-D arrays")
+    if not np.all(np.isfinite(provisional)) or np.any(provisional <= 0.0):
+        raise ValueError("Provisional inherited spectrum must be positive and finite")
+    if not np.all(np.isfinite(parent)) or np.any(parent <= 0.0):
+        raise ValueError("Parent comparison spectrum must be positive and finite")
+    if not np.all(np.isfinite(child)) or np.any(child <= 0.0):
+        raise ValueError("Child comparison spectrum must be positive and finite")
+
+    correction = parent / child
+    corrected = provisional * correction
+    if not np.all(np.isfinite(corrected)) or np.any(corrected <= 0.0):
+        raise ValueError("Corrected inherited spectrum must be positive and finite")
+    return correction, corrected
+
+
+def _matches_serialized_mcmono_grid(
+    serialized_wavelengths: np.ndarray,
+    requested_wavelengths: np.ndarray,
+) -> bool:
+    """Return whether a RADMC-3D grid matches its six-decimal input grid."""
+    serialized = np.asarray(serialized_wavelengths, dtype=np.float64)
+    requested = np.asarray(requested_wavelengths, dtype=np.float64)
+    return serialized.shape == requested.shape and bool(
+        np.allclose(serialized, requested, rtol=0.0, atol=5.0e-7)
+    )
+
+
+def _clip_parent_temperature_to_child(
+    parent_temperature: Quantity,
+    parent_model: Model,
+    child_model: Model,
+) -> Quantity:
+    """Clip a parent temperature onto an exact inner-prefix child mesh."""
+    parent_mesh = parent_model.mesh
+    child_mesh = child_model.mesh
+    if parent_mesh is None or child_mesh is None:
+        raise ValueError("Parent and child calibration models require meshes")
+    if parent_mesh.coord_system != child_mesh.coord_system:
+        raise ValueError("Parent and child calibration coordinates differ")
+    if parent_mesh.axis_names() != child_mesh.axis_names():
+        raise ValueError("Parent and child calibration axis orders differ")
+
+    for axis in parent_mesh.axis_names():
+        parent_edges = parent_mesh.edges(axis)
+        child_edges = child_mesh.edges(axis).to(parent_edges.units)
+        n_child_edges = int(child_edges.size)
+        if n_child_edges > int(parent_edges.size) or not np.array_equal(
+            np.asarray(parent_edges.magnitude[:n_child_edges]),
+            np.asarray(child_edges.magnitude),
+        ):
+            raise ValueError("Child calibration mesh is not an inner prefix of its parent")
+
+    parent_values = np.asarray(parent_temperature.magnitude)
+    spatial_ndim = len(parent_mesh.axis_names())
+    if parent_values.shape[-spatial_ndim:] != tuple(parent_mesh.shape):
+        raise ValueError("Parent temperature shape does not match its mesh")
+    leading = (slice(None),) * (parent_values.ndim - spatial_ndim)
+    spatial = tuple(slice(0, int(size)) for size in child_mesh.shape)
+    return Quantity(parent_values[leading + spatial], parent_temperature.units)
 
 
 class SegmentedRadRunner:
@@ -574,26 +651,152 @@ class SegmentedRadRunner:
         link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
         return rad
 
-    def _inherit_external_source(
-        self,
+    @staticmethod
+    def _extract_parent_shell_spectrum(
         outer_rad: 'RadModel',
-        inner_rad: 'RadModel',
         r_split_au: float,
-        uv_min: Quantity,
-        uv_max: Quantity,
-    ) -> None:
-        """Inherit one parent source shell while retaining original non-UV flux."""
-        wavelengths_um, shell_spectrum = outer_rad.extract_shell_spectrum(
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the one-cell parent source-shell spectrum."""
+        return outer_rad.extract_shell_spectrum(
             r_split_au=r_split_au,
             shell_ncells=1,
             mcmono_dir=outer_rad.outputs_dir / 'mcmono',
         )
+
+    @staticmethod
+    def _write_inherited_external_source(
+        inner_rad: 'RadModel',
+        wavelengths_um: np.ndarray,
+        spectrum: np.ndarray,
+        uv_min: Quantity,
+        uv_max: Quantity,
+    ) -> None:
+        """Write one inherited UV spectrum while retaining original non-UV flux."""
         inner_rad.ensure_inherited_uv_external_source(
             wavelengths_um=wavelengths_um,
-            spectrum=shell_spectrum,
+            spectrum=spectrum,
             uv_min=uv_min,
             uv_max=uv_max,
         )
+
+    def _calibrate_child_external_source(
+        self,
+        *,
+        parent_rad: 'RadModel',
+        parent_scout: PairedScoutResult,
+        parent_split_info: dict[str, Any],
+        child_model: Model,
+        work_dir: Path,
+        base_opacity_dir: Path,
+        r_split_au: float,
+        nphot: int,
+        wavelengths_um: np.ndarray,
+        uv_min: Quantity,
+        uv_max: Quantity,
+        level: int,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        """Calibrate a provisional isotropic child source in the shared shell."""
+        provisional_wavelengths, provisional_spectrum = self._extract_parent_shell_spectrum(
+            parent_rad,
+            r_split_au,
+        )
+        if not _matches_serialized_mcmono_grid(
+            provisional_wavelengths,
+            wavelengths_um,
+        ):
+            raise ValueError("Parent source spectrum does not match the segmented UV grid")
+
+        calibration_dir = work_dir.parent / f".{work_dir.name}_boundary_calibration"
+        if calibration_dir.exists():
+            shutil.rmtree(calibration_dir)
+        seed = 130363 + int(level)
+        try:
+            calibration_rad = self._setup_segment(
+                child_model,
+                calibration_dir,
+                base_opacity_dir,
+            )
+            self._write_inherited_external_source(
+                calibration_rad,
+                provisional_wavelengths,
+                provisional_spectrum,
+                uv_min,
+                uv_max,
+            )
+            if parent_rad.dust_temperature is None:
+                raise RuntimeError("Parent segment has no temperature for UV calibration")
+            calibration_temperature = _clip_parent_temperature_to_child(
+                parent_rad.dust_temperature,
+                parent_rad.model,
+                calibration_rad.model,
+            )
+            if calibration_rad.model.dust is None:
+                raise ValueError("Boundary calibration requires dust species")
+            calibration_rad.writer.write_dust_temperature(
+                calibration_temperature,
+                output_dir=calibration_rad.outputs_dir / "temperature",
+                nspec=int(calibration_rad.model.dust.nbin),
+            )
+            output_dir = calibration_rad.outputs_dir / "mcmono"
+            calibration_rad.compute_mcmono(
+                nphot=int(nphot),
+                output_dir=output_dir,
+                force=True,
+                wavelengths_um=wavelengths_um,
+                uv_min=uv_min,
+                uv_max=uv_max,
+                compute_uv_products=False,
+                iseed=seed,
+            )
+            intensity_path = output_dir / "mean_intensity.bout"
+            child_frequency_hz, child_shell_j = radial_shell_mean_intensity(
+                intensity_path,
+                compute_cell_volumes(calibration_rad.model),
+            )
+            parent_frequency_hz = np.asarray(
+                parent_scout.wavelength_metrics["frequencies_hz"],
+                dtype=np.float64,
+            )
+            if not np.array_equal(child_frequency_hz, parent_frequency_hz):
+                raise ValueError("Parent and child calibration frequency grids differ")
+            parent_idx = int(parent_split_info["comparison_shell_idx"])
+            child_idx = int(calibration_rad.model.mesh.shape[0] - 1)
+            parent_comparison_j = np.asarray(
+                parent_scout.wavelength_metrics["shell_mean"][parent_idx],
+                dtype=np.float64,
+            )
+            child_comparison_j = np.asarray(child_shell_j[child_idx], dtype=np.float64)
+            correction, corrected_spectrum = _calibrate_inherited_spectrum(
+                provisional_spectrum,
+                parent_comparison_j,
+                child_comparison_j,
+            )
+            denominator = np.abs(parent_comparison_j) + np.abs(child_comparison_j)
+            discrepancy = np.divide(
+                2.0 * np.abs(parent_comparison_j - child_comparison_j),
+                denominator,
+                out=np.zeros_like(denominator),
+                where=denominator > 0.0,
+            )
+            metadata = {
+                "iseed": int(seed),
+                "nphot_mono": int(nphot),
+                "parent_comparison_shell_idx": int(parent_idx),
+                "child_comparison_shell_idx": int(child_idx),
+                "wavelengths_um": provisional_wavelengths,
+                "frequencies_hz": child_frequency_hz,
+                "provisional_spectrum": provisional_spectrum,
+                "parent_comparison_j": parent_comparison_j,
+                "child_comparison_j": child_comparison_j,
+                "pre_correction_fractional": discrepancy,
+                "correction": correction,
+                "corrected_spectrum": corrected_spectrum,
+                "mean_intensity_sha256": sha256_file(intensity_path),
+            }
+        finally:
+            shutil.rmtree(calibration_dir, ignore_errors=True)
+
+        return provisional_wavelengths, corrected_spectrum, metadata
 
     @staticmethod
     def _copy_uv_products(rad: "RadModel") -> dict[str, Quantity]:
@@ -736,6 +939,54 @@ class SegmentedRadRunner:
         """Remove temporary paired intensity outputs after diagnostics are saved."""
         for directory in scout.estimator_dirs:
             shutil.rmtree(directory, ignore_errors=True)
+
+    def _single_uv_run_result(
+        self,
+        rad: "RadModel",
+        *,
+        nphot: int,
+    ) -> PairedScoutResult:
+        """Build join-compatible shell means from one terminal UV calculation."""
+        volumes = compute_cell_volumes(rad.model)
+        shell_weights = np.sum(volumes, axis=(1, 2))
+        products: dict[str, dict[str, np.ndarray]] = {}
+        for name, value in rad.uv_products.items():
+            values = np.asarray(value.magnitude, dtype=np.float64)
+            if values.ndim != 3:
+                continue
+            shell_mean = np.sum(values * volumes, axis=(1, 2)) / shell_weights
+            metrics: dict[str, np.ndarray] = {
+                "shell_mean": shell_mean,
+                "shell_fractional": np.full(shell_mean.shape, np.nan),
+            }
+            if name == "chi_broad":
+                metrics["mean"] = values
+            products[name] = metrics
+
+        mean_intensity_path = rad.outputs_dir / "mcmono" / "mean_intensity.bout"
+        frequencies_hz, shell_j = radial_shell_mean_intensity(
+            mean_intensity_path,
+            volumes,
+        )
+        unknown = np.full(shell_j.shape, np.nan)
+        return PairedScoutResult(
+            metadata={
+                "mode": "single_final",
+                "nphot_total": int(nphot),
+                "uncertainty_available": False,
+                "canonical_scout_sha256": sha256_file(mean_intensity_path),
+            },
+            products=products,
+            wavelength_metrics={
+                "frequencies_hz": frequencies_hz,
+                "shell_mean": shell_j,
+                "shell_sigma": unknown,
+                "shell_fractional": unknown,
+                "shell_fractional_max": np.full(shell_j.shape[0], np.nan),
+            },
+            reliable_shells=np.zeros(shell_j.shape[0], dtype=bool),
+            estimator_dirs=(),
+        )
 
     def _stellar_screen_profiles(
         self,
@@ -1226,9 +1477,10 @@ class SegmentedRadRunner:
         """Run noise-aware segmented UV radiative transfer.
 
         Scout UV calculations use two independent estimators whose total
-        packet count is the configured intermediate budget. Each child inherits
-        the parent source-shell UV spectrum while retaining the configured IR
-        and CMB spectrum. The selected terminal domain is then run once at the
+        packet count is the configured intermediate budget. Each child starts
+        from the parent source-shell UV spectrum, calibrates that spectrum once
+        against the shared comparison shell, and retains the configured IR and
+        CMB spectrum. A domain known to be terminal runs directly at the
         configured final thermal and monochromatic packet budgets.
 
         Parameters
@@ -1372,6 +1624,14 @@ class SegmentedRadRunner:
         split_radii_au: list[float] = []
         joins: list[dict[str, Any]] = []
         scout_runs: list[dict[str, Any]] = []
+        photon_packages = {
+            "scout_thermal": 0,
+            "scout_mono": 0,
+            "boundary_calibration_mono": 0,
+            "final_thermal": 0,
+            "final_mono": 0,
+        }
+        n_mcmono_wavelengths = int(wavelengths_um.size)
 
         current_outer_rmax_au = float(np.max(mesh.edges("r").to("au").magnitude))
         parent_rad: Optional[RadModel] = None
@@ -1379,6 +1639,8 @@ class SegmentedRadRunner:
         parent_split_info: Optional[dict[str, Any]] = None
 
         for level in range(max_splits + 1):
+            known_terminal = level >= max_splits
+            boundary_calibration: Optional[dict[str, Any]] = None
             if level == 0:
                 bounds: Dict[str, Tuple[Optional[Quantity], Optional[Quantity]]] = {}
                 work_dir = self.base_model_dir / "segments" / "segment_00_full"
@@ -1394,40 +1656,94 @@ class SegmentedRadRunner:
                 definition = SegmentDefinition(f"segment_{level:02d}", bounds, work_dir)
                 segment_model, segment_indexer = self._build_segment_model_and_indexer(definition)
 
+            corrected_wavelengths: Optional[np.ndarray] = None
+            corrected_spectrum: Optional[np.ndarray] = None
+            if level > 0:
+                if parent_rad is None or parent_scout is None or parent_split_info is None:
+                    raise RuntimeError("Missing parent segment state for boundary calibration")
+                corrected_wavelengths, corrected_spectrum, boundary_calibration = (
+                    self._calibrate_child_external_source(
+                        parent_rad=parent_rad,
+                        parent_scout=parent_scout,
+                        parent_split_info=parent_split_info,
+                        child_model=segment_model,
+                        work_dir=work_dir,
+                        base_opacity_dir=base_opacity_dir,
+                        r_split_au=current_outer_rmax_au,
+                        nphot=scout_counts[0],
+                        wavelengths_um=wavelengths_um,
+                        uv_min=uv_min,
+                        uv_max=uv_max,
+                        level=level,
+                    )
+                )
+                photon_packages["boundary_calibration_mono"] += (
+                    int(scout_counts[0]) * n_mcmono_wavelengths
+                )
+                self._remove_scout_estimators(parent_scout)
+                segment_model, segment_indexer = self._build_segment_model_and_indexer(definition)
+
             rad = self._setup_segment(segment_model, work_dir, base_opacity_dir)
             if level == 0:
                 if bool(getattr(rad.params, "external_uv", False)):
                     rad.writer.ensure_external_source(work_dir)
             else:
-                if parent_rad is None:
-                    raise RuntimeError("Missing parent segment for inherited UV source")
-                self._inherit_external_source(
-                    parent_rad,
+                if corrected_wavelengths is None or corrected_spectrum is None:
+                    raise RuntimeError("Boundary calibration did not produce a child UV source")
+                self._write_inherited_external_source(
                     rad,
-                    current_outer_rmax_au,
+                    corrected_wavelengths,
+                    corrected_spectrum,
                     uv_min,
                     uv_max,
                 )
 
-            rad.compute_temperature(
-                nphot=scout_thermal,
-                output_dir=rad.outputs_dir / "temperature",
-                force=force,
-            )
-            scout = self._run_paired_uv_scout(
-                rad,
-                nphot_total=scout_mono,
-                wavelengths_um=wavelengths_um,
-                uv_min=uv_min,
-                uv_max=uv_max,
-                noise_tolerance=tolerance,
-                level=level,
-                force=force,
-            )
-            stellar_array, stellar_profiles = self._stellar_screen_profiles(
-                rad, scout, product_specs
-            )
-            metrics_file = self._write_scout_diagnostics(rad, scout, stellar_profiles)
+            terminal_reason: Optional[str] = "maximum_splits" if known_terminal else None
+            metrics_file: Optional[Path] = None
+            stellar_array: Optional[np.ndarray] = None
+            if known_terminal:
+                self._run_segment_rt(
+                    rad,
+                    final_thermal,
+                    final_mono,
+                    wavelengths_um,
+                    force,
+                    compute_uv_products=True,
+                    uv_min=uv_min,
+                    uv_max=uv_max,
+                )
+                photon_packages["final_thermal"] += int(final_thermal)
+                photon_packages["final_mono"] += int(final_mono) * n_mcmono_wavelengths
+                scout = self._single_uv_run_result(rad, nphot=final_mono)
+            else:
+                rad.compute_temperature(
+                    nphot=scout_thermal,
+                    output_dir=rad.outputs_dir / "temperature",
+                    force=force,
+                )
+                scout = self._run_paired_uv_scout(
+                    rad,
+                    nphot_total=scout_mono,
+                    wavelengths_um=wavelengths_um,
+                    uv_min=uv_min,
+                    uv_max=uv_max,
+                    noise_tolerance=tolerance,
+                    level=level,
+                    force=force,
+                )
+                photon_packages["scout_thermal"] += int(scout_thermal)
+                photon_packages["scout_mono"] += int(scout_mono) * n_mcmono_wavelengths
+                stellar_array, stellar_profiles = self._stellar_screen_profiles(
+                    rad, scout, product_specs
+                )
+                metrics_file = self._write_scout_diagnostics(rad, scout, stellar_profiles)
+
+            if boundary_calibration is not None:
+                calibration_path = rad.outputs_dir / "mcmono" / "boundary_calibration.json"
+                calibration_path.write_text(
+                    json.dumps(jsonable(boundary_calibration), indent=2, sort_keys=True) + "\n"
+                )
+                boundary_calibration["metadata_file"] = str(calibration_path)
 
             join: Optional[dict[str, Any]] = None
             if parent_scout is not None and parent_split_info is not None:
@@ -1445,13 +1761,10 @@ class SegmentedRadRunner:
                 )
                 joins.append(join)
 
-            self._remove_scout_estimators(scout)
-
             split_info: Optional[dict[str, Any]] = None
-            terminal_reason: Optional[str] = None
-            if level >= max_splits:
-                terminal_reason = "maximum_splits"
-            else:
+            if not known_terminal:
+                if stellar_array is None:
+                    raise RuntimeError("Intermediate segment is missing stellar-screen profiles")
                 try:
                     split_radius, raw_split_info = find_noise_aware_split(
                         rad.model.mesh.edges("r").to("au").magnitude,
@@ -1485,12 +1798,17 @@ class SegmentedRadRunner:
                 "level": int(level),
                 "work_dir": str(work_dir),
                 "r_max_au": float(current_outer_rmax_au),
-                "nphot_thermal": int(scout_thermal),
-                "nphot_mono": int(scout_mono),
-                "scout": jsonable(scout.metadata),
-                "scout_metrics_file": str(metrics_file),
-                "noise_reliable_shell_count": int(np.count_nonzero(scout.reliable_shells)),
-                "noise_shell_count": int(scout.reliable_shells.size),
+                "nphot_thermal": int(final_thermal if known_terminal else scout_thermal),
+                "nphot_mono": int(final_mono if known_terminal else scout_mono),
+                "scout": None if known_terminal else jsonable(scout.metadata),
+                "scout_metrics_file": str(metrics_file) if metrics_file is not None else None,
+                "noise_reliable_shell_count": (
+                    None
+                    if known_terminal
+                    else int(np.count_nonzero(scout.reliable_shells))
+                ),
+                "noise_shell_count": None if known_terminal else int(scout.reliable_shells.size),
+                "boundary_calibration": jsonable(boundary_calibration),
                 "split": split_info,
                 "join": join,
                 "stellar_fraction_threshold": float(
@@ -1500,23 +1818,39 @@ class SegmentedRadRunner:
                 "has_mcmono": True,
                 "is_final": terminal_reason is not None,
             }
-            scout_runs.append(dict(segment_entry))
+            if not known_terminal:
+                scout_runs.append(dict(segment_entry))
 
-            if terminal_reason is not None:
-                self._run_segment_rt(
-                    rad,
-                    final_thermal,
-                    final_mono,
-                    wavelengths_um,
-                    True,
-                    compute_uv_products=True,
-                    uv_min=uv_min,
-                    uv_max=uv_max,
-                )
+            if terminal_reason is not None and not known_terminal:
+                if final_thermal != scout_thermal:
+                    rad.compute_temperature(
+                        nphot=final_thermal,
+                        output_dir=rad.outputs_dir / "temperature",
+                        force=True,
+                    )
+                    photon_packages["final_thermal"] += int(final_thermal)
+                if final_mono != scout_mono:
+                    rad.compute_mcmono(
+                        nphot=final_mono,
+                        output_dir=rad.outputs_dir / "mcmono",
+                        force=True,
+                        wavelengths_um=wavelengths_um,
+                        uv_min=uv_min,
+                        uv_max=uv_max,
+                        compute_uv_products=True,
+                    )
+                    photon_packages["final_mono"] += (
+                        int(final_mono) * n_mcmono_wavelengths
+                    )
                 segment_entry["nphot_thermal"] = int(final_thermal)
                 segment_entry["nphot_mono"] = int(final_mono)
                 segment_entry["terminal_reason"] = terminal_reason
-                segment_entry["scout_canonical_replaced_by_final"] = True
+                segment_entry["scout_canonical_replaced_by_final"] = bool(
+                    final_mono != scout_mono
+                )
+            elif terminal_reason is not None:
+                segment_entry["terminal_reason"] = terminal_reason
+                segment_entry["scout_canonical_replaced_by_final"] = False
             else:
                 split_radius = float(split_info["r_split_au"])
                 split_radii_au.append(split_radius)
@@ -1542,6 +1876,7 @@ class SegmentedRadRunner:
             segments.append(segment_entry)
 
             if terminal_reason is not None:
+                self._remove_scout_estimators(scout)
                 break
             parent_rad = rad
             parent_scout = scout
@@ -1605,6 +1940,10 @@ class SegmentedRadRunner:
             "segments": segments,
             "scout_runs": scout_runs,
             "joins": joins,
+            "photon_packages": {
+                **photon_packages,
+                "total": int(sum(photon_packages.values())),
+            },
             "temperature": merged_temperature,
             "chi": base_rad.chi,
             "uv_products": merged_uv_products,

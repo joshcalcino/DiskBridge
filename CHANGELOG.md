@@ -39,8 +39,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   to `mcmono`.
 - Segmented RADMC-3D UV transport now uses paired seeded scouts, measured
   shell/P99 Monte Carlo uncertainty, conservative stellar screening,
-  one-shell inherited UV boundaries that preserve the original IR/CMB field,
-  warning-only parent-child join checks, and one full-budget terminal run.
+  wavelength-resolved one-pass calibration of inherited UV boundaries that
+  preserve the original IR/CMB field, warning-only parent-child join checks,
+  and a direct full-budget terminal run without redundant paired scouts.
 - Brought the public `diskbridge.chemistry.shielding` docstrings (HEALPix and 1-D shielding, the Draine & Bertoldi H2 function, and the Visser table loader) to the NumPy-style + References standard.
 
 ### Fixed
@@ -66,6 +67,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
+  0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
+  volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining
+  few-percent inner radial residual is consistent with the isotropic,
+  angle-averaged boundary approximation.
 - Simplified `validation/segmented_uv` to one canonical diagnostic layout:
   native per-segment and join diagnostics under `plots/segmented_rt/`, UV
   product comparisons under `plots/uv_products/`, and root summary metrics and

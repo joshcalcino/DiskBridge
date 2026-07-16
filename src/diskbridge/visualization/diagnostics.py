@@ -1479,9 +1479,13 @@ def make_segmented_rt_segment_diagnostic_plots(
                     join_axes[1].plot(
                         wavelength_nm[order], np.asarray(join["j_fractional"])[order], label="join"
                     )
-                    join_axes[1].plot(
-                        wavelength_nm[order], np.asarray(join["j_sigma_rel"])[order], label="paired sigma"
-                    )
+                    join_sigma = np.asarray(join["j_sigma_rel"], dtype=float)
+                    if np.any(np.isfinite(join_sigma)):
+                        join_axes[1].plot(
+                            wavelength_nm[order],
+                            join_sigma[order],
+                            label="paired sigma",
+                        )
                     join_axes[1].axhline(
                         float(join.get("tolerance", 0.01)), color="0.25", linestyle="--"
                     )
