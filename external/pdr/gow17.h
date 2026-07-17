@@ -90,6 +90,7 @@ class gow17 : public Ode {
     /*Set to use global NCO for NCOeff or not*/
     void SetNCOeffGlobal(const bool isNCOeff_global);
     void SetCoolingCOThin(const bool isCoolingCOThin);
+    void SetNCOeffExternal(const double NCOeff);
     /*Set to bCO as a function of length scale or not*/
     void SetbCOL(const bool isbCO_L);
 		void Leff_CO_max(const double Leff_CO_max);
@@ -173,6 +174,8 @@ class gow17 : public Ode {
     bool isbCO_L_;
     /*Set whether to use optically thin CO cooling (NCOeff = 0) */
     bool isCoolingCOThin_;
+    bool use_NCOeff_external_;
+    double NCOeff_external_;
     //Maximum CO cooling length. default 100pc.
     double Leff_CO_max_;
 

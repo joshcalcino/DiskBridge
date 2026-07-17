@@ -22,10 +22,16 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- The Bondi All-Stars production chemistry now explicitly includes direct CO
+  desorption by cosmic-ray whole-grain heating using the HH93 70 K duty-cycle
+  approximation with the ProDiMo ionization-rate scaling; CR-induced UV
+  photodesorption remains a separate enabled channel.
 - Variable-linewidth Visser CO shielding, effective linewidths, H2/C shielding
   algebra, and directional reductions now use parallel array kernels. Fused
   H2*CO reductions and in-place linewidth storage remove ray-sized
-  temporaries, and GOW17 elemental-budget projection is parallel over cells.
+  temporaries, GOW17 elemental-budget projection is parallel over cells,
+  HEALPix DDA workers receive cyclic spatial work, and directional Omukai
+  cooling uses guided OpenMP scheduling.
 - Native GOW17 batch solves reuse one SUNDIALS/CVODE solver per OpenMP worker
   and report aggregate failures without emitting per-cell `t+h=t` warning
   floods. Coupled updates also pass their already-projected state directly to

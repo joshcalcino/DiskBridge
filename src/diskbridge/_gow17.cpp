@@ -3,6 +3,8 @@
 #include <pybind11/stl.h>
 
 #include <atomic>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -197,6 +199,8 @@ static py::dict solve_batch_equilibrium(
     const bool const_temp,
     const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> NCOeff_external,
+    const bool use_NCOeff_external,
     const bool isDust_cooling,
     const bool isCoolingCOThin,
     const double fH2gr,
@@ -268,6 +272,9 @@ static py::dict solve_batch_equilibrium(
     if (gradv.ndim() != 1 || gradv.size() != Ncells) {
         throw std::invalid_argument("gradv must be 1D with length Ncells");
     }
+    if (NCOeff_external.ndim() != 1 || NCOeff_external.size() != Ncells) {
+        throw std::invalid_argument("NCOeff_external must be 1D with length Ncells");
+    }
     if (sigma_d_CO_per_H.ndim() != 1 || sigma_d_CO_per_H.size() != Ncells) {
         throw std::invalid_argument("sigma_d_CO_per_H must be 1D with length Ncells");
     }
@@ -294,6 +301,7 @@ static py::dict solve_batch_equilibrium(
     const double *abstol_ptr = abstol.data();
     const double *Leff_CO_max_ptr = Leff_CO_max.data();
     const double *gradv_ptr = gradv.data();
+    const double *NCOeff_external_ptr = NCOeff_external.data();
     const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
     const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
     const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
@@ -354,6 +362,9 @@ static py::dict solve_batch_equilibrium(
                 co_k_crdes_CO_ptr[i]);
 
             ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            if (use_NCOeff_external) {
+                ode.SetNCOeffExternal(NCOeff_external_ptr[i]);
+            }
             ode.IsDustCooling(isDust_cooling);
             ode.SetCoolingCOThin(isCoolingCOThin);
 
@@ -479,6 +490,8 @@ static py::dict solve_batch_time(
     const bool const_temp,
     const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> NCOeff_external,
+    const bool use_NCOeff_external,
     const bool isDust_cooling,
     const bool isCoolingCOThin,
     const double fH2gr,
@@ -550,6 +563,9 @@ static py::dict solve_batch_time(
     if (gradv.ndim() != 1 || gradv.size() != Ncells) {
         throw std::invalid_argument("gradv must be 1D with length Ncells");
     }
+    if (NCOeff_external.ndim() != 1 || NCOeff_external.size() != Ncells) {
+        throw std::invalid_argument("NCOeff_external must be 1D with length Ncells");
+    }
     if (sigma_d_CO_per_H.ndim() != 1 || sigma_d_CO_per_H.size() != Ncells) {
         throw std::invalid_argument("sigma_d_CO_per_H must be 1D with length Ncells");
     }
@@ -579,6 +595,7 @@ static py::dict solve_batch_time(
     const double *abstol_ptr = abstol.data();
     const double *Leff_CO_max_ptr = Leff_CO_max.data();
     const double *gradv_ptr = gradv.data();
+    const double *NCOeff_external_ptr = NCOeff_external.data();
     const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
     const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
     const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
@@ -637,6 +654,9 @@ static py::dict solve_batch_time(
                 co_k_crdes_CO_ptr[i]);
 
             ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            if (use_NCOeff_external) {
+                ode.SetNCOeffExternal(NCOeff_external_ptr[i]);
+            }
             ode.IsDustCooling(isDust_cooling);
             ode.SetCoolingCOThin(isCoolingCOThin);
 
@@ -728,6 +748,8 @@ static py::dict eval_rhs_batch(
     const bool const_temp,
     const py::array_t<double, py::array::c_style | py::array::forcecast> gradv,
     const py::array_t<double, py::array::c_style | py::array::forcecast> Leff_CO_max,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> NCOeff_external,
+    const bool use_NCOeff_external,
     const bool isDust_cooling,
     const bool isCoolingCOThin,
     const double fH2gr,
@@ -795,6 +817,9 @@ static py::dict eval_rhs_batch(
     if (Leff_CO_max.ndim() != 1 || Leff_CO_max.size() != Ncells) {
         throw std::invalid_argument("Leff_CO_max must be 1D with length Ncells");
     }
+    if (NCOeff_external.ndim() != 1 || NCOeff_external.size() != Ncells) {
+        throw std::invalid_argument("NCOeff_external must be 1D with length Ncells");
+    }
     if (co_F_CRUV_CO_pdes.ndim() != 1 || co_F_CRUV_CO_pdes.size() != Ncells) {
         throw std::invalid_argument("co_F_CRUV_CO_pdes must be 1D with length Ncells");
     }
@@ -818,6 +843,7 @@ static py::dict eval_rhs_batch(
     const double *sigma_d_CO_per_H_ptr = sigma_d_CO_per_H.data();
     const double *gradv_ptr = gradv.data();
     const double *Leff_CO_max_ptr = Leff_CO_max.data();
+    const double *NCOeff_external_ptr = NCOeff_external.data();
     const double *co_F_CRUV_CO_pdes_ptr = co_F_CRUV_CO_pdes.data();
     const double *co_k_crdes_CO_ptr = co_k_crdes_CO.data();
 
@@ -881,6 +907,9 @@ static py::dict eval_rhs_batch(
                 co_F_CRUV_CO_pdes_ptr[i],
                 co_k_crdes_CO_ptr[i]);
             ode.Leff_CO_max(Leff_CO_max_ptr[i]);
+            if (use_NCOeff_external) {
+                ode.SetNCOeffExternal(NCOeff_external_ptr[i]);
+            }
             ode.IsDustCooling(isDust_cooling);
             ode.SetCoolingCOThin(isCoolingCOThin);
             if (const_temp) {
@@ -932,6 +961,142 @@ static py::dict eval_rhs_batch(
     out["thermo_rates"] = thermo_out;
     out["status"] = status_out;
     out["failure_cells"] = n_failure.load();
+    return out;
+}
+
+
+static py::dict reduce_directional_co_cooling(
+    const py::array_t<double, py::array::c_style | py::array::forcecast> temperature,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> nHI,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> nH2,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> ne,
+    const py::array_t<double, py::array::c_style | py::array::forcecast> columns,
+    const double rtol,
+    const int max_iter) {
+    if (columns.ndim() != 2) {
+        throw std::invalid_argument("columns must have shape (Ncells, Ndirs)");
+    }
+    const py::ssize_t ncells = columns.shape(0);
+    const py::ssize_t ndirs = columns.shape(1);
+    if (ndirs < 1) {
+        throw std::invalid_argument("columns must contain at least one direction");
+    }
+    if (temperature.ndim() != 1 || temperature.size() != ncells ||
+        nHI.ndim() != 1 || nHI.size() != ncells ||
+        nH2.ndim() != 1 || nH2.size() != ncells ||
+        ne.ndim() != 1 || ne.size() != ncells) {
+        throw std::invalid_argument(
+            "temperature, nHI, nH2, and ne must be 1D with length Ncells");
+    }
+    if (!(rtol > 0.0) || !std::isfinite(rtol)) {
+        throw std::invalid_argument("rtol must be finite and positive");
+    }
+    if (max_iter < 1) {
+        throw std::invalid_argument("max_iter must be positive");
+    }
+
+    const double *temperature_ptr = temperature.data();
+    const double *nHI_ptr = nHI.data();
+    const double *nH2_ptr = nH2.data();
+    const double *ne_ptr = ne.data();
+    const double *columns_ptr = columns.data();
+    for (py::ssize_t i = 0; i < ncells; ++i) {
+        if (!std::isfinite(temperature_ptr[i]) || temperature_ptr[i] <= 0.0 ||
+            !std::isfinite(nHI_ptr[i]) || nHI_ptr[i] < 0.0 ||
+            !std::isfinite(nH2_ptr[i]) || nH2_ptr[i] < 0.0 ||
+            !std::isfinite(ne_ptr[i]) || ne_ptr[i] < 0.0) {
+            throw std::invalid_argument(
+                "CO cooling state arrays must be finite with positive temperature "
+                "and non-negative collider densities");
+        }
+    }
+    for (py::ssize_t i = 0; i < ncells * ndirs; ++i) {
+        if (!std::isfinite(columns_ptr[i]) || columns_ptr[i] < 0.0) {
+            throw std::invalid_argument(
+                "Directional CO effective columns must be finite and non-negative");
+        }
+    }
+
+    py::array_t<double> equivalent(py::array::ShapeContainer{ncells});
+    py::array_t<double> mean_cooling(py::array::ShapeContainer{ncells});
+    py::array_t<double> equivalent_cooling(py::array::ShapeContainer{ncells});
+    double *equivalent_ptr = equivalent.mutable_data();
+    double *mean_ptr = mean_cooling.mutable_data();
+    double *equivalent_cooling_ptr = equivalent_cooling.mutable_data();
+    std::atomic<long long> failures{0};
+
+    py::gil_scoped_release release;
+    #pragma omp parallel for schedule(guided)
+    for (py::ssize_t i = 0; i < ncells; ++i) {
+        const double *row = columns_ptr + i * ndirs;
+        double col_min = row[0];
+        double col_max = row[0];
+        double target = 0.0;
+        for (py::ssize_t k = 0; k < ndirs; ++k) {
+            col_min = std::min(col_min, row[k]);
+            col_max = std::max(col_max, row[k]);
+            target += Thermo::CoolingCOR(
+                1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i], temperature_ptr[i], row[k]);
+        }
+        target /= static_cast<double>(ndirs);
+        mean_ptr[i] = target;
+
+        const double rate_min_col = Thermo::CoolingCOR(
+            1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i], temperature_ptr[i], col_min);
+        const double rate_max_col = Thermo::CoolingCOR(
+            1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i], temperature_ptr[i], col_max);
+        const double scale = std::max(std::abs(rate_min_col), 1.0e-300);
+        const double tol = rtol * scale;
+        if (!std::isfinite(target) || !std::isfinite(rate_min_col) ||
+            !std::isfinite(rate_max_col) || rate_max_col > rate_min_col + tol ||
+            target > rate_min_col + tol || target < rate_max_col - tol) {
+            equivalent_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+            equivalent_cooling_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+            failures.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        if (col_min == col_max || std::abs(rate_min_col - rate_max_col) <= tol) {
+            equivalent_ptr[i] = col_min;
+            equivalent_cooling_ptr[i] = rate_min_col;
+            continue;
+        }
+
+        double q_lo = std::log10(col_min * 1.0e5 + 1.0e13);
+        double q_hi = std::log10(col_max * 1.0e5 + 1.0e13);
+        double col_mid = col_min;
+        double rate_mid = rate_min_col;
+        for (int iteration = 0; iteration < max_iter; ++iteration) {
+            const double q_mid = 0.5 * (q_lo + q_hi);
+            col_mid = std::max((std::pow(10.0, q_mid) - 1.0e13) / 1.0e5, 0.0);
+            rate_mid = Thermo::CoolingCOR(
+                1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i], temperature_ptr[i], col_mid);
+            if (std::abs(rate_mid - target) <= tol) {
+                break;
+            }
+            if (rate_mid > target) {
+                q_lo = q_mid;
+            } else {
+                q_hi = q_mid;
+            }
+        }
+        equivalent_ptr[i] = col_mid;
+        equivalent_cooling_ptr[i] = rate_mid;
+        if (!std::isfinite(rate_mid) || std::abs(rate_mid - target) > 5.0 * tol) {
+            failures.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    py::gil_scoped_acquire acquire;
+    if (failures.load() > 0) {
+        throw std::runtime_error(
+            "Directional CO cooling reduction failed monotonicity or inversion checks in " +
+            std::to_string(failures.load()) + " cells");
+    }
+
+    py::dict out;
+    out["NCOeff_equivalent"] = equivalent;
+    out["mean_cooling_coefficient"] = mean_cooling;
+    out["equivalent_cooling_coefficient"] = equivalent_cooling;
     return out;
 }
 
@@ -1044,6 +1209,8 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("const_temp"),
         py::arg("gradv"),
         py::arg("Leff_CO_max"),
+        py::arg("NCOeff_external"),
+        py::arg("use_NCOeff_external"),
         py::arg("isDust_cooling") = false,
         py::arg("isCoolingCOThin") = false,
         py::arg("fH2gr"),
@@ -1089,6 +1256,8 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("const_temp"),
         py::arg("gradv"),
         py::arg("Leff_CO_max"),
+        py::arg("NCOeff_external"),
+        py::arg("use_NCOeff_external"),
         py::arg("isDust_cooling") = false,
         py::arg("isCoolingCOThin") = false,
         py::arg("fH2gr"),
@@ -1130,6 +1299,8 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("const_temp"),
         py::arg("gradv"),
         py::arg("Leff_CO_max"),
+        py::arg("NCOeff_external"),
+        py::arg("use_NCOeff_external"),
         py::arg("isDust_cooling") = false,
         py::arg("isCoolingCOThin") = false,
         py::arg("fH2gr"),
@@ -1147,6 +1318,17 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("co_S_CO"),
         py::arg("co_F_CRUV_CO_pdes"),
         py::arg("co_k_crdes_CO"));
+
+    m.def(
+        "reduce_directional_co_cooling",
+        &reduce_directional_co_cooling,
+        py::arg("temperature"),
+        py::arg("nHI"),
+        py::arg("nH2"),
+        py::arg("ne"),
+        py::arg("columns"),
+        py::arg("rtol") = 1.0e-10,
+        py::arg("max_iter") = 100);
 
     m.def(
         "co_freezeout_rate_cgs",

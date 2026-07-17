@@ -11,7 +11,7 @@ import tomllib
 
 import numpy as np
 
-from diskbridge._constants import M_H
+from diskbridge._constants import G_GRAV, M_H, SOLAR_MASS
 from diskbridge._units import Quantity
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.dust import Dust
@@ -59,12 +59,13 @@ def resolve_run_settings(run_name: str, config: dict[str, Any] | None = None) ->
 
 
 def variant_configs(base_chemistry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    """Return the three controlled GOW17 variant override dictionaries."""
+    """Return the controlled GOW17 variant override dictionaries."""
 
     base = {
         "shielding_max_iter": 10,
         "temperature": {"initial": "gas_temperature"},
         "dust": {"sigma_d_CO_per_H_source": "constant"},
+        "co_cooling": {"method": "legacy_scalar"},
     }
     if base_chemistry:
         base.update(
@@ -75,7 +76,7 @@ def variant_configs(base_chemistry: dict[str, Any] | None = None) -> dict[str, d
             }
         )
 
-    return {
+    variants = {
         "gas_only_no_co_phase": {
             **copy.deepcopy(base),
             "enable_co_phase": False,
@@ -99,6 +100,7 @@ def variant_configs(base_chemistry: dict[str, Any] | None = None) -> dict[str, d
             },
         },
     }
+    return variants
 
 
 def _edges_from_centers(centers: np.ndarray, *, low: float, high: float) -> np.ndarray:
@@ -137,10 +139,12 @@ def _register(model: Model, name: str, data: np.ndarray, unit: str) -> None:
 
 
 def _geometry(model: Model) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r = model.mesh.centers_f64("r", "cm")[:, None, None]  # type: ignore[union-attr]
+    shape = model.mesh.shape  # type: ignore[union-attr]
+    radius = model.mesh.centers_f64("r", "cm")[:, None, None]  # type: ignore[union-attr]
     theta = model.mesh.centers_f64("theta", "rad")[None, :, None]  # type: ignore[union-attr]
-    R = r * np.sin(theta)
-    z = r * np.cos(theta)
+    r = np.broadcast_to(radius, shape)
+    R = np.broadcast_to(radius * np.sin(theta), shape)
+    z = np.broadcast_to(radius * np.cos(theta), shape)
     return r, R, z
 
 
@@ -157,7 +161,7 @@ def _outer_taper(R_au: np.ndarray, disk: dict[str, Any]) -> np.ndarray:
 
 
 def build_outer_disk_model(settings: RunSettings) -> tuple[Model, dict[str, Any]]:
-    """Build the deterministic 2D axisymmetric outer-disk validation model."""
+    """Build the deterministic axisymmetric outer-disk validation model."""
 
     grid = settings.grid
     disk = settings.disk
@@ -207,6 +211,13 @@ def build_outer_disk_model(settings: RunSettings) -> tuple[Model, dict[str, Any]
     nH = rho / (1.4 * float(M_H))
     chi_initial = np.maximum(1.0e-30, np.exp(-np.minimum(nH / 1.0e7, 80.0)))
     microturbulence = np.full(model.mesh.shape, 0.2, dtype=np.float64)  # type: ignore[union-attr]
+    stellar_mass = float(disk["stellar_mass_msun"]) * float(SOLAR_MASS)
+    vphi = np.broadcast_to(
+        np.sqrt(G_GRAV * stellar_mass / np.maximum(R, 1.0)),
+        model.mesh.shape,  # type: ignore[union-attr]
+    ).copy()
+    vr = np.zeros(model.mesh.shape, dtype=np.float64)  # type: ignore[union-attr]
+    vtheta = np.zeros(model.mesh.shape, dtype=np.float64)  # type: ignore[union-attr]
 
     _register(model, "density", rho, "g/cm^3")
     _register(model, "number_density_H", nH, "cm^-3")
@@ -215,6 +226,9 @@ def build_outer_disk_model(settings: RunSettings) -> tuple[Model, dict[str, Any]
     _register(model, "temperature", tdust, "K")
     _register(model, "chi", chi_initial, "dimensionless")
     _register(model, "microturbulence", microturbulence, "km/s")
+    _register(model, "vr", vr, "cm/s")
+    _register(model, "vtheta", vtheta, "cm/s")
+    _register(model, "vphi", vphi, "cm/s")
 
     model.dust = Dust(model)
     model.dust.set_distribution(
@@ -228,7 +242,7 @@ def build_outer_disk_model(settings: RunSettings) -> tuple[Model, dict[str, Any]
     )
 
     meta = {
-        "grid": "deterministic 2D mirrored spherical outer disk",
+        "grid": "deterministic mirrored spherical outer disk",
         "run": settings.name,
         "nr": int(model.mesh.ncell("r")),
         "ntheta": int(model.mesh.ncell("theta")),
@@ -236,6 +250,8 @@ def build_outer_disk_model(settings: RunSettings) -> tuple[Model, dict[str, Any]
         "shape": list(model.mesh.shape),
         "r_min_au": r_min,
         "r_max_au": r_max,
+        "stellar_mass_msun": float(disk["stellar_mass_msun"]),
+        "velocity_field": "Keplerian azimuthal rotation with vr=vtheta=0",
         "outer_taper_start_au": float(disk["outer_taper_start_au"]),
         "outer_taper_scale_au": float(disk["outer_taper_scale_au"]),
         "outer_taper_power": float(disk["outer_taper_power"]),

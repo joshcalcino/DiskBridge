@@ -337,6 +337,8 @@ gow17::gow17()
   isNCOeff_global_ = false;
   isbCO_L_ = false;
   isCoolingCOThin_ = false;
+	use_NCOeff_external_ = false;
+	NCOeff_external_ = 0.0;
 	Leff_CO_max_ = 3.0e20; //Maximum CO cooling length. default 100pc.
   gradv_ = 1.0e-14; /*0.3km/s /pc*/
 }
@@ -1096,6 +1098,8 @@ double gow17::dEdt_(const double *y, const bool is_store_rates) {
   double NCOeff, grad_small, gradeff;
   if (isCoolingCOThin_) {
     NCOeff = 0;
+  } else if (use_NCOeff_external_) {
+    NCOeff = NCOeff_external_;
   } else if (isNCOeff_global_) {
     if (isbCO_L_) {
       double bCO_L = 1.0e5 * sqrt(NH_/nH_ / 3.086e18);
@@ -1183,6 +1187,15 @@ void gow17::SetbCOL(const bool isbCO_L) {
 
 void gow17::SetCoolingCOThin(const bool isCoolingCOThin) {
   isCoolingCOThin_ = isCoolingCOThin;
+  return;
+}
+
+void gow17::SetNCOeffExternal(const double NCOeff) {
+  if (!std::isfinite(NCOeff) || NCOeff < 0.0) {
+    throw std::invalid_argument("External CO effective column must be finite and non-negative");
+  }
+  NCOeff_external_ = NCOeff;
+  use_NCOeff_external_ = true;
   return;
 }
 

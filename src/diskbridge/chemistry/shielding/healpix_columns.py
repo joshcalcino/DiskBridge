@@ -33,7 +33,7 @@ import hashlib
 import json
 import time as _time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 import numpy as np
 
 from diskbridge._logging import logger
@@ -1272,6 +1272,10 @@ def compute_pdr_shielding_healpix(
     stellar_metadata: Optional[dict] = None,
     chunk_size: Optional[int] = None,
     memory_budget_gib: Optional[float] = None,
+    extra_ray_fields: Optional[dict[str, np.ndarray]] = None,
+    ray_chunk_reducer: Optional[
+        Callable[[np.ndarray, np.ndarray, dict[str, np.ndarray]], None]
+    ] = None,
 ) -> tuple[np.ndarray, ...]:
     """Compute PDR shielding factors (H2, CO, C) and effective UV via HEALPix rays.
 
@@ -1335,6 +1339,14 @@ def compute_pdr_shielding_healpix(
         Approximate working-memory budget for one shielding chunk. Defaults to
         a conservative internal budget because ``W_rays`` may already be
         resident.
+    extra_ray_fields : dict of str to ndarray or None, optional
+        Additional mesh-shaped fields integrated in the same traversal and
+        exposed only to ``ray_chunk_reducer``. They are not returned or used
+        in shielding reductions.
+    ray_chunk_reducer : callable or None, optional
+        Called as ``reducer(candidate_idx, dirs, columns)`` once per chunk,
+        before directional arrays are released. This hook must consume its
+        results immediately and must not retain the column arrays.
     Returns
     -------
     theta_h2 : ndarray
@@ -1374,6 +1386,21 @@ def compute_pdr_shielding_healpix(
             b_grid=b_CO_kms_grid,
             shape=nH_cgs.shape,
         )
+
+    shielding_field_names = tuple(fields)
+    extras = {} if extra_ray_fields is None else dict(extra_ray_fields)
+    if (not extras) != (ray_chunk_reducer is None):
+        raise ValueError(
+            "extra_ray_fields and ray_chunk_reducer must be supplied together"
+        )
+    for name, values in extras.items():
+        key = str(name)
+        if key in fields:
+            raise ValueError(f"extra ray field {key!r} conflicts with shielding fields")
+        array = _as_f64(key, values)
+        if array.shape != nH_cgs.shape:
+            raise ValueError(f"extra ray field {key!r} must match nH shape")
+        fields[key] = array
 
     candidate_mask_arr = np.ones(nH_cgs.shape, dtype=bool)
     tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
@@ -1464,6 +1491,9 @@ def compute_pdr_shielding_healpix(
             cell_centers=cell_centers_chunk,
         )
 
+        if ray_chunk_reducer is not None:
+            ray_chunk_reducer(candidate_idx_chunk, dirs, cols)
+
         N_H2_rays = cols["h2"]
         N_C_rays = cols["c"]
         star_cols = None
@@ -1471,7 +1501,7 @@ def compute_pdr_shielding_healpix(
             star_cols = _starward_columns_for_chunk(
                 tracer,
                 cell_centers_chunk,
-                fields,
+                {name: fields[name] for name in shielding_field_names},
                 candidate_idx_chunk,
                 stop_radius_cm=float(stellar["star_inner_radius_cm"]),
             )

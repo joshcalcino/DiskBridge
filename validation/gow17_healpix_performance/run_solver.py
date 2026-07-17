@@ -116,6 +116,8 @@ def _inputs(ncells: int) -> dict[str, np.ndarray | float | int | bool]:
         "const_temp": False,
         "gradv": np.power(10.0, -20.0 + 12.0 * f3),
         "Leff_CO_max": np.full(ncells, 3.0e20, dtype=np.float64),
+        "NCOeff_external": np.zeros(ncells, dtype=np.float64),
+        "use_NCOeff_external": False,
         "isDust_cooling": True,
         "isCoolingCOThin": False,
         "fH2gr": 1.0,

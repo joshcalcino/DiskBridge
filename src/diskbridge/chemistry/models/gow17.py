@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 import h5py
+from numba import njit, prange
 
 import diskbridge
 from diskbridge._units import Quantity
@@ -27,8 +28,16 @@ from diskbridge.model.profiles import compute_cell_volumes
 from diskbridge.model.microturbulence import (
     ensure_microturbulence_field,
 )
+from diskbridge.model.kinematics import (
+    cartesian_velocity_cm_s,
+    microturbulence_cm_s,
+    molecular_doppler_width_cm_s,
+    projected_velocity_gradient_s1,
+    symmetric_velocity_gradient_s1,
+)
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.shielding.healpix_columns import (
+    _chunk_size_from_memory_budget,
     _prepare_healpix_geometry,
     compute_column_rays_healpix,
     compute_gradv_nh_weighted,
@@ -55,6 +64,9 @@ from diskbridge.radmc3d.uv_products import (
     uv_product_specs_from_config,
 )
 from diskbridge.radmc3d.cache import build_mesh_cache_context, stable_json_hash
+from diskbridge.radmc3d.line_transfer.escape_healpix import (
+    compute_velocity_coherent_columns_healpix,
+)
 
 import diskbridge._gow17 as _gow17
 
@@ -128,6 +140,31 @@ _SIGMA_ISRF_AVFAC = 0.561
 KPH_C_BASE = float(_KPH_BASE[IPH_C])
 KPH_CO_BASE = float(_KPH_BASE[IPH_CO])
 KPH_H2_BASE = float(_KPH_BASE[IPH_H2])
+
+
+@njit(parallel=True, cache=True)
+def _apply_sobolev_limit_inplace(
+    finite_columns: np.ndarray,
+    nco_local: np.ndarray,
+    projected_gradient: np.ndarray,
+) -> int:
+    """Replace finite columns by ``min(finite, n_CO / gradv)`` in place."""
+
+    n_cells, n_dirs = finite_columns.shape
+    sobolev_limited = 0
+    for q in prange(n_cells * n_dirs):
+        cell = q // n_dirs
+        direction = q - cell * n_dirs
+        density = nco_local[cell]
+        gradient = projected_gradient[cell, direction]
+        if density <= 0.0:
+            finite_columns[cell, direction] = 0.0
+        elif gradient > 0.0:
+            sobolev = density / gradient
+            if sobolev < finite_columns[cell, direction]:
+                finite_columns[cell, direction] = sobolev
+                sobolev_limited += 1
+    return sobolev_limited
 
 
 @dataclass(frozen=True)
@@ -1462,6 +1499,8 @@ def _compute_rhs_residual_diagnostics(
     const_temp: bool,
     gradv_arr: np.ndarray,
     Leff_CO_max_arr: np.ndarray,
+    NCOeff_external_arr: np.ndarray,
+    use_NCOeff_external: bool,
     isDust_cooling: bool,
     isCoolingCOThin: bool,
     fH2gr: float,
@@ -1505,6 +1544,10 @@ def _compute_rhs_residual_diagnostics(
             const_temp=bool(const_temp),
             gradv=np.ascontiguousarray(gradv_arr, dtype=np.float64),
             Leff_CO_max=np.ascontiguousarray(Leff_CO_max_arr, dtype=np.float64),
+            NCOeff_external=np.ascontiguousarray(
+                NCOeff_external_arr, dtype=np.float64
+            ),
+            use_NCOeff_external=bool(use_NCOeff_external),
             isDust_cooling=bool(isDust_cooling),
             isCoolingCOThin=bool(isCoolingCOThin),
             fH2gr=float(fH2gr),
@@ -1758,6 +1801,8 @@ def _compute_shielding_and_gph(
     slab_Av_flat: np.ndarray | None = None,
     skip_shielding: bool = False,
     use_directional_weights: bool = True,
+    extra_ray_fields: dict[str, np.ndarray] | None = None,
+    ray_chunk_reducer=None,
 ) -> tuple:
     """Compute shielding factors and radiation field arrays from current abundances.
 
@@ -1860,6 +1905,8 @@ def _compute_shielding_and_gph(
                     "pdr_shielding_memory_budget_gib",
                     None,
                 ),
+                extra_ray_fields=extra_ray_fields,
+                ray_chunk_reducer=ray_chunk_reducer,
             )
 
     theta_h2_flat = theta_h2_arr.reshape(ncells)
@@ -1911,6 +1958,19 @@ def _compute_shielding_and_gph(
 # db-role: entrypoint
 def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
+    co_cooling_method = str(
+        _nested_cfg(cfg, "co_cooling").get("method", "legacy_scalar")
+    ).lower()
+    valid_co_cooling_methods = {
+        "legacy_scalar",
+        "healpix_hybrid_lvg",
+        "healpix_velocity_coherent_reference",
+    }
+    if co_cooling_method not in valid_co_cooling_methods:
+        raise ValueError(
+            "gow17 co_cooling.method must be one of "
+            f"{sorted(valid_co_cooling_methods)}, got {co_cooling_method!r}"
+        )
     nside = int(diskbridge.params.nside)
     checkpoint_cfg = _gow17_checkpoint_config(rad, cfg, nside=nside)
     ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
@@ -1950,6 +2010,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         raise ValueError("gow17 isDust_cooling is no longer supported; use dust_cooling.mode")
     isDust_cooling = True
     isCoolingCOThin = bool(cfg["isCoolingCOThin"])
+    if co_cooling_method != "legacy_scalar" and isCoolingCOThin:
+        raise ValueError(
+            "directional CO cooling requires isCoolingCOThin=false"
+        )
     temperature_cfg = _resolve_temperature_config(cfg)
     temperature_mode = str(temperature_cfg["mode"])
     const_temp = bool(temperature_cfg["const_temp"])
@@ -1966,6 +2030,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     shielding_max_iter = int(cfg["shielding_max_iter"])
     skip_shielding = bool(cfg["skip_shielding"])
+    if co_cooling_method == "healpix_hybrid_lvg" and skip_shielding:
+        raise ValueError(
+            "healpix_hybrid_lvg CO cooling requires the PDR shielding traversal"
+        )
     shielding_ray_average = str(cfg.get("shielding_ray_average", "weighted")).lower()
     if shielding_ray_average not in {"weighted", "uniform"}:
         raise ValueError(
@@ -2127,10 +2195,14 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     candidate_idx = None
     candidate_flat_idx = None
     cell_centers = None
+    co_cooling_velocity_xyz = None
+    co_cooling_microturbulence = None
+    co_cooling_strain_s1 = None
 
     use_healpix_geometry = (
         (gradv_mode == "nh_weighted_shear+turb")
         or (Leff_CO_max_mode == "geo")
+        or (co_cooling_method == "healpix_velocity_coherent_reference")
     )
     if use_healpix_geometry:
         candidate_mask_arr = np.ones(shape, dtype=bool)
@@ -2142,6 +2214,26 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
         if candidate_idx.size > 0:
             candidate_flat_idx = np.ravel_multi_index(candidate_idx.T, dims=shape)
+
+    if co_cooling_method == "healpix_velocity_coherent_reference":
+        if candidate_idx is None or candidate_idx.shape[0] != ncells:
+            raise RuntimeError(
+                "velocity-coherent reference cooling requires HEALPix geometry for every cell"
+            )
+        co_cooling_velocity_xyz = cartesian_velocity_cm_s(rad)
+        co_cooling_microturbulence = microturbulence_cm_s(rad)
+    elif co_cooling_method == "healpix_hybrid_lvg":
+        try:
+            hybrid_is_1d = is_effectively_1d(rad.model.mesh, shape)
+        except AttributeError:
+            hybrid_is_1d = False
+        if hybrid_is_1d:
+            raise ValueError(
+                "healpix_hybrid_lvg is a three-dimensional closure; use the "
+                "dedicated GOW17 slab workflow for one-dimensional models"
+            )
+        co_cooling_microturbulence = microturbulence_cm_s(rad)
+        co_cooling_strain_s1 = symmetric_velocity_gradient_s1(rad)
 
     if gradv_mode == "nh_weighted_shear+turb":
         if candidate_idx is None or candidate_idx.size == 0:
@@ -2340,6 +2432,296 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             T_state = y[:, I_E] / Cv
         return np.clip(T_state, float(temperature_cfg["Tgas_floor"]), float(temperature_cfg["Tgas_ceiling"]))
 
+    NCOeff_external_arr = np.zeros(ncells, dtype=np.float64)
+    co_cooling_update_diagnostics: list[dict[str, float | int]] = []
+
+    def _directional_cooling_state(y_state: np.ndarray) -> tuple:
+        """Return temperature, CO/linewidth, and collider arrays."""
+
+        if co_cooling_microturbulence is None:
+            raise RuntimeError("Directional CO cooling linewidth was not initialized")
+        y_arr = np.ascontiguousarray(y_state, dtype=np.float64)
+        temperature = T_flat if const_temp else _state_temperature(y_arr)
+        a_co = molecular_doppler_width_cm_s(
+            temperature.reshape(shape),
+            co_cooling_microturbulence,
+            28.0,
+        )
+        nco_flat = np.maximum(y_arr[:, I_CO], 0.0) * nH_flat
+        nco = nco_flat.reshape(shape)
+        density_over_width = np.divide(
+            nco,
+            a_co,
+            out=np.zeros(shape, dtype=np.float64),
+            where=a_co > 0.0,
+        )
+        xe = np.maximum(_electron_abundance(y_arr), 0.0)
+        xh = 1.0 - (
+            y_arr[:, I_OHX]
+            + y_arr[:, I_CHX]
+            + y_arr[:, I_HCOP]
+            + 3.0 * y_arr[:, I_H3P]
+            + 2.0 * y_arr[:, I_H2P]
+            + y_arr[:, I_HP]
+            + 2.0 * y_arr[:, I_H2]
+        )
+        return (
+            np.ascontiguousarray(temperature),
+            a_co,
+            np.ascontiguousarray(nco_flat),
+            np.ascontiguousarray(density_over_width),
+            np.ascontiguousarray(np.maximum(xh, 0.0) * nH_flat),
+            np.ascontiguousarray(np.maximum(y_arr[:, I_H2], 0.0) * nH_flat),
+            np.ascontiguousarray(xe * nH_flat),
+        )
+
+    def _update_coherent_reference_column(y_state: np.ndarray) -> None:
+        """Update the held-fixed explicit velocity-coherent reference column."""
+
+        if co_cooling_method != "healpix_velocity_coherent_reference":
+            return
+        if (
+            tracer is None
+            or dirs is None
+            or candidate_idx is None
+            or candidate_flat_idx is None
+            or cell_centers is None
+            or co_cooling_velocity_xyz is None
+            or co_cooling_microturbulence is None
+        ):
+            raise RuntimeError("Directional CO cooling geometry was not initialized")
+
+        (
+            temperature,
+            a_co,
+            _nco_flat,
+            density_over_width,
+            n_hi,
+            n_h2,
+            n_e,
+        ) = _directional_cooling_state(y_state)
+
+        configured_chunk = getattr(
+            diskbridge.params,
+            "pdr_shielding_chunk_size",
+            None,
+        )
+        if configured_chunk:
+            chunk_size = int(configured_chunk)
+        else:
+            chunk_size = _chunk_size_from_memory_budget(
+                n_candidates=int(candidate_idx.shape[0]),
+                npix=int(dirs.shape[0]),
+                # The direction-major kernel and its candidate-major output
+                # coexist briefly during the exact layout conversion.
+                dense_ray_map_count=2,
+                memory_budget_gib=getattr(
+                    diskbridge.params,
+                    "pdr_shielding_memory_budget_gib",
+                    None,
+                ),
+            )
+        chunk_size = max(1, chunk_size)
+        ray_seconds = 0.0
+        reduction_seconds = 0.0
+        directional_min = np.inf
+        directional_max = 0.0
+        n_candidates = int(candidate_idx.shape[0])
+        for start in range(0, n_candidates, chunk_size):
+            end = min(start + chunk_size, n_candidates)
+            ray_started = time.perf_counter()
+            columns = compute_velocity_coherent_columns_healpix(
+                mesh=rad.model.mesh,
+                tracer=tracer,
+                candidate_idx=candidate_idx[start:end],
+                cell_centers=cell_centers[start:end],
+                dirs=dirs,
+                density_over_width=density_over_width,
+                velocity_xyz=co_cooling_velocity_xyz,
+                a_line=a_co,
+            )
+            ray_seconds += time.perf_counter() - ray_started
+            directional_min = min(directional_min, float(np.min(columns)))
+            directional_max = max(directional_max, float(np.max(columns)))
+
+            flat_idx = candidate_flat_idx[start:end]
+            reduction_started = time.perf_counter()
+            reduced = _gow17.reduce_directional_co_cooling(
+                temperature=np.ascontiguousarray(temperature[flat_idx]),
+                nHI=np.ascontiguousarray(n_hi[flat_idx]),
+                nH2=np.ascontiguousarray(n_h2[flat_idx]),
+                ne=np.ascontiguousarray(n_e[flat_idx]),
+                columns=np.ascontiguousarray(columns),
+            )
+            reduction_seconds += time.perf_counter() - reduction_started
+            NCOeff_external_arr[flat_idx] = np.asarray(
+                reduced["NCOeff_equivalent"], dtype=np.float64
+            )
+
+        percentiles = np.percentile(
+            NCOeff_external_arr,
+            [0.0, 16.0, 50.0, 84.0, 100.0],
+        )
+        co_cooling_update_diagnostics.append(
+            {
+                "method": "healpix_velocity_coherent_reference",
+                "update": len(co_cooling_update_diagnostics) + 1,
+                "ray_seconds": float(ray_seconds),
+                "reduction_seconds": float(reduction_seconds),
+                "directional_min_internal": float(directional_min),
+                "directional_max_internal": float(directional_max),
+                "equivalent_min_internal": float(percentiles[0]),
+                "equivalent_p16_internal": float(percentiles[1]),
+                "equivalent_median_internal": float(percentiles[2]),
+                "equivalent_p84_internal": float(percentiles[3]),
+                "equivalent_max_internal": float(percentiles[4]),
+                "directional_min_cm-2_per_km_s-1": float(directional_min * 1.0e5),
+                "directional_max_cm-2_per_km_s-1": float(directional_max * 1.0e5),
+                "equivalent_min_cm-2_per_km_s-1": float(percentiles[0] * 1.0e5),
+                "equivalent_p16_cm-2_per_km_s-1": float(percentiles[1] * 1.0e5),
+                "equivalent_median_cm-2_per_km_s-1": float(percentiles[2] * 1.0e5),
+                "equivalent_p84_cm-2_per_km_s-1": float(percentiles[3] * 1.0e5),
+                "equivalent_max_cm-2_per_km_s-1": float(percentiles[4] * 1.0e5),
+            }
+        )
+        logger.info(
+            "GOW17 directional CO cooling update %d: rays=%.3f s, reduction=%.3f s",
+            len(co_cooling_update_diagnostics),
+            ray_seconds,
+            reduction_seconds,
+        )
+
+    def _prepare_hybrid_cooling_reducer(y_state: np.ndarray):
+        """Build the extra ray field and in-chunk hybrid cooling reducer."""
+
+        if co_cooling_method != "healpix_hybrid_lvg":
+            return None, None, None
+        if co_cooling_strain_s1 is None:
+            raise RuntimeError("Hybrid CO cooling velocity gradient was not initialized")
+        (
+            temperature,
+            _a_co,
+            nco_flat,
+            density_over_width,
+            n_hi,
+            n_h2,
+            n_e,
+        ) = _directional_cooling_state(y_state)
+        stats = {
+            "reduction_seconds": 0.0,
+            "finite_min_internal": np.inf,
+            "finite_max_internal": 0.0,
+            "hybrid_min_internal": np.inf,
+            "hybrid_max_internal": 0.0,
+            "sobolev_limited_directions": 0,
+            "total_directions": 0,
+        }
+
+        def _reduce_chunk(
+            candidate_idx_chunk: np.ndarray,
+            ray_directions: np.ndarray,
+            columns_by_name: dict[str, np.ndarray],
+        ) -> None:
+            started = time.perf_counter()
+            columns = np.asarray(
+                columns_by_name["co_cooling_nco_over_a"], dtype=np.float64
+            )
+            if np.any(~np.isfinite(columns)) or np.any(columns < 0.0):
+                raise ValueError("finite directional CO columns must be non-negative and finite")
+            flat_idx = np.ravel_multi_index(candidate_idx_chunk.T, dims=shape)
+            projected = projected_velocity_gradient_s1(
+                rad.model.mesh,
+                co_cooling_strain_s1,
+                candidate_idx_chunk,
+                ray_directions,
+            )
+            stats["finite_min_internal"] = min(
+                stats["finite_min_internal"], float(np.min(columns))
+            )
+            stats["finite_max_internal"] = max(
+                stats["finite_max_internal"], float(np.max(columns))
+            )
+            stats["sobolev_limited_directions"] += int(
+                _apply_sobolev_limit_inplace(
+                    columns,
+                    np.ascontiguousarray(nco_flat[flat_idx]),
+                    projected,
+                )
+            )
+            stats["total_directions"] += int(columns.size)
+            stats["hybrid_min_internal"] = min(
+                stats["hybrid_min_internal"], float(np.min(columns))
+            )
+            stats["hybrid_max_internal"] = max(
+                stats["hybrid_max_internal"], float(np.max(columns))
+            )
+            reduced = _gow17.reduce_directional_co_cooling(
+                temperature=np.ascontiguousarray(temperature[flat_idx]),
+                nHI=np.ascontiguousarray(n_hi[flat_idx]),
+                nH2=np.ascontiguousarray(n_h2[flat_idx]),
+                ne=np.ascontiguousarray(n_e[flat_idx]),
+                columns=np.ascontiguousarray(columns),
+            )
+            NCOeff_external_arr[flat_idx] = np.asarray(
+                reduced["NCOeff_equivalent"], dtype=np.float64
+            )
+            stats["reduction_seconds"] += time.perf_counter() - started
+
+        return {"co_cooling_nco_over_a": density_over_width}, _reduce_chunk, stats
+
+    def _finish_hybrid_cooling_update(stats: dict | None) -> None:
+        """Record compact diagnostics after the fused shielding traversal."""
+
+        if stats is None:
+            return
+        percentiles = np.percentile(
+            NCOeff_external_arr,
+            [0.0, 16.0, 50.0, 84.0, 100.0],
+        )
+        total = int(stats["total_directions"])
+        sobolev = int(stats["sobolev_limited_directions"])
+        entry = {
+            "method": "healpix_hybrid_lvg",
+            "update": len(co_cooling_update_diagnostics) + 1,
+            "ray_seconds": 0.0,
+            "reduction_seconds": float(stats["reduction_seconds"]),
+            "finite_min_internal": float(stats["finite_min_internal"]),
+            "finite_max_internal": float(stats["finite_max_internal"]),
+            "directional_min_internal": float(stats["hybrid_min_internal"]),
+            "directional_max_internal": float(stats["hybrid_max_internal"]),
+            "sobolev_limited_fraction": float(sobolev / total) if total else 0.0,
+            "finite_limited_fraction": float((total - sobolev) / total) if total else 0.0,
+            "equivalent_min_internal": float(percentiles[0]),
+            "equivalent_p16_internal": float(percentiles[1]),
+            "equivalent_median_internal": float(percentiles[2]),
+            "equivalent_p84_internal": float(percentiles[3]),
+            "equivalent_max_internal": float(percentiles[4]),
+        }
+        entry.update(
+            {
+                f"{name}_cm-2_per_km_s-1": float(value * 1.0e5)
+                for name, value in (
+                    ("finite_min", stats["finite_min_internal"]),
+                    ("finite_max", stats["finite_max_internal"]),
+                    ("directional_min", stats["hybrid_min_internal"]),
+                    ("directional_max", stats["hybrid_max_internal"]),
+                    ("equivalent_min", percentiles[0]),
+                    ("equivalent_p16", percentiles[1]),
+                    ("equivalent_median", percentiles[2]),
+                    ("equivalent_p84", percentiles[3]),
+                    ("equivalent_max", percentiles[4]),
+                )
+            }
+        )
+        co_cooling_update_diagnostics.append(entry)
+        logger.info(
+            "GOW17 hybrid CO cooling update %d: reduction=%.3f s, "
+            "Sobolev-limited=%.3f",
+            len(co_cooling_update_diagnostics),
+            float(stats["reduction_seconds"]),
+            entry["sobolev_limited_fraction"],
+        )
+
     def _project(y: np.ndarray, indices: np.ndarray | None = None) -> np.ndarray:
         y_arr = np.asarray(y, dtype=np.float64)
         if indices is None:
@@ -2389,6 +2771,20 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         use_directional_weights=bool(use_directional_weights),
     )
 
+    def _compute_nonlocal_products(y_state: np.ndarray) -> tuple:
+        extra_fields, chunk_reducer, hybrid_stats = _prepare_hybrid_cooling_reducer(
+            y_state
+        )
+        products = _compute_shielding_and_gph(
+            y_flat=y_state,
+            extra_ray_fields=extra_fields,
+            ray_chunk_reducer=chunk_reducer,
+            **_shielding_kw,
+        )
+        _finish_hybrid_cooling_update(hybrid_stats)
+        _update_coherent_reference_column(y_state)
+        return products
+
     # Common keyword dict for CO phase parameters passed to batch solvers.
     _zero_cell = np.zeros(ncells, dtype=np.float64)
     _co_phase_kw = dict(
@@ -2421,6 +2817,15 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             dtype=np.float64,
         )
         return out
+
+    def _co_cooling_subset(indices: np.ndarray | None = None) -> dict:
+        values = NCOeff_external_arr
+        if indices is not None:
+            values = values[np.asarray(indices, dtype=np.int64)]
+        return {
+            "NCOeff_external": np.ascontiguousarray(values, dtype=np.float64),
+            "use_NCOeff_external": co_cooling_method != "legacy_scalar",
+        }
 
     def _solve_equilibrium_subset(indices: np.ndarray, y0_subset: np.ndarray) -> dict:
         idx = np.asarray(indices, dtype=np.int64)
@@ -2457,6 +2862,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             const_temp=const_temp,
             gradv=np.ascontiguousarray(gradv_arr[idx], dtype=np.float64),
             Leff_CO_max=np.ascontiguousarray(Leff_CO_max_arr[idx], dtype=np.float64),
+            **_co_cooling_subset(idx),
             isDust_cooling=isDust_cooling,
             isCoolingCOThin=isCoolingCOThin,
             fH2gr=fH2gr,
@@ -2637,10 +3043,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             Tgas_old = _state_temperature(y_guess) if not const_temp else None
 
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
-                _compute_shielding_and_gph(
-                    y_flat=y_guess,
-                    **_shielding_kw,
-                )
+                _compute_nonlocal_products(y_guess)
             )
 
             result = _gow17.solve_batch_equilibrium(
@@ -2670,6 +3073,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 const_temp=const_temp,
                 gradv=gradv_arr,
                 Leff_CO_max=Leff_CO_max_arr,
+                **_co_cooling_subset(),
                 isDust_cooling=isDust_cooling,
                 isCoolingCOThin=isCoolingCOThin,
                 fH2gr=fH2gr,
@@ -2751,10 +3155,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             # to the final equilibrium solve (no pseudo-time integration).
             y_guess[:, :] = _project(y_guess)
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
-                _compute_shielding_and_gph(
-                    y_flat=y_guess,
-                    **_shielding_kw,
-                )
+                _compute_nonlocal_products(y_guess)
             )
 
             result = _gow17.solve_batch_equilibrium(
@@ -2784,6 +3185,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 const_temp=const_temp,
                 gradv=gradv_arr,
                 Leff_CO_max=Leff_CO_max_arr,
+                **_co_cooling_subset(),
                 isDust_cooling=isDust_cooling,
                 isCoolingCOThin=isCoolingCOThin,
                 fH2gr=fH2gr,
@@ -2889,10 +3291,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 # Step 1+2: compute columns and shielding from current y_state.
                 shielding_started = time.perf_counter()
                 theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
-                    _compute_shielding_and_gph(
-                        y_flat=y_state,
-                        **_shielding_kw,
-                    )
+                    _compute_nonlocal_products(y_state)
                 )
                 shielding_seconds = time.perf_counter() - shielding_started
 
@@ -2923,6 +3322,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                     const_temp=const_temp,
                     gradv=gradv_arr,
                     Leff_CO_max=Leff_CO_max_arr,
+                    **_co_cooling_subset(),
                     isDust_cooling=isDust_cooling,
                     isCoolingCOThin=isCoolingCOThin,
                     fH2gr=fH2gr,
@@ -3078,10 +3478,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             # After N macro-updates: recompute columns + shielding from final y_state.
             y_state[:, :] = _project(y_state)
             theta_h2_flat, theta_co_flat, theta_c_flat, Gph, GPE, GISRF = (
-                _compute_shielding_and_gph(
-                    y_flat=y_state,
-                    **_shielding_kw,
-                )
+                _compute_nonlocal_products(y_state)
             )
 
             # Final equilibrium solve with shielding held fixed.
@@ -3112,6 +3509,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 const_temp=const_temp,
                 gradv=gradv_arr,
                 Leff_CO_max=Leff_CO_max_arr,
+                **_co_cooling_subset(),
                 isDust_cooling=isDust_cooling,
                 isCoolingCOThin=isCoolingCOThin,
                 fH2gr=fH2gr,
@@ -3235,6 +3633,28 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     gow17_diag = {
         "coupling_mode": coupling_mode,
+        "co_cooling_method": {
+            "legacy_scalar": "legacy_scalar_omukai",
+            "healpix_hybrid_lvg": "healpix_hybrid_lvg_omukai",
+            "healpix_velocity_coherent_reference": (
+                "healpix_velocity_coherent_reference_omukai"
+            ),
+        }[co_cooling_method],
+        "co_cooling_healpix_nside": (
+            int(nside) if co_cooling_method != "legacy_scalar" else None
+        ),
+        "co_cooling_direction_count": (
+            12 * int(nside) * int(nside)
+            if co_cooling_method != "legacy_scalar"
+            else 0
+        ),
+        "co_cooling_doppler_width": "sqrt(a_turb^2 + 2 k_B T / m_CO)",
+        "co_cooling_nonlocal_updates": len(co_cooling_update_diagnostics),
+        "co_cooling_update_diagnostics": co_cooling_update_diagnostics,
+        "co_cooling_legacy_gradv_min_s-1": float(np.min(gradv_arr)),
+        "co_cooling_legacy_gradv_max_s-1": float(np.max(gradv_arr)),
+        "co_cooling_legacy_Leff_min_cm": float(np.min(Leff_CO_max_arr)),
+        "co_cooling_legacy_Leff_max_cm": float(np.max(Leff_CO_max_arr)),
         "enable_co_phase": bool(enable_co_phase),
         "dust_cooling_mode": dust_cooling_mode,
         "dust_cooling_mode_id_map": {1: "surface_area", 2: "gow17_original"},
@@ -3456,6 +3876,10 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ),
         "b_H2_kms": Quantity(b_H2_kms_arr, "km/s"),
         "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
+        "NCOeff_CO_cooling": Quantity(
+            NCOeff_external_arr.reshape(shape),
+            "s/cm^3",
+        ),
         "chi_broad": Quantity(chi_dust_arr, "dimensionless"),
         "G_CO_diss": Quantity(G_CO_diss_arr, "dimensionless"),
         "G_H2_diss": Quantity(G_H2_diss_arr, "dimensionless"),
@@ -3552,6 +3976,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         const_temp=const_temp,
         gradv_arr=gradv_arr,
         Leff_CO_max_arr=Leff_CO_max_arr,
+        NCOeff_external_arr=NCOeff_external_arr,
+        use_NCOeff_external=co_cooling_method != "legacy_scalar",
         isDust_cooling=isDust_cooling,
         isCoolingCOThin=isCoolingCOThin,
         fH2gr=fH2gr,
@@ -3606,6 +4032,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
 
     meta = {
         "model": "gow17",
+        "co_cooling_method": gow17_diag["co_cooling_method"],
         "enable_co_phase": bool(enable_co_phase),
         "nside": int(nside),
         "b_H2_kms_scalar": float(b_H2_kms),

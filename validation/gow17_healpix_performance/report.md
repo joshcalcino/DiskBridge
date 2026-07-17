@@ -2,10 +2,12 @@
 
 ## Codebase results
 
-All comparisons use the unchanged commit
+The original shielding and solver comparisons use commit
 `f919e3f8f74072ef409cd7b7575bd78e66dc012c` through the detached baseline
 worktree and the optimized source through `perf/gow17-healpix-efficiency`.
-Scientific inputs and thread counts are fixed within each comparison.
+The later scheduling comparisons directly switch only the scheduling strategy
+within the same source tree. Scientific inputs and thread counts are fixed
+within each comparison.
 
 | Workload | Unchanged | Optimized | Speedup | Numerical result |
 |---|---:|---:|---:|---|
@@ -14,6 +16,8 @@ Scientific inputs and thread counts are fixed within each comparison.
 | Complete post-ray shielding, 67,108,800 rays | 4.92482 s | 0.249548 s | 19.73x | sampled max abs `2.89e-15` |
 | Native GOW17 solve, 500,000 cells, 16 threads | 24.00065 s | 23.78550 s | 1.009x | sampled states bit-for-bit identical |
 | C/O budget projection, 23,415,480 cells | 1.072 s | 0.03339 s | 32.1x | analytic budget tests pass |
+| Six-field spherical DDA, 19,200 cells x 192 rays | 3.302 s | 2.917 s | 1.13x | column checksum identical; exact toy regressions |
+| Directional Omukai reduction, 1,200,000 cells | 1.048 s | 1.023 s | 1.02x | equivalent-column checksum identical |
 
 The complete post-ray comparison includes effective H2 and CO linewidths, H2
 and C formulas, Visser CO interpolation, weighted ray reductions, and the
@@ -22,6 +26,14 @@ cores and peak RSS fell from 15.67 to 5.86 GiB. At 67 chunks per update, this
 isolated stage projects to 330.0 s unchanged versus 16.7 s optimized, a saving
 of about 5.22 minutes per shielding update. It does not include ray marching
 or the chemistry solve.
+
+The DDA result uses the completed `60 x 40 x 8`, `nside=4` hybrid-cooling
+validation grid and all six fields required by the cooling calculation. A
+no-copy cyclic cell assignment raised median occupancy to 17.0 of 18 cores.
+Numba dynamic chunk sizes were also measured and were slower, at 3.60--9.27 s,
+so they were rejected. For the directional Omukai reduction, a deterministic
+mixture of full column inversions and early-return cells improved modestly
+with guided OpenMP scheduling while preserving the checksum.
 
 Machine-readable complete-postprocessing results are in:
 

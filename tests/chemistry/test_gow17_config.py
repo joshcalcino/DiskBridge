@@ -88,6 +88,20 @@ def test_default_gow17_shielding_ray_average_is_weighted():
     assert cfg["shielding_ray_average"] == "weighted"
 
 
+def test_default_gow17_co_cooling_method_is_legacy_scalar():
+    cfg = resolve_model_config(("chemistry", "gow17"), overrides={})
+
+    assert cfg["co_cooling"]["method"] == "legacy_scalar"
+
+
+def test_invalid_gow17_co_cooling_method_raises(tmp_path):
+    with pytest.raises(ValueError, match="co_cooling.method"):
+        run_gow17(
+            SimpleNamespace(model_dir=tmp_path),
+            {"co_cooling": {"method": "mean_column"}},
+        )
+
+
 def test_visser_linewidth_info_logging_can_be_suppressed(monkeypatch):
     calls = []
 

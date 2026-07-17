@@ -7,6 +7,7 @@ Verifies:
 - direct stellar weighting uses exact starward shielding instead of HEALPix
   pixel-center boundary columns
 - W_rays=None in shielding functions equals isotropic mean
+- Cartesian and spherical ray columns are independent of Numba thread count
 """
 
 # db-keywords: shielding, co-shielding, healpix-columns, uv-products, gow17, validation, units, radmc3d, chemistry, model, mesh
@@ -17,6 +18,7 @@ Verifies:
 import numpy as np
 import pytest
 import healpy as hp
+from numba import get_num_threads, set_num_threads
 
 from diskbridge._units import Quantity
 from diskbridge._constants import U_DRAINE, C_LIGHT, H_PLANCK, K_B
@@ -32,6 +34,7 @@ from diskbridge.chemistry.shielding.healpix_columns import (
     _c_shielding,
     _effective_b_from_columns,
     _scatter_candidates_3d,
+    compute_column_rays_healpix,
     compute_co_shielding_healpix,
     compute_pdr_shielding_healpix,
 )
@@ -159,6 +162,51 @@ def _make_uniform_cartesian_mesh(ncells: int = 4, L_cm: float = 1e17):
             "z": Axis(edges=edges_q),
         },
     )
+
+
+def _make_small_spherical_mesh() -> Mesh:
+    return Mesh.spherical(
+        r=Axis(edges=Quantity(np.linspace(1.0, 5.0, 5), "cm")),
+        theta=Axis(edges=Quantity(np.linspace(0.3, np.pi - 0.3, 5), "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 5), "rad")),
+    )
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [_make_uniform_cartesian_mesh(ncells=4, L_cm=4.0), _make_small_spherical_mesh()],
+    ids=("cartesian", "spherical"),
+)
+def test_healpix_columns_are_exactly_independent_of_numba_thread_count(mesh):
+    """Cyclic worker assignment must preserve every native output row."""
+
+    original_threads = get_num_threads()
+    if original_threads < 2:
+        pytest.skip("thread-count comparison requires at least two Numba workers")
+    shape = mesh.shape
+    field = 1.0 + np.arange(np.prod(shape), dtype=np.float64).reshape(shape)
+    mask = np.ones(shape, dtype=bool)
+    try:
+        set_num_threads(1)
+        idx_one, dirs_one, cols_one = compute_column_rays_healpix(
+            mesh,
+            {"density": field},
+            nside=1,
+            candidate_mask=mask,
+        )
+        set_num_threads(min(4, original_threads))
+        idx_many, dirs_many, cols_many = compute_column_rays_healpix(
+            mesh,
+            {"density": field},
+            nside=1,
+            candidate_mask=mask,
+        )
+    finally:
+        set_num_threads(original_threads)
+
+    np.testing.assert_array_equal(idx_many, idx_one)
+    np.testing.assert_array_equal(dirs_many, dirs_one)
+    np.testing.assert_array_equal(cols_many["density"], cols_one["density"])
 
 
 def _star_weight_metadata_for_target(shape, target_idx, *, nside, w_star):
@@ -884,3 +932,51 @@ def test_source_cell_has_no_undefined_stellar_weight():
     np.testing.assert_allclose(W.sum(axis=1), 1.0, atol=1.0e-12)
     assert not bool(stellar["valid_star"][origin_flat])
     assert stellar["w_star"][origin_flat] == 0.0
+
+
+def test_pdr_extra_ray_field_reducer_reuses_shielding_traversal():
+    """Extra directional fields are consumed by chunk without changing shielding."""
+
+    mesh = _make_uniform_cartesian_mesh(ncells=2, L_cm=2.0)
+    shape = (2, 2, 2)
+    nH = np.full(shape, 100.0)
+    chi = np.ones(shape)
+    nH2 = np.full(shape, 30.0)
+    nC = np.full(shape, 1.0e-2)
+    extra = np.full(shape, 3.0)
+    baseline = compute_pdr_shielding_healpix(
+        mesh,
+        nH,
+        chi,
+        visser=None,
+        nC=nC,
+        nH2=nH2,
+        nside=1,
+        chunk_size=3,
+    )
+    seen = []
+
+    def reduce_chunk(candidate_idx, directions, columns):
+        assert candidate_idx.shape[1] == 3
+        assert directions.shape == (12, 3)
+        seen.append(np.asarray(columns["test_extra"]).copy())
+
+    fused = compute_pdr_shielding_healpix(
+        mesh,
+        nH,
+        chi,
+        visser=None,
+        nC=nC,
+        nH2=nH2,
+        nside=1,
+        chunk_size=3,
+        extra_ray_fields={"test_extra": extra},
+        ray_chunk_reducer=reduce_chunk,
+    )
+
+    assert len(seen) == 3
+    assert sum(chunk.shape[0] for chunk in seen) == np.prod(shape)
+    assert all(chunk.shape[1] == 12 for chunk in seen)
+    assert all(np.all(chunk >= 0.0) for chunk in seen)
+    for expected, actual in zip(baseline, fused):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)

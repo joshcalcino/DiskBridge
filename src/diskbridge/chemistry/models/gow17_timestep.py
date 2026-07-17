@@ -93,6 +93,15 @@ class Gow17TimeStepper:
     def __init__(self, rad, config: dict):
         cfg = resolve_model_config(("chemistry", "gow17"), overrides=config)
         self.cfg = cfg
+        co_cooling_method = str(
+            cfg.get("co_cooling", {}).get("method", "legacy_scalar")
+        ).lower()
+        if co_cooling_method != "legacy_scalar":
+            raise ValueError(
+                "Gow17TimeStepper currently supports only "
+                "co_cooling.method='legacy_scalar'; use run_gow17 for the "
+                "directional comparison"
+            )
 
         self.temperature_cfg = _resolve_temperature_config(cfg)
         self.temperature_mode = str(self.temperature_cfg["mode"])
@@ -622,6 +631,8 @@ class Gow17TimeStepper:
             const_temp=self.const_temp,
             gradv=self.gradv_arr,
             Leff_CO_max=self.Leff_CO_max_arr,
+            NCOeff_external=np.zeros(self.ncells, dtype=np.float64),
+            use_NCOeff_external=False,
             isDust_cooling=self.isDust_cooling,
             isCoolingCOThin=self.isCoolingCOThin,
             fH2gr=self.fH2gr,
@@ -722,6 +733,8 @@ class Gow17TimeStepper:
                 const_temp=self.const_temp,
                 gradv=self.gradv_arr,
                 Leff_CO_max=self.Leff_CO_max_arr,
+                NCOeff_external=np.zeros(self.ncells, dtype=np.float64),
+                use_NCOeff_external=False,
                 isDust_cooling=self.isDust_cooling,
                 isCoolingCOThin=self.isCoolingCOThin,
                 fH2gr=self.fH2gr,
@@ -795,6 +808,8 @@ class Gow17TimeStepper:
             const_temp=self.const_temp,
             gradv=self.gradv_arr,
             Leff_CO_max=self.Leff_CO_max_arr,
+            NCOeff_external=np.zeros(self.ncells, dtype=np.float64),
+            use_NCOeff_external=False,
             isDust_cooling=self.isDust_cooling,
             isCoolingCOThin=self.isCoolingCOThin,
             fH2gr=self.fH2gr,

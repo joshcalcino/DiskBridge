@@ -12,6 +12,7 @@ astrochem_n_updates = 8
 astrochem_t_end_yr = 1.0e6
 
 [disk]
+stellar_mass_msun = 1.0
 sigma_100_g_cm2 = 5.0
 surface_density_power = 1.0
 characteristic_radius_au = 130.0

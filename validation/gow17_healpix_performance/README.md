@@ -2,8 +2,9 @@
 
 ## Overview
 
-This validation measures the variable-linewidth Visser CO shielding stage,
-the complete post-ray shielding algebra, and the native GOW17 per-cell CVODE
+This validation measures HEALPix DDA ray marching, the variable-linewidth
+Visser CO shielding stage, the complete post-ray shielding algebra, the
+directional Omukai cooling reduction, and the native GOW17 per-cell CVODE
 stage at scales relevant to the Bondi All-Stars run. It is a performance and
 numerical-comparison workflow, not a pytest test.
 The largest default shielding case has
@@ -70,6 +71,13 @@ are separate Bondi pipeline and end-to-end measurements.
 The implementation is warmed before measurement so Numba compilation time is
 excluded; production jobs likewise compile once and reuse the kernels over
 many shielding chunks and chemistry updates.
+
+The DDA comparison integrates the six fields required by hybrid CO cooling on
+the saved `60 x 40 x 8`, `nside=4` validation grid. Separate pytest coverage
+requires bit-for-bit identical Cartesian and spherical columns with one and
+multiple Numba threads. The directional Omukai benchmark uses deterministic
+cells that mix full column inversion with inexpensive early-return cases so
+that scheduling behavior is measured without changing the cooling problem.
 
 The native-solver comparison tests whether one SUNDIALS/CVODE allocation per
 OpenMP worker can replace one allocation per cell without changing any solver

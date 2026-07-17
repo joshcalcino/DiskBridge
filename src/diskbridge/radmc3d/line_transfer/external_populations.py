@@ -28,10 +28,14 @@ import time
 import numpy as np
 from numba import njit, prange
 
-from diskbridge._constants import K_B, M_H
 from diskbridge._logging import logger
 from diskbridge._units import units
 from diskbridge.model.mesh import Axis, Mesh
+from diskbridge.model.kinematics import (
+    cartesian_velocity_cm_s,
+    microturbulence_cm_s,
+    molecular_doppler_width_cm_s,
+)
 from diskbridge.radmc3d.colliders import gow17_lamda_colliders
 from diskbridge.radmc3d.writer import RadWriter
 from diskbridge.utils import sha256_array, sha256_file
@@ -142,74 +146,6 @@ def _radmc_transfer_mesh(mesh):
         theta=Axis(edges=mesh.edges("theta")),
         phi=Axis(edges=RadWriter.radmc_spherical_phi_edges_rad(mesh) * units("radian")),
     )
-
-
-def _velocity_xyz_cm_s(rad, *, basis_mesh=None) -> np.ndarray:
-    """Build a Cartesian velocity field ``v_xyz[n0, n1, n2, 3]`` in cm/s."""
-    mesh = rad.model.mesh
-    basis_mesh = basis_mesh or mesh
-    gas = rad.model.gas
-
-    if mesh.coord_system == "cartesian":
-        vx = _gas_field(rad, "vx", unit="cm/s") if "vx" in gas else None
-        vy = _gas_field(rad, "vy", unit="cm/s") if "vy" in gas else None
-        vz = _gas_field(rad, "vz", unit="cm/s") if "vz" in gas else None
-        if vx is None or vy is None or vz is None:
-            raise KeyError(
-                "Cartesian mesh requires model.gas['vx', 'vy', 'vz'] for "
-                "Cartesian-velocity HEALPix integration"
-            )
-        out = np.empty(vx.shape + (3,), dtype=np.float64)
-        out[..., 0] = vx
-        out[..., 1] = vy
-        out[..., 2] = vz
-        return np.ascontiguousarray(out)
-
-    if mesh.coord_system != "spherical":
-        raise ValueError(
-            f"Unsupported coordinate system for HEALPix SE: {mesh.coord_system!r}"
-        )
-
-    vr = _gas_field(rad, "vr", unit="cm/s")
-    vtheta = _gas_field(rad, "vtheta", unit="cm/s")
-    vphi = _gas_field(rad, "vphi", unit="cm/s")
-    # Line transfer integrates in Cartesian ray directions; the Mesh owns the
-    # spherical basis conversion so this module only assembles the required
-    # velocity field.
-    # The external escape-probability solve must use the same spherical basis
-    # that RADMC-3D sees in amr_grid.inp.
-    vx, vy, vz = basis_mesh.spherical_vector_components_to_cartesian(
-        vr,
-        vtheta,
-        vphi,
-        axis_order=mesh.axis_names(),
-    )
-
-    out = np.empty(vr.shape + (3,), dtype=np.float64)
-    out[..., 0] = vx
-    out[..., 1] = vy
-    out[..., 2] = vz
-    return np.ascontiguousarray(out)
-
-
-def _microturbulence_cm_s(rad) -> np.ndarray:
-    """Return microturbulence ``a_turb`` (cm/s) on the mesh.
-
-    RADMC-3D reads ``microturbulence.*`` as the turbulent line-width parameter
-    ``a_turb`` and combines it as ``sqrt(a_turb**2 + 2 k T / m_mol)``. Use the
-    same convention in the external population solver.
-    """
-    return _gas_field(rad, "microturbulence", unit="cm/s")
-
-
-def _build_a_line(Tgas: np.ndarray, a_turb: np.ndarray, molweight: float) -> np.ndarray:
-    """Total Doppler line-width parameter in cm/s.
-
-    ``a_line = sqrt(a_turb^2 + 2 k T / m_mol)``.
-    """
-    m_mol = molweight * M_H
-    thermal_sq = 2.0 * K_B * Tgas / m_mol
-    return np.sqrt(np.maximum(a_turb * a_turb + thermal_sq, 0.0))
 
 
 def _range_pair(values: np.ndarray) -> list[float]:
@@ -873,10 +809,10 @@ def solve_and_write_healpix_levelpop(
 
     # Gas fields (native mesh order).
     Tgas = _gas_field(rad, "gas_temperature", unit="K")
-    a_turb = _microturbulence_cm_s(rad)
-    a_line = _build_a_line(Tgas, a_turb, molecule.molweight)
+    a_turb = microturbulence_cm_s(rad)
+    a_line = molecular_doppler_width_cm_s(Tgas, a_turb, molecule.molweight)
     n_species = _species_density_cm3(chemistry_result, species)
-    velocity_xyz = _velocity_xyz_cm_s(rad, basis_mesh=transfer_mesh)
+    velocity_xyz = cartesian_velocity_cm_s(rad, basis_mesh=transfer_mesh)
     velocity_range = _velocity_range_diagnostics(velocity_xyz)
     velocity_mesh, velocity_components = _gas_velocity_components_cm_s(rad)
     gas_velocity_sha256 = RadWriter.gas_velocity_binp_sha256(

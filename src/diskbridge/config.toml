@@ -202,6 +202,9 @@ isfsC = true
 NCOeff_global = true
 bCO_L = true
 
+[chemistry.gow17.co_cooling]
+method = "legacy_scalar"
+
 [chemistry.gow17.temperature]
 mode = "computed"
 initial = "dust"

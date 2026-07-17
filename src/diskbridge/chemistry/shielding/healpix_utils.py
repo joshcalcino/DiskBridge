@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Tuple
 
 import numpy as np
-from numba import njit, prange
+from numba import get_num_threads, njit, prange
 
 from diskbridge._constants import HEALPIX_SELF_WEIGHT
 
@@ -338,6 +338,7 @@ def _integrate_all_rays_spherical_dda_multi(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_steps: int = 200000,
+    n_workers: int = 1,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -354,7 +355,17 @@ def _integrate_all_rays_spherical_dda_multi(
 
     two_pi = 2.0 * np.pi
 
-    for i in prange(n_cells):
+    # Transpose the conceptual (worker, cell) work grid so every static
+    # worker block samples the complete native cell order instead of one
+    # contiguous spatial band. Output rows remain in native order.
+    cells_per_worker = (n_cells + n_workers - 1) // n_workers
+    padded_work = n_workers * cells_per_worker
+    for work_index in prange(padded_work):
+        worker_block = work_index // cells_per_worker
+        block_offset = work_index - worker_block * cells_per_worker
+        i = block_offset * n_workers + worker_block
+        if i >= n_cells:
+            continue
         x0 = cell_centers[i, 0]
         y0 = cell_centers[i, 1]
         z0 = cell_centers[i, 2]
@@ -500,6 +511,7 @@ def _integrate_all_rays_cartesian_dda_multi(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_steps: int = 100000,
+    n_workers: int = 1,
 ) -> np.ndarray:
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
@@ -524,7 +536,15 @@ def _integrate_all_rays_cartesian_dda_multi(
 
     eps = 1e-12
 
-    for i in prange(n_cells):
+    # Use the same no-copy cyclic assignment as the spherical DDA kernel.
+    cells_per_worker = (n_cells + n_workers - 1) // n_workers
+    padded_work = n_workers * cells_per_worker
+    for work_index in prange(padded_work):
+        worker_block = work_index // cells_per_worker
+        block_offset = work_index - worker_block * cells_per_worker
+        i = block_offset * n_workers + worker_block
+        if i >= n_cells:
+            continue
         x0 = cell_centers[i, 0]
         y0 = cell_centers[i, 1]
         z0 = cell_centers[i, 2]
@@ -748,10 +768,20 @@ def integrate_rays_multi(
 
     if kind == "cartesian":
         return _integrate_all_rays_cartesian_dda_multi(
-            cell_centers, directions, fields_stack, *edges, max_steps
+            cell_centers,
+            directions,
+            fields_stack,
+            *edges,
+            max_steps,
+            int(get_num_threads()),
         )
     return _integrate_all_rays_spherical_dda_multi(
-        cell_centers, directions, fields_stack, *edges, max_steps
+        cell_centers,
+        directions,
+        fields_stack,
+        *edges,
+        max_steps,
+        int(get_num_threads()),
     )
 
 

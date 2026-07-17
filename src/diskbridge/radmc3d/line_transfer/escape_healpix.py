@@ -34,6 +34,17 @@ from diskbridge.chemistry.shielding.healpix_utils import (
 )
 
 
+def _unit_directions(dirs: np.ndarray) -> np.ndarray:
+    """Normalize ray directions once before entering the per-cell kernels."""
+
+    directions = np.ascontiguousarray(dirs, dtype=np.float64)
+    norms = np.linalg.norm(directions, axis=1)
+    nonzero = norms > 0.0
+    normalized = directions.copy()
+    normalized[nonzero] /= norms[nonzero, None]
+    return np.ascontiguousarray(normalized)
+
+
 @njit(cache=True, inline="always")
 def _beta_of_tau(tau: float) -> float:
     """Stable (1 - exp(-tau)) / tau with small-tau series."""
@@ -45,7 +56,7 @@ def _beta_of_tau(tau: float) -> float:
 
 
 @njit(parallel=True, cache=True, fastmath=False)
-def compute_beta_cartesian(
+def _integrate_velocity_coherent_cartesian(
     candidate_idx: np.ndarray,        # (Ncand, 3) int64 (ix, iy, iz)
     cell_centers: np.ndarray,         # (Ncand, 3) f64
     dirs: np.ndarray,                 # (Npix, 3) f64
@@ -56,8 +67,9 @@ def compute_beta_cartesian(
     y_edges: np.ndarray,
     z_edges: np.ndarray,
     max_ray_steps: int,
+    reduction: int,
 ) -> np.ndarray:
-    """Cartesian-mesh kernel returning ``beta`` with shape (Ncand, nlin)."""
+    """Integrate coherent fields, returning rays or mean escape probability."""
 
     n_cand = candidate_idx.shape[0]
     n_dirs = dirs.shape[0]
@@ -66,7 +78,8 @@ def compute_beta_cartesian(
     ny = alpha0_stack.shape[2]
     nz = alpha0_stack.shape[3]
 
-    beta = np.zeros((n_cand, nlin), dtype=np.float64)
+    n_reduced = n_dirs if reduction == 0 else 1
+    out = np.zeros((n_cand, n_reduced, nlin), dtype=np.float64)
 
     xmin = x_edges[0]
     xmax = x_edges[-1]
@@ -99,14 +112,11 @@ def compute_beta_cartesian(
             ux = dirs[k, 0]
             uy = dirs[k, 1]
             uz = dirs[k, 2]
-            norm = np.sqrt(ux * ux + uy * uy + uz * uz)
-            if norm == 0.0:
-                for m in range(nlin):
-                    beta_sum[m] += 1.0
+            if ux == 0.0 and uy == 0.0 and uz == 0.0:
+                if reduction == 1:
+                    for m in range(nlin):
+                        beta_sum[m] += 1.0
                 continue
-            ux /= norm
-            uy /= norm
-            uz /= norm
 
             x = cell_centers[c, 0]
             y = cell_centers[c, 1]
@@ -128,8 +138,9 @@ def compute_beta_cartesian(
             iy = np.searchsorted(y_edges, y) - 1
             iz = np.searchsorted(z_edges, z) - 1
             if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
-                for m in range(nlin):
-                    beta_sum[m] += 1.0
+                if reduction == 1:
+                    for m in range(nlin):
+                        beta_sum[m] += 1.0
                 continue
 
             if ux > 0.0:
@@ -199,9 +210,18 @@ def compute_beta_cartesian(
                 aL = a_line[ix, iy, iz]
                 if aL <= 0.0:
                     overlap = 0.0
+                elif dv == 0.0:
+                    overlap = 1.0
                 else:
                     arg = dv / aL
-                    overlap = np.exp(-arg * arg)
+                    arg_sq = arg * arg
+                    if arg_sq > 745.1332191019412:
+                        # exp(-arg_sq) rounds to zero in float64 beyond this
+                        # point, so avoid an expensive libm call without
+                        # introducing a physical overlap cutoff.
+                        overlap = 0.0
+                    else:
+                        overlap = np.exp(-arg_sq)
 
                 for m in range(nlin):
                     tau[m] += alpha0_stack[m, ix, iy, iz] * overlap * ds
@@ -217,17 +237,22 @@ def compute_beta_cartesian(
                     iz += step_z
                     tMaxZ += tDeltaZ
 
+            if reduction == 0:
+                for m in range(nlin):
+                    out[c, k, m] = tau[m]
+            else:
+                for m in range(nlin):
+                    beta_sum[m] += _beta_of_tau(tau[m])
+
+        if reduction == 1:
             for m in range(nlin):
-                beta_sum[m] += _beta_of_tau(tau[m])
+                out[c, 0, m] = beta_sum[m] * inv_npix
 
-        for m in range(nlin):
-            beta[c, m] = beta_sum[m] * inv_npix
-
-    return beta
+    return out
 
 
 @njit(parallel=True, cache=True, fastmath=False)
-def compute_beta_spherical(
+def _integrate_velocity_coherent_spherical(
     candidate_idx: np.ndarray,        # (Ncand, 3) int64 (ir, it, ip)
     cell_centers: np.ndarray,         # (Ncand, 3) f64
     dirs: np.ndarray,                 # (Npix, 3) f64
@@ -238,8 +263,9 @@ def compute_beta_spherical(
     theta_edges: np.ndarray,
     phi_edges: np.ndarray,
     max_ray_steps: int,
+    reduction: int,
 ) -> np.ndarray:
-    """Spherical-mesh kernel returning ``beta`` with shape (Ncand, nlin)."""
+    """Integrate coherent fields, returning rays or mean escape probability."""
 
     n_cand = candidate_idx.shape[0]
     n_dirs = dirs.shape[0]
@@ -248,7 +274,8 @@ def compute_beta_spherical(
     nt = alpha0_stack.shape[2]
     nphi = alpha0_stack.shape[3]
 
-    beta = np.zeros((n_cand, nlin), dtype=np.float64)
+    n_reduced = n_dirs if reduction == 0 else 1
+    out = np.zeros((n_cand, n_reduced, nlin), dtype=np.float64)
 
     rmin = r_edges[0]
     rmax = r_edges[-1]
@@ -270,14 +297,11 @@ def compute_beta_spherical(
             ux = dirs[k, 0]
             uy = dirs[k, 1]
             uz = dirs[k, 2]
-            norm = np.sqrt(ux * ux + uy * uy + uz * uz)
-            if norm == 0.0:
-                for m in range(nlin):
-                    beta_sum[m] += 1.0
+            if ux == 0.0 and uy == 0.0 and uz == 0.0:
+                if reduction == 1:
+                    for m in range(nlin):
+                        beta_sum[m] += 1.0
                 continue
-            ux /= norm
-            uy /= norm
-            uz /= norm
 
             x = cell_centers[c, 0]
             y = cell_centers[c, 1]
@@ -285,8 +309,9 @@ def compute_beta_spherical(
 
             r = np.sqrt(x * x + y * y + z * z)
             if r <= rmin or r >= rmax:
-                for m in range(nlin):
-                    beta_sum[m] += 1.0
+                if reduction == 1:
+                    for m in range(nlin):
+                        beta_sum[m] += 1.0
                 continue
             # The caller already knows the containing cell. Recomputing it from
             # atan2() can be wrong for meshes whose phi edges are [-pi, pi],
@@ -295,8 +320,9 @@ def compute_beta_spherical(
             it = it0
             ip = ip0
             if ir < 0 or ir >= nr or it < 0 or it >= nt or ip < 0 or ip >= nphi:
-                for m in range(nlin):
-                    beta_sum[m] += 1.0
+                if reduction == 1:
+                    for m in range(nlin):
+                        beta_sum[m] += 1.0
                 continue
 
             for m in range(nlin):
@@ -364,9 +390,17 @@ def compute_beta_spherical(
                 aL = a_line[ir, it, ip]
                 if aL <= 0.0:
                     overlap = 0.0
+                elif dv == 0.0:
+                    overlap = 1.0
                 else:
                     arg = dv / aL
-                    overlap = np.exp(-arg * arg)
+                    arg_sq = arg * arg
+                    if arg_sq > 745.1332191019412:
+                        # This is the float64 underflow limit, not a physical
+                        # truncation of the Gaussian profile.
+                        overlap = 0.0
+                    else:
+                        overlap = np.exp(-arg_sq)
                 for m in range(nlin):
                     tau[m] += alpha0_stack[m, ir, it, ip] * overlap * ds
 
@@ -394,13 +428,301 @@ def compute_beta_spherical(
                         if ip >= nphi:
                             ip = 0
 
+            if reduction == 0:
+                for m in range(nlin):
+                    out[c, k, m] = tau[m]
+            else:
+                for m in range(nlin):
+                    beta_sum[m] += _beta_of_tau(tau[m])
+
+        if reduction == 1:
             for m in range(nlin):
-                beta_sum[m] += _beta_of_tau(tau[m])
+                out[c, 0, m] = beta_sum[m] * inv_npix
 
-        for m in range(nlin):
-            beta[c, m] = beta_sum[m] * inv_npix
+    return out
 
-    return beta
+
+@njit(parallel=True, cache=True, fastmath=False)
+def _integrate_velocity_coherent_spherical_columns(
+    candidate_idx: np.ndarray,
+    cell_centers: np.ndarray,
+    dirs: np.ndarray,
+    field: np.ndarray,
+    velocity_xyz: np.ndarray,
+    a_line: np.ndarray,
+    r_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    phi_edges: np.ndarray,
+    max_ray_steps: int,
+) -> np.ndarray:
+    """Integrate one coherent field with direction-major parallel work."""
+
+    n_cand = candidate_idx.shape[0]
+    n_dirs = dirs.shape[0]
+    nr, nt, nphi = field.shape
+    out = np.zeros((n_dirs, n_cand), dtype=np.float64)
+    rmin = r_edges[0]
+    rmax = r_edges[-1]
+
+    # Direction-major ordering distributes the complete set of source-cell
+    # path lengths across each worker instead of assigning a radial block of
+    # cells to one worker. Each (cell, direction) ray remains independent.
+    for q in prange(n_cand * n_dirs):
+        k = q // n_cand
+        c = q - k * n_cand
+
+        ir0 = candidate_idx[c, 0]
+        it0 = candidate_idx[c, 1]
+        ip0 = candidate_idx[c, 2]
+        if ir0 < 0 or ir0 >= nr or it0 < 0 or it0 >= nt or ip0 < 0 or ip0 >= nphi:
+            continue
+
+        ux = dirs[k, 0]
+        uy = dirs[k, 1]
+        uz = dirs[k, 2]
+        if ux == 0.0 and uy == 0.0 and uz == 0.0:
+            continue
+
+        x = cell_centers[c, 0]
+        y = cell_centers[c, 1]
+        z = cell_centers[c, 2]
+        radius = np.sqrt(x * x + y * y + z * z)
+        if radius <= rmin or radius >= rmax:
+            continue
+
+        ir = ir0
+        it = it0
+        ip = ip0
+        v0x = velocity_xyz[ir0, it0, ip0, 0]
+        v0y = velocity_xyz[ir0, it0, ip0, 1]
+        v0z = velocity_xyz[ir0, it0, ip0, 2]
+        column = 0.0
+
+        for _step in range(max_ray_steps):
+            if ir < 0 or ir >= nr or it < 0 or it >= nt:
+                break
+            radius = np.sqrt(x * x + y * y + z * z)
+            if radius <= rmin or radius >= rmax:
+                break
+
+            t_min = np.inf
+            hit_dim = -1
+            hit_side = -1
+
+            if ir > 0:
+                value = _t_to_radius_boundary(
+                    x, y, z, ux, uy, uz, r_edges[ir]
+                )
+                if value < t_min:
+                    t_min = value
+                    hit_dim = 0
+                    hit_side = 0
+            if ir < nr:
+                value = _t_to_radius_boundary(
+                    x, y, z, ux, uy, uz, r_edges[ir + 1]
+                )
+                if value < t_min:
+                    t_min = value
+                    hit_dim = 0
+                    hit_side = 1
+            if it > 0:
+                value = _t_to_theta_boundary(
+                    x, y, z, ux, uy, uz, theta_edges[it]
+                )
+                if value < t_min:
+                    t_min = value
+                    hit_dim = 1
+                    hit_side = 0
+            if it < nt - 1:
+                value = _t_to_theta_boundary(
+                    x, y, z, ux, uy, uz, theta_edges[it + 1]
+                )
+                if value < t_min:
+                    t_min = value
+                    hit_dim = 1
+                    hit_side = 1
+
+            value = _t_to_phi_boundary(x, y, ux, uy, phi_edges[ip])
+            if value < t_min:
+                t_min = value
+                hit_dim = 2
+                hit_side = 0
+            value = _t_to_phi_boundary(x, y, ux, uy, phi_edges[ip + 1])
+            if value < t_min:
+                t_min = value
+                hit_dim = 2
+                hit_side = 1
+
+            if not np.isfinite(t_min) or t_min <= 0.0:
+                break
+
+            dv = (
+                (velocity_xyz[ir, it, ip, 0] - v0x) * ux
+                + (velocity_xyz[ir, it, ip, 1] - v0y) * uy
+                + (velocity_xyz[ir, it, ip, 2] - v0z) * uz
+            )
+            aL = a_line[ir, it, ip]
+            if aL <= 0.0:
+                overlap = 0.0
+            elif dv == 0.0:
+                overlap = 1.0
+            else:
+                arg = dv / aL
+                arg_sq = arg * arg
+                if arg_sq > 745.1332191019412:
+                    overlap = 0.0
+                else:
+                    overlap = np.exp(-arg_sq)
+            column += field[ir, it, ip] * overlap * t_min
+
+            x += ux * t_min
+            y += uy * t_min
+            z += uz * t_min
+
+            if hit_dim == 0:
+                if hit_side == 0:
+                    ir -= 1
+                else:
+                    ir += 1
+            elif hit_dim == 1:
+                if hit_side == 0:
+                    it -= 1
+                else:
+                    it += 1
+            elif hit_dim == 2:
+                if hit_side == 0:
+                    ip -= 1
+                    if ip < 0:
+                        ip = nphi - 1
+                else:
+                    ip += 1
+                    if ip >= nphi:
+                        ip = 0
+
+        out[k, c] = column
+
+    return out
+
+
+def compute_beta_cartesian(
+    candidate_idx,
+    cell_centers,
+    dirs,
+    alpha0_stack,
+    velocity_xyz,
+    a_line,
+    x_edges,
+    y_edges,
+    z_edges,
+    max_ray_steps,
+):
+    """Return direction-averaged Cartesian escape probabilities."""
+
+    return _integrate_velocity_coherent_cartesian(
+        candidate_idx,
+        cell_centers,
+        _unit_directions(dirs),
+        alpha0_stack,
+        velocity_xyz,
+        a_line,
+        x_edges,
+        y_edges,
+        z_edges,
+        max_ray_steps,
+        1,
+    )[:, 0, :]
+
+
+def compute_beta_spherical(
+    candidate_idx,
+    cell_centers,
+    dirs,
+    alpha0_stack,
+    velocity_xyz,
+    a_line,
+    r_edges,
+    theta_edges,
+    phi_edges,
+    max_ray_steps,
+):
+    """Return direction-averaged spherical escape probabilities."""
+
+    return _integrate_velocity_coherent_spherical(
+        candidate_idx,
+        cell_centers,
+        _unit_directions(dirs),
+        alpha0_stack,
+        velocity_xyz,
+        a_line,
+        r_edges,
+        theta_edges,
+        phi_edges,
+        max_ray_steps,
+        1,
+    )[:, 0, :]
+
+
+def compute_velocity_coherent_columns_healpix(
+    *,
+    mesh,
+    tracer,
+    candidate_idx: np.ndarray,
+    cell_centers: np.ndarray,
+    dirs: np.ndarray,
+    density_over_width: np.ndarray,
+    velocity_xyz: np.ndarray,
+    a_line: np.ndarray,
+    max_ray_steps: int = 200_000,
+) -> np.ndarray:
+    """Integrate direction-dependent velocity-coherent columns.
+
+    ``density_over_width`` is normally ``n_CO / a_CO``. The returned array has
+    shape ``(ncells, npix)`` and units ``cm^-2 / (cm s^-1)``.
+    """
+
+    candidate_idx = np.ascontiguousarray(candidate_idx, dtype=np.int64)
+    cell_centers = np.ascontiguousarray(cell_centers, dtype=np.float64)
+    dirs = _unit_directions(dirs)
+    field_stack = np.ascontiguousarray(
+        np.asarray(density_over_width, dtype=np.float64)[None, ...]
+    )
+    velocity_xyz = np.ascontiguousarray(velocity_xyz, dtype=np.float64)
+    a_line = np.ascontiguousarray(a_line, dtype=np.float64)
+    if mesh.coord_system == "cartesian":
+        out = _integrate_velocity_coherent_cartesian(
+            candidate_idx,
+            cell_centers,
+            dirs,
+            field_stack,
+            velocity_xyz,
+            a_line,
+            np.ascontiguousarray(tracer.x_edges, dtype=np.float64),
+            np.ascontiguousarray(tracer.y_edges, dtype=np.float64),
+            np.ascontiguousarray(tracer.z_edges, dtype=np.float64),
+            int(max_ray_steps),
+            0,
+        )
+    elif mesh.coord_system == "spherical":
+        phi_edges = np.ascontiguousarray(tracer.phi_edges, dtype=np.float64)
+        direction_major = _integrate_velocity_coherent_spherical_columns(
+            candidate_idx,
+            cell_centers,
+            dirs,
+            field_stack[0],
+            velocity_xyz,
+            a_line,
+            np.ascontiguousarray(tracer.r_edges, dtype=np.float64),
+            np.ascontiguousarray(tracer.theta_edges, dtype=np.float64),
+            phi_edges,
+            int(max_ray_steps),
+        )
+        return np.ascontiguousarray(direction_major.T)
+    else:
+        raise ValueError(
+            "Velocity-coherent HEALPix integration requires spherical or "
+            f"Cartesian mesh, got {mesh.coord_system!r}"
+        )
+    return out[:, :, 0]
 
 
 def compute_escape_probabilities_healpix(
@@ -442,7 +764,7 @@ def compute_escape_probabilities_healpix(
 
     candidate_idx = np.ascontiguousarray(candidate_idx, dtype=np.int64)
     cell_centers = np.ascontiguousarray(cell_centers, dtype=np.float64)
-    dirs = np.ascontiguousarray(dirs, dtype=np.float64)
+    dirs = _unit_directions(dirs)
     alpha0_stack = np.ascontiguousarray(alpha0_stack, dtype=np.float64)
     velocity_xyz = np.ascontiguousarray(velocity_xyz, dtype=np.float64)
     a_line = np.ascontiguousarray(a_line, dtype=np.float64)
@@ -541,6 +863,7 @@ def _dispatch_compute_beta(
 
 __all__ = [
     "compute_escape_probabilities_healpix",
+    "compute_velocity_coherent_columns_healpix",
     "compute_beta_cartesian",
     "compute_beta_spherical",
     "_beta_of_tau",

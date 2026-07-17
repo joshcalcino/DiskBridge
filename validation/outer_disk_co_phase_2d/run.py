@@ -118,9 +118,14 @@ def _jsonable_meta(meta: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _configure_diskbridge(settings, *, external_uv: bool) -> None:
+def _configure_diskbridge(
+    settings,
+    *,
+    external_uv: bool,
+    params_file: Path = PARAMS_FILE,
+) -> None:
     del settings
-    diskbridge.params = read_params(PARAMS_FILE)
+    diskbridge.params = read_params(params_file)
     diskbridge.params.external_uv = bool(external_uv)
     diskbridge.params.external_uv_chi = 1.0 if external_uv else 0.0
     diskbridge.params.microturbulence = Quantity(0.2, "km/s")
@@ -201,13 +206,18 @@ def _run_radmc_products(
     *,
     external_uv: bool,
     label: str,
+    params_file: Path = PARAMS_FILE,
 ) -> tuple[dict[str, Quantity], Quantity, dict[str, Any]]:
-    _configure_diskbridge(settings, external_uv=external_uv)
+    _configure_diskbridge(
+        settings,
+        external_uv=external_uv,
+        params_file=params_file,
+    )
     photon_budget = _photon_budget(settings)
     model, grid_meta = build_outer_disk_model(settings)
     rad_dir = out_dir / label
     rad_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(PARAMS_FILE, rad_dir / "params.txt")
+    shutil.copy2(params_file, rad_dir / "params.txt")
 
     rad = RadModel(model, model_dir=rad_dir)
     rad.writer.write_model_inputs(rad_dir, include_gas_velocity=False)
@@ -358,6 +368,7 @@ def _run_variant(
         "snapshot": str(snapshot),
         "grid": grid_meta,
         "config_overrides": overrides,
+        "co_cooling_method": result.meta.get("co_cooling_method"),
         "radiation_context": radiation_context,
         "regions": region_summary,
         "status": {
