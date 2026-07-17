@@ -35,6 +35,7 @@ validation/*/out/
 validation/*/outputs/
 validation/validation_out/
 legacy/
+paper/
 
 # Local/generated agent and analysis artifacts
 .codex/
