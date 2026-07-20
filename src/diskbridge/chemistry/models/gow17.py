@@ -30,7 +30,6 @@ from diskbridge.model.microturbulence import (
 )
 from diskbridge.model.kinematics import (
     cartesian_velocity_cm_s,
-    microturbulence_cm_s,
     molecular_doppler_width_cm_s,
     projected_velocity_gradient_s1,
     symmetric_velocity_gradient_s1,
@@ -1296,7 +1295,7 @@ def _resolve_shielding_linewidth(
     Tgas_K: np.ndarray,
     v_turb_grid_kms: np.ndarray,
 ) -> tuple[float, np.ndarray, float, np.ndarray, dict]:
-    """Resolve H2 and CO shielding linewidths from Tgas and microturbulence."""
+    """Resolve H2 and CO Doppler widths from Tgas and microturbulence."""
     T_arr = np.asarray(Tgas_K, dtype=np.float64)
 
     if not np.all(np.isfinite(T_arr)):
@@ -1327,12 +1326,17 @@ def _resolve_shielding_linewidth(
             f"n_bad={bad.shape[0]}"
         )
 
-    def _species_b_kms(mass_g: float) -> np.ndarray:
-        b_thermal = np.sqrt(2.0 * KB_CGS * np.maximum(T_arr, 0.0) / mass_g) / 1.0e5
-        return np.sqrt(b_thermal * b_thermal + v_grid * v_grid)
-
-    b_H2_arr = _species_b_kms(2.0 * float(M_H))
-    b_CO_arr = _species_b_kms(28.0 * float(M_H))
+    v_grid_cm_s = v_grid * 1.0e5
+    b_H2_arr = molecular_doppler_width_cm_s(
+        np.maximum(T_arr, 0.0),
+        v_grid_cm_s,
+        2.0,
+    ) / 1.0e5
+    b_CO_arr = molecular_doppler_width_cm_s(
+        np.maximum(T_arr, 0.0),
+        v_grid_cm_s,
+        28.0,
+    ) / 1.0e5
 
     for label, b_arr in (("H2", b_H2_arr), ("CO", b_CO_arr)):
         if not np.all(np.isfinite(b_arr)):
@@ -1356,6 +1360,7 @@ def _resolve_shielding_linewidth(
         "b_H2_scalar_kms": float(b_H2_scalar),
         "b_CO_scalar_kms": float(b_CO_scalar),
         "b_CO_scalar_approximation": True,
+        "doppler_width_temperature_source": "current_gas_temperature",
     }
     return b_H2_scalar, b_H2_arr, b_CO_scalar, b_CO_arr, meta
 
@@ -2196,7 +2201,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     candidate_flat_idx = None
     cell_centers = None
     co_cooling_velocity_xyz = None
-    co_cooling_microturbulence = None
     co_cooling_strain_s1 = None
 
     use_healpix_geometry = (
@@ -2219,9 +2223,8 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         if candidate_idx is None or candidate_idx.shape[0] != ncells:
             raise RuntimeError(
                 "velocity-coherent reference cooling requires HEALPix geometry for every cell"
-            )
+        )
         co_cooling_velocity_xyz = cartesian_velocity_cm_s(rad)
-        co_cooling_microturbulence = microturbulence_cm_s(rad)
     elif co_cooling_method == "healpix_hybrid_lvg":
         try:
             hybrid_is_1d = is_effectively_1d(rad.model.mesh, shape)
@@ -2232,7 +2235,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 "healpix_hybrid_lvg is a three-dimensional closure; use the "
                 "dedicated GOW17 slab workflow for one-dimensional models"
             )
-        co_cooling_microturbulence = microturbulence_cm_s(rad)
         co_cooling_strain_s1 = symmetric_velocity_gradient_s1(rad)
 
     if gradv_mode == "nh_weighted_shear+turb":
@@ -2435,25 +2437,21 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     NCOeff_external_arr = np.zeros(ncells, dtype=np.float64)
     co_cooling_update_diagnostics: list[dict[str, float | int]] = []
 
-    def _directional_cooling_state(y_state: np.ndarray) -> tuple:
-        """Return temperature, CO/linewidth, and collider arrays."""
+    def _directional_cooling_state(
+        y_state: np.ndarray,
+        b_co_cm_s: np.ndarray,
+    ) -> tuple:
+        """Return CO Doppler-column and collider arrays for one update."""
 
-        if co_cooling_microturbulence is None:
-            raise RuntimeError("Directional CO cooling linewidth was not initialized")
         y_arr = np.ascontiguousarray(y_state, dtype=np.float64)
-        temperature = T_flat if const_temp else _state_temperature(y_arr)
-        a_co = molecular_doppler_width_cm_s(
-            temperature.reshape(shape),
-            co_cooling_microturbulence,
-            28.0,
-        )
+        b_co = np.ascontiguousarray(b_co_cm_s, dtype=np.float64).reshape(shape)
         nco_flat = np.maximum(y_arr[:, I_CO], 0.0) * nH_flat
         nco = nco_flat.reshape(shape)
         density_over_width = np.divide(
             nco,
-            a_co,
+            b_co,
             out=np.zeros(shape, dtype=np.float64),
-            where=a_co > 0.0,
+            where=b_co > 0.0,
         )
         xe = np.maximum(_electron_abundance(y_arr), 0.0)
         xh = 1.0 - (
@@ -2466,8 +2464,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             + 2.0 * y_arr[:, I_H2]
         )
         return (
-            np.ascontiguousarray(temperature),
-            a_co,
             np.ascontiguousarray(nco_flat),
             np.ascontiguousarray(density_over_width),
             np.ascontiguousarray(np.maximum(xh, 0.0) * nH_flat),
@@ -2475,7 +2471,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             np.ascontiguousarray(xe * nH_flat),
         )
 
-    def _update_coherent_reference_column(y_state: np.ndarray) -> None:
+    def _update_coherent_reference_column(
+        y_state: np.ndarray,
+        temperature: np.ndarray,
+        b_co_cm_s: np.ndarray,
+    ) -> None:
         """Update the held-fixed explicit velocity-coherent reference column."""
 
         if co_cooling_method != "healpix_velocity_coherent_reference":
@@ -2487,19 +2487,16 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             or candidate_flat_idx is None
             or cell_centers is None
             or co_cooling_velocity_xyz is None
-            or co_cooling_microturbulence is None
         ):
             raise RuntimeError("Directional CO cooling geometry was not initialized")
 
         (
-            temperature,
-            a_co,
             _nco_flat,
             density_over_width,
             n_hi,
             n_h2,
             n_e,
-        ) = _directional_cooling_state(y_state)
+        ) = _directional_cooling_state(y_state, b_co_cm_s)
 
         configured_chunk = getattr(
             diskbridge.params,
@@ -2538,7 +2535,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 dirs=dirs,
                 density_over_width=density_over_width,
                 velocity_xyz=co_cooling_velocity_xyz,
-                a_line=a_co,
+                a_line=b_co_cm_s,
             )
             ray_seconds += time.perf_counter() - ray_started
             directional_min = min(directional_min, float(np.min(columns)))
@@ -2591,7 +2588,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             reduction_seconds,
         )
 
-    def _prepare_hybrid_cooling_reducer(y_state: np.ndarray):
+    def _prepare_hybrid_cooling_reducer(
+        y_state: np.ndarray,
+        temperature: np.ndarray,
+        b_co_cm_s: np.ndarray,
+    ):
         """Build the extra ray field and in-chunk hybrid cooling reducer."""
 
         if co_cooling_method != "healpix_hybrid_lvg":
@@ -2599,14 +2600,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         if co_cooling_strain_s1 is None:
             raise RuntimeError("Hybrid CO cooling velocity gradient was not initialized")
         (
-            temperature,
-            _a_co,
             nco_flat,
             density_over_width,
             n_hi,
             n_h2,
             n_e,
-        ) = _directional_cooling_state(y_state)
+        ) = _directional_cooling_state(y_state, b_co_cm_s)
         stats = {
             "reduction_seconds": 0.0,
             "finite_min_internal": np.inf,
@@ -2624,7 +2623,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ) -> None:
             started = time.perf_counter()
             columns = np.asarray(
-                columns_by_name["co_cooling_nco_over_a"], dtype=np.float64
+                columns_by_name["co_cooling_nco_over_b"], dtype=np.float64
             )
             if np.any(~np.isfinite(columns)) or np.any(columns < 0.0):
                 raise ValueError("finite directional CO columns must be non-negative and finite")
@@ -2667,7 +2666,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             )
             stats["reduction_seconds"] += time.perf_counter() - started
 
-        return {"co_cooling_nco_over_a": density_over_width}, _reduce_chunk, stats
+        return {"co_cooling_nco_over_b": density_over_width}, _reduce_chunk, stats
 
     def _finish_hybrid_cooling_update(stats: dict | None) -> None:
         """Record compact diagnostics after the fused shielding traversal."""
@@ -2760,10 +2759,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         nH_cm3=nH_cm3,
         chi_dust_arr=chi_dust_arr,
         visser=visser,
-        b_H2_kms=b_H2_kms,
-        b_CO_kms=b_CO_kms,
-        b_H2_kms_grid=b_H2_kms_grid,
-        b_CO_kms_grid=b_CO_kms_grid,
         nside=nside,
         shielding_outer_1d=str(cfg.get("shielding_outer_1d", "max")),
         slab_Av_flat=slab_Av_flat,
@@ -2772,17 +2767,57 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
     )
 
     def _compute_nonlocal_products(y_state: np.ndarray) -> tuple:
+        nonlocal b_H2_kms, b_H2_kms_arr, b_CO_kms, b_CO_kms_arr
+        nonlocal b_H2_kms_grid, b_CO_kms_grid
+
+        temperature = T_flat if const_temp else _state_temperature(y_state)
+        (
+            b_H2_kms,
+            b_H2_kms_arr,
+            b_CO_kms,
+            b_CO_kms_arr,
+            current_linewidth_meta,
+        ) = _resolve_shielding_linewidth(
+            temperature.reshape(shape),
+            v_turb_grid_kms,
+        )
+        b_H2_kms_grid = _shielding_b_grid_or_none(b_H2_kms_arr)
+        b_CO_kms_grid = _shielding_b_grid_or_none(b_CO_kms_arr)
+        if (
+            b_CO_kms_grid is None
+            and abs(float(b_CO_kms) - float(visser.b_kms)) > 1.0e-6
+        ):
+            # A constant current width still needs the multi-table interpolator
+            # when it differs from the table loaded to initialize the family.
+            b_CO_kms_grid = np.ascontiguousarray(b_CO_kms_arr, dtype=np.float64)
+        current_linewidth_meta["b_H2_ray_grid"] = b_H2_kms_grid is not None
+        current_linewidth_meta["b_CO_ray_grid"] = b_CO_kms_grid is not None
+        current_linewidth_meta["b_CO_scalar_approximation"] = (
+            b_CO_kms_grid is None
+        )
+        current_linewidth_meta["doppler_width_updates"] = int(
+            shielding_linewidth_meta.get("doppler_width_updates", 0)
+        ) + 1
+        shielding_linewidth_meta.update(current_linewidth_meta)
+
+        b_co_cm_s = np.ascontiguousarray(b_CO_kms_arr * 1.0e5, dtype=np.float64)
         extra_fields, chunk_reducer, hybrid_stats = _prepare_hybrid_cooling_reducer(
-            y_state
+            y_state,
+            temperature,
+            b_co_cm_s,
         )
         products = _compute_shielding_and_gph(
             y_flat=y_state,
+            b_H2_kms=b_H2_kms,
+            b_CO_kms=b_CO_kms,
+            b_H2_kms_grid=b_H2_kms_grid,
+            b_CO_kms_grid=b_CO_kms_grid,
             extra_ray_fields=extra_fields,
             ray_chunk_reducer=chunk_reducer,
             **_shielding_kw,
         )
         _finish_hybrid_cooling_update(hybrid_stats)
-        _update_coherent_reference_column(y_state)
+        _update_coherent_reference_column(y_state, temperature, b_co_cm_s)
         return products
 
     # Common keyword dict for CO phase parameters passed to batch solvers.

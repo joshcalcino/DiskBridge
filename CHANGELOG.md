@@ -22,6 +22,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- GOW17 molecular shielding now recomputes the H2 and CO Doppler widths from
+  the current gas temperature at each existing non-local update. Directional
+  CO cooling consumes the same current CO width during the fused shielding
+  traversal; the configured microturbulent field remains fixed.
 - The Bondi All-Stars production chemistry now explicitly includes direct CO
   desorption by cosmic-ray whole-grain heating using the HH93 70 K duty-cycle
   approximation with the ProDiMo ionization-rate scaling; CR-induced UV

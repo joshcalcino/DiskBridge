@@ -38,6 +38,15 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 
 Projects in progress are tracked in `projects/`. When working on an active project, update the relevant project markdown file before editing code. Keep project notes concise and current, and remove stale information rather than accumulating history.
 
+## Bibliography Policy
+
+- AI agents must not add reference records to any `.bib` file.
+- When a needed source is absent from the relevant bibliography, provide the
+  user with its NASA ADS abstract link and wait for the user to add the BibTeX
+  record and supply or confirm the citation key.
+- Do not invent citation keys, placeholder bibliography records, or incomplete
+  BibTeX entries. Existing bibliography records may be cited normally.
+
 ## Planning, Review, And Documentation Workflow
 
 For any non-trivial change, create or update a project plan before editing code. A non-trivial change includes any change that:

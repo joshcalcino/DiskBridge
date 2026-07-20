@@ -58,6 +58,7 @@ from diskbridge.chemistry.models.gow17 import (
     _resolve_h2_grain_scaling,
     _resolve_pah_scaling,
     _resolve_dust_cooling_controls,
+    _resolve_shielding_linewidth,
     _resolve_temperature_config,
     _resolve_visser_table_linewidth,
     _summarize_equilibrium_solver_diagnostics,
@@ -118,6 +119,42 @@ def test_visser_linewidth_info_logging_can_be_suppressed(monkeypatch):
 
     _resolve_visser_table_linewidth(0.319038, {}, log_info=True)
     assert calls
+
+
+def test_shielding_doppler_widths_use_canonical_temperature_dependent_helper():
+    """H2 and CO shielding widths share the canonical molecular definition."""
+
+    from diskbridge.model.kinematics import molecular_doppler_width_cm_s
+
+    temperature = np.array([[10.0, 100.0], [1.0e3, 1.0e4]])
+    microturbulence_kms = np.array([[0.03, 0.03], [0.2, 0.2]])
+
+    _, b_h2, _, b_co, meta = _resolve_shielding_linewidth(
+        temperature,
+        microturbulence_kms,
+    )
+
+    np.testing.assert_allclose(
+        b_h2,
+        molecular_doppler_width_cm_s(
+            temperature,
+            microturbulence_kms * 1.0e5,
+            2.0,
+        )
+        / 1.0e5,
+    )
+    np.testing.assert_allclose(
+        b_co,
+        molecular_doppler_width_cm_s(
+            temperature,
+            microturbulence_kms * 1.0e5,
+            28.0,
+        )
+        / 1.0e5,
+    )
+    assert b_h2[0, 1] > b_h2[0, 0]
+    assert b_co[1, 1] > b_co[1, 0]
+    assert meta["doppler_width_temperature_source"] == "current_gas_temperature"
 
 
 def test_invalid_gow17_shielding_ray_average_raises(tmp_path):
