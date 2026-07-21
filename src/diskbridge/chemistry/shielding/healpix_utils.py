@@ -10,8 +10,6 @@ from typing import Tuple
 import numpy as np
 from numba import get_num_threads, njit, prange
 
-from diskbridge._constants import HEALPIX_SELF_WEIGHT
-
 
 def _as_f64(name: str, x) -> np.ndarray:
     a = np.asarray(x, dtype=np.float64)
@@ -407,8 +405,6 @@ def _integrate_all_rays_spherical_dda_multi(
             if ir < 0 or ir >= nr or it < 0 or it >= nt or ip < 0 or ip >= nphi:
                 continue
 
-            is_first = True
-
             for _ in range(max_steps):
                 if ir < 0 or ir >= nr or it < 0 or it >= nt:
                     break
@@ -467,13 +463,8 @@ def _integrate_all_rays_spherical_dda_multi(
                     break
 
                 ds = t_min
-                if is_first:
-                    for k in range(n_fields):
-                        N_all[i, j, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ir, it, ip] * ds
-                    is_first = False
-                else:
-                    for k in range(n_fields):
-                        N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
+                for k in range(n_fields):
+                    N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
 
                 x += dx * t_min
                 y += dy * t_min
@@ -631,8 +622,6 @@ def _integrate_all_rays_cartesian_dda_multi(
                 tDeltaZ = np.inf
 
             t_curr = 0.0
-            is_first = True
-
             for _ in range(max_steps):
                 if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
                     break
@@ -655,13 +644,8 @@ def _integrate_all_rays_cartesian_dda_multi(
                 if ds_loc <= 0.0 or not np.isfinite(ds_loc):
                     break
 
-                if is_first:
-                    for k in range(n_fields):
-                        N_all[i, j, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ix, iy, iz] * ds_loc
-                    is_first = False
-                else:
-                    for k in range(n_fields):
-                        N_all[i, j, k] += fields_stack[k, ix, iy, iz] * ds_loc
+                for k in range(n_fields):
+                    N_all[i, j, k] += fields_stack[k, ix, iy, iz] * ds_loc
 
                 t_curr = t_next
 
@@ -867,7 +851,7 @@ def _integrate_starward_radial_spherical(
         ds_self = r_centers[ir_cell] - self_inner
         if ds_self > 0.0:
             for k in range(n_fields):
-                cols[i, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ir_cell, it, ip] * ds_self
+                cols[i, k] += fields_stack[k, ir_cell, it, ip] * ds_self
 
         # Inner cells: full or partial radial extents down to r_stop.
         for j in range(ir_cell - 1, -1, -1):
@@ -1019,8 +1003,6 @@ def _integrate_starward_cartesian_dda_multi(
             tDeltaZ = np.inf
 
         t_curr = 0.0
-        is_first = True
-
         for _ in range(max_steps):
             if t_curr >= t_stop:
                 break
@@ -1046,13 +1028,8 @@ def _integrate_starward_cartesian_dda_multi(
             if ds_loc <= 0.0 or not np.isfinite(ds_loc):
                 break
 
-            if is_first:
-                for k in range(n_fields):
-                    cols[i, k] += HEALPIX_SELF_WEIGHT * fields_stack[k, ix, iy, iz] * ds_loc
-                is_first = False
-            else:
-                for k in range(n_fields):
-                    cols[i, k] += fields_stack[k, ix, iy, iz] * ds_loc
+            for k in range(n_fields):
+                cols[i, k] += fields_stack[k, ix, iy, iz] * ds_loc
 
             t_curr = t_seg
 

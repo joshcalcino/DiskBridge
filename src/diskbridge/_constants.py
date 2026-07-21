@@ -43,9 +43,6 @@ G_GRAV = units('G').to_base_units().magnitude          # cm^3/(g s^2)
 # Reference: Draine 1978, ApJS, 36, 595
 U_DRAINE = 9.0e-14
 
-# Fixed half-cell contribution for the starting cell in HEALPix ray integrations.
-HEALPIX_SELF_WEIGHT = 0.5
-
 # =============================================================================
 # RADMC-3D EXTERNAL BOUNDARY FIELD
 # =============================================================================

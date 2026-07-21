@@ -7,6 +7,8 @@ Verifies:
 - direct stellar weighting uses exact starward shielding instead of HEALPix
   pixel-center boundary columns
 - W_rays=None in shielding functions equals isotropic mean
+- the exact Cartesian +x ray reduces to the 1D outer half-cell convention
+- spherical boundary and starward rays include the geometric source segment
 - Cartesian and spherical ray columns are independent of Numba thread count
 """
 
@@ -28,7 +30,10 @@ from diskbridge.chemistry.shielding.angular_uv_weights import (
     compute_uv_direction_weights_healpix,
 )
 from diskbridge.chemistry.shielding.w_rays_cache import _estimate_w_rays_memory_bytes
+from diskbridge.chemistry.shielding.columns_1d import column_to_outer_boundary_1d
 from diskbridge.chemistry.shielding.healpix_columns import (
+    CartesianHealpixRayTracer,
+    SphericalHealpixRayTracer,
     _average_product_rays,
     _average_rays,
     _c_shielding,
@@ -42,6 +47,8 @@ from diskbridge.chemistry.shielding.h2_db96 import h2_self_shielding_db96
 from diskbridge.chemistry.shielding.healpix_utils import (
     _multiply_3d_parallel,
     _weighted_b2_3d_parallel,
+    integrate_rays_multi,
+    integrate_starward_rays_multi,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
 
@@ -207,6 +214,108 @@ def test_healpix_columns_are_exactly_independent_of_numba_thread_count(mesh):
     np.testing.assert_array_equal(idx_many, idx_one)
     np.testing.assert_array_equal(dirs_many, dirs_one)
     np.testing.assert_array_equal(cols_many["density"], cols_one["density"])
+
+
+def test_cartesian_plus_x_column_matches_1d_half_cell_convention():
+    """The source-centre-to-face DDA segment is already a half cell."""
+
+    x_edges = np.linspace(0.0, 4.0, 5)
+    mesh_1d = Mesh.cartesian(
+        x=Axis(edges=Quantity(x_edges, "cm")),
+        y=Axis(edges=Quantity([0.0, 1.0], "cm")),
+        z=Axis(edges=Quantity([0.0, 1.0], "cm")),
+    )
+    mesh_3d = Mesh.cartesian(
+        x=Axis(edges=Quantity(x_edges, "cm")),
+        y=Axis(edges=Quantity([-40.0, 0.0, 40.0], "cm")),
+        z=Axis(edges=Quantity([-40.0, 40.0], "cm")),
+    )
+    density_1d = np.arange(1.0, 5.0).reshape(4, 1, 1)
+    density_3d = np.broadcast_to(density_1d, mesh_3d.shape).copy()
+
+    expected = column_to_outer_boundary_1d(
+        mesh_1d,
+        density_1d,
+        axis_name="x",
+        axis_index=0,
+        outer="max",
+    )[:, 0, 0]
+    candidate_idx, directions, columns = compute_column_rays_healpix(
+        mesh_3d,
+        {"density": density_3d},
+        nside=1,
+        candidate_mask=np.ones(mesh_3d.shape, dtype=bool),
+    )
+    normal_pixel = np.flatnonzero(
+        np.all(
+            np.isclose(directions, np.array([1.0, 0.0, 0.0]), atol=1.0e-14),
+            axis=1,
+        )
+    )
+    assert normal_pixel.size == 1
+    actual = np.empty(mesh_3d.shape, dtype=np.float64)
+    actual[tuple(candidate_idx.T)] = columns["density"][:, int(normal_pixel[0])]
+
+    np.testing.assert_allclose(actual[:, 0, 0], expected, rtol=0.0, atol=1.0e-14)
+    np.testing.assert_allclose(actual[:, 1, 0], expected, rtol=0.0, atol=1.0e-14)
+
+
+def test_spherical_radial_column_includes_source_to_face_segment():
+    """A radial DDA ray integrates its source-to-face and full outer segments."""
+
+    mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.arange(1.0, 6.0), "cm")),
+        theta=Axis(edges=Quantity([0.0, np.pi], "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 5), "rad")),
+    )
+    tracer = SphericalHealpixRayTracer(mesh, nside=1)
+    center = np.asarray([tracer.cell_center_xyz(1, 0, 0)])
+    direction = center / np.linalg.norm(center, axis=1, keepdims=True)
+    radial_density = np.arange(1.0, 5.0).reshape(4, 1, 1)
+    fields = np.broadcast_to(radial_density, mesh.shape)[None, ...].copy()
+
+    column = integrate_rays_multi(tracer, center, direction, fields)
+
+    expected = (tracer.r_edges[2] - tracer.r_centers[1]) * 2.0 + 3.0 + 4.0
+    np.testing.assert_allclose(column[0, 0, 0], expected)
+
+
+@pytest.mark.parametrize("geometry", ["cartesian", "spherical"])
+def test_starward_column_includes_source_to_face_segment(geometry):
+    """A starward ray integrates its source-to-face and full inner segments."""
+
+    radial_density = np.arange(1.0, 5.0).reshape(4, 1, 1)
+    if geometry == "cartesian":
+        mesh = Mesh.cartesian(
+            x=Axis(edges=Quantity(np.arange(5.0), "cm")),
+            y=Axis(edges=Quantity([-1.0, 1.0], "cm")),
+            z=Axis(edges=Quantity([-1.0, 1.0], "cm")),
+        )
+        tracer = CartesianHealpixRayTracer(mesh, nside=1)
+        center = np.array([[3.5, 0.0, 0.0]])
+        candidate_idx = None
+        source_segment = 0.5
+    else:
+        mesh = Mesh.spherical(
+            r=Axis(edges=Quantity(np.arange(1.0, 6.0), "cm")),
+            theta=Axis(edges=Quantity([0.0, np.pi], "rad")),
+            phi=Axis(edges=Quantity([0.0, 2.0 * np.pi], "rad")),
+        )
+        tracer = SphericalHealpixRayTracer(mesh, nside=1)
+        center = np.asarray([tracer.cell_center_xyz(3, 0, 0)])
+        candidate_idx = np.array([[3, 0, 0]], dtype=np.int64)
+        source_segment = tracer.r_centers[3] - tracer.r_edges[3]
+
+    column = integrate_starward_rays_multi(
+        tracer,
+        center,
+        radial_density[None, ...],
+        candidate_idx=candidate_idx,
+    )
+
+    np.testing.assert_allclose(
+        column[0, 0], source_segment * 4.0 + 3.0 + 2.0 + 1.0
+    )
 
 
 def _star_weight_metadata_for_target(shape, target_idx, *, nside, w_star):

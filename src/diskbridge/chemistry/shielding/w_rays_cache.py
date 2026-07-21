@@ -13,8 +13,9 @@ This module provides:
 - :func:`maybe_ensure_W_rays`: high-level convenience that resolves all
   prerequisites (dust bins, kext_uv, chi_ext0, star UV luminosity) from
   ``rad`` and ``diskbridge.params``, then delegates to :func:`ensure_W_rays`.
-  Silently returns ``None`` when prerequisites are unavailable (e.g. 1-D mesh
-  or missing dustkappa files).
+  Retains an already supplied W-ray map when automatic prerequisites are
+  unavailable; otherwise returns ``None`` (e.g. on a 1-D mesh or without
+  dustkappa files).
 
 Functions
 ---------
@@ -501,10 +502,11 @@ def maybe_ensure_W_rays(
     This is the recommended entry point for chemistry models. It:
 
     1. Checks whether the mesh is effectively 1-D (W_rays is only meaningful
-       for multi-D HEALPix integration); returns ``None`` for 1-D meshes.
+       for multi-D HEALPix integration); retains a supplied map if present and
+       otherwise returns ``None`` for 1-D meshes.
     2. Resolves dust opacity mode via :func:`resolve_uv_tau_mode`. If
-       dustkappa files are unavailable, returns ``None`` (shielding will
-       fall back to isotropic averaging).
+       dustkappa files are unavailable, retains a precomputed W-ray map when
+       present; otherwise shielding falls back to isotropic averaging.
     3. Extracts ``chi_ext0`` from ``diskbridge.params.external_uv_chi``
        (0.0 if external UV is disabled).
     4. Computes stellar UV luminosity from ``diskbridge.params`` star/accretion
@@ -556,12 +558,20 @@ def maybe_ensure_W_rays(
         reference_spectrum="draine",
     )
     if mode != "dustkappa" or kext_uv is None:
-        logger.info(
-            "W_rays: dustkappa mode unavailable (mode=%s); "
-            "shielding will use isotropic averaging",
-            mode,
-        )
-        return getattr(rad, "W_rays", None)
+        existing = getattr(rad, "W_rays", None)
+        if existing is None:
+            logger.info(
+                "W_rays: dustkappa mode unavailable (mode=%s); "
+                "shielding will use isotropic averaging",
+                mode,
+            )
+        else:
+            logger.info(
+                "W_rays: dustkappa mode unavailable (mode=%s); "
+                "retaining the precomputed directional weights",
+                mode,
+            )
+        return existing
 
     # 3. Dust density fields
     try:

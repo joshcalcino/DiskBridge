@@ -7,10 +7,9 @@ projected velocity is offset from the absorbing cell by more than the line
 width. Per-direction beta values are then direction-averaged.
 
 The DDA logic mirrors
-``diskbridge.chemistry.shielding.healpix_utils`` but accumulates tau (per
-line) instead of a scalar column, omits the PDR self-cell ``HEALPIX_SELF_WEIGHT``
-convention, and starts integration at the cell center using the first DDA
-segment length to the next face.
+``diskbridge.chemistry.shielding.healpix_utils`` but accumulates tau per line
+instead of a scalar molecular column. Integration starts at the cell center
+and includes the geometric first segment to the next face once.
 """
 
 # db-keywords: shielding, healpix-columns, gow17, line-transfer, radmc3d, mesh, field, coordinates

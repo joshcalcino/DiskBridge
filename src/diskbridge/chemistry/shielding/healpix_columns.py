@@ -731,14 +731,13 @@ class SphericalHealpixRayTracer:
     nside : int
         HEALPix Nside (npix = 12 * nside^2).
     ds_fraction : float, optional
-        Step size along rays = ds_fraction * min(dr).
-        Smaller ds -> more accurate, more expensive.
+        Scale used for the stored tracer ``ds`` metadata. Production columns
+        use exact DDA segments and do not use this as an integration step.
 
     Notes
     -----
-    - Uses simple fixed step-size marching; no attempt at exact
-      cell-face intersections. Intended as a first implementation
-      that you can optimize / numba-ise later.
+    Boundary columns use exact cell-face DDA segments. ``ds_fraction`` sets
+    tracer metadata but does not set the production integration step.
     """
 
     def __init__(
@@ -832,13 +831,13 @@ class CartesianHealpixRayTracer:
     nside : int, optional
         HEALPix Nside (npix = 12 * nside^2).
     ds_fraction : float, optional
-        Step size along rays = ds_fraction * min(dx, dy, dz).
-        Smaller ds -> more accurate, more expensive.
+        Scale used for the stored tracer ``ds`` metadata. Production columns
+        use exact DDA segments and do not use this as an integration step.
 
     Notes
     -----
-    - Uses simple fixed step-size marching; no attempt at exact
-      cell-face intersections.
+    Boundary columns use exact cell-face DDA segments. ``ds_fraction`` sets
+    tracer metadata but does not set the production integration step.
     """
 
     def __init__(self, mesh, nside: int = 4, ds_fraction: float = 0.5) -> None:

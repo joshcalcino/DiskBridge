@@ -56,6 +56,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- HEALPix Cartesian, spherical, and starward DDA columns now include the
+  geometric source-center-to-face segment exactly once. Grid-normal rays
+  therefore use the same half-cell starting convention as the canonical 1-D
+  shielding reducer.
 - RADMC-3D thermal and monochromatic cache identity now includes the exact
   `external_source.inp` content hash. Segmented setup writes missing configured
   or inherited spectra, reuses exact matches, and rejects mismatches without
@@ -80,6 +84,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Added a staged generic GOW17 Cartesian slab reduction that compares inputs,
+  reaction-specific dust radiation, unshielded chemistry, frozen normal-ray
+  columns and shielding, coupled normal-ray chemistry, and the first departure
+  under uniform angular shielding.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining
