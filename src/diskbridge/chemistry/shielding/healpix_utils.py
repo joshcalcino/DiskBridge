@@ -239,30 +239,41 @@ def _weighted_b2_3d_parallel(
 
 
 @njit(cache=True)
-def _next_positive_quadratic_root(a: float, b: float, c: float) -> float:
+def _positive_quadratic_roots(
+    a: float,
+    b: float,
+    c: float,
+    minimum_t: float,
+) -> tuple[float, float]:
+    """Return the positive real roots in ascending order."""
     if a == 0.0:
         if b == 0.0:
-            return np.inf
+            return np.inf, np.inf
         t = -c / b
-        if t > 1e-12:
-            return t
-        return np.inf
+        if t > minimum_t:
+            return t, np.inf
+        return np.inf, np.inf
 
     disc = b * b - 4.0 * a * c
-    if disc <= 0.0:
-        return np.inf
+    if disc < 0.0:
+        return np.inf, np.inf
 
     sqrt_disc = np.sqrt(disc)
     t1 = (-b - sqrt_disc) / (2.0 * a)
     t2 = (-b + sqrt_disc) / (2.0 * a)
-
-    t_min = np.inf
-    if t1 > 1e-12 and t1 < t_min:
-        t_min = t1
-    if t2 > 1e-12 and t2 < t_min:
-        t_min = t2
-
-    return t_min
+    if t1 > t2:
+        temporary = t1
+        t1 = t2
+        t2 = temporary
+    if t1 <= minimum_t:
+        t1 = np.inf
+    if t2 <= minimum_t:
+        t2 = np.inf
+    if t2 < t1:
+        temporary = t1
+        t1 = t2
+        t2 = temporary
+    return t1, t2
 
 
 @njit(cache=True)
@@ -278,7 +289,10 @@ def _t_to_radius_boundary(
     a = dx * dx + dy * dy + dz * dz
     b = 2.0 * (x * dx + y * dy + z * dz)
     c = x * x + y * y + z * z - r_edge * r_edge
-    return _next_positive_quadratic_root(a, b, c)
+    radius = np.sqrt(x * x + y * y + z * z)
+    minimum_t = 1.0e-10 * max(radius, 1.0)
+    t1, _ = _positive_quadratic_roots(a, b, c, minimum_t)
+    return t1
 
 
 @njit(cache=True)
@@ -302,7 +316,25 @@ def _t_to_theta_boundary(
     B = 2.0 * (s2 * z * dz - c2 * x * dx - c2 * y * dy)
     C = s2 * z * z - c2 * x * x - c2 * y * y
 
-    return _next_positive_quadratic_root(A, B, C)
+    radius = np.sqrt(x * x + y * y + z * z)
+    minimum_t = 1.0e-10 * max(radius, 1.0)
+    t1, t2 = _positive_quadratic_roots(A, B, C, minimum_t)
+
+    # The quadratic describes both halves of a cone.  A theta boundary is
+    # only the half with the same sign of z as cos(theta_edge).
+    for t in (t1, t2):
+        if not np.isfinite(t):
+            continue
+        x_hit = x + dx * t
+        y_hit = y + dy * t
+        z_hit = z + dz * t
+        r_hit = np.sqrt(x_hit * x_hit + y_hit * y_hit + z_hit * z_hit)
+        if r_hit == 0.0:
+            continue
+        branch_tolerance = 1.0e-10 * r_hit
+        if z_hit * c >= -branch_tolerance:
+            return t
+    return np.inf
 
 
 @njit(cache=True)
@@ -322,8 +354,17 @@ def _t_to_phi_boundary(
 
     num = -(y * c - x * s)
     t = num / denom
-    if t > 1e-12:
-        return t
+    radius = np.sqrt(x * x + y * y)
+    minimum_t = 1.0e-10 * max(radius, 1.0)
+    if t > minimum_t:
+        x_hit = x + dx * t
+        y_hit = y + dy * t
+        # A constant-phi boundary is a half-plane.  Reject the opposite
+        # azimuth, which lies on the same infinite Cartesian plane.
+        radial_projection = x_hit * c + y_hit * s
+        hit_radius = np.sqrt(x_hit * x_hit + y_hit * y_hit)
+        if radial_projection >= -1.0e-10 * max(hit_radius, 1.0):
+            return t
     return np.inf
 
 
@@ -388,12 +429,7 @@ def _integrate_all_rays_spherical_dda_multi(
             if r <= rmin or r >= rmax:
                 continue
 
-            mu = z / r
-            if mu > 1.0:
-                mu = 1.0
-            elif mu < -1.0:
-                mu = -1.0
-            theta = np.arccos(mu)
+            theta = np.arctan2(np.sqrt(x * x + y * y), z)
             phi = np.arctan2(y, x)
             if phi < 0.0:
                 phi += two_pi
@@ -414,52 +450,42 @@ def _integrate_all_rays_spherical_dda_multi(
                     break
 
                 t_min = np.inf
-                hit_dim = -1
-                hit_side = -1
-
-                if ir > 0:
-                    t_r_lo = _t_to_radius_boundary(x, y, z, dx, dy, dz, r_edges[ir])
-                    if t_r_lo < t_min:
-                        t_min = t_r_lo
-                        hit_dim = 0
-                        hit_side = 0
+                t_r_lo = _t_to_radius_boundary(
+                    x, y, z, dx, dy, dz, r_edges[ir]
+                )
+                if t_r_lo < t_min:
+                    t_min = t_r_lo
                 if ir < nr:
                     t_r_hi = _t_to_radius_boundary(x, y, z, dx, dy, dz, r_edges[ir + 1])
                     if t_r_hi < t_min:
                         t_min = t_r_hi
-                        hit_dim = 0
-                        hit_side = 1
 
                 if it > 0:
                     th_lo = theta_edges[it]
                     t_th_lo = _t_to_theta_boundary(x, y, z, dx, dy, dz, th_lo)
                     if t_th_lo < t_min:
                         t_min = t_th_lo
-                        hit_dim = 1
-                        hit_side = 0
                 if it < nt - 1:
                     th_hi = theta_edges[it + 1]
                     t_th_hi = _t_to_theta_boundary(x, y, z, dx, dy, dz, th_hi)
                     if t_th_hi < t_min:
                         t_min = t_th_hi
-                        hit_dim = 1
-                        hit_side = 1
 
                 phi_lo = phi_edges[ip]
                 t_phi_lo = _t_to_phi_boundary(x, y, dx, dy, phi_lo)
                 if t_phi_lo < t_min:
                     t_min = t_phi_lo
-                    hit_dim = 2
-                    hit_side = 0
 
                 phi_hi = phi_edges[ip + 1]
                 t_phi_hi = _t_to_phi_boundary(x, y, dx, dy, phi_hi)
                 if t_phi_hi < t_min:
                     t_min = t_phi_hi
-                    hit_dim = 2
-                    hit_side = 1
 
-                if not np.isfinite(t_min) or t_min <= 0.0:
+                if (
+                    not np.isfinite(t_min)
+                    or t_min <= 0.0
+                    or t_min > 2.0 * rmax * (1.0 + 1.0e-10)
+                ):
                     break
 
                 ds = t_min
@@ -470,25 +496,27 @@ def _integrate_all_rays_spherical_dda_multi(
                 y += dy * t_min
                 z += dz * t_min
 
-                if hit_dim == 0:
-                    if hit_side == 0:
-                        ir -= 1
-                    else:
-                        ir += 1
-                elif hit_dim == 1:
-                    if hit_side == 0:
-                        it -= 1
-                    else:
-                        it += 1
-                elif hit_dim == 2:
-                    if hit_side == 0:
-                        ip -= 1
-                        if ip < 0:
-                            ip = nphi - 1
-                    else:
-                        ip += 1
-                        if ip >= nphi:
-                            ip = 0
+                # Resolve all tied crossings from a point just beyond the
+                # boundary.  Keeping the integration point at the exact hit
+                # avoids dropping the probe segment from the column.
+                probe = 1.0e-9 * max(np.sqrt(x * x + y * y + z * z), 1.0)
+                x_probe = x + dx * probe
+                y_probe = y + dy * probe
+                z_probe = z + dz * probe
+                r_probe = np.sqrt(
+                    x_probe * x_probe + y_probe * y_probe + z_probe * z_probe
+                )
+                if r_probe <= rmin or r_probe >= rmax:
+                    break
+                theta_probe = np.arctan2(
+                    np.sqrt(x_probe * x_probe + y_probe * y_probe), z_probe
+                )
+                phi_probe = np.arctan2(y_probe, x_probe)
+                if phi_probe < 0.0:
+                    phi_probe += two_pi
+                ir = np.searchsorted(r_edges, r_probe, side="right") - 1
+                it = np.searchsorted(theta_edges, theta_probe, side="right") - 1
+                ip = np.searchsorted(phi_edges, phi_probe, side="right") - 1
 
     return N_all
 

@@ -9,6 +9,8 @@ Verifies:
 - W_rays=None in shielding functions equals isotropic mean
 - the exact Cartesian +x ray reduces to the 1D outer half-cell convention
 - spherical boundary and starward rays include the geometric source segment
+- spherical oblique rays stop at the first physical radial boundary even when
+  they cross opposite-azimuth planes and theta cones
 - Cartesian and spherical ray columns are independent of Numba thread count
 """
 
@@ -278,6 +280,62 @@ def test_spherical_radial_column_includes_source_to_face_segment():
 
     expected = (tracer.r_edges[2] - tracer.r_centers[1]) * 2.0 + 3.0 + 4.0
     np.testing.assert_allclose(column[0, 0, 0], expected)
+
+
+def test_spherical_oblique_uniform_columns_match_first_radial_boundary():
+    """Angular crossings must not change a uniform sphere's path length."""
+
+    mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.arange(1.0, 6.0), "cm")),
+        theta=Axis(edges=Quantity(np.linspace(0.0, np.pi, 5), "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 9), "rad")),
+    )
+    tracer = SphericalHealpixRayTracer(mesh, nside=1)
+    source_indices = np.asarray(
+        [[3, 1, 0], [2, 2, 4], [1, 0, 6], [3, 3, 2], [1, 3, 0]],
+        dtype=np.int64,
+    )
+    centers = np.asarray(
+        [tracer.cell_center_xyz(*index) for index in source_indices],
+        dtype=np.float64,
+    )
+    directions = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.3, 0.4, np.sqrt(0.75)],
+            [-0.7, 0.2, np.sqrt(0.47)],
+            [-np.cos(np.pi / 8.0), -np.sin(np.pi / 8.0), 0.0],
+        ],
+        dtype=np.float64,
+    )
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    fields = np.ones((1, *mesh.shape), dtype=np.float64)
+
+    actual = integrate_rays_multi(tracer, centers, directions, fields)[:, :, 0]
+    expected = np.empty_like(actual)
+    for i, center in enumerate(centers):
+        radius2 = float(center @ center)
+        for j, direction in enumerate(directions):
+            projection = float(center @ direction)
+            outer = -projection + np.sqrt(
+                projection * projection + tracer.r_edges[-1] ** 2 - radius2
+            )
+            inner_discriminant = (
+                projection * projection + tracer.r_edges[0] ** 2 - radius2
+            )
+            inner = np.inf
+            if inner_discriminant >= 0.0:
+                candidate = -projection - np.sqrt(inner_discriminant)
+                if candidate > 0.0:
+                    inner = candidate
+            expected[i, j] = min(inner, outer)
+
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-9, atol=2.0e-9)
 
 
 @pytest.mark.parametrize("geometry", ["cartesian", "spherical"])

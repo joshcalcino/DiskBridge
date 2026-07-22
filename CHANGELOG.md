@@ -56,6 +56,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Spherical HEALPix traversal now rejects the opposite halves of constant-phi
+  planes and theta cones, includes the physical inner radial boundary, and
+  resolves tied/polar crossings from a stable beyond-boundary probe. Oblique
+  spherical columns no longer terminate early or accumulate non-physical path
+  lengths.
 - HEALPix Cartesian, spherical, and starward DDA columns now include the
   geometric source-center-to-face segment exactly once. Grid-normal rays
   therefore use the same half-cell starting convention as the canonical 1-D
@@ -84,10 +89,52 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Added a `256 x 8 x 16`, non-constant-density spherical UV/chemistry
+  validation with paired 16-million-photon pure-extinction and
+  isotropic-scattering RADMC-3D transports, an exact direct-field control,
+  twelve optical-depth-dependent angular closures, HEALPix maps, and absolute
+  chemistry/sensitivity profiles.
+- Extended the isotropic-scattering Cartesian slab validation with an
+  auxiliary pure-extinction RADMC-3D solve and a matched 4-million-to-16-million
+  photon convergence check. The higher budget largely removes clipped
+  direct/total ratios, but the remaining direct-shape and uniform-residual
+  errors leave shielding and maximum abundance errors large, so no production
+  weighting change is adopted.
+- Added an isotropic-scattering extension to the Cartesian RADMC-3D slab
+  validation. A wavelength-dependent discrete-ordinates reference separates
+  the current grey direct-field error from the uniform-scattering closure and
+  shows that the latter has a `0.758` p90 HEALPix-map L1 error, while its
+  fixed-temperature abundance impact is surface-localized (`0.0164 dex` p90).
+- Added a native 3D angular follow-up to the Cartesian RADMC-3D slab
+  validation. Width-one, width-two, and width-four boxes now use their full
+  cell-by-cell radiation fields and production opacity-weighted `nside=4`
+  shielding against an independent cell-averaged plane-parallel angular
+  reference. The maintained result localizes the first disagreement to the
+  angular weight builder's nearly uniform isotropic residual rather than the
+  converged median RADMC-3D UV profile.
+- Extended `validation/gow17_radmc3d_cartesian_slab` with a fixed-temperature
+  chemistry reduction that imports the native width-four RADMC-3D UV products,
+  gives the 1-D model one exact central-ray slice, proves bitwise-identical
+  unshielded chemistry and floating-point-level +x columns, and verifies the
+  coupled normal-ray abundances to a worst p90 difference of
+  `8.50e-7 dex` without prescribing the full 3-D radiation field.
+- Added `validation/gow17_radmc3d_cartesian_slab`, an absorption-only
+  Cartesian RADMC-3D benchmark against the exact cell-averaged, two-sided
+  isotropic plane-parallel solution. It measures dust-free normalization,
+  transverse side-boundary convergence, full-slab and `A_V >= 2` spectral and
+  process-specific UV-product errors, and photon-count convergence in one
+  maintained reference output without running chemistry.
 - Added a staged generic GOW17 Cartesian slab reduction that compares inputs,
   reaction-specific dust radiation, unshielded chemistry, frozen normal-ray
   columns and shielding, coupled normal-ray chemistry, and the first departure
-  under uniform angular shielding.
+  under uniform angular shielding. The five-face screened stage assigns its
+  measured grey angular field through `local_chi`, runs fixed-temperature
+  coupled chemistry, and verifies initial and final direct dust-times-molecular
+  photorates against the factored weighted reduction. Its canonical report
+  compares chi only with the matched one-sided angular grey reference and
+  omits unscreened backside illumination and unmatched native-slab chemistry.
+  Accepted runs now contain the complete canonical plot sequence from
+  `stage00.png` through `stage06.png`.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining
