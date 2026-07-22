@@ -68,6 +68,19 @@ python validation/cartesian_wedge_uv_weighting/healpix_center_map.py --overwrite
 This diagnostic uses the current density setup only. It does not run RADMC-3D
 or chemistry.
 
+Point-source angular-weight benchmark:
+
+```bash
+PYTHONPATH=src python validation/cartesian_wedge_uv_weighting/weight_benchmark.py --overwrite
+```
+
+This post-processes the retained `outputs/default` calculation; it does not
+launch RADMC-3D or rerun chemistry. That calculation used 200 million
+monochromatic photons, one point star, no external UV field, and no scattering.
+It is therefore an objective direct-source benchmark: the incident angular UV
+weight should be concentrated in the HEALPix pixel containing the direction to
+the star. The scalar RADMC-3D UV magnitude remains the normalization.
+
 ## Outputs
 
 The full validation writes:
@@ -83,6 +96,13 @@ The full validation writes:
 - `outputs/healpix_center_map/healpix_sphere-center_cell_nH_column_nsides.png`
 - `outputs/healpix_center_map/healpix_sphere-center_cell_nH_column_summary.json`
 - `outputs/healpix_center_map/healpix_sphere-center_cell_columns.npz`
+- `outputs/weight_benchmark/summary.json`
+- `outputs/weight_benchmark/report.md`
+- `outputs/weight_benchmark/weight_benchmark_arrays.npz`
+- `outputs/weight_benchmark/plots/selected_cells_geometry.png`
+- `outputs/weight_benchmark/plots/healpix_weight_components.png`
+- `outputs/weight_benchmark/plots/healpix_molecular_shielding.png`
+- `outputs/weight_benchmark/plots/scalar_weight_benchmark.png`
 
 The density preview writes the same density and cone plots under
 `outputs/density_preview/`.
@@ -95,8 +115,34 @@ ratio maps. The central slice should show the circle and downward-opening
 cavity, and the 3-D view should show a true cone with its apex at the cloud
 center.
 
+For the angular benchmark, start with `selected_cells_geometry.png` and
+`scalar_weight_benchmark.png`, then inspect the HEALPix maps. The cyan star in
+each map marks the true source direction. In `healpix_weight_components.png`,
+the direct-star and final angular maps give the percentage of the total local
+UV assigned to each HEALPix pixel. Both use the same logarithmic color scale,
+labelled in percentages, from `0.001%` to `100%`; values below the display floor
+are not changed in the saved arrays. The stacked bar at right remains linear
+and gives the integrated split between the star and the residual; the residual
+is then distributed uniformly over all 192 pixels. The molecular map shows the
+directional H2 and CO columns, their shielding factors, and each ray's
+contribution to the weighted CO photodissociation rate.
+
+The retained result locates the source in the correct maximum-weight pixel,
+but the current scalar closure does not recover a pure point-source angular
+field at the dense cavity wall. At the selected illuminated-wall cell it
+assigns about 27% of the weight to the source and distributes about 73%
+isotropically. This is a failure of the direct-source angular benchmark, not
+evidence for physical diffuse UV, because scattering and external illumination
+are disabled.
+
 ## Known Limitations
 
 The central plot is a 2-D diagnostic slice of a 3-D Cartesian density field.
 The `z` extent and resolution affect the true cone, the spherical cloud volume,
 and the eventual HEALPix columns.
+
+The point-source benchmark tests direct stellar attribution only. It cannot
+determine the correct angular closure when scattering, diffuse emission,
+multiple sources, or an external radiation field are present. Normalized
+weights in cells where the retained scalar UV field is effectively zero are
+also Monte Carlo-noise diagnostics rather than meaningful source fractions.

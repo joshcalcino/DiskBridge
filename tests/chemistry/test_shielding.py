@@ -880,6 +880,78 @@ def test_chunked_weights_match_single_chunk():
     assert "tau_ext_rays" not in debug_chunked
 
 
+def test_selected_weight_cells_match_all_cell_build():
+    """A candidate mask must select unchanged rows in argwhere order."""
+    ncells = 3
+    mesh = _make_uniform_cartesian_mesh(ncells=ncells)
+    shape = (ncells, ncells, ncells)
+    rng = np.random.default_rng(8732)
+    chi_radmc = 1.0 + rng.random(shape)
+    dust_rho_bins = [
+        np.full(shape, 2.0e-23, dtype=np.float64),
+        np.full(shape, 7.0e-24, dtype=np.float64),
+    ]
+    kext_uv = np.array([120.0, 280.0], dtype=np.float64)
+
+    W_all, idx_all, dirs_all, centers_all, _ = compute_uv_direction_weights_healpix(
+        mesh,
+        chi_radmc=chi_radmc,
+        nside=1,
+        dust_rho_bins=dust_rho_bins,
+        kext_uv=kext_uv,
+        chi_ext0=0.8,
+        star_uv_luminosity_erg_s=0.0,
+        chunk_size=5,
+    )
+    selected_cells = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.int64)
+    candidate_mask = np.zeros(shape, dtype=bool)
+    candidate_mask[tuple(selected_cells.T)] = True
+    W_selected, idx_selected, dirs_selected, centers_selected, _ = (
+        compute_uv_direction_weights_healpix(
+            mesh,
+            chi_radmc=chi_radmc,
+            nside=1,
+            candidate_mask=candidate_mask,
+            dust_rho_bins=dust_rho_bins,
+            kext_uv=kext_uv,
+            chi_ext0=0.8,
+            star_uv_luminosity_erg_s=0.0,
+            chunk_size=1,
+        )
+    )
+
+    expected_rows = np.array(
+        [np.flatnonzero(np.all(idx_all == cell, axis=1))[0] for cell in selected_cells]
+    )
+    np.testing.assert_array_equal(idx_selected, selected_cells)
+    np.testing.assert_allclose(dirs_selected, dirs_all, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(W_selected, W_all[expected_rows], rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(
+        centers_selected,
+        centers_all[expected_rows],
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(W_selected.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-12)
+
+
+def test_weight_candidate_mask_must_match_radiation_shape():
+    """A diagnostic candidate mask must use the active radiation grid."""
+    mesh = _make_uniform_cartesian_mesh(ncells=2)
+    shape = (2, 2, 2)
+    with pytest.raises(ValueError, match="candidate_mask must match chi_radmc shape"):
+        compute_uv_direction_weights_healpix(
+            mesh,
+            chi_radmc=np.ones(shape, dtype=np.float64),
+            nside=1,
+            candidate_mask=np.ones((2, 2), dtype=bool),
+            dust_rho_bins=[np.ones(shape, dtype=np.float64)],
+            kext_uv=np.array([100.0]),
+            chi_ext0=1.0,
+            star_uv_luminosity_erg_s=0.0,
+        )
+
+
 def test_weights_require_dust_rho_bins():
     """Missing dust_rho_bins should raise ValueError."""
     mesh = _make_uniform_cartesian_mesh(ncells=2)

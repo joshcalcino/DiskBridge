@@ -347,6 +347,7 @@ def compute_uv_direction_weights_healpix(
     *,
     chi_radmc: np.ndarray,
     nside: int,
+    candidate_mask: np.ndarray | None = None,
     dust_rho_bins: list[np.ndarray],
     kext_uv: np.ndarray,
     chi_ext0: float,
@@ -378,6 +379,10 @@ def compute_uv_direction_weights_healpix(
         Full scalar chi from RADMC mean intensity (Draine units), 3-D grid.
     nside : int
         HEALPix Nside (npix = 12 * nside**2).
+    candidate_mask : ndarray of bool or None, optional
+        Mesh-shaped mask selecting cells for which weights are built. If
+        omitted, weights are built for every cell. Selected rows follow
+        ``np.argwhere(candidate_mask)`` ordering.
     dust_rho_bins : list of ndarray
         Per-bin dust mass density arrays (g/cm^3), each matching mesh shape.
     kext_uv : ndarray, shape (nbin,)
@@ -448,13 +453,21 @@ def compute_uv_direction_weights_healpix(
     chi_arr = _as_f64("chi_radmc", chi_radmc)
     nbin = len(dust_rho_bins)
 
-    candidate_mask = np.ones(chi_arr.shape, dtype=bool)
+    if candidate_mask is None:
+        candidate_mask_arr = np.ones(chi_arr.shape, dtype=bool)
+    else:
+        candidate_mask_arr = np.asarray(candidate_mask, dtype=bool)
+        if candidate_mask_arr.shape != chi_arr.shape:
+            raise ValueError(
+                "candidate_mask must match chi_radmc shape; "
+                f"got {candidate_mask_arr.shape} and {chi_arr.shape}"
+            )
 
     # -- 1. Prepare HEALPix geometry -----------------------------------------
     tracer, dirs, candidate_idx, cell_centers = _prepare_healpix_geometry(
         mesh,
         nside=int(nside),
-        candidate_mask=candidate_mask,
+        candidate_mask=candidate_mask_arr,
         cache_dir=cache_dir,
     )
 

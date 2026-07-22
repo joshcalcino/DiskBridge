@@ -55,7 +55,7 @@ Full Gong, Ostriker & Wolfire (2017) reduced reaction network. Wraps the C/CVODE
 | Function | Purpose | Used by |
 | --- | --- | --- |
 | [`run_gow17`](../src/diskbridge/chemistry/models/gow17.py#L363) | Registry entry point. Sets up arrays, runs the shielding/chemistry coupling loop, returns `ChemistryResult`. | Registry — looked up only by [registry.py:13](../src/diskbridge/chemistry/registry.py#L13). |
-| [`_cv_cold`](../src/diskbridge/chemistry/models/gow17.py#L80) | Cold-gas heat capacity per H nucleus (erg/K/H). | Internal **and** [`gow17_timestep.py:44`](../src/diskbridge/chemistry/models/gow17_timestep.py#L44) **and** [`validation/reproduce_gow17_fig2_3dhealpix.py:26`](../validation/reproduce_gow17_fig2_3dhealpix.py). |
+| [`_cv_cold`](../src/diskbridge/chemistry/models/gow17.py#L80) | Cold-gas heat capacity per H nucleus (erg/K/H). | Internal **and** [`gow17_timestep.py:44`](../src/diskbridge/chemistry/models/gow17_timestep.py#L44). |
 | [`_electron_abundance`](../src/diskbridge/chemistry/models/gow17.py#L85) | Sums all ion abundances → `xe`. | Internal **and** [`gow17_timestep.py:45`](../src/diskbridge/chemistry/models/gow17_timestep.py#L45). |
 | [`_apply_astrochem_aitken_acceleration`](../src/diskbridge/chemistry/models/gow17.py#L100) | Guarded scalar Aitken acceleration on `H₂`, `CO`, and (if enabled) `CO_ice`. | **Internal** (called only inside `run_gow17`'s `astrochem` branch). |
 | [`_compute_shielding_and_gph`](../src/diskbridge/chemistry/models/gow17.py#L181) | From the current abundance state, computes `θ_H₂`, `θ_CO`, `θ_C` and assembles per-cell radiation field arrays `Gph`, `GPE`, `GISRF`. Dispatches between 1-D, HEALPix, and slab paths. | Internal **and** [`gow17_timestep.py:49`](../src/diskbridge/chemistry/models/gow17_timestep.py#L49). |
@@ -85,8 +85,7 @@ The vast majority of model-internal helpers are exactly that — internal. The c
 
 1. **`pinte_switches.compute_freezeout_factor`** is reused by `abundance_switches.compute_abundance_layered_column`.
 2. **`gow17` low-level helpers** (`_cv_cold`, `_electron_abundance`, `_compute_shielding_and_gph`, `_as_cgs_f64`, `_broadcast_scalar_or_array`, `_maybe_quantity_to_float`) are re-imported by `gow17_timestep.py` so the two modules share state-vector conventions.
-3. **`gow17._cv_cold`** is also imported by [`validation/reproduce_gow17_fig2_3dhealpix.py`](../validation/reproduce_gow17_fig2_3dhealpix.py).
-4. **`Gow17TimeStepper`** has no `src/` callers; only [`validation/gow17_infall_stream_1d/driver.py`](../validation/gow17_infall_stream_1d/driver.py) uses it.
+3. **`Gow17TimeStepper`** has no `src/` callers; only [`validation/gow17_infall_stream_1d/driver.py`](../validation/gow17_infall_stream_1d/driver.py) uses it.
 
 ## Broken-on-purpose after the carbon_reduced removal
 

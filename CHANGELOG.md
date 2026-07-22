@@ -8,6 +8,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- Stable HEALPix shielding validation report under
+  `docs/testing/spherical_healpix_shielding.md`, covering the exact Cartesian
+  reduction, boundary-screen test, absorption and scattering RADMC-3D
+  controls, wavelength and photon convergence, closure sensitivity, spherical
+  traversal invariants, and the resolved non-uniform sphere.
 - Segmented RADMC-3D diagnostics now include native per-segment plots and a
   `segments_summary.json` manifest whenever segmented RT diagnostics are
   enabled.
@@ -78,6 +83,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Retired the exploratory GOW17 Cartesian slab, RADMC-3D scattering-closure,
+  3D-PDR/beta, and resolved-sphere validation runners and their raw outputs
+  after consolidating their conclusions in the stable shielding testing
+  report. None of the empirical angular closures is a supported production
+  implementation.
 - Removed the unused shielding UV-boundary module and obsolete flat-profile
   `find_r_split` helpers; calibrated noise-aware boundary selection is the sole
   segmented-UV split implementation.
@@ -89,52 +99,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
-- Added a `256 x 8 x 16`, non-constant-density spherical UV/chemistry
-  validation with paired 16-million-photon pure-extinction and
-  isotropic-scattering RADMC-3D transports, an exact direct-field control,
-  twelve optical-depth-dependent angular closures, HEALPix maps, and absolute
-  chemistry/sensitivity profiles.
-- Extended the isotropic-scattering Cartesian slab validation with an
-  auxiliary pure-extinction RADMC-3D solve and a matched 4-million-to-16-million
-  photon convergence check. The higher budget largely removes clipped
-  direct/total ratios, but the remaining direct-shape and uniform-residual
-  errors leave shielding and maximum abundance errors large, so no production
-  weighting change is adopted.
-- Added an isotropic-scattering extension to the Cartesian RADMC-3D slab
-  validation. A wavelength-dependent discrete-ordinates reference separates
-  the current grey direct-field error from the uniform-scattering closure and
-  shows that the latter has a `0.758` p90 HEALPix-map L1 error, while its
-  fixed-temperature abundance impact is surface-localized (`0.0164 dex` p90).
-- Added a native 3D angular follow-up to the Cartesian RADMC-3D slab
-  validation. Width-one, width-two, and width-four boxes now use their full
-  cell-by-cell radiation fields and production opacity-weighted `nside=4`
-  shielding against an independent cell-averaged plane-parallel angular
-  reference. The maintained result localizes the first disagreement to the
-  angular weight builder's nearly uniform isotropic residual rather than the
-  converged median RADMC-3D UV profile.
-- Extended `validation/gow17_radmc3d_cartesian_slab` with a fixed-temperature
-  chemistry reduction that imports the native width-four RADMC-3D UV products,
-  gives the 1-D model one exact central-ray slice, proves bitwise-identical
-  unshielded chemistry and floating-point-level +x columns, and verifies the
-  coupled normal-ray abundances to a worst p90 difference of
-  `8.50e-7 dex` without prescribing the full 3-D radiation field.
-- Added `validation/gow17_radmc3d_cartesian_slab`, an absorption-only
-  Cartesian RADMC-3D benchmark against the exact cell-averaged, two-sided
-  isotropic plane-parallel solution. It measures dust-free normalization,
-  transverse side-boundary convergence, full-slab and `A_V >= 2` spectral and
-  process-specific UV-product errors, and photon-count convergence in one
-  maintained reference output without running chemistry.
-- Added a staged generic GOW17 Cartesian slab reduction that compares inputs,
-  reaction-specific dust radiation, unshielded chemistry, frozen normal-ray
-  columns and shielding, coupled normal-ray chemistry, and the first departure
-  under uniform angular shielding. The five-face screened stage assigns its
-  measured grey angular field through `local_chi`, runs fixed-temperature
-  coupled chemistry, and verifies initial and final direct dust-times-molecular
-  photorates against the factored weighted reduction. Its canonical report
-  compares chi only with the matched one-sided angular grey reference and
-  omits unscreened backside illumination and unmatched native-slab chemistry.
-  Accepted runs now contain the complete canonical plot sequence from
-  `stage00.png` through `stage06.png`.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining
@@ -152,6 +116,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   UV validation comparing no shielding, uniform HEALPix shielding, and
   weighted HEALPix shielding chemistry from one shared RADMC-3D transport run
   with an explicit `2 R_sun`, `10000 K` blackbody source.
+- Added a selected-cell point-source benchmark to
+  `validation/cartesian_wedge_uv_weighting`. HEALPix figures now expose the
+  production direct-star and final weights as per-pixel UV percentages on one
+  logarithmic color scale, the linear integrated star/residual split,
+  molecular columns, shielding factors, and weighted contributions without
+  rerunning the retained RADMC-3D calculation.
 - Updated the cube validation workflow for current GOW17/RADMC-3D UV products, mctherm-derived dust temperatures, explicit shielding-off comparisons, and current GOW17 diagnostic plots.
 - Adjusted the high-resolution cube validation density setup to use a 100x lower base density with a localized 100x boost of the densest clumps.
 - Added a cube validation `--prepare-only` mode that writes RADMC-3D inputs and setup summaries without launching transport or GOW17 chemistry.

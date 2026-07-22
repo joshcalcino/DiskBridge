@@ -2,11 +2,11 @@
   "G0": 2.0,
   "NH_min_cm2": 1e+17,
   "NH_total_cm2": 1e+22,
-  "format": "%.17e",
+  "format": "original other_codes/pdr text output",
   "nH_cm3": 100.0,
   "ngrid": 2000,
-  "note": "Old 14-column GOW17 order; CO_ice is disabled and omitted.",
-  "source": "diskbridge._gow17 built from external/pdr",
+  "note": "Copied without numerical rewriting from other_codes/pdr/out_example_simple; old 14-column GOW17 order; CO_ice is absent.",
+  "source": "other_codes/pdr/run/example_simple.cpp",
   "tmax_s": 6.32e+16,
   "tmin_s": 3160000000000.0
 }

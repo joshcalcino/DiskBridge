@@ -54,7 +54,6 @@ validation/cube_test/*.png
 validation/cube_test/inputs.json
 validation/cube_test/summary.json
 validation/cube_test/rho0_*/
-validation/reproduce_gow17_fig2_3dhealpix/
 validation/prodimo_diana/
 validation/rac2d_disk/
 validation/prizmo_disk/params.txt
