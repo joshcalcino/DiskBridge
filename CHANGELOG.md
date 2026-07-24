@@ -78,6 +78,15 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Soft Joos disc weights no longer snap high scores to exactly one. Their
+  complementary ISM fractions therefore remain smooth and positive, removing
+  artificial sharp changes in settled-disc/ISM dust-density ratio maps.
+- Joos disc-axis measurement now always has finite radial support: an explicit
+  `r_max_for_axis` takes precedence, otherwise the mask `r_max` is reused, and
+  calls supplying neither are rejected. Empty or degenerate axis selections
+  also raise instead of silently broadening the density population or choosing
+  positive z. The Bondi All-Stars workflow explicitly uses each snapshot's
+  adopted disc radius for both axis measurement and masking.
 - The high-level GOW17 equilibrium slab now translates physical incident
   Draine units to the native solver according to radiation geometry: beamed
   slabs retain `G0 = 2 chi`, while one-sided isotropic slabs use `G0 = chi`.
@@ -135,13 +144,20 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- A full-native 23,415,480-cell Bondi hydro/mask A/B reduced the contaminated
+  `m10_8_dm_f250_c10` Joos tilt from 27.178 degrees with 50,000-au support to
+  0.079 degrees with 387.1-au support and removed its pinwheel-like mask. The
+  nearly aligned `m20_8_dmid_f120_c10` control changed from 2.678 to 0.013
+  degrees and retained a 0.9815 mask Jaccard overlap.
 - Added a gas-phase GOW17 Figure 23 reproduction using the paper's one-sided
   60-degree isotropic approximation, unit incident field, 1000-zone grid, and
-  original numerical controls at `nH = 100` and `1000 cm^-3`. It disables CO
-  phase chemistry, overlays current DiskBridge profiles on vector curves
-  extracted from the published figure. Both this workflow and the CO
-  freeze-out comparison now keep figures, numerical outputs, extracted paper
-  curves, and reports in dedicated artifact folders with complete provenance.
+  strict `reltol = 1e-4` convergence control at `nH = 100` and
+  `1000 cm^-3`. It disables CO phase chemistry, overlays current DiskBridge
+  profiles on vector curves extracted from the published figure, and records
+  the numerical criterion in its report. The paired CO-only phase comparison
+  uses the same strict control; both workflows retain their figures, numerical
+  outputs, extracted paper curves, and reports in dedicated artifact folders
+  with complete provenance.
 - Added a deterministic complete directional UV-weight benchmark that records
   scientific samples, row closure, wall time, CPU occupancy, sampled RSS
   history, and known-array memory estimates for baseline/optimized comparison.

@@ -472,6 +472,7 @@ def _plot_field_maps(
     outputs = [
         plots_dir / f"rz_{safe}.png",
         plots_dir / f"xy_{safe}.png",
+        plots_dir / f"xy_{safe}_inner_1000au.png",
     ]
     plot_phi_avg_rz_slice(
         model,
@@ -491,7 +492,21 @@ def _plot_field_maps(
         field_name,
         outputs[1],
         log10=log10,
+        log10_dyn_range_dex=log10_dyn_range_dex,
         cmap=cmap,
+        symlog_linthresh=(
+            float(model.mesh.edges("r").to("au").magnitude[-1]) * 0.002
+        ),
+    )
+    plot_midplane_xy_map(
+        model,
+        field_name,
+        outputs[2],
+        log10=log10,
+        log10_dyn_range_dex=log10_dyn_range_dex,
+        cmap=cmap,
+        xlim=(-1000.0, 1000.0),
+        ylim=(-1000.0, 1000.0),
     )
     return outputs
 

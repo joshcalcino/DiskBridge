@@ -31,6 +31,7 @@ from diskbridge.model.field import Field
 import matplotlib.pyplot as plt
 
 from diskbridge.model.utils import field_data_as_order
+from diskbridge.visualization.scales import log10_display_limits, log10_display_values
 
 from diskbridge.model.profiles import (
     compute_cell_volumes as _compute_cell_volumes,
@@ -426,8 +427,7 @@ def plot_phi_avg_rz_slice(
     vmin_plot = None
     vmax_plot = None
     if log10:
-        tiny = np.finfo(np.float64).tiny
-        z_plot = np.log10(np.maximum(data_phi_avg, tiny))
+        z_plot = log10_display_values(data_phi_avg)
         if vmax is not None:
             vmax_plot = vmax
         else:
@@ -589,12 +589,44 @@ def plot_midplane_xy_map(
     output: Union[str, "Path"] = "midplane_xy_map.png",
     *,
     log10: bool = True,
+    log10_dyn_range_dex: Optional[float] = 8.0,
     cmap: str = "viridis",
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
+    symlog_linthresh: Optional[float] = None,
 ):
+    """Plot a field in the spherical-grid midplane.
+
+    Parameters
+    ----------
+    model : Model
+        Model containing the spherical mesh and field.
+    field : str or Field
+        Registered field name or field object to plot.
+    output : str or pathlib.Path, optional
+        Output image path.
+    log10 : bool, optional
+        Whether to display base-10 logarithmic field values.
+    log10_dyn_range_dex : float, optional
+        Maximum color dynamic range for logarithmic fields. Set to ``None``
+        only when explicit ``vmin`` and ``vmax`` are supplied.
+    cmap : str, optional
+        Matplotlib colormap name.
+    vmin, vmax : float, optional
+        Explicit color limits in displayed units.
+    xlim, ylim : tuple of float, optional
+        Spatial limits in au.
+    symlog_linthresh : float, optional
+        If supplied, use symmetric-log x/y axes with this central linear
+        half-width in au.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Closed figure containing the generated map.
+    """
     mesh = model.mesh
     r_edges = mesh.edges("r").to("au").magnitude
     phi_edges = mesh.edges("phi").magnitude
@@ -617,8 +649,29 @@ def plot_midplane_xy_map(
     x = rr * np.cos(pp)
     y = rr * np.sin(pp)
 
-    tiny = np.finfo(np.float64).tiny
-    c_plot = np.log10(np.maximum(slice_mid, tiny)) if log10 else slice_mid
+    if log10:
+        c_plot = log10_display_values(slice_mid)
+        if vmin is None or vmax is None:
+            color_values = slice_mid
+            if xlim is not None or ylim is not None:
+                full_extent = (-r_edges[-1], r_edges[-1])
+                x_extent = max(abs(value) for value in (xlim or full_extent))
+                y_extent = max(abs(value) for value in (ylim or full_extent))
+                radial_limit = float(np.hypot(x_extent, y_extent))
+                r_centers = mesh.centers("r").to("au").magnitude
+                radial_mask = r_centers <= radial_limit
+                if np.any(radial_mask):
+                    color_values = slice_mid[radial_mask, :]
+            max_decades = 8.0 if log10_dyn_range_dex is None else log10_dyn_range_dex
+            auto_vmin, auto_vmax = log10_display_limits(
+                color_values,
+                upper_percentile=99.5,
+                max_decades=max_decades,
+            )
+            vmin = auto_vmin if vmin is None else vmin
+            vmax = auto_vmax if vmax is None else vmax
+    else:
+        c_plot = slice_mid
 
     fig, ax = plt.subplots(figsize=(6, 6))
     pc = ax.pcolormesh(x, y, c_plot, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
@@ -630,6 +683,19 @@ def plot_midplane_xy_map(
         ax.set_xlim(float(xlim[0]), float(xlim[1]))
     if ylim is not None:
         ax.set_ylim(float(ylim[0]), float(ylim[1]))
+    if symlog_linthresh is not None:
+        linthresh = float(symlog_linthresh)
+        if not np.isfinite(linthresh) or linthresh <= 0.0:
+            raise ValueError("symlog_linthresh must be finite and > 0")
+        ax.set_xscale("symlog", linthresh=linthresh)
+        ax.set_yscale("symlog", linthresh=linthresh)
+        max_abs = float(np.nanmax(np.abs(r_edges)))
+        min_power = int(np.ceil(np.log10(linthresh)))
+        max_power = int(np.floor(np.log10(max_abs)))
+        positive_ticks = 10.0 ** np.arange(min_power, max_power + 1)
+        ticks = np.concatenate((-positive_ticks[::-1], [0.0], positive_ticks))
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
     fig.colorbar(pc, ax=ax)
     fig.tight_layout()
     fig.savefig(str(output), dpi=200)

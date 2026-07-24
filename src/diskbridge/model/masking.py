@@ -59,12 +59,16 @@ def _compute_disk_orientation(
     vphi: Quantity,
     vtheta: Quantity,
     rho_core_min: Quantity,
-    rho_disk_min: Quantity,
-    r_max_for_axis: Optional[Quantity],
+    r_max_for_axis: Quantity,
 ) -> np.ndarray:
-    core_mask = rho >= rho_core_min
-    if r_max_for_axis is not None:
-        core_mask &= (r_grid <= r_max_for_axis)
+    axis_limit = np.asarray(
+        r_max_for_axis.to(r_grid.units).magnitude,
+        dtype=float,
+    )
+    if axis_limit.ndim != 0 or not np.isfinite(axis_limit) or axis_limit <= 0.0:
+        raise ValueError("r_max_for_axis must be a finite positive scalar length")
+
+    core_mask = (rho >= rho_core_min) & (r_grid <= r_max_for_axis)
 
     x, y, z = cartesian_from_spherical(r_grid, phi_grid, theta_grid)
     # Reuse the mesh-owned spherical basis conversion so disk masking and
@@ -77,8 +81,10 @@ def _compute_disk_orientation(
 
     w = (rho * dV) * core_mask
     if not np.any(core_mask):
-        core_mask = rho >= rho_disk_min
-        w = (rho * dV) * core_mask
+        raise ValueError(
+            "No cells satisfy the disk-axis density and radial support; "
+            "adjust rho_core_min or r_max_for_axis explicitly"
+        )
 
     Lx = np.sum(w * (y * vz - z * vy))
     Ly = np.sum(w * (z * vx - x * vz))
@@ -86,14 +92,15 @@ def _compute_disk_orientation(
     Lnorm = np.sqrt(Lx * Lx + Ly * Ly + Lz * Lz)
     Lnorm_mag = float(Lnorm.magnitude)
     if Lnorm_mag == 0.0 or not np.isfinite(Lnorm_mag):
-        k_hat = np.array([0.0, 0.0, 1.0], dtype=float)
-    else:
-        k_hat = np.array([
-            (Lx / Lnorm).to("dimensionless").magnitude,
-            (Ly / Lnorm).to("dimensionless").magnitude,
-            (Lz / Lnorm).to("dimensionless").magnitude
-        ])
-    return k_hat
+        raise ValueError(
+            "Disk-axis angular momentum is zero or non-finite within the "
+            "requested density and radial support"
+        )
+    return np.array([
+        (Lx / Lnorm).to("dimensionless").magnitude,
+        (Ly / Lnorm).to("dimensionless").magnitude,
+        (Lz / Lnorm).to("dimensionless").magnitude,
+    ])
 
 
 def _transform_to_disk_frame(
@@ -443,9 +450,9 @@ def _soft_cut_from_ratio(q: np.ndarray, delta: float, floor: float) -> np.ndarra
     score = _sigmoid(x)
     if floor > 0.0:
         score = np.where(score <= floor, 0.0, score)
-        score = np.where(score >= 1.0 - floor, 1.0, score)
     score[~np.isfinite(score)] = 0.0
-    return np.clip(score, 0.0, 1.0)
+    upper_open = np.nextafter(1.0, 0.0)
+    return np.clip(score, 0.0, upper_open)
 
 
 def _soft_delta_value(
@@ -652,10 +659,13 @@ def set_mask_from_joos_disk(
             logarithmically from this value at the inner radius to fthres at r_max.
         rho_core_min: Density used to define the core region when estimating the disk axis.
             If None, defaults to 10 * rho_disk_min.
-        r_max_for_axis: If provided, restricts the axis-estimation core region to r <= this.
+        r_max_for_axis: Maximum radius of the axis-estimation core region. If
+            omitted, ``r_max`` is used. At least one of these radial limits is
+            required so the measured axis cannot silently use the full mesh.
         n_r_bins: Optional downsampling of radial bins (cannot refine beyond native).
         n_theta_bins: Number of theta_from_midplane bins used for ring averages.
-        r_max: Optional maximum radius included in the final boolean mask.
+        r_max: Optional maximum radius included in the final boolean mask and,
+            unless ``r_max_for_axis`` is supplied, in the axis estimate.
         weight_mode: "none" skips disk_weight, "cell" registers the binary cell-wise
             disk mask, "soft" registers the local soft Joos score, and
             "soft_connected" registers the soft score with weakest-link midplane
@@ -670,8 +680,9 @@ def set_mask_from_joos_disk(
         SubModel representing the disk region. The returned SubModel.mask is boolean.
 
     Raises:
-        ValueError: If mesh is not spherical, binning yields no valid cells, or weight
-            parameters are invalid.
+        ValueError: If mesh is not spherical, axis support is missing or
+            degenerate, binning yields no valid cells, or weight parameters are
+            invalid.
         KeyError: If required gas fields are missing.
     """
     mesh = model.mesh
@@ -713,9 +724,15 @@ def set_mask_from_joos_disk(
     if rho_core_min is None:
         rho_core_min = 10.0 * rho_disk_min
 
+    axis_r_max = r_max if r_max_for_axis is None else r_max_for_axis
+    if axis_r_max is None:
+        raise ValueError(
+            "Joos disk-axis estimation requires r_max_for_axis or r_max"
+        )
+
     k_hat = _compute_disk_orientation(
         model, rho, dV, r_grid, theta_grid, phi_grid,
-        vr, vphi, vtheta, rho_core_min, rho_disk_min, r_max_for_axis
+        vr, vphi, vtheta, rho_core_min, axis_r_max
     )
 
     disk_frame = _transform_to_disk_frame(
