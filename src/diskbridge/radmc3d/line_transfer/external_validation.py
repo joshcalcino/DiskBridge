@@ -114,28 +114,31 @@ def validate_external_population_run(
         inp / f"molecule_{species}.inp",
         f"Missing molecule_{species}.inp",
     )
-    manifest = inp / f"external_levelpop_manifest_{species}.json"
-    manifest_path = None
-    if manifest.exists():
-        manifest_path = manifest
-        manifest_payload = json.loads(manifest.read_text())
-        if manifest_payload.get("species") != species:
-            raise ValueError(
-                f"{manifest.name} species {manifest_payload.get('species')!r} does not "
-                f"match expected {species!r}"
-            )
-        manifest_allows_unconverged = bool(manifest_payload.get("allow_unconverged", False))
-        if (
-            not bool(manifest_payload.get("converged", False))
-            and not bool(allow_unconverged)
-            and not manifest_allows_unconverged
-        ):
-            raise ValueError(f"{manifest.name} does not describe a converged solve")
-        expected_sha = manifest_payload.get("molecule_sha256")
-        if expected_sha and sha256_file(molecule) != expected_sha:
-            raise ValueError(
-                f"{molecule.name} does not match the molecule file used to solve populations"
-            )
+    manifest = _check_required(
+        inp / f"external_levelpop_manifest_{species}.json",
+        f"Missing external_levelpop_manifest_{species}.json",
+    )
+    manifest_path = manifest
+    manifest_payload = json.loads(manifest.read_text())
+    if manifest_payload.get("species") != species:
+        raise ValueError(
+            f"{manifest.name} species {manifest_payload.get('species')!r} does not "
+            f"match expected {species!r}"
+        )
+    manifest_allows_unconverged = bool(manifest_payload.get("allow_unconverged", False))
+    if (
+        not bool(manifest_payload.get("converged", False))
+        and not bool(allow_unconverged)
+        and not manifest_allows_unconverged
+    ):
+        raise ValueError(f"{manifest.name} does not describe a converged solve")
+    expected_sha = manifest_payload.get("molecule_sha256")
+    if not expected_sha:
+        raise ValueError(f"{manifest.name} does not record molecule_sha256")
+    if sha256_file(molecule) != expected_sha:
+        raise ValueError(
+            f"{molecule.name} does not match the molecule file used to solve populations"
+        )
     levelpop = _check_required(
         inp / f"levelpop_{species}.dat",
         f"Missing levelpop_{species}.dat",
@@ -170,13 +173,12 @@ def validate_external_population_run(
         nonnegative=True,
     )
     check_radmc_binp_file(gas_vel, expected_ncells=ncells, components=3)
-    if manifest_path is not None:
-        expected_gas_velocity_sha = manifest_payload.get("gas_velocity_sha256")
-        if expected_gas_velocity_sha and sha256_file(gas_vel) != expected_gas_velocity_sha:
-            raise ValueError(
-                "gas_velocity.binp does not match the velocity field used by the "
-                "external population solver"
-            )
+    expected_gas_velocity_sha = manifest_payload.get("gas_velocity_sha256")
+    if expected_gas_velocity_sha and sha256_file(gas_vel) != expected_gas_velocity_sha:
+        raise ValueError(
+            "gas_velocity.binp does not match the velocity field used by the "
+            "external population solver"
+        )
 
     n_cells_lp, n_levels_lp, levels, populations = _read_levelpop_dat(levelpop)
     if ncells is not None and n_cells_lp != ncells:

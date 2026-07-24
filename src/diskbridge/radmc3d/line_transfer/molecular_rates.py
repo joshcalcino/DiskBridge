@@ -314,43 +314,9 @@ def _lte_populations_flat(
     return out
 
 
-def assert_temperature_in_collision_range(
-    molecule: MoleculeData,
-    Tgas: np.ndarray,
-    cell_mask: np.ndarray,
-) -> None:
-    """Strict temperature-bound policy.
-
-    Raises if any selected cell's temperature lies outside the tabulated
-    temperature range of any required collider.
-    """
-    T = np.asarray(Tgas, dtype=np.float64)
-    mask = np.asarray(cell_mask, dtype=bool)
-    if T.shape != mask.shape:
-        raise ValueError(
-            f"Tgas shape {T.shape} does not match cell_mask shape {mask.shape}"
-        )
-    if not np.any(mask):
-        return
-    T_cand = T[mask]
-    for name, tgrid in zip(molecule.collider_names, molecule.collider_tgrid_K):
-        lo, hi = float(tgrid[0]), float(tgrid[-1])
-        below = int(np.count_nonzero(T_cand < lo))
-        above = int(np.count_nonzero(T_cand > hi))
-        if below or above:
-            raise ValueError(
-                f"Temperature out of collision-rate range for collider {name!r} "
-                f"({lo:.3f} K - {hi:.3f} K): "
-                f"{below} selected cells below, {above} cells above; "
-                f"T range in selected cells is "
-                f"[{float(T_cand.min()):.3f}, {float(T_cand.max()):.3f}] K."
-            )
-
-
 __all__ = [
     "MoleculeData",
     "parse_lamda_molecule_file",
     "stack_collider_tables",
     "lte_populations",
-    "assert_temperature_in_collision_range",
 ]

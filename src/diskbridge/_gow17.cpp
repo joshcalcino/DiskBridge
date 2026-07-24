@@ -63,6 +63,7 @@ static py::dict solve_slab_1d_equilibrium(
     const py::array_t<double, py::array::c_style | py::array::forcecast> y0,
     const bool const_temp,
     const double Tgas,
+    const double Tdust,
     const double gradv,
     const bool NCOeff_global,
     const bool bCO_L,
@@ -105,7 +106,7 @@ static py::dict solve_slab_1d_equilibrium(
     ode.SetZd(Zd);
     ode.SetDpah(Zd);
     ode.SetDh2gr(Zd);
-    ode.SetTdust(Tgas);
+    ode.SetTdust(Tdust);
 
     ode.SetfH2gr(fH2gr);
     ode.SetfHplusgr(fHplusgr);
@@ -161,15 +162,31 @@ static py::dict solve_slab_1d_equilibrium(
     py::array_t<double> fShieldCO(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
     slab.CopyfShieldCOmol(static_cast<double *>(fShieldCO.mutable_data()));
 
+    py::array_t<double> fShieldC(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
+    slab.CopyfShieldC(static_cast<double *>(fShieldC.mutable_data()));
+
     py::array_t<double> GPE(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
     slab.CopyGPE(static_cast<double *>(GPE.mutable_data()));
+
+    py::array_t<double> GCO_pdes(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
+    slab.CopyGCOPhotodesorption(static_cast<double *>(GCO_pdes.mutable_data()));
+
+    py::array_t<int> reached_tevol_max(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
+    slab.CopyReachedTevolMax(static_cast<int *>(reached_tevol_max.mutable_data()));
+
+    py::array_t<double> tevol_max_residual(py::array::ShapeContainer{static_cast<py::ssize_t>(ngrid)});
+    slab.CopyTevolMaxResidual(static_cast<double *>(tevol_max_residual.mutable_data()));
 
     py::dict out;
     out["NH"] = NH_arr;
     out["y"] = y;
     out["fShieldH2"] = fShieldH2;
     out["fShieldCO"] = fShieldCO;
+    out["fShieldC"] = fShieldC;
     out["GPE"] = GPE;
+    out["GCO_pdes"] = GCO_pdes;
+    out["reached_tevol_max"] = reached_tevol_max;
+    out["tevol_max_residual"] = tevol_max_residual;
     out["dimen"] = dim;
     return out;
 }
@@ -1160,6 +1177,7 @@ PYBIND11_MODULE(_gow17, m) {
         py::arg("y0"),
         py::arg("const_temp"),
         py::arg("Tgas"),
+        py::arg("Tdust"),
         py::arg("gradv"),
         py::arg("NCOeff_global"),
         py::arg("bCO_L"),

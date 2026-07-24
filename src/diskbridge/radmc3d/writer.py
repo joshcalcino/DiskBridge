@@ -5,7 +5,7 @@ and writes the necessary RADMC-3D input files, handling unit conversion
 from Pint Quantities to CGS units.
 """
 
-# db-keywords: config, units, radmc3d, model, mesh, field
+# db-keywords: config, units, radmc3d, model, mesh, field, io, serialization
 # db-role: canonical
 # db-scope: package
 # db-purpose: RADMC-3D input file writer for DiskBridge Models.
@@ -106,7 +106,20 @@ class RadWriter:
 
     @staticmethod
     def flatten_scalar_to_radmc_order(mesh, arr3d: np.ndarray) -> np.ndarray:
-        """Flatten a native mesh-order scalar field in RADMC-3D cell order."""
+        """Flatten a native mesh-order scalar field in RADMC-3D cell order.
+
+        Parameters
+        ----------
+        mesh : diskbridge.model.mesh.Mesh
+            Spherical or Cartesian mesh describing the native array axes.
+        arr3d : ndarray
+            Scalar field in ``mesh.axis_names()`` order.
+
+        Returns
+        -------
+        ndarray
+            One-dimensional field with the RADMC-3D x/r index varying fastest.
+        """
 
         arr = np.asarray(arr3d)
         if mesh.coord_system == 'spherical':
@@ -115,9 +128,16 @@ class RadWriter:
                 from_order=mesh.axis_names(),
                 to_order=('phi', 'theta', 'r'),
             )
-        elif mesh.coord_system != 'cartesian':
+            return np.ascontiguousarray(arr).reshape(-1, order='C')
+        if mesh.coord_system == 'cartesian':
+            arr = transpose_to_axis_order(
+                arr,
+                from_order=mesh.axis_names(),
+                to_order=('x', 'y', 'z'),
+            )
+            return np.asarray(arr).reshape(-1, order='F')
+        else:
             raise ValueError(f"Unsupported coordinate system: {mesh.coord_system}")
-        return np.ascontiguousarray(arr).reshape(-1, order='C')
 
     @staticmethod
     def flatten_vector_to_radmc_order(mesh, components: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
@@ -1143,22 +1163,12 @@ class RadWriter:
         output_dir.mkdir(parents=True, exist_ok=True)
         fpath = output_dir / ('gas_temperature.binp' if binary else 'gas_temperature.inp')
         
-        temp = temperature.to('K').magnitude
+        temp = np.asarray(temperature.to('K').magnitude)
 
         mesh = self.model.mesh
         if mesh is None:
             raise ValueError('Model has no mesh defined')
-        if mesh.coord_system == 'spherical':
-            temp = transpose_to_axis_order(
-                np.asarray(temp),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-        elif mesh.coord_system != 'cartesian':
-            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
-        
-        # Flatten in C order (row-major) to match RADMC-3D cell ordering
-        temp_flat = np.asarray(temp).flatten()
+        temp_flat = self.flatten_scalar_to_radmc_order(mesh, temp)
         ncells = temp_flat.size
         
         logger.info(
@@ -1329,35 +1339,27 @@ class RadWriter:
         output_dir = self._get_output_dir(base_dir, 'molecule')
 
         mol_lower = str(molecule).lower()
-        n_dens = number_density.to('cm^-3').magnitude
+        n_dens = np.asarray(number_density.to('cm^-3').magnitude)
 
         mesh = self.model.mesh
         if mesh is None:
             raise ValueError('Model has no mesh defined')
 
-        if mesh.coord_system == 'spherical':
-            n_dens = transpose_to_axis_order(
-                np.asarray(n_dens),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-        elif mesh.coord_system != 'cartesian':
-            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
-
-        ncells = int(n_dens.size)
+        n_dens_flat = self.flatten_scalar_to_radmc_order(mesh, n_dens)
+        ncells = int(n_dens_flat.size)
 
         if binary:
             fpath = output_dir / f'numberdens_{mol_lower}.binp'
             with open(fpath, 'wb') as f:
                 header = np.array([1, 8, ncells], dtype=np.int64)
                 header.tofile(f)
-                n_dens.flatten().astype(np.float64).tofile(f)
+                n_dens_flat.astype(np.float64).tofile(f)
         else:
             fpath = output_dir / f'numberdens_{mol_lower}.inp'
             with open(fpath, 'w') as f:
                 f.write('1\n')
                 f.write(f'{ncells}\n')
-                n_dens.flatten().tofile(f, sep='\n')
+                n_dens_flat.tofile(f, sep='\n')
                 f.write('\n')
 
         self.written_files[fpath.name] = fpath
@@ -1388,21 +1390,15 @@ class RadWriter:
         base_dir = Path(output_dir)
         output_dir = self._get_output_dir(base_dir, 'gas')
 
-        vturb_cgs = vturb.to('cm/s').magnitude
+        vturb_cgs = np.asarray(vturb.to('cm/s').magnitude)
 
         mesh = self.model.mesh
         if mesh is None:
             raise ValueError('Model has no mesh defined')
-        if mesh.coord_system == 'spherical':
-            vturb_cgs = transpose_to_axis_order(
-                np.asarray(vturb_cgs),
-                from_order=mesh.axis_names(),
-                to_order=('phi', 'theta', 'r'),
-            )
-        elif mesh.coord_system != 'cartesian':
-            raise ValueError(f'Unsupported coordinate system: {mesh.coord_system}')
-
-        vturb_flat = np.asarray(vturb_cgs, dtype=np.float64).flatten()
+        vturb_flat = np.asarray(
+            self.flatten_scalar_to_radmc_order(mesh, vturb_cgs),
+            dtype=np.float64,
+        )
         ncells = int(vturb_flat.size)
 
         fpath = output_dir / 'microturbulence.binp'

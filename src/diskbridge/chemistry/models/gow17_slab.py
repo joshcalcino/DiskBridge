@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
 
 _MODEL_NAME = "gow17_slab_equilibrium"
+logger = logging.getLogger(__name__)
 
 
 def _require_slab_shape(shape: tuple[int, ...]) -> None:
@@ -123,6 +125,7 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
 
     nH0 = _uniform_scalar("nH", nH_cm3)
     chi0 = _uniform_scalar("incident chi", chi_arr)
+    Tdust0 = _uniform_scalar("Tdust", Tdust_K)
     T0 = _uniform_scalar("Tgas", T_K) if const_temp else float(T_K.reshape(-1)[0])
 
     Av_flat = np.asarray(Av_arr, dtype=np.float64).reshape(-1)
@@ -213,6 +216,7 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
         y0=_default_y0(const_temp=const_temp, Tgas=T0),
         const_temp=bool(const_temp),
         Tgas=float(T0),
+        Tdust=float(Tdust0),
         gradv=float(gradv),
         NCOeff_global=bool(cfg["NCOeff_global"]),
         bCO_L=bool(cfg["bCO_L"]),
@@ -243,7 +247,21 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
     y_out = np.asarray(slab["y"], dtype=np.float64).reshape(shape + (N_Y,))
     theta_h2_arr = np.asarray(slab["fShieldH2"], dtype=np.float64).reshape(shape)
     theta_co_arr = np.asarray(slab["fShieldCO"], dtype=np.float64).reshape(shape)
-    theta_c_arr = np.ones_like(theta_co_arr, dtype=np.float64)
+    theta_c_arr = np.asarray(slab["fShieldC"], dtype=np.float64).reshape(shape)
+    NH_slab_arr = np.asarray(slab["NH"], dtype=np.float64).reshape(shape)
+    G_CO_pdes_arr = np.asarray(slab["GCO_pdes"], dtype=np.float64).reshape(shape)
+    reached_tevol_max = np.asarray(slab["reached_tevol_max"], dtype=np.int32).reshape(shape)
+    tevol_max_residual = np.asarray(
+        slab["tevol_max_residual"], dtype=np.float64
+    ).reshape(shape)
+    n_tevol_max = int(np.count_nonzero(reached_tevol_max))
+    if n_tevol_max:
+        logger.warning(
+            "%s: %d cells reached the equilibrium time cap; max residual=%.4e",
+            _MODEL_NAME,
+            n_tevol_max,
+            float(np.max(tevol_max_residual)),
+        )
 
     xe = _electron_abundance(y_out)
     if const_temp:
@@ -285,7 +303,7 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
         line_h2_opr=cfg["line_h2_opr"],
     )
 
-    F_CO_pdes_photon = chi_arr * _co_pdes_draine_flux()
+    F_CO_pdes_photon = G_CO_pdes_arr * _co_pdes_draine_flux()
     F_CO_pdes_total = F_CO_pdes_photon + (
         F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else 0.0
     )
@@ -297,11 +315,12 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
         "Tgas_status": Quantity(np.zeros(shape, dtype=np.int32), "dimensionless"),
         "b_H2_kms": Quantity(b_H2_kms_arr, "km/s"),
         "b_CO_kms": Quantity(b_CO_kms_arr, "km/s"),
+        "NH_slab": Quantity(NH_slab_arr, "cm^-2"),
         "chi_broad": Quantity(chi_arr, "dimensionless"),
         "G_CO_diss": Quantity(chi_arr, "dimensionless"),
         "G_H2_diss": Quantity(chi_arr, "dimensionless"),
         "G_C_ion": Quantity(chi_arr, "dimensionless"),
-        "G_CO_pdes": Quantity(chi_arr, "dimensionless"),
+        "G_CO_pdes": Quantity(G_CO_pdes_arr, "dimensionless"),
         "F_CO_pdes_photon": Quantity(F_CO_pdes_photon, "1/(cm^2 s)"),
         "theta_co": Quantity(theta_co_arr, "dimensionless"),
         "theta_h2": Quantity(theta_h2_arr, "dimensionless"),
@@ -311,16 +330,23 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
         "G_C_ion_actual": Quantity(chi_arr * theta_c_arr, "dimensionless"),
         "G_H2_diss_actual": Quantity(chi_arr * theta_h2_arr, "dimensionless"),
         "F_CRUV_CO_pdes": Quantity(
-            F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else np.zeros(shape, dtype=np.float64),
+            (
+                F_CRUV_CO_pdes_arr.reshape(shape)
+                if enable_co_phase
+                else np.zeros(shape, dtype=np.float64)
+            ),
             "1/(cm^2 s)",
         ),
         "F_CO_pdes_photon_total": Quantity(F_CO_pdes_total, "1/(cm^2 s)"),
+        "gow17_reached_tevol_max": Quantity(reached_tevol_max, "dimensionless"),
+        "gow17_tevol_max_residual": Quantity(tevol_max_residual, "dimensionless"),
     }
 
     rad.gow17_y = y_out
     rad.nco_gas = Quantity(y_out[..., I_CO] * nH_cm3, "cm^-3")
     rad.nco_ice = fields["co_ice"]
     rad.theta_co = fields["theta_co"]
+    rad.theta_c = fields["theta_c"]
     rad.chi_eff = fields["chi_eff"]
     rad.nH2 = Quantity(y_out[..., I_H2] * nH_cm3, "cm^-3")
     rad.nH_atom = Quantity(np.maximum(xH_atom, 0.0) * nH_cm3, "cm^-3")
@@ -344,14 +370,17 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
             "ion_rate_s": float(ion_rate_s),
             "Zg": float(Zg),
             "Zd": float(Zd),
+            "Tdust_K": float(Tdust0),
             "NH_min": float(NH_min),
             "NH_total": float(NH_total),
             "reltol": float(reltol),
             "abstol0": float(abstol0),
-            "n_fail": 0,
-            "max_status": 0,
-            "fail_idx_head": [],
-            "status_hist": {0: int(ncells), -1: 0},
+            "n_fail": n_tevol_max,
+            "max_status": int(np.max(reached_tevol_max)),
+            "fail_idx_head": np.flatnonzero(reached_tevol_max.reshape(-1))[:20].tolist(),
+            "status_hist": {0: int(ncells - n_tevol_max), 1: n_tevol_max},
+            "tevol_max_cells": n_tevol_max,
+            "tevol_max_residual_max": float(np.max(tevol_max_residual)),
             "co_sigma_d_per_H_ref": float(co_sigma_d_per_H_ref),
         },
     )

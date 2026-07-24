@@ -8,6 +8,13 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- The standalone 1--500 au DiskBridge disc validation now generates
+  chemistry-derived LTE/non-LTE [C I] 1-0 and HCO+ 4-3 channel figures from one
+  physical RADMC-3D/GOW17 run, without abundance or collider scaling.
+- External HEALPix non-LTE solves now expose spherical inner-boundary
+  (`stop` or `vacuum_cavity`) and truncated-theta (`vacuum` or
+  `boundary_cell_to_rmax`) policies in `HealpixSEConfig`. Ray-step exhaustion
+  returns the truncated result with one aggregated warning.
 - Stable HEALPix shielding validation report under
   `docs/testing/spherical_healpix_shielding.md`, covering the exact Cartesian
   reduction, boundary-screen test, absorption and scattering RADMC-3D
@@ -27,6 +34,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Supported line species now download their canonical current online LAMDA
+  files during solving, staging, and imaging, without a cached, legacy, or
+  user-supplied molecule-file path. HCO+ uses the current separate para-H2 and
+  ortho-H2 collision tables. Collision coefficients always use the nearest
+  tabulated temperature endpoint outside the table range while the physical
+  gas temperature remains unchanged.
 - GOW17 molecular shielding now recomputes the H2 and CO Doppler widths from
   the current gas temperature at each existing non-local update. Directional
   CO cooling consumes the same current CO width during the fused shielding
@@ -61,6 +74,17 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Native and Python incident-slab GOW17 chemistry now attenuate the external
+  CO-photodesorption continuum as `exp(-1.8 A_V)` instead of reusing the much
+  broader dust-heating ISRF attenuation. Native slab atomic-carbon shielding
+  also excludes carbon locked in CO ice, and its returned diagnostics expose
+  the actual photodesorption and C-shielding fields used by the solver.
+- The native GOW17 equilibrium slab now receives its actual uniform dust
+  temperature separately from the initial gas temperature, so CO freeze-out
+  and gas--dust thermal coupling use the configured slab dust field.
+- Cartesian RADMC-3D gas temperature, number density, microturbulence,
+  velocity, and external level-population products now consistently serialize
+  cells with x varying fastest, as required by the RADMC-3D grid contract.
 - Spherical HEALPix traversal now rejects the opposite halves of constant-phi
   planes and theta cones, includes the physical inner radial boundary, and
   resolves tied/polar crossings from a stable beyond-boundary probe. Oblique
@@ -83,6 +107,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Removed the selectable `HealpixSEConfig.collision_temperature_policy` and
+  the legacy effective-H2 HCO+ LAMDA path from DiskBridge, along with
+  external-population APIs that accepted local molecule files.
 - Retired the exploratory GOW17 Cartesian slab, RADMC-3D scattering-closure,
   3D-PDR/beta, and resolved-sphere validation runners and their raw outputs
   after consolidating their conclusions in the stable shielding testing
@@ -99,6 +126,37 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Added `validation/gow17_fig23`, a two-panel equilibrium slab comparison at
+  `nH = 100` and `1000 cm^-3` showing CO, C, C+, HCO+, OHx, CHx, O, and O+
+  with CO phase chemistry disabled and enabled. The enabled branch inherits
+  the regular fiducial DiskBridge adsorption and desorption settings without
+  validation-specific physics overrides, while both branches solve gas
+  temperature.
+- Added an HCO+ inventory-weighted gas-temperature histogram and cumulative
+  distribution to the standalone disc validation, written directly beside the
+  channel-map figures.
+- Added the standalone `validation/diskbridge_disc` line workflow. It builds a
+  240 by 192 by 1 axisymmetric DiskBridge disc from scratch over 1--500 au,
+  then compares LTE and non-LTE CO J=6-5 using identical physical H2, CO,
+  temperature, velocity, and microturbulence fields. The two maintained
+  figures live directly in the validation directory and the reproducibility
+  products use one shallow `out/{lte,nonlte,levelpop}` tree. No density or
+  collider transform, PRIZMO or GOW17 chemistry product, Tdust comparison,
+  cross-chemistry branch, or CSV result table is included.
+- Added `validation/nonlte_ray_boundaries`, which compares the two spherical
+  theta and inner boundary policies on the saved PRIZMO/GOW17 disk and checks
+  boundary-cell extrapolation against an explicitly widened polar grid.
+- Added a Bondi All-Stars 1D streamer grid for `0.5`, `1.0`, and `2.0 Msun`
+  sources at optimistic `nH = 1e5` and `1e6 cm^-3` densities, with the
+  production accretion rates `3e-9`, `1e-8`, and `5e-8 Msun yr^-1`,
+  respectively, spectrum-aware UV products, strict
+  thermochemical-equilibrium tracking, evolved gas energy, fixed dust
+  temperature, concurrent star-level execution, and density-specific
+  carbon-chemistry figures comparing all three masses at stream-front distances
+  near `3000`, `1000`, and `500 au` with compact LaTeX-style publication
+  labels and matching vector-PDF exports, plus density-specific stream-front gas
+  temperature histories versus physical time and full evolving/equilibrium
+  gas-temperature profiles at the same three distances.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining

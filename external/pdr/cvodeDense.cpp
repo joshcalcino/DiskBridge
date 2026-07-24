@@ -200,6 +200,8 @@ void CvodeDense::Solve(const double tfinal) {
 }
 void CvodeDense::SolveEq(const double tolfac, const double tmax,
 												 const bool verbose, const double tmin) {
+	reached_tevol_max_ = false;
+	tevol_max_residual_ = 0.;
   /* Sanity check*/
   if (tolfac <= 1.) {
     throw std::logic_error("ERROR: CvodeDense::SoveEq - tolfac <= 1. ");

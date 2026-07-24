@@ -32,6 +32,10 @@ maybe_ensure_W_rays
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import resource
+import sys
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -109,57 +113,82 @@ def _bytes_to_gib(nbytes: int | float) -> float:
     return float(nbytes) / float(2**30)
 
 
+def _current_process_rss_bytes() -> int:
+    """Return current RSS on Linux and a conservative high-water value elsewhere."""
+    statm = Path("/proc/self/statm")
+    if statm.exists():
+        resident_pages = int(statm.read_text().split()[1])
+        return resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
 def _estimate_w_rays_memory_bytes(
     *,
     n_cells: int,
     npix: int,
     nbin: int,
     include_star: bool,
+    chunk_cells: int | None = None,
     keep_debug_arrays: bool = False,
     keep_closure_diagnostics: bool = False,
 ) -> dict[str, int | float]:
     """Estimate peak memory for building directional HEALPix UV weights.
 
-    The old estimate only counted the final ``W_rays`` array. The build path
-    also keeps dense ray maps for dust columns, tau, source contributions, the
-    total contribution map, and normalization temporaries.
+    The estimate separates arrays retained for the full build from one chunk's
+    incremental working storage. It counts the opacity-weighted scalar mesh
+    field and one optical-depth/attenuation ray map; the optimized builder does
+    not materialize per-bin dust columns or normalization copies.
     """
     n_cells = int(n_cells)
     npix = int(npix)
     nbin = int(nbin)
     if n_cells < 0 or npix < 0 or nbin < 0:
         raise ValueError("n_cells, npix, and nbin must be non-negative")
+    if chunk_cells is None:
+        chunk_cells = n_cells
+    chunk_cells = max(0, min(int(chunk_cells), n_cells))
 
     float64_bytes = np.dtype(np.float64).itemsize
     bool_bytes = np.dtype(bool).itemsize
     index_bytes = np.dtype(np.intp).itemsize
 
     ray_map_bytes = n_cells * npix * float64_bytes
+    chunk_ray_map_bytes = chunk_cells * npix * float64_bytes
     cell_scalar_bytes = n_cells * float64_bytes
+    chunk_scalar_bytes = chunk_cells * float64_bytes
 
-    # Dense ray-sized arrays alive near the normalization step:
-    # dust columns (nbin), tau_ext, uv_ext, uv_star, uv_iso, uv_total, W_rays,
-    # plus two conservative temporaries from masked advanced-index division.
-    dense_ray_map_count = nbin + 8
-    dense_ray_peak_bytes = dense_ray_map_count * ray_map_bytes
-
-    non_ray_bytes = (
-        cell_scalar_bytes  # chi_arr
-        + nbin * cell_scalar_bytes  # prepared dust_rho_bins held by caller
-        + nbin * cell_scalar_bytes  # fields_stack inside column integration
+    caller_retained_bytes = (
+        cell_scalar_bytes  # chi_arr retained by the caller
+        + nbin * cell_scalar_bytes  # dust_rho_bins retained by the caller
+    )
+    builder_nonray_persistent_bytes = (
+        cell_scalar_bytes  # alpha_uv opacity-weighted mesh field
         + n_cells * bool_bytes  # candidate_mask
         + n_cells * 3 * index_bytes  # candidate_idx
         + n_cells * 3 * float64_bytes  # cell_centers
+        + npix * 3 * float64_bytes  # HEALPix directions
     )
     if include_star:
-        non_ray_bytes += (
-            nbin * cell_scalar_bytes  # dust_fields_stack for starward rays
-            + nbin * cell_scalar_bytes  # star_cols
-            + 6 * cell_scalar_bytes  # tau/r/F/chi/star-dir helper arrays
-            + n_cells * index_bytes  # k_star
+        builder_nonray_persistent_bytes += (
+            n_cells * index_bytes  # k_star
             + cell_scalar_bytes  # w_star
             + n_cells * bool_bytes  # valid_star
         )
+
+    builder_persistent_bytes = ray_map_bytes + builder_nonray_persistent_bytes
+    persistent_input_bytes = caller_retained_bytes + builder_nonray_persistent_bytes
+    persistent_bytes = caller_retained_bytes + builder_persistent_bytes
+
+    # One external attenuation map plus conservative per-cell scalar/index
+    # storage used while constructing stellar and closure contributions.
+    chunk_float_scalar_count = 10 + (7 if include_star else 0)
+    chunk_incremental_bytes = (
+        chunk_ray_map_bytes
+        + chunk_float_scalar_count * chunk_scalar_bytes
+        + chunk_cells * index_bytes
+        + 2 * chunk_cells * bool_bytes
+    )
 
     retained_debug_ray_map_count = 5 if keep_debug_arrays else 0
     retained_debug_cell_scalar_count = 7 if keep_debug_arrays else 0
@@ -169,22 +198,47 @@ def _estimate_w_rays_memory_bytes(
         + retained_debug_cell_scalar_count * cell_scalar_bytes
         + retained_closure_cell_scalar_count * cell_scalar_bytes
     )
+    # Final concatenation temporarily coexists with the per-chunk diagnostic
+    # parts. Count that peak explicitly even though production disables it.
+    diagnostic_concatenation_bytes = retained_diagnostics_bytes
 
-    estimated_peak_bytes = dense_ray_peak_bytes + non_ray_bytes + retained_diagnostics_bytes
+    estimated_peak_bytes = (
+        persistent_bytes
+        + chunk_incremental_bytes
+        + retained_diagnostics_bytes
+        + diagnostic_concatenation_bytes
+    )
+    builder_peak_increment_bytes = (
+        builder_persistent_bytes
+        + chunk_incremental_bytes
+        + retained_diagnostics_bytes
+        + diagnostic_concatenation_bytes
+    )
 
     return {
         "ray_map_bytes": ray_map_bytes,
+        "chunk_ray_map_bytes": chunk_ray_map_bytes,
         "w_rays_final_bytes": ray_map_bytes,
-        "dust_column_bytes": nbin * ray_map_bytes,
-        "uv_working_ray_bytes": 5 * ray_map_bytes,
-        "normalization_temp_bytes": 2 * ray_map_bytes,
+        "alpha_uv_bytes": cell_scalar_bytes,
+        "dust_input_bytes": nbin * cell_scalar_bytes,
+        "caller_retained_bytes": caller_retained_bytes,
+        "builder_nonray_persistent_bytes": builder_nonray_persistent_bytes,
+        "builder_persistent_bytes": builder_persistent_bytes,
+        "builder_peak_increment_bytes": builder_peak_increment_bytes,
+        "dust_column_bytes": 0,
+        "uv_working_ray_bytes": chunk_ray_map_bytes,
+        "normalization_temp_bytes": 0,
+        "persistent_input_bytes": persistent_input_bytes,
+        "persistent_bytes": persistent_bytes,
+        "chunk_incremental_bytes": chunk_incremental_bytes,
         "retained_diagnostics_bytes": retained_diagnostics_bytes,
+        "diagnostic_concatenation_bytes": diagnostic_concatenation_bytes,
         "retained_debug_ray_map_count": retained_debug_ray_map_count,
         "retained_debug_cell_scalar_count": retained_debug_cell_scalar_count,
         "retained_closure_cell_scalar_count": retained_closure_cell_scalar_count,
-        "dense_ray_map_count": dense_ray_map_count,
-        "dense_ray_peak_bytes": dense_ray_peak_bytes,
-        "non_ray_bytes": non_ray_bytes,
+        "dense_ray_map_count": 1,
+        "dense_ray_peak_bytes": chunk_ray_map_bytes,
+        "non_ray_bytes": persistent_input_bytes,
         "estimated_peak_bytes": estimated_peak_bytes,
     }
 
@@ -397,49 +451,40 @@ def ensure_W_rays(
         npix=npix,
         nbin=nbin,
         include_star=float(star_uv_luminosity_erg_s) > 0.0,
+        chunk_cells=resolved_chunk_size,
         keep_debug_arrays=keep_debug_arrays,
         keep_closure_diagnostics=keep_closure_diagnostics,
     )
     gib = _bytes_to_gib(int(memory["w_rays_final_bytes"]))
     peak_gib = _bytes_to_gib(int(memory["estimated_peak_bytes"]))
+    rss_before_bytes = _current_process_rss_bytes()
+    projected_process_peak_bytes = rss_before_bytes + int(
+        memory["builder_peak_increment_bytes"]
+    )
 
     logger.info(
         "Allocating W_rays: shape=(%d, %d) float64, nbin=%d => %.2f GiB final; "
-        "unchunked estimated build peak %.2f GiB "
-        "(dense ray maps=%d, dust columns %.2f GiB, UV maps %.2f GiB, "
-        "normalization temps %.2f GiB, retained diagnostics %.2f GiB, "
-        "geometry/input %.2f GiB)",
+        "known-array peak %.2f GiB "
+        "(persistent %.2f GiB, alpha_uv %.2f GiB, one chunk %.2f GiB, "
+        "chunk ray map %.2f GiB, retained diagnostics %.2f GiB)",
         n_cells,
         npix,
         nbin,
         gib,
         peak_gib,
-        int(memory["dense_ray_map_count"]),
-        _bytes_to_gib(int(memory["dust_column_bytes"])),
-        _bytes_to_gib(int(memory["uv_working_ray_bytes"])),
-        _bytes_to_gib(int(memory["normalization_temp_bytes"])),
+        _bytes_to_gib(int(memory["persistent_bytes"])),
+        _bytes_to_gib(int(memory["alpha_uv_bytes"])),
+        _bytes_to_gib(int(memory["chunk_incremental_bytes"])),
+        _bytes_to_gib(int(memory["chunk_ray_map_bytes"])),
         _bytes_to_gib(int(memory["retained_diagnostics_bytes"])),
-        _bytes_to_gib(int(memory["non_ray_bytes"])),
-    )
-    chunk_memory = _estimate_w_rays_memory_bytes(
-        n_cells=resolved_chunk_size,
-        npix=npix,
-        nbin=nbin,
-        include_star=float(star_uv_luminosity_erg_s) > 0.0,
-        keep_debug_arrays=False,
-        keep_closure_diagnostics=False,
-    )
-    chunk_peak_gib = _bytes_to_gib(
-        int(memory["w_rays_final_bytes"])
-        + int(memory["retained_diagnostics_bytes"])
-        + int(chunk_memory["estimated_peak_bytes"])
     )
     logger.info(
-        "Chunked W_rays build: chunk_size=%d (%d chunk(s)); estimated peak %.2f GiB "
-        "including final W_rays and one chunk",
+        "Chunked W_rays build: chunk_size=%d (%d chunk(s)); current RSS %.2f GiB, "
+        "projected process peak %.2f GiB (current RSS + builder-owned arrays)",
         resolved_chunk_size,
         (n_cells + resolved_chunk_size - 1) // resolved_chunk_size,
-        chunk_peak_gib,
+        _bytes_to_gib(rss_before_bytes),
+        _bytes_to_gib(projected_process_peak_bytes),
     )
 
     # --- Compute ---

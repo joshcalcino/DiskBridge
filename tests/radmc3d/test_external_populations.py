@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,8 @@ from diskbridge.radmc3d.line_transfer.external_validation import (
     validate_external_population_run,
 )
 from diskbridge.radmc3d.writer import RadWriter
+from diskbridge.utils import sha256_file
 from diskbridge.radmc3d.line_transfer.molecular_rates import (
-    assert_temperature_in_collision_range,
     lte_populations,
     parse_lamda_molecule_file,
     stack_collider_tables,
@@ -361,7 +362,19 @@ def _make_min_staged_dir(tmp_path: Path, species="co", n=2, pop=None) -> Path:
         "incl_lines = 1\nlines_mode = 50\ntgas_eq_tdust = 0\n"
     )
     (inp / "lines.inp").write_text(f"2\n1\n{species}    leiden    0    0    0\n")
-    (inp / f"molecule_{species}.inp").write_text("!stub\n")
+    molecule = inp / f"molecule_{species}.inp"
+    molecule.write_text("!stub\n")
+    (inp / f"external_levelpop_manifest_{species}.json").write_text(
+        json.dumps(
+            {
+                "species": species,
+                "converged": True,
+                "allow_unconverged": False,
+                "molecule_sha256": sha256_file(molecule),
+            }
+        )
+        + "\n"
+    )
     _write_scalar_binp(inp / f"numberdens_{species}.binp", [1.0e5, 2.0e5])
     _write_scalar_binp(inp / "gas_temperature.binp", [20.0, 30.0])
     _write_scalar_binp(inp / "microturbulence.binp", [1.0e4, 1.0e4])
@@ -439,22 +452,28 @@ def test_validation_rejects_negative_population(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Temperature-range policy
+# Collision-table temperature endpoints
 # ---------------------------------------------------------------------------
 
 
-def test_strict_temperature_policy_raises_when_out_of_range():
-    mol = parse_lamda_molecule_file(_CO_LAMDA)
-    T_max = float(mol.collider_tgrid_K[0][-1])
-    Tgas = np.array([[T_max + 1000.0]], dtype=np.float64)
-    mask = np.array([[True]], dtype=bool)
-    with pytest.raises(ValueError, match="out of collision-rate range"):
-        assert_temperature_in_collision_range(mol, Tgas, mask)
+def test_collisional_rates_hold_nearest_temperature_endpoint():
+    """Temperatures outside a table use its first or last downward rate."""
 
+    temperatures = np.array([5.0, 10.0, 15.0, 20.0, 25.0])
+    collider_densities = np.full((temperatures.size, 1), 2.0)
+    tgrids = np.array([[10.0, 20.0]])
+    ntemps = np.array([2], dtype=np.int64)
+    tables = np.zeros((1, 2, 2, 2))
+    tables[0, :, 1, 0] = [1.0, 3.0]
 
-def test_strict_temperature_policy_honors_cell_mask():
-    mol = parse_lamda_molecule_file(_CO_LAMDA)
-    T_max = float(mol.collider_tgrid_K[0][-1])
-    Tgas = np.array([[T_max + 1000.0, 50.0]], dtype=np.float64)
-    mask = np.array([[False, True]], dtype=bool)
-    assert_temperature_in_collision_range(mol, Tgas, mask)  # no raise
+    rates = compute_collisional_rates(
+        temperatures,
+        collider_densities,
+        tgrids,
+        ntemps,
+        tables,
+        np.array([1.0, 3.0]),
+        np.array([0.0, 1.0e-15]),
+    )
+
+    np.testing.assert_allclose(rates[:, 1, 0], [2.0, 2.0, 4.0, 6.0, 6.0])

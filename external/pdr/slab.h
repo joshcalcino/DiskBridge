@@ -20,7 +20,11 @@ class Slab {
 		void CopyNH(double *out) const;
 		void CopyfShieldH2mol(double *out) const;
 		void CopyfShieldCOmol(double *out) const;
+		void CopyfShieldC(double *out) const;
 		void CopyGPE(double *out) const;
+		void CopyGCOPhotodesorption(double *out) const;
+		void CopyReachedTevolMax(int *out) const;
+		void CopyTevolMaxResidual(double *out) const;
 		void SetCOPhotodesorptionFlux(double F_DRAINE);
 		/*Solve the chemistry to equalibrium*/
 		void SolveEq(const double tolfac, const double tmin, const double tmax, 
@@ -62,9 +66,12 @@ class Slab {
 		double **yE_; /*heating and cooling processes*/
 		double *fShieldH2mol_;
 		double *fShieldCOmol_;
+		double *fShieldC_;
 		double *hLast_;
 		double *tSolve_;
 		double *nstepLast_;
+		int *reachedTevolMax_;
+		double *tevolMaxResidual_;
 		double *NH_arr_;
 		/*calculate with/without dust/self sheilding*/
     const double G0_;

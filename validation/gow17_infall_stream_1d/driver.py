@@ -953,6 +953,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xcp_hist = np.zeros_like(xco_hist)
     xchx_hist = np.zeros_like(xco_hist)
     xhcop_hist = np.zeros_like(xco_hist)
+    Tgas_hist = np.zeros_like(xco_hist)
 
     Tgas_front = np.zeros_like(t_hist)
     Tdust_front = np.zeros_like(t_hist)
@@ -961,6 +962,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xcp_eq_hist = None
     xchx_eq_hist = None
     xhcop_eq_hist = None
+    Tgas_eq_hist = None
     Tgas_front_eq = None
     Tdust_front_eq = None
 
@@ -986,6 +988,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xcp_eq_hist = np.full_like(xco_hist, np.nan)
         xchx_eq_hist = np.full_like(xco_hist, np.nan)
         xhcop_eq_hist = np.full_like(xco_hist, np.nan)
+        Tgas_eq_hist = np.full_like(xco_hist, np.nan)
         Tgas_front_eq = np.full_like(t_hist, np.nan)
         Tdust_front_eq = np.full_like(t_hist, np.nan)
 
@@ -997,6 +1000,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xcp_store: np.ndarray,
         xchx_store: np.ndarray,
         xhcop_store: np.ndarray,
+        Tgas_profile_store: np.ndarray,
         Tgas_store: np.ndarray,
         Tdust_store: np.ndarray,
         k: int,
@@ -1010,9 +1014,15 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
 
         Tdust_store[k] = float(rad_local.dust_temperature.to("K").magnitude.reshape(-1)[i_front])
         if cfg.evolve_energy and getattr(rad_local, "Tgas_gow17", None) is not None:
-            Tgas_store[k] = float(rad_local.Tgas_gow17.to("K").magnitude.reshape(-1)[i_front])
+            Tgas_values = np.asarray(
+                rad_local.Tgas_gow17.to("K").magnitude, dtype=float
+            ).reshape(-1)
         else:
-            Tgas_store[k] = float(rad_local.gas_temperature.to("K").magnitude.reshape(-1)[i_front])
+            Tgas_values = np.asarray(
+                rad_local.gas_temperature.to("K").magnitude, dtype=float
+            ).reshape(-1)
+        Tgas_profile_store[k, :] = Tgas_values
+        Tgas_store[k] = float(Tgas_values[i_front])
 
     def _record(k: int, *, record_equilibrium: bool = False):
         _record_branch(
@@ -1022,6 +1032,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xcp_store=xcp_hist,
             xchx_store=xchx_hist,
             xhcop_store=xhcop_hist,
+            Tgas_profile_store=Tgas_hist,
             Tgas_store=Tgas_front,
             Tdust_store=Tdust_front,
             k=k,
@@ -1035,6 +1046,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xcp_store=xcp_eq_hist,
                 xchx_store=xchx_eq_hist,
                 xhcop_store=xhcop_eq_hist,
+                Tgas_profile_store=Tgas_eq_hist,
                 Tgas_store=Tgas_front_eq,
                 Tdust_store=Tdust_front_eq,
                 k=k,
@@ -1186,6 +1198,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xcp_hist = xcp_hist[: k + 1, :]
             xchx_hist = xchx_hist[: k + 1, :]
             xhcop_hist = xhcop_hist[: k + 1, :]
+            Tgas_hist = Tgas_hist[: k + 1, :]
             Tgas_front = Tgas_front[: k + 1]
             Tdust_front = Tdust_front[: k + 1]
             if cfg.track_infall_equilibrium:
@@ -1194,6 +1207,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xcp_eq_hist = xcp_eq_hist[: k + 1, :]
                 xchx_eq_hist = xchx_eq_hist[: k + 1, :]
                 xhcop_eq_hist = xhcop_eq_hist[: k + 1, :]
+                Tgas_eq_hist = Tgas_eq_hist[: k + 1, :]
                 Tgas_front_eq = Tgas_front_eq[: k + 1]
                 Tdust_front_eq = Tdust_front_eq[: k + 1]
             break
@@ -1213,6 +1227,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "xcp_hist": xcp_hist,
         "xchx_hist": xchx_hist,
         "xhcop_hist": xhcop_hist,
+        "Tgas_hist": Tgas_hist,
         "Tgas_front": Tgas_front,
         "Tdust_front": Tdust_front,
     }
@@ -1243,6 +1258,7 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 "xcp_eq_hist": xcp_eq_hist,
                 "xchx_eq_hist": xchx_eq_hist,
                 "xhcop_eq_hist": xhcop_eq_hist,
+                "Tgas_eq_hist": Tgas_eq_hist,
                 "Tgas_front_eq": Tgas_front_eq,
                 "Tdust_front_eq": Tdust_front_eq,
             }

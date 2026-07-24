@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 import json
 import time
 
@@ -36,17 +37,22 @@ from diskbridge.model.kinematics import (
     microturbulence_cm_s,
     molecular_doppler_width_cm_s,
 )
-from diskbridge.radmc3d.colliders import gow17_lamda_colliders
+from diskbridge.radmc3d.colliders import (
+    gow17_lamda_colliders,
+    install_validated_molecule_file,
+)
 from diskbridge.radmc3d.writer import RadWriter
 from diskbridge.utils import sha256_array, sha256_file
 from diskbridge.chemistry.shielding.healpix_columns import (
     SphericalHealpixRayTracer,
     CartesianHealpixRayTracer,
 )
-from .escape_healpix import compute_escape_probabilities_healpix
+from .escape_healpix import (
+    _spherical_boundary_mode_codes,
+    compute_escape_probabilities_healpix,
+)
 from .molecular_rates import (
     MoleculeData,
-    assert_temperature_in_collision_range,
     lte_populations,
     parse_lamda_molecule_file,
     stack_collider_tables,
@@ -59,9 +65,28 @@ from .se_solver import (
 )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
 @dataclass(frozen=True)
 class HealpixSEConfig:
-    """Configuration for the 3D HEALPix non-LTE solver."""
+    """Configuration for the 3D HEALPix non-LTE solver.
+
+    Parameters
+    ----------
+    spherical_inner_boundary : {"stop", "vacuum_cavity"}, optional
+        Spherical-grid treatment at ``rmin``. ``"stop"`` ends the ray;
+        ``"vacuum_cavity"`` crosses the central cavity with zero opacity and
+        resumes integration on the far side.
+    spherical_theta_boundary : {"vacuum", "boundary_cell_to_rmax"}, optional
+        Spherical-grid treatment outside a truncated theta range. ``"vacuum"``
+        ends the ray at the theta edge; ``"boundary_cell_to_rmax"`` extends
+        the boundary-cell fields through the uncovered angle to ``rmax``.
+    Collision coefficients are held at the nearest tabulated temperature
+    boundary outside each collider table's range. The physical gas temperature
+    used for LTE populations, detailed balance, and Doppler broadening is not
+    clipped.
+    """
 
     nside: int = 4
     maxiter: int = 60
@@ -77,6 +102,18 @@ class HealpixSEConfig:
     checkpoint_interval: int = 1
     checkpoint_levelpop: bool = False
     resume_from_checkpoint: bool = False
+    spherical_inner_boundary: Literal["stop", "vacuum_cavity"] = "vacuum_cavity"
+    spherical_theta_boundary: Literal[
+        "vacuum", "boundary_cell_to_rmax"
+    ] = "boundary_cell_to_rmax"
+
+    def __post_init__(self) -> None:
+        """Validate spherical ray-boundary choices at configuration time."""
+
+        _spherical_boundary_mode_codes(
+            self.spherical_inner_boundary,
+            self.spherical_theta_boundary,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +190,31 @@ def _range_pair(values: np.ndarray) -> list[float]:
     if arr.size == 0:
         return [0.0, 0.0]
     return [float(np.min(arr)), float(np.max(arr))]
+
+
+def _collision_temperature_diagnostics(
+    molecule: MoleculeData,
+    Tgas: np.ndarray,
+    cell_mask: np.ndarray,
+) -> dict[str, dict[str, float | int]]:
+    """Summarize selected cells outside each collider's temperature table."""
+
+    selected = np.asarray(Tgas, dtype=np.float64)[np.asarray(cell_mask, dtype=bool)]
+    diagnostics: dict[str, dict[str, float | int]] = {}
+    for name, tgrid in zip(
+        molecule.collider_names,
+        molecule.collider_tgrid_K,
+        strict=True,
+    ):
+        low = float(tgrid[0])
+        high = float(tgrid[-1])
+        diagnostics[name] = {
+            "table_min_K": low,
+            "table_max_K": high,
+            "selected_cells_below": int(np.count_nonzero(selected < low)),
+            "selected_cells_above": int(np.count_nonzero(selected > high)),
+        }
+    return diagnostics
 
 
 def _beta_diagnostics(beta: np.ndarray) -> dict[str, float]:
@@ -256,13 +318,16 @@ def _checkpoint_fingerprint(
     collider_dens_cand: np.ndarray,
 ) -> dict:
     return {
-        "version": 1,
+        "version": 2,
         "species": species,
         "solver": "healpix_escape_probability_statistical_equilibrium",
         "nside": int(config.nside),
         "tbg_K": float(config.tbg_K),
         "relaxation": float(config.relaxation),
         "max_ray_steps": int(config.max_ray_steps),
+        "spherical_inner_boundary": config.spherical_inner_boundary,
+        "spherical_theta_boundary": config.spherical_theta_boundary,
+        "collision_temperature_policy": "nearest_table_boundary",
         "species_density_floor_cm3": float(config.species_density_floor_cm3),
         "molecule_sha256": molecule_sha256,
         "gas_velocity_sha256": gas_velocity_sha256,
@@ -745,7 +810,6 @@ def solve_and_write_healpix_levelpop(
     rad,
     chemistry_result,
     species: str,
-    molecule_file: str | Path,
     output_dir: str | Path,
     config: HealpixSEConfig,
 ) -> Path:
@@ -758,10 +822,9 @@ def solve_and_write_healpix_levelpop(
         Provides ``number_densities`` for the species and its colliders.
     species : str
         Lowercased species name (``"co"``, ``"catom"``, or ``"hco+"``).
-    molecule_file : path
-        Validated molecule file (collider order matches GOW17/LAMDA policy).
     output_dir : path
-        Directory in which to write ``levelpop_<species>.dat`` and the manifest.
+        Directory in which to stage the current online LAMDA molecule file and
+        write ``levelpop_<species>.dat`` and its manifest.
     config : HealpixSEConfig
 
     Returns
@@ -791,8 +854,13 @@ def solve_and_write_healpix_levelpop(
             # cannot leave RADMC-3D pointed at an older levelpop/manifest pair.
             stale.unlink()
 
+    molecule_file = install_validated_molecule_file(
+        species=species,
+        moldata_dir=_REPO_ROOT / "data" / "moldata",
+        inputs_dir=output_dir,
+    )
     molecule = parse_lamda_molecule_file(molecule_file)
-    molecule_sha256 = sha256_file(Path(molecule_file))
+    molecule_sha256 = sha256_file(molecule_file)
 
     expected_colliders = gow17_lamda_colliders(species)
     actual_colliders = list(molecule.collider_names)
@@ -849,7 +917,23 @@ def solve_and_write_healpix_levelpop(
     # an explicit floor and the manifest records that choice.
     cell_mask = n_species > density_floor
 
-    assert_temperature_in_collision_range(molecule, Tgas, cell_mask)
+    collision_temperature_diagnostics = _collision_temperature_diagnostics(
+        molecule,
+        Tgas,
+        cell_mask,
+    )
+    for collider, diagnostics in collision_temperature_diagnostics.items():
+        below = int(diagnostics["selected_cells_below"])
+        above = int(diagnostics["selected_cells_above"])
+        if below or above:
+            logger.warning(
+                "Holding %s collision coefficients at their tabulated "
+                "temperature boundaries for %d cells below and %d cells "
+                "above the table range",
+                collider,
+                below,
+                above,
+            )
 
     tracer, dirs, cell_idx, cell_centers = _build_tracer_and_geometry(
         transfer_mesh, config.nside, cell_mask,
@@ -886,7 +970,7 @@ def solve_and_write_healpix_levelpop(
             species=species,
             config=config,
             molecule=molecule,
-            molecule_file=Path(molecule_file),
+            molecule_file=molecule_file,
             molecule_sha256=molecule_sha256,
             levelpop_path=levelpop_path,
             iterations=0,
@@ -901,6 +985,7 @@ def solve_and_write_healpix_levelpop(
             converged=True,
             cell_counts=cell_counts,
             collider_density_ranges=collider_density_ranges,
+            collision_temperature_diagnostics=collision_temperature_diagnostics,
             maser_diagnostics=_empty_maser_diagnostics(),
             selected_cell_diagnostics=[],
             resumed_from_checkpoint_iteration=None,
@@ -1039,6 +1124,8 @@ def solve_and_write_healpix_levelpop(
             a_line=a_line,
             max_ray_steps=int(config.max_ray_steps),
             chunk_size=int(config.escape_chunk_size),
+            spherical_inner_boundary=config.spherical_inner_boundary,
+            spherical_theta_boundary=config.spherical_theta_boundary,
         )
 
         logger.info("  iter %3d/%d: solving statistical equilibrium", iteration, config.maxiter)
@@ -1191,7 +1278,7 @@ def solve_and_write_healpix_levelpop(
         species=species,
         config=config,
         molecule=molecule,
-        molecule_file=Path(molecule_file),
+        molecule_file=molecule_file,
         molecule_sha256=molecule_sha256,
         levelpop_path=levelpop_path,
         iterations=last_iter,
@@ -1206,6 +1293,7 @@ def solve_and_write_healpix_levelpop(
         converged=converged,
         cell_counts=cell_counts,
         collider_density_ranges=collider_density_ranges,
+        collision_temperature_diagnostics=collision_temperature_diagnostics,
         maser_diagnostics=maser_diagnostics,
         selected_cell_diagnostics=selected_cell_diagnostics,
         resumed_from_checkpoint_iteration=resumed_from_checkpoint_iteration,
@@ -1248,6 +1336,7 @@ def _write_manifest(
     converged: bool,
     cell_counts: dict[str, int],
     collider_density_ranges: dict[str, list[float]],
+    collision_temperature_diagnostics: dict[str, dict[str, float | int]],
     maser_diagnostics: dict,
     selected_cell_diagnostics: list[dict],
     resumed_from_checkpoint_iteration: int | None,
@@ -1260,6 +1349,9 @@ def _write_manifest(
         "maxiter": int(config.maxiter),
         "convcrit": float(config.convcrit),
         "escape_chunk_size": int(config.escape_chunk_size),
+        "spherical_inner_boundary": config.spherical_inner_boundary,
+        "spherical_theta_boundary": config.spherical_theta_boundary,
+        "collision_temperature_policy": "nearest_table_boundary",
         "allow_unconverged": bool(config.allow_unconverged),
         "species_density_floor_cm3": float(config.species_density_floor_cm3),
         "overwrite": bool(config.overwrite),
@@ -1286,6 +1378,7 @@ def _write_manifest(
         },
         "colliders": list(molecule.collider_names),
         "collider_density_ranges_cm3": collider_density_ranges,
+        "collision_temperature_diagnostics": collision_temperature_diagnostics,
         "temperature_range_K": [float(tgas_range[0]), float(tgas_range[1])],
         "microturbulence_range_cm_s": [float(aturb_range[0]), float(aturb_range[1])],
         "species_density_range_cm3": [float(nsp_range[0]), float(nsp_range[1])],

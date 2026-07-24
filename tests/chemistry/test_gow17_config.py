@@ -731,6 +731,61 @@ def test_co_pdes_radiation_assembly_keeps_photodesorption_flux_unshielded(monkey
     np.testing.assert_allclose(theta_c, np.ones(ncells))
 
 
+def test_healpix_shielding_receives_gas_carbon_without_co_ice(monkeypatch):
+    """CO ice belongs to the elemental budget, not C or CO shielding columns."""
+
+    shape = (2,)
+    ncells = 2
+    captured = {}
+
+    def fake_compute_pdr_shielding_healpix(**kwargs):
+        captured["nC"] = np.asarray(kwargs["nC"], dtype=np.float64).copy()
+        captured["nCO"] = np.asarray(kwargs["nCO"], dtype=np.float64).copy()
+        ones = np.ones(shape, dtype=np.float64)
+        return ones, ones, ones, None, None
+
+    monkeypatch.setattr(
+        "diskbridge.chemistry.shielding.healpix_columns.compute_pdr_shielding_healpix",
+        fake_compute_pdr_shielding_healpix,
+    )
+
+    y = np.zeros((ncells, N_Y), dtype=np.float64)
+    y[:, I_CO] = [1.0e-5, 2.0e-5]
+    y[:, I_CO_ICE] = [3.0e-5, 4.0e-5]
+    y[:, I_CP] = [5.0e-5, 6.0e-5]
+    y[:, I_H2] = 0.5
+    nH = np.array([1.0e3, 2.0e3], dtype=np.float64)
+    xCtot = np.full(ncells, 1.6e-4, dtype=np.float64)
+
+    _compute_shielding_and_gph(
+        y_flat=y,
+        nH_flat=nH,
+        chi_dust_flat=np.ones(ncells),
+        G_CO_diss_flat=np.ones(ncells),
+        G_H2_diss_flat=np.ones(ncells),
+        G_C_ion_flat=np.ones(ncells),
+        G_CO_pdes_flat=np.ones(ncells),
+        F_CO_pdes_photon_flat=np.ones(ncells),
+        xCtot_flat=xCtot,
+        Zd_arr=np.ones(ncells),
+        shape=shape,
+        ncells=ncells,
+        rad=SimpleNamespace(model=SimpleNamespace(mesh=object())),
+        nH_cm3=nH.reshape(shape),
+        chi_dust_arr=np.ones(shape),
+        visser=object(),
+        b_H2_kms=1.0,
+        b_CO_kms=1.0,
+        b_H2_kms_grid=None,
+        b_CO_kms_grid=None,
+        nside=1,
+    )
+
+    expected_nC = (xCtot - y[:, I_CO] - y[:, I_CO_ICE] - y[:, I_CP]) * nH
+    np.testing.assert_allclose(captured["nC"].reshape(-1), expected_nC)
+    np.testing.assert_allclose(captured["nCO"].reshape(-1), y[:, I_CO] * nH)
+
+
 def test_gow17_shielding_helper_suppresses_direction_weights_when_uniform(monkeypatch):
     shape = (2,)
     ncells = 2
@@ -1117,7 +1172,7 @@ def _build_one_cell_incident_product_rad(case: dict) -> RadModel:
     not (RADFIELD_REF_DIR / "radfield_beamed.json").exists(),
     reason="GOW17 RadField::Beamed reference data not available",
 )
-def test_timestepper_incident_slab_radiation_matches_external_radfield_reference(monkeypatch):
+def test_timestepper_incident_slab_photochemistry_and_pdes_attenuation(monkeypatch):
     case = _load_radfield_reference_case("av1_molecular_shielding")
     ref = case["output"]
 
@@ -1163,7 +1218,11 @@ def test_timestepper_incident_slab_radiation_matches_external_radfield_reference
     np.testing.assert_allclose(theta_c, [1.0], rtol=1.0e-14)
     np.testing.assert_allclose(Gph[0, :], ref["Gph"], rtol=1.0e-14)
     np.testing.assert_allclose(GPE, [ref["GPE"]], rtol=1.0e-14)
-    np.testing.assert_allclose(GISRF, [ref["GISRF"]], rtol=1.0e-14)
+    incident_flux = 0.5 * float(case["input"]["G0_boundary"])
+    Av = float(case["input"]["NH_cm2"]) / 1.87e21
+    expected_pdes = incident_flux * np.exp(-1.8 * Av)
+    np.testing.assert_allclose(GISRF, [expected_pdes], rtol=1.0e-14)
+    assert GISRF[0] < float(ref["GISRF"])
 
 
 def test_skip_shielding_uses_unity_factors_without_column_solve(monkeypatch):

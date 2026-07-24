@@ -135,7 +135,7 @@ _KPH_AVFAC = np.asarray(
     dtype=np.float64,
 )
 _SIGMA_PE_AVFAC = 1.87
-_SIGMA_ISRF_AVFAC = 0.561
+_CO_PDES_AVFAC = 1.8
 KPH_C_BASE = float(_KPH_BASE[IPH_C])
 KPH_CO_BASE = float(_KPH_BASE[IPH_CO])
 KPH_H2_BASE = float(_KPH_BASE[IPH_H2])
@@ -1943,7 +1943,7 @@ def _compute_shielding_and_gph(
         Av_flat = np.maximum(np.where(np.isfinite(Av_flat), Av_flat, 0.0), 0.0)
         Gph *= np.exp(-Av_flat[:, None] * _KPH_AVFAC[None, :])
         GPE *= np.exp(-Av_flat * _SIGMA_PE_AVFAC)
-        F_CO_pdes_ext *= np.exp(-Av_flat * _SIGMA_ISRF_AVFAC)
+        F_CO_pdes_ext *= np.exp(-Av_flat * _CO_PDES_AVFAC)
 
     Gph[:, IPH_C] *= theta_c_flat
     Gph[:, IPH_CO] *= theta_co_flat

@@ -19,6 +19,7 @@ RadField::RadField(const long int ngrid, const double G0, const double Zd)
   isdust_= true;
   GPE = new double [ngrid];
   GISRF = new double [ngrid];
+  GCO_pdes = new double [ngrid];
   Gph = new double* [ngrid];
   for (int i=0; i<ngrid; i++) {
     Gph[i] = new double [gow17::n_ph_];
@@ -31,6 +32,7 @@ RadField::~RadField() {
   }
   delete [] GPE;
   delete [] GISRF;
+  delete [] GCO_pdes;
   delete [] Gph;
 }
 
@@ -41,10 +43,12 @@ void RadField::Beamed(const long int igrid, const double NH,
     AV = NH * Zd_ / 1.87e21;
     GPE[igrid] = (G0_/2.) * exp(-NH * Thermo::sigmaPE_ * Zd_);
     GISRF[igrid] = (G0_/2.) * exp(-NH * Thermo::sigmaISRF_ * Zd_);
+    GCO_pdes[igrid] = (G0_/2.) * exp(-1.8 * AV);
   } else {
     AV = 0.;
     GPE[igrid] = (G0_/2.);
     GISRF[igrid] = (G0_/2.);
+    GCO_pdes[igrid] = (G0_/2.);
   }
   /*photo-reactions*/
 	for (int i=0; i<gow17::n_ph_; i++) {
@@ -91,6 +95,7 @@ void RadField::Isotropic(const long int igrid, const double NH,
                          const long int nangle) {
   double sumGPE = 0.;
   double sumGISRF = 0.;
+  double sumGCO_pdes = 0.;
   double sumGph[gow17::n_ph_];
   double dist_fac = 0.;
   for (int i=0; i<gow17::n_ph_; i++) {
@@ -100,6 +105,7 @@ void RadField::Isotropic(const long int igrid, const double NH,
   Beamed(igrid, NH, NH2, NCO, NC);
   sumGPE += 0.5 * (2*GPE[igrid]);
   sumGISRF += 0.5 * (2*GISRF[igrid]);
+  sumGCO_pdes += 0.5 * (2*GCO_pdes[igrid]);
   for (int i=0; i<gow17::n_ph_; i++) {
     sumGph[i] += 0.5 * (2*Gph[igrid][i]);
   }
@@ -107,6 +113,7 @@ void RadField::Isotropic(const long int igrid, const double NH,
   if (nangle <= 1) {
     GPE[igrid] = sumGPE * 0.5;
     GISRF[igrid] = sumGISRF * 0.5;
+    GCO_pdes[igrid] = sumGCO_pdes * 0.5;
     for (int i=0; i<gow17::n_ph_; i++) {
       Gph[igrid][i] = sumGph[i] * 0.5;
     }
@@ -121,6 +128,7 @@ void RadField::Isotropic(const long int igrid, const double NH,
     Beamed(igrid, NH*dist_fac, NH2*dist_fac, NCO*dist_fac, NC*dist_fac);
     sumGPE += 2*GPE[igrid];
     sumGISRF += 2*GISRF[igrid];
+    sumGCO_pdes += 2*GCO_pdes[igrid];
     for (int i=0; i<gow17::n_ph_; i++) {
       sumGph[i] +=  2*Gph[igrid][i];
     }
@@ -128,6 +136,7 @@ void RadField::Isotropic(const long int igrid, const double NH,
   /*assign results*/
   GPE[igrid] = sumGPE * dx / 2;
   GISRF[igrid] = sumGISRF * dx / 2;
+  GCO_pdes[igrid] = sumGCO_pdes * dx / 2;
   for (int i=0; i<gow17::n_ph_; i++) {
     Gph[igrid][i] = sumGph[i] * dx / 2;
   }
@@ -167,4 +176,8 @@ double RadField::GetfShieldH2mol() {
 
 double RadField::GetfShieldCOmol() {
   return fs_CO_;
+}
+
+double RadField::GetfShieldC() {
+  return fs_C_;
 }

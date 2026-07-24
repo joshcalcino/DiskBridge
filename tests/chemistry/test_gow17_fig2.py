@@ -105,7 +105,7 @@ def build_model(nH_cm3: float, NH: np.ndarray, chi0: float = 2.0):
 
     radm.nH = Quantity(np.full(shape, float(nH_cm3)), "cm^-3")
     radm.gas_temperature = Quantity(np.full(shape, 100.0), "K")
-    radm.dust_temperature = Quantity(np.full(shape, 20.0), "K")
+    radm.dust_temperature = Quantity(np.full(shape, 10.0), "K")
 
     # Av profile used by the reference PDR code: Av = NH * Zd / 1.87e21.
     # Here we adopt Zd=1, matching the regression reference.
@@ -120,14 +120,24 @@ def build_model(nH_cm3: float, NH: np.ndarray, chi0: float = 2.0):
     return radm, Av_db
 
 
-def run_gow17_slab_equilibrium(radm: RadModel, nH: float, *, chi0: float, n_iter: int):
+def run_gow17_slab_equilibrium(
+    radm: RadModel,
+    nH: float,
+    *,
+    chi0: float,
+    n_iter: int,
+    enable_co_phase: bool = False,
+    reltol: float = 1.0e-2,
+    tmin_s: float = 3.16e12,
+    tmax_s: float = 6.32e16,
+):
     """Run GOW17 chemistry with shielding iterations."""
     radm.nco_gas = Quantity(np.full(radm.model.mesh.shape, 1e-12 * nH), "cm^-3")
 
     config = {
         "mode": "equilibrium",
         "temperature": {"mode": "computed", "initial": "gas_temperature"},
-        "tmax": "6.32e16 s",
+        "tmax": f"{float(tmax_s)} s",
         "b_kms": 3.0,
         "chi0": chi0,
         "NH_total": "1.0e22 cm^-2",
@@ -140,16 +150,16 @@ def run_gow17_slab_equilibrium(radm: RadModel, nH: float, *, chi0: float, n_iter
         "ion_rate": "2e-16 1/s",
         "gradv": 9.0e-14,
         "Leff_CO_max": 3.0e20,
-        "reltol": 1.0e-2,
+        "reltol": float(reltol),
         "abstol0": 1.0e-9,
         "mxsteps": 5000000,
         "maxord": 3,
         "tolfac": 10.0,
-        "tmin": "3.16e12 s",
+        "tmin": f"{float(tmin_s)} s",
         "isfsH2": True,
         "isfsCO": True,
         "isfsC": True,
-        "enable_co_phase": False,
+        "enable_co_phase": bool(enable_co_phase),
         "fHplusgr": 0.6,
         "fHeplusgr": 0.6,
         "fCplusgr": 0.6,
@@ -174,6 +184,13 @@ def run_gow17_slab_equilibrium(radm: RadModel, nH: float, *, chi0: float, n_iter
         },
         "shielding_max_iter": 80,
     }
+    if enable_co_phase:
+        config["co_phase"] = {
+            "S_CO": 1.0,
+            "Y_CO": 0.0,
+            "enable_cruv_pdes": False,
+            "enable_crdes_CO": False,
+        }
 
     res = None
     for _ in range(n_iter):
@@ -186,6 +203,119 @@ def run_gow17_slab_equilibrium(radm: RadModel, nH: float, *, chi0: float, n_iter
         radm.nco_gas = res.number_densities["co"]
 
     return res
+
+
+@pytest.fixture(scope="module")
+def cold_co_phase_slab():
+    """Return a cold native slab with enough CO ice to test phase bookkeeping."""
+
+    NH = np.geomspace(1.0e17, 1.0e22, 96)
+    radm, _Av = build_model(1000.0, NH, chi0=1.0)
+    result = run_gow17_slab_equilibrium(
+        radm,
+        1000.0,
+        chi0=1.0,
+        n_iter=1,
+        enable_co_phase=True,
+    )
+    return radm, result
+
+
+def test_slab_co_freezeout_uses_uniform_dust_temperature(cold_co_phase_slab) -> None:
+    """Cold dust permits CO ice while warm dust thermally desorbs it."""
+
+    _cold_rad, cold_result = cold_co_phase_slab
+    ice_max = {
+        10.0: float(np.max(cold_result.abundances["co_ice"].magnitude))
+    }
+    NH = np.geomspace(1.0e17, 1.0e22, 96)
+    warm_rad, _Av = build_model(1000.0, NH, chi0=1.0)
+    warm_rad.dust_temperature = Quantity(
+        np.full(warm_rad.model.mesh.shape, 100.0),
+        "K",
+    )
+    warm_result = run_gow17_slab_equilibrium(
+        warm_rad,
+        1000.0,
+        chi0=1.0,
+        n_iter=1,
+        enable_co_phase=True,
+    )
+    ice_max[100.0] = float(np.max(warm_result.abundances["co_ice"].magnitude))
+
+    assert ice_max[10.0] > 1.0e-5
+    assert ice_max[100.0] < 1.0e-12
+
+
+def test_native_slab_co_photodesorption_uses_fuv_attenuation(
+    cold_co_phase_slab,
+) -> None:
+    """The native slab uses the process-specific exp(-1.8 Av) FUV field."""
+
+    _radm, result = cold_co_phase_slab
+    NH = result.fields["NH_slab"].to("cm^-2").magnitude.reshape(-1)
+    G_CO_pdes = result.fields["G_CO_pdes"].magnitude.reshape(-1)
+    expected = np.exp(-1.8 * NH / 1.87e21)
+
+    np.testing.assert_allclose(G_CO_pdes, expected, rtol=2.0e-15, atol=0.0)
+
+
+def test_native_slab_carbon_shielding_excludes_co_ice(
+    cold_co_phase_slab,
+) -> None:
+    """Reconstruct native C shielding from gas C after removing CO ice."""
+
+    radm, result = cold_co_phase_slab
+    y = np.asarray(radm.gow17_y, dtype=np.float64).reshape(-1, N_Y)
+    NH = result.fields["NH_slab"].to("cm^-2").magnitude.reshape(-1)
+    theta_c = result.fields["theta_c"].magnitude.reshape(-1)
+    x_c_neutral = 1.6e-4 - (
+        y[:, I_HCOP]
+        + y[:, I_CHX]
+        + y[:, I_CO]
+        + y[:, I_CO_ICE]
+        + y[:, I_CP]
+    )
+    x_c_neutral = np.maximum(x_c_neutral, 0.0)
+
+    expected = np.empty_like(theta_c)
+    N_H2 = 0.0
+    N_C = 0.0
+    for i in range(NH.size):
+        tau_h2 = 1.2e-14 * 2.0 * N_H2
+        y_h2 = 1.17e-8 * tau_h2
+        expected[i] = np.exp(-1.6e-17 * N_C) * np.exp(-y_h2) / (1.0 + y_h2)
+        if i + 1 < NH.size:
+            dNH = NH[i + 1] - NH[i]
+            N_H2 += y[i, I_H2] * dNH
+            N_C += x_c_neutral[i] * dNH
+
+    assert float(np.max(y[:, I_CO_ICE])) > 1.0e-5
+    np.testing.assert_allclose(theta_c, expected, rtol=2.0e-14, atol=1.0e-15)
+
+
+def test_native_slab_reports_equilibrium_time_cap() -> None:
+    """A deliberately short solve reports rather than hides its time cap."""
+
+    NH = np.geomspace(1.0e17, 1.0e20, 8)
+    radm, _Av = build_model(100.0, NH, chi0=1.0)
+    result = run_gow17_slab_equilibrium(
+        radm,
+        100.0,
+        chi0=1.0,
+        n_iter=1,
+        reltol=1.0e-12,
+        tmin_s=3.16e12,
+        tmax_s=5.056e13,
+    )
+
+    reached = result.fields["gow17_reached_tevol_max"].magnitude.reshape(-1)
+    residual = result.fields["gow17_tevol_max_residual"].magnitude.reshape(-1)
+    assert int(result.meta["n_fail"]) == int(np.count_nonzero(reached))
+    assert int(result.meta["n_fail"]) > 0
+    assert float(result.meta["tevol_max_residual_max"]) == pytest.approx(
+        float(np.max(residual))
+    )
 
 
 @pytest.fixture(scope="module")
@@ -234,7 +364,13 @@ class TestGOW17Fig2Regression:
             ("HCO+", I_HCOP),
         ],
     )
-    def test_species_match_external_pdr_reference(self, species, idx_db, diskbridge_nH100, reference_nH100) -> None:
+    def test_species_match_external_pdr_reference(
+        self,
+        species,
+        idx_db,
+        diskbridge_nH100,
+        reference_nH100,
+    ) -> None:
         """Match the original PDR output within its solver and file precision."""
         _Av_ref, slab_ref = reference_nH100
         Av_db, Y, _res = diskbridge_nH100

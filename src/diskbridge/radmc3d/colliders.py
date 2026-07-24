@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
-import urllib.request
+import subprocess
+import tempfile
 
 
 LAMDA_URLS = {
     "co": "https://home.strw.leidenuniv.nl/~moldata/datafiles/co.dat",
     "catom": "https://home.strw.leidenuniv.nl/~moldata/datafiles/catom.dat",
-    "hco+": "https://home.strw.leidenuniv.nl/~moldata/datafiles/hco%2B@xpol.dat",
+    "hco+": "https://home.strw.leidenuniv.nl/~moldata/datafiles/hco%2B.dat",
 }
 
 LAMDA_COLLIDER_ID_TO_NAME = {
@@ -29,8 +31,13 @@ LAMDA_COLLIDER_ID_TO_NAME = {
 GOW17_LAMDA_COLLIDERS = {
     "co": ["p-h2", "o-h2"],
     "catom": ["h", "p-h2", "o-h2", "e"],
-    "hco+": ["h2"],
+    "hco+": ["p-h2", "o-h2"],
 }
+
+
+def _is_collision_block_header(line: str) -> bool:
+    text = line.strip().upper()
+    return text.startswith("!COLLISIONS BETWEEN") or text.startswith("!PARTNER ")
 
 
 def gow17_lamda_colliders(species: str) -> list[str]:
@@ -49,7 +56,7 @@ def read_lamda_collision_order(path: str | Path) -> list[str]:
     lines = path.read_text().splitlines()
     order: list[str] = []
     for i, line in enumerate(lines):
-        if not line.strip().upper().startswith("!COLLISIONS BETWEEN"):
+        if not _is_collision_block_header(line):
             continue
         j = i + 1
         while j < len(lines):
@@ -85,7 +92,7 @@ def _collision_blocks_by_name(path: str | Path) -> tuple[list[str], dict[str, li
     block_starts = [
         i
         for i, line in enumerate(lines)
-        if line.strip().upper().startswith("!COLLISIONS BETWEEN")
+        if _is_collision_block_header(line)
     ]
     if not block_starts:
         return lines, {}, []
@@ -151,14 +158,72 @@ def write_reordered_lamda_file(
 
 
 def ensure_official_lamda_file(species: str, moldata_dir: str | Path) -> Path:
+    """Download the current canonical LAMDA file for ``species``.
+
+    The online file is fetched on every call and atomically replaces the local
+    copy only after a successful download. Network failures are propagated;
+    an existing local file is never used as a fallback.
+
+    Parameters
+    ----------
+    species : str
+        Supported LAMDA species identifier.
+    moldata_dir : path-like
+        Directory in which the refreshed canonical file is stored.
+
+    Returns
+    -------
+    pathlib.Path
+        Refreshed local file path.
+    """
+
     species = str(species).lower().strip()
     moldata_dir = Path(moldata_dir)
     moldata_dir.mkdir(parents=True, exist_ok=True)
     if species not in LAMDA_URLS:
         raise ValueError(f"No official LAMDA URL configured for {species!r}")
     path = moldata_dir / f"{species}.dat"
-    if not path.exists():
-        urllib.request.urlretrieve(LAMDA_URLS[species], path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{species}.",
+        suffix=".download",
+        dir=moldata_dir,
+    )
+    os.close(fd)
+    temporary_path = Path(temporary_name)
+    try:
+        if shutil.which("curl") is None:
+            raise RuntimeError(
+                "Current online LAMDA staging requires the 'curl' executable"
+            )
+        subprocess.run(
+            [
+                "curl",
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--output",
+                str(temporary_path),
+                LAMDA_URLS[species],
+            ],
+            check=True,
+        )
+        if temporary_path.stat().st_size == 0:
+            raise ValueError(f"LAMDA returned an empty file for {species!r}")
+        available_colliders = read_lamda_collision_order(temporary_path)
+        missing_colliders = [
+            collider
+            for collider in gow17_lamda_colliders(species)
+            if collider not in available_colliders
+        ]
+        if missing_colliders:
+            raise ValueError(
+                f"Downloaded LAMDA file for {species!r} is missing required "
+                f"collision block(s): {missing_colliders}"
+            )
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return path
 
 

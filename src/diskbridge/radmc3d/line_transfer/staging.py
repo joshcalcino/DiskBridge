@@ -289,7 +289,6 @@ def prepare_external_population_line_run(
     work_dir: str | Path,
     species: str,
     levelpop_file: str | Path,
-    molecule_file: str | Path | None = None,
     copy_mode: str = "symlink",
     exist_ok: bool = False,
     allow_unconverged: bool = False,
@@ -297,7 +296,11 @@ def prepare_external_population_line_run(
     itempdecoup: int = 1,
     rto_style: int = 3,
 ) -> Path:
-    """Stage a single-species RADMC-3D ``lines_mode = 50`` run."""
+    """Stage a single-species RADMC-3D ``lines_mode = 50`` run.
+
+    The molecule file is downloaded through the canonical online LAMDA
+    installer and must match the hash recorded by the population solve.
+    """
 
     species = str(species).lower().strip()
     source_inputs = Path(source_inputs_dir)
@@ -420,33 +423,23 @@ def prepare_external_population_line_run(
     else:
         staged_gas_velocity_sha256 = sha256_file(work_inputs / "gas_velocity.binp")
 
-    if molecule_file is None:
-        manifest_molecule = solver_manifest.get("molecule_file")
-        if not manifest_molecule:
-            raise ValueError(
-                "Solver manifest does not record molecule_file; cannot safely stage "
-                "external populations."
-            )
-        molecule_src = _resolve_manifest_path(
-            str(manifest_molecule),
-            base_dir=solver_manifest_file.parent,
-        )
-    else:
-        molecule_src = Path(molecule_file)
-    if not molecule_src.exists():
-        raise FileNotFoundError(f"molecule_file does not exist: {molecule_src}")
-    molecule_sha256 = sha256_file(molecule_src)
     expected_molecule_sha256 = solver_manifest.get("molecule_sha256")
-    if expected_molecule_sha256 and molecule_sha256 != expected_molecule_sha256:
+    if not expected_molecule_sha256:
         raise ValueError(
-            "Staged molecule file does not match the molecule used by the external "
-            "population solver."
+            "Solver manifest does not record molecule_sha256; cannot verify "
+            "current online LAMDA data."
         )
-    molecule_dst = _link_or_copy(
-        molecule_src,
-        work_inputs / f"molecule_{species}.inp",
-        copy_mode=copy_mode,
+    molecule_dst = install_validated_molecule_file(
+        species=species,
+        moldata_dir=_REPO_ROOT / "data" / "moldata",
+        inputs_dir=work_inputs,
     )
+    molecule_sha256 = sha256_file(molecule_dst)
+    if molecule_sha256 != expected_molecule_sha256:
+        raise ValueError(
+            "Current online LAMDA molecule file does not match the file used by "
+            "the external population solver; rerun the population solve."
+        )
     staged[molecule_dst.name] = str(molecule_dst)
 
     levelpop_dst = _link_or_copy(

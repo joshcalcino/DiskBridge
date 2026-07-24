@@ -1,5 +1,7 @@
 #include "slab.h"
 
+#include <algorithm>
+
 Slab::Slab(gow17 &ode, CvodeDense &solver,
 		       const long int ngrid, const double NH_total,
            const double G0, const double Zd,
@@ -27,14 +29,20 @@ Slab::Slab(gow17 &ode, CvodeDense &solver,
 	t_ = ode.GetTime();
 	fShieldH2mol_ = new double [ngrid_];
 	fShieldCOmol_ = new double [ngrid_];
+	fShieldC_ = new double [ngrid_];
 	hLast_ = new double [ngrid_];
 	tSolve_ = new double [ngrid_];
 	nstepLast_ = new double [ngrid_];
+	reachedTevolMax_ = new int [ngrid_];
+	tevolMaxResidual_ = new double [ngrid_];
 	NH_arr_ = new double [ngrid_];
 	for (int i=0; i<ngrid_; i++) {
 		ode.CopyAbd(y_[i]);
 		fShieldH2mol_[i] = 0.;
 		fShieldCOmol_[i] = 0.;
+		fShieldC_[i] = 0.;
+		reachedTevolMax_[i] = 0;
+		tevolMaxResidual_[i] = 0.;
 	}
 	/*initialize yE_*/
 	for (int i=0; i<ngrid_; i++) {
@@ -53,9 +61,12 @@ Slab::~Slab() {
 	delete [] yE_;
 	delete [] fShieldH2mol_;
 	delete [] fShieldCOmol_;
+	delete [] fShieldC_;
 	delete [] hLast_;
 	delete [] tSolve_;
 	delete [] nstepLast_;
+	delete [] reachedTevolMax_;
+	delete [] tevolMaxResidual_;
 	delete [] NH_arr_;
   delete prad_;
 }
@@ -86,9 +97,33 @@ void Slab::CopyfShieldCOmol(double *out) const {
 	}
 }
 
+void Slab::CopyfShieldC(double *out) const {
+	for (int i=0; i<ngrid_; i++) {
+		out[i] = fShieldC_[i];
+	}
+}
+
 void Slab::CopyGPE(double *out) const {
 	for (int i=0; i<ngrid_; i++) {
 		out[i] = prad_->GPE[i];
+	}
+}
+
+void Slab::CopyGCOPhotodesorption(double *out) const {
+	for (int i=0; i<ngrid_; i++) {
+		out[i] = prad_->GCO_pdes[i];
+	}
+}
+
+void Slab::CopyReachedTevolMax(int *out) const {
+	for (int i=0; i<ngrid_; i++) {
+		out[i] = reachedTevolMax_[i];
+	}
+}
+
+void Slab::CopyTevolMaxResidual(double *out) const {
+	for (int i=0; i<ngrid_; i++) {
+		out[i] = tevolMaxResidual_[i];
 	}
 }
 
@@ -163,17 +198,22 @@ void Slab::SolveEq(const double tolfac, const double tmin,
     /*get sheilding factor*/
 		fShieldH2mol_[i] = prad_->GetfShieldH2mol();
 		fShieldCOmol_[i] = prad_->GetfShieldCOmol();
+		fShieldC_[i] = prad_->GetfShieldC();
     /*assign radiation field to chemistry*/
-    double FCO_pdes_photon = prad_->GISRF[i] * co_F_DRAINE_;
+    double FCO_pdes_photon = prad_->GCO_pdes[i] * co_F_DRAINE_;
     ode_.SetRadField(prad_->GPE + i, *(prad_->Gph + i), &FCO_pdes_photon);
     /*solve to equalibrium*/
 		solver_.SolveEq(tolfac, tmax, verbose, tmin);
+		reachedTevolMax_[i] = solver_.ReachedTevolMax() ? 1 : 0;
+		tevolMaxResidual_[i] = solver_.GetTevolMaxResidual();
 		ode_.CopyAbd(y_[i]);
 		ode_.CopyThermoRates(yE_[i]);
 		NH2 += y_[i][ode_.id("H2")] * dNH;
 		NCO += y_[i][ode_.id("CO")] * dNH;
-    xCI =  xCtot - y_[i][ode_.id("HCO+")] - y_[i][ode_.id("CHx")] 
-                 - y_[i][ode_.id("CO")]- y_[i][ode_.id("C+")];
+    xCI = xCtot - y_[i][ode_.id("HCO+")] - y_[i][ode_.id("CHx")]
+                 - y_[i][ode_.id("CO")] - y_[i][ode_.id("CO_ice")]
+                 - y_[i][ode_.id("C+")];
+		xCI = std::max(0.0, xCI);
 		NC += xCI * dNH;
 		hLast_[i] = solver_.GethLast();
 		tSolve_[i] = solver_.GettSolve();

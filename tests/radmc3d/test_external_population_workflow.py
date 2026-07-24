@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -28,6 +30,36 @@ from diskbridge.radmc3d.line_transfer import (
 
 _REPO = Path(__file__).resolve().parents[2]
 _CO_LAMDA = _REPO / "data" / "moldata" / "co.dat"
+
+
+@pytest.fixture(autouse=True)
+def canonical_online_lamda_installer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, Path]]:
+    """Replace network access while recording every canonical install call."""
+
+    calls: list[tuple[str, Path]] = []
+
+    def install(species: str, moldata_dir: str | Path, inputs_dir: str | Path) -> Path:
+        del moldata_dir
+        species = str(species).lower().strip()
+        assert species == "co"
+        destination = Path(inputs_dir) / f"molecule_{species}.inp"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_CO_LAMDA, destination)
+        calls.append((species, destination))
+        return destination
+
+    monkeypatch.setattr(
+        "diskbridge.radmc3d.line_transfer.external_populations."
+        "install_validated_molecule_file",
+        install,
+    )
+    monkeypatch.setattr(
+        "diskbridge.radmc3d.line_transfer.staging.install_validated_molecule_file",
+        install,
+    )
+    return calls
 
 
 class _FakeGas:
@@ -92,12 +124,12 @@ def _make_chemistry_result(shape, n_co: float = 1.0e3, n_h2: float = 1.0e8):
     )
 
 
-def test_solve_and_write_healpix_levelpop_smoke(tmp_path: Path):
+def test_solve_and_write_healpix_levelpop_smoke(
+    tmp_path: Path,
+    canonical_online_lamda_installer: list[tuple[str, Path]],
+):
     rad, shape = _make_cartesian_rad(tmp_path, n=4)
     chem = _make_chemistry_result(shape, n_co=10.0)
-    # Use the real CO LAMDA file (already in p-H2, o-H2 order).
-    molecule_file = tmp_path / "molecule_co.inp"
-    shutil.copyfile(_CO_LAMDA, molecule_file)
 
     out_dir = tmp_path / "out"
     config = HealpixSEConfig(
@@ -111,12 +143,14 @@ def test_solve_and_write_healpix_levelpop_smoke(tmp_path: Path):
         rad=rad,
         chemistry_result=chem,
         species="co",
-        molecule_file=molecule_file,
         output_dir=out_dir,
         config=config,
     )
     assert path.exists()
     assert path.name == "levelpop_co.dat"
+    assert canonical_online_lamda_installer == [
+        ("co", out_dir / "molecule_co.inp")
+    ]
 
     # Parse and validate the file.
     tokens = path.read_text().split()
@@ -139,13 +173,80 @@ def test_solve_and_write_healpix_levelpop_smoke(tmp_path: Path):
     assert manifest.exists()
     payload = json.loads(manifest.read_text())
     assert payload["microturbulence_range_cm_s"] == pytest.approx([1.0e4, 1.0e4])
+    assert payload["spherical_inner_boundary"] == "vacuum_cavity"
+    assert payload["spherical_theta_boundary"] == "boundary_cell_to_rmax"
+    assert payload["collision_temperature_policy"] == "nearest_table_boundary"
+    checkpoint = json.loads(
+        (out_dir / "checkpoints" / "checkpoint_latest_co.json").read_text()
+    )
+    assert checkpoint["fingerprint"]["spherical_inner_boundary"] == "vacuum_cavity"
+    assert (
+        checkpoint["fingerprint"]["spherical_theta_boundary"]
+        == "boundary_cell_to_rmax"
+    )
+    assert (
+        checkpoint["fingerprint"]["collision_temperature_policy"]
+        == "nearest_table_boundary"
+    )
+    with pytest.raises(ValueError, match="does not match the current inputs"):
+        solve_and_write_healpix_levelpop(
+            rad=rad,
+            chemistry_result=chem,
+            species="co",
+            output_dir=out_dir,
+            config=replace(
+                config,
+                maxiter=config.maxiter + 1,
+                resume_from_checkpoint=True,
+                spherical_theta_boundary="vacuum",
+            ),
+        )
 
 
-def test_prepare_external_population_run_and_validation(tmp_path: Path):
+def test_collision_temperature_endpoint_holding_is_audited(tmp_path: Path):
+    """Boundary-held rates permit a solve without changing physical Tgas."""
+
+    rad, shape = _make_cartesian_rad(tmp_path, n=2)
+    hot_temperature = 5000.0
+    _add_field(
+        rad.model,
+        "gas_temperature",
+        np.full(shape, hot_temperature),
+        "K",
+    )
+    chem = _make_chemistry_result(shape, n_co=10.0)
+
+    output_dir = tmp_path / "out"
+    path = solve_and_write_healpix_levelpop(
+        rad=rad,
+        chemistry_result=chem,
+        species="co",
+        output_dir=output_dir,
+        config=HealpixSEConfig(
+            nside=1,
+            maxiter=20,
+            convcrit=1.0e-3,
+            max_ray_steps=200,
+        ),
+    )
+
+    assert path.exists()
+    payload = json.loads(
+        (output_dir / "external_levelpop_manifest_co.json").read_text()
+    )
+    assert payload["collision_temperature_policy"] == "nearest_table_boundary"
+    assert payload["temperature_range_K"] == [hot_temperature, hot_temperature]
+    diagnostics = payload["collision_temperature_diagnostics"]
+    assert diagnostics["p-h2"]["selected_cells_above"] == int(np.prod(shape))
+    assert diagnostics["o-h2"]["selected_cells_above"] == int(np.prod(shape))
+
+
+def test_prepare_external_population_run_and_validation(
+    tmp_path: Path,
+    canonical_online_lamda_installer: list[tuple[str, Path]],
+):
     rad, shape = _make_cartesian_rad(tmp_path, n=3)
     chem = _make_chemistry_result(shape, n_co=5.0)
-    molecule_file = tmp_path / "molecule_co.inp"
-    shutil.copyfile(_CO_LAMDA, molecule_file)
 
     levelpop_dir = tmp_path / "pops"
     config = HealpixSEConfig(nside=1, maxiter=15, convcrit=1.0e-3, max_ray_steps=200)
@@ -153,7 +254,6 @@ def test_prepare_external_population_run_and_validation(tmp_path: Path):
         rad=rad,
         chemistry_result=chem,
         species="co",
-        molecule_file=molecule_file,
         output_dir=levelpop_dir,
         config=config,
     )
@@ -191,9 +291,28 @@ def test_prepare_external_population_run_and_validation(tmp_path: Path):
         work_dir=work,
         species="co",
         levelpop_file=levelpop_path,
-        molecule_file=molecule_file,
         copy_mode="copy",
     )
+    assert canonical_online_lamda_installer == [
+        ("co", levelpop_dir / "molecule_co.inp"),
+        ("co", work / "radmc3d_inputs" / "molecule_co.inp"),
+    ]
     info = validate_external_population_run(work, species="co")
     assert info["line_mode"] == 50
     assert Path(info["levelpop_file"]).exists()
+
+    staged_manifest = work / "radmc3d_inputs" / "external_levelpop_manifest_co.json"
+    manifest_payload = json.loads(staged_manifest.read_text())
+    manifest_payload.pop("molecule_sha256")
+    staged_manifest.write_text(json.dumps(manifest_payload))
+    with pytest.raises(ValueError, match="does not record molecule_sha256"):
+        validate_external_population_run(work, species="co")
+
+
+def test_external_population_apis_do_not_accept_local_molecule_files() -> None:
+    assert "molecule_file" not in inspect.signature(
+        solve_and_write_healpix_levelpop
+    ).parameters
+    assert "molecule_file" not in inspect.signature(
+        prepare_external_population_line_run
+    ).parameters

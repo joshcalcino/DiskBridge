@@ -400,6 +400,76 @@ python validation/gow17_infall_stream_1d/compare_runs.py \
   --new-dir validation/gow17_infall_stream_1d/out/energy_0_tdust_0_eqtrack_0_teff_6750K_rad_stellar_products
 ```
 
+### Bondi All-Stars Figure Grid
+
+The Bondi-specific figure grid is defined in
+`bondi_all_stars.toml`. It uses the same stellar and accretion parameters as
+the Bondi All-Stars production runs:
+
+| Stellar mass | Effective temperature | Stellar radius | Accretion rate |
+|---|---:|---:|---:|
+| `0.5 Msun` | `3800 K` | `1.8 Rsun` | `3e-9 Msun yr^-1` |
+| `1.0 Msun` | `4500 K` | `2.0 Rsun` | `1e-8 Msun yr^-1` |
+| `2.0 Msun` | `8000 K` | `2.0 Rsun` | `5e-8 Msun yr^-1` |
+
+Each star is run at exactly two uniform hydrogen-nuclei densities:
+`nH = 1e5` and `1e6 cm^-3`. These are intentionally optimistic dense-streamer
+values. They are not intended to represent the volume-filling, lower-density
+gas in the Bondi simulations.
+
+The committed configuration uses `stellar_products` radiation, enables the
+infall equilibrium branch, disables the loose presentation-equilibrium
+controls, and does not generate movies. Gas-energy evolution and the grey dust
+temperature estimate are configured as `evolve_energy = true` and
+`estimate_tdust = false`: the gas thermal state evolves with GOW17 while the
+dust temperature remains at the validation's prescribed constant value.
+
+Run all six chemistry cases with:
+
+```bash
+python validation/gow17_infall_stream_1d/run_bondi_all_stars.py
+```
+
+The three stellar masses run concurrently in separate worker processes. Each
+worker runs its `1e5` and `1e6 cm^-3` cases sequentially and writes only inside
+that star's output directory.
+
+The runner refuses to replace an existing
+`outputs/bondi_all_stars/` directory. To deliberately replace that exact run
+set, use:
+
+```bash
+python validation/gow17_infall_stream_1d/run_bondi_all_stars.py --overwrite
+```
+
+After all histories complete, assemble the static figure set with:
+
+```bash
+python validation/gow17_infall_stream_1d/plot_bondi_all_stars.py
+```
+
+Pass `--overwrite` to the plotting command only when intentionally replacing
+the existing `plots/bondi_all_stars/` figure set.
+
+The plotter selects the saved equilibrium snapshots nearest stream-front
+distances of `3000`, `1000`, and `500 au`. For each density it writes a carbon
+profile figure as both PNG and vector PDF, with stellar mass arranged by column and front distance by row,
+a gas-temperature profile figure with the same layout, and a stream-front
+gas-temperature history versus physical time. The carbon panels use
+LaTeX-style serif notation, put `M_star` near the lower right of the top-row
+panels, and put exact `r_front` labels near the lower left of the left-column panels.
+The boxed species and branch legends share one top edge above the panel grid,
+with the left edge of the species box aligned to the left-column y axis. A
+concise `n_H` density label is centered above the middle column at a larger
+font size, and the panel gaps are slightly reduced.
+Colored carbon lines are
+labelled only by species, while temperature-history colors identify stellar
+mass. Separate line-style legends identify solid values as time-dependent and dashed
+values as local equilibrium. Both temperature diagnostics use a logarithmic
+Kelvin axis; the history panels use elapsed time in kyr and their different
+endpoints reflect the mass-dependent free-fall durations. Exact sampled radii,
+times, and temperature ranges are recorded in the plot summary and report.
+
 ## Output Files
 
 Each top-level run directory contains:
@@ -410,8 +480,14 @@ Each top-level run directory contains:
 
 Each density subdirectory contains:
 
-- `history.npz`: output-cadence histories for abundances, front position, `chi`, and temperatures, plus internal adaptive-step diagnostics (`t_internal_s`, `dt_internal_s`, `r_face_internal_cm`, `chi_face_internal`)
-  If `track_infall_equilibrium=True`, this file also includes `xco_eq_hist`, `xc_eq_hist`, `xcp_eq_hist`, `xchx_eq_hist`, `Tgas_front_eq`, and `Tdust_front_eq`.
+- `history.npz`: output-cadence histories for abundances, front position, `chi`,
+  and temperature, including the full `(n_snapshots, n_cells)` `Tgas_hist` and
+  scalar `Tgas_front`, plus internal adaptive-step diagnostics (`t_internal_s`,
+  `dt_internal_s`, `r_face_internal_cm`, `chi_face_internal`). If
+  `track_infall_equilibrium=True`, this file also includes `xco_eq_hist`,
+  `xc_eq_hist`, `xcp_eq_hist`, `xchx_eq_hist`, `Tgas_eq_hist`,
+  `Tgas_front_eq`, and `Tdust_front_eq`; unsampled equilibrium rows remain
+  `NaN`.
 - `abundances_init_relax.mp4`: movie of the initial relaxation phase, if enabled
   This movie records only a bounded set of relaxation snapshots and is capped to the configured runtime limit (`20 s` by default).
 - `abundances_vs_time.mp4`: movie of the infall evolution
@@ -422,6 +498,35 @@ If the run fails, the top-level output directory receives:
 
 - `error.png`: exception summary and traceback
 
+The Bondi grid writes:
+
+- `outputs/bondi_all_stars/summary.json`: top-level status, exact stellar
+  parameters, densities, shared physics controls, and per-star scan summaries.
+- `outputs/bondi_all_stars/<star-id>/`: the canonical per-star `inputs.json`,
+  `scan_summary.json`, density directories, and `history.npz` files described
+  above.
+- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e5.png`: CO, C, C+,
+  CHx, and HCO+ profiles for all three stars at the three selected distances,
+  using only `nH = 1e5 cm^-3`.
+- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e6.png`: the same
+  mass-by-distance comparison using only `nH = 1e6 cm^-3`.
+- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e5.pdf` and
+  `carbon_profiles_by_distance_nH_1e6.pdf`: vector exports of the two carbon
+  figures for manuscript use.
+- `plots/bondi_all_stars/tgas_front_vs_time_nH_1e5.png`: time-dependent and sampled
+  equilibrium stream-front gas temperature versus physical time for all three
+  stellar masses at `nH = 1e5 cm^-3`.
+- `plots/bondi_all_stars/tgas_front_vs_time_nH_1e6.png`: the same
+  mass-by-time comparison using only `nH = 1e6 cm^-3`.
+- `plots/bondi_all_stars/tgas_profiles_by_distance_nH_1e5.png`: full gas
+  temperature versus stream depth for all three stellar masses at the three
+  selected front distances, using only `nH = 1e5 cm^-3`.
+- `plots/bondi_all_stars/tgas_profiles_by_distance_nH_1e6.png`: the same
+  mass-by-distance temperature profiles using only `nH = 1e6 cm^-3`.
+- `plots/bondi_all_stars/summary.json` and `report.md`: figure inventory and
+  exact distance/time samples, front and profile temperature ranges, line
+  conventions, validation checks, and human-review guidance.
+
 ## Important Assumptions And Limitations
 
 - The model is 1D and does not solve multidimensional radiative transfer.
@@ -429,6 +534,8 @@ If the run fails, the top-level output directory receives:
 - In `draine_scalar` mode, the factor of 2 applied to `chi` is part of the current implementation and should be treated as a modeling choice specific to this validation. The `stellar_products` path assigns the process-specific products directly.
 - The dust temperature estimate is grey and heuristic.
 - The stream density is static while only the front radius changes.
+- The Bondi figure grid deliberately selects only optimistic `1e5` and
+  `1e6 cm^-3` densities and does not sample the low-density Bondi gas.
 - The model is designed for comparative tests and diagnostics, not precision dust thermal structure predictions.
 
 ## Suggested Citations

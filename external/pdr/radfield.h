@@ -22,6 +22,8 @@ class RadField {
     double *GPE; 
     /*ISRF*/
     double *GISRF; 
+    /*FUV continuum for CO ice photodesorption*/
+    double *GCO_pdes;
     /*photo reactions of gow17 network, including dust and self shielding for
      * CO and H2, Gph[igrid][ispec]*/
     double **Gph;
@@ -44,6 +46,7 @@ class RadField {
     /*return self-sheilding factors*/
     double GetfShieldH2mol();
     double GetfShieldCOmol();
+    double GetfShieldC();
   private:
     const double ngrid_;
     const double G0_; /* radiation field at boundary*/

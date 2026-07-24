@@ -12,7 +12,7 @@ instead of a scalar molecular column. Integration starts at the cell center
 and includes the geometric first segment to the next face once.
 """
 
-# db-keywords: shielding, healpix-columns, gow17, line-transfer, radmc3d, mesh, field, coordinates
+# db-keywords: shielding, healpix-columns, gow17, nonlte, line-transfer, radmc3d, mesh, field, coordinates, ray-tracing
 # db-role: canonical
 # db-scope: package
 # db-purpose: HEALPix velocity-coherent escape-probability kernel (Numba, parallel).
@@ -31,6 +31,85 @@ from diskbridge.chemistry.shielding.healpix_utils import (
     _t_to_radius_boundary,
     _t_to_theta_boundary,
 )
+
+
+_INNER_BOUNDARY_STOP = 0
+_INNER_BOUNDARY_VACUUM_CAVITY = 1
+_THETA_BOUNDARY_VACUUM = 0
+_THETA_BOUNDARY_CELL_TO_RMAX = 1
+
+
+def _spherical_boundary_mode_codes(
+    inner_boundary: str,
+    theta_boundary: str,
+) -> tuple[int, int]:
+    """Return Numba mode codes for spherical non-LTE ray boundaries."""
+
+    inner_modes = {
+        "stop": _INNER_BOUNDARY_STOP,
+        "vacuum_cavity": _INNER_BOUNDARY_VACUUM_CAVITY,
+    }
+    theta_modes = {
+        "vacuum": _THETA_BOUNDARY_VACUUM,
+        "boundary_cell_to_rmax": _THETA_BOUNDARY_CELL_TO_RMAX,
+    }
+    try:
+        inner_code = inner_modes[str(inner_boundary)]
+    except KeyError as exc:
+        raise ValueError(
+            "spherical_inner_boundary must be 'stop' or 'vacuum_cavity', "
+            f"got {inner_boundary!r}"
+        ) from exc
+    try:
+        theta_code = theta_modes[str(theta_boundary)]
+    except KeyError as exc:
+        raise ValueError(
+            "spherical_theta_boundary must be 'vacuum' or "
+            f"'boundary_cell_to_rmax', got {theta_boundary!r}"
+        ) from exc
+    return inner_code, theta_code
+
+
+@njit(cache=True)
+def _spherical_indices_at_point(
+    x: float,
+    y: float,
+    z: float,
+    r_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    phi_edges: np.ndarray,
+    theta_boundary_mode: int,
+) -> tuple[int, int, int]:
+    """Locate a point after transparent-cavity traversal."""
+
+    radius = np.sqrt(x * x + y * y + z * z)
+    ir = np.searchsorted(r_edges, radius, side="right") - 1
+    if ir < 0 or ir >= r_edges.size - 1:
+        return -1, -1, -1
+
+    theta = np.arctan2(np.sqrt(x * x + y * y), z)
+    it = np.searchsorted(theta_edges, theta, side="right") - 1
+    nt = theta_edges.size - 1
+    if it < 0 or it >= nt:
+        if theta_boundary_mode == _THETA_BOUNDARY_CELL_TO_RMAX:
+            if theta < theta_edges[0]:
+                it = 0
+            else:
+                it = nt - 1
+        else:
+            return -1, -1, -1
+
+    phi = np.arctan2(y, x)
+    two_pi = 2.0 * np.pi
+    while phi < phi_edges[0]:
+        phi += two_pi
+    while phi >= phi_edges[-1]:
+        phi -= two_pi
+    ip = np.searchsorted(phi_edges, phi, side="right") - 1
+    nphi = phi_edges.size - 1
+    if ip < 0 or ip >= nphi:
+        return -1, -1, -1
+    return ir, it, ip
 
 
 def _unit_directions(dirs: np.ndarray) -> np.ndarray:
@@ -67,7 +146,7 @@ def _integrate_velocity_coherent_cartesian(
     z_edges: np.ndarray,
     max_ray_steps: int,
     reduction: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Integrate coherent fields, returning rays or mean escape probability."""
 
     n_cand = candidate_idx.shape[0]
@@ -79,6 +158,7 @@ def _integrate_velocity_coherent_cartesian(
 
     n_reduced = n_dirs if reduction == 0 else 1
     out = np.zeros((n_cand, n_reduced, nlin), dtype=np.float64)
+    step_limit_hits = np.zeros(n_cand, dtype=np.int64)
 
     xmin = x_edges[0]
     xmax = x_edges[-1]
@@ -184,9 +264,11 @@ def _integrate_velocity_coherent_cartesian(
             for m in range(nlin):
                 tau[m] = 0.0
             t_curr = 0.0
+            ray_terminated = False
 
             for _step in range(max_ray_steps):
                 if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
+                    ray_terminated = True
                     break
                 t_next = tMaxX
                 if tMaxY < t_next:
@@ -199,6 +281,7 @@ def _integrate_velocity_coherent_cartesian(
                 hit_z = np.abs(tMaxZ - t_next) <= tol
                 ds = t_next - t_curr
                 if ds <= 0.0 or not np.isfinite(ds):
+                    ray_terminated = True
                     break
 
                 dv = (
@@ -236,6 +319,12 @@ def _integrate_velocity_coherent_cartesian(
                     iz += step_z
                     tMaxZ += tDeltaZ
 
+                if ix < 0 or ix >= nx or iy < 0 or iy >= ny or iz < 0 or iz >= nz:
+                    ray_terminated = True
+
+            if not ray_terminated:
+                step_limit_hits[c] += 1
+
             if reduction == 0:
                 for m in range(nlin):
                     out[c, k, m] = tau[m]
@@ -247,7 +336,7 @@ def _integrate_velocity_coherent_cartesian(
             for m in range(nlin):
                 out[c, 0, m] = beta_sum[m] * inv_npix
 
-    return out
+    return out, step_limit_hits
 
 
 @njit(parallel=True, cache=True, fastmath=False)
@@ -263,7 +352,9 @@ def _integrate_velocity_coherent_spherical(
     phi_edges: np.ndarray,
     max_ray_steps: int,
     reduction: int,
-) -> np.ndarray:
+    inner_boundary_mode: int,
+    theta_boundary_mode: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """Integrate coherent fields, returning rays or mean escape probability."""
 
     n_cand = candidate_idx.shape[0]
@@ -275,9 +366,12 @@ def _integrate_velocity_coherent_spherical(
 
     n_reduced = n_dirs if reduction == 0 else 1
     out = np.zeros((n_cand, n_reduced, nlin), dtype=np.float64)
+    step_limit_hits = np.zeros(n_cand, dtype=np.int64)
 
     rmin = r_edges[0]
     rmax = r_edges[-1]
+    has_lower_theta_exterior = theta_edges[0] > 0.0
+    has_upper_theta_exterior = theta_edges[-1] < np.pi
     inv_npix = 1.0 / float(n_dirs)
 
     for c in prange(n_cand):
@@ -326,38 +420,46 @@ def _integrate_velocity_coherent_spherical(
 
             for m in range(nlin):
                 tau[m] = 0.0
+            ray_terminated = False
 
             for _step in range(max_ray_steps):
                 if ir < 0 or ir >= nr or it < 0 or it >= nt:
+                    ray_terminated = True
                     break
                 r = np.sqrt(x * x + y * y + z * z)
                 if r <= rmin or r >= rmax:
+                    ray_terminated = True
                     break
 
                 t_min = np.inf
                 hit_dim = -1
                 hit_side = -1
 
-                if ir > 0:
-                    t_r_lo = _t_to_radius_boundary(x, y, z, ux, uy, uz, r_edges[ir])
-                    if t_r_lo < t_min:
-                        t_min = t_r_lo
-                        hit_dim = 0
-                        hit_side = 0
+                t_r_lo = _t_to_radius_boundary(x, y, z, ux, uy, uz, r_edges[ir])
+                if t_r_lo < t_min:
+                    t_min = t_r_lo
+                    hit_dim = 0
+                    hit_side = 0
                 if ir < nr:
                     t_r_hi = _t_to_radius_boundary(x, y, z, ux, uy, uz, r_edges[ir + 1])
                     if t_r_hi < t_min:
                         t_min = t_r_hi
                         hit_dim = 0
                         hit_side = 1
-                if it > 0:
+                if it > 0 or (
+                    theta_boundary_mode == _THETA_BOUNDARY_VACUUM
+                    and has_lower_theta_exterior
+                ):
                     th_lo = theta_edges[it]
                     t_th_lo = _t_to_theta_boundary(x, y, z, ux, uy, uz, th_lo)
                     if t_th_lo < t_min:
                         t_min = t_th_lo
                         hit_dim = 1
                         hit_side = 0
-                if it < nt - 1:
+                if it < nt - 1 or (
+                    theta_boundary_mode == _THETA_BOUNDARY_VACUUM
+                    and has_upper_theta_exterior
+                ):
                     th_hi = theta_edges[it + 1]
                     t_th_hi = _t_to_theta_boundary(x, y, z, ux, uy, uz, th_hi)
                     if t_th_hi < t_min:
@@ -378,6 +480,7 @@ def _integrate_velocity_coherent_spherical(
                     hit_side = 1
 
                 if not np.isfinite(t_min) or t_min <= 0.0:
+                    ray_terminated = True
                     break
 
                 ds = t_min
@@ -409,7 +512,31 @@ def _integrate_velocity_coherent_spherical(
 
                 if hit_dim == 0:
                     if hit_side == 0:
-                        ir -= 1
+                        if ir > 0:
+                            ir -= 1
+                        elif inner_boundary_mode == _INNER_BOUNDARY_STOP:
+                            ir = -1
+                        else:
+                            t_cavity = _t_to_radius_boundary(
+                                x, y, z, ux, uy, uz, rmin
+                            )
+                            if not np.isfinite(t_cavity) or t_cavity <= 0.0:
+                                ir = -1
+                            else:
+                                probe = 1.0e-9 * max(rmin, 1.0)
+                                travel = t_cavity + probe
+                                x += ux * travel
+                                y += uy * travel
+                                z += uz * travel
+                                ir, it, ip = _spherical_indices_at_point(
+                                    x,
+                                    y,
+                                    z,
+                                    r_edges,
+                                    theta_edges,
+                                    phi_edges,
+                                    theta_boundary_mode,
+                                )
                     else:
                         ir += 1
                 elif hit_dim == 1:
@@ -427,6 +554,20 @@ def _integrate_velocity_coherent_spherical(
                         if ip >= nphi:
                             ip = 0
 
+                r_after = np.sqrt(x * x + y * y + z * z)
+                if (
+                    ir < 0
+                    or ir >= nr
+                    or it < 0
+                    or it >= nt
+                    or r_after <= rmin
+                    or r_after >= rmax
+                ):
+                    ray_terminated = True
+
+            if not ray_terminated:
+                step_limit_hits[c] += 1
+
             if reduction == 0:
                 for m in range(nlin):
                     out[c, k, m] = tau[m]
@@ -438,7 +579,7 @@ def _integrate_velocity_coherent_spherical(
             for m in range(nlin):
                 out[c, 0, m] = beta_sum[m] * inv_npix
 
-    return out
+    return out, step_limit_hits
 
 
 @njit(parallel=True, cache=True, fastmath=False)
@@ -617,10 +758,10 @@ def compute_beta_cartesian(
 ):
     """Return direction-averaged Cartesian escape probabilities."""
 
-    return _integrate_velocity_coherent_cartesian(
+    beta, step_limit_hits = _compute_beta_cartesian_with_diagnostics(
         candidate_idx,
         cell_centers,
-        _unit_directions(dirs),
+        dirs,
         alpha0_stack,
         velocity_xyz,
         a_line,
@@ -628,8 +769,14 @@ def compute_beta_cartesian(
         y_edges,
         z_edges,
         max_ray_steps,
-        1,
-    )[:, 0, :]
+    )
+    _warn_ray_step_limit(
+        coordinate_system="cartesian",
+        step_limit_hits=step_limit_hits,
+        total_rays=int(np.asarray(candidate_idx).shape[0] * np.asarray(dirs).shape[0]),
+        max_ray_steps=int(max_ray_steps),
+    )
+    return beta
 
 
 def compute_beta_spherical(
@@ -643,10 +790,90 @@ def compute_beta_spherical(
     theta_edges,
     phi_edges,
     max_ray_steps,
+    spherical_inner_boundary="vacuum_cavity",
+    spherical_theta_boundary="boundary_cell_to_rmax",
 ):
-    """Return direction-averaged spherical escape probabilities."""
+    """Return direction-averaged spherical escape probabilities.
 
-    return _integrate_velocity_coherent_spherical(
+    Parameters
+    ----------
+    spherical_inner_boundary : {"stop", "vacuum_cavity"}, optional
+        Stop at ``rmin`` or cross the central cavity without opacity.
+    spherical_theta_boundary : {"vacuum", "boundary_cell_to_rmax"}, optional
+        Stop at the angular mesh edge or extrapolate its boundary-cell values
+        through the uncovered angular region to ``rmax``.
+    """
+
+    inner_mode, theta_mode = _spherical_boundary_mode_codes(
+        spherical_inner_boundary,
+        spherical_theta_boundary,
+    )
+    beta, step_limit_hits = _compute_beta_spherical_with_diagnostics(
+        candidate_idx,
+        cell_centers,
+        dirs,
+        alpha0_stack,
+        velocity_xyz,
+        a_line,
+        r_edges,
+        theta_edges,
+        phi_edges,
+        max_ray_steps,
+        inner_mode,
+        theta_mode,
+    )
+    _warn_ray_step_limit(
+        coordinate_system="spherical",
+        step_limit_hits=step_limit_hits,
+        total_rays=int(np.asarray(candidate_idx).shape[0] * np.asarray(dirs).shape[0]),
+        max_ray_steps=int(max_ray_steps),
+    )
+    return beta
+
+
+def _compute_beta_cartesian_with_diagnostics(
+    candidate_idx,
+    cell_centers,
+    dirs,
+    alpha0_stack,
+    velocity_xyz,
+    a_line,
+    x_edges,
+    y_edges,
+    z_edges,
+    max_ray_steps,
+) -> tuple[np.ndarray, int]:
+    out, hits = _integrate_velocity_coherent_cartesian(
+        candidate_idx,
+        cell_centers,
+        _unit_directions(dirs),
+        alpha0_stack,
+        velocity_xyz,
+        a_line,
+        x_edges,
+        y_edges,
+        z_edges,
+        max_ray_steps,
+        1,
+    )
+    return out[:, 0, :], int(np.sum(hits))
+
+
+def _compute_beta_spherical_with_diagnostics(
+    candidate_idx,
+    cell_centers,
+    dirs,
+    alpha0_stack,
+    velocity_xyz,
+    a_line,
+    r_edges,
+    theta_edges,
+    phi_edges,
+    max_ray_steps,
+    inner_boundary_mode,
+    theta_boundary_mode,
+) -> tuple[np.ndarray, int]:
+    out, hits = _integrate_velocity_coherent_spherical(
         candidate_idx,
         cell_centers,
         _unit_directions(dirs),
@@ -658,7 +885,31 @@ def compute_beta_spherical(
         phi_edges,
         max_ray_steps,
         1,
-    )[:, 0, :]
+        inner_boundary_mode,
+        theta_boundary_mode,
+    )
+    return out[:, 0, :], int(np.sum(hits))
+
+
+def _warn_ray_step_limit(
+    *,
+    coordinate_system: str,
+    step_limit_hits: int,
+    total_rays: int,
+    max_ray_steps: int,
+) -> None:
+    """Warn once when ray integration stops at the configured step limit."""
+
+    if step_limit_hits <= 0:
+        return
+    logger.warning(
+        "HEALPix %s integration reached max_ray_steps=%d for %d/%d rays; "
+        "returning optical depths truncated at the step limit",
+        coordinate_system,
+        max_ray_steps,
+        step_limit_hits,
+        total_rays,
+    )
 
 
 def compute_velocity_coherent_columns_healpix(
@@ -688,7 +939,7 @@ def compute_velocity_coherent_columns_healpix(
     velocity_xyz = np.ascontiguousarray(velocity_xyz, dtype=np.float64)
     a_line = np.ascontiguousarray(a_line, dtype=np.float64)
     if mesh.coord_system == "cartesian":
-        out = _integrate_velocity_coherent_cartesian(
+        out, _step_limit_hits = _integrate_velocity_coherent_cartesian(
             candidate_idx,
             cell_centers,
             dirs,
@@ -736,6 +987,8 @@ def compute_escape_probabilities_healpix(
     a_line: np.ndarray,
     max_ray_steps: int = 200_000,
     chunk_size: int | None = None,
+    spherical_inner_boundary: str = "vacuum_cavity",
+    spherical_theta_boundary: str = "boundary_cell_to_rmax",
 ) -> np.ndarray:
     """Compute direction-averaged escape probability per candidate cell, per line.
 
@@ -755,6 +1008,13 @@ def compute_escape_probabilities_healpix(
     max_ray_steps : int
     chunk_size : int or None
         If not None, candidates are processed in chunks of this size.
+    spherical_inner_boundary : {"stop", "vacuum_cavity"}, optional
+        For spherical meshes, stop rays at ``rmin`` or cross the unmodelled
+        central cavity with zero opacity and resume on the far side.
+    spherical_theta_boundary : {"vacuum", "boundary_cell_to_rmax"}, optional
+        For spherical meshes whose theta range does not cover the full sphere,
+        stop rays at the theta edge or extend the boundary-cell fields through
+        the uncovered angular region until the ray reaches ``rmax``.
 
     Returns
     -------
@@ -772,8 +1032,13 @@ def compute_escape_probabilities_healpix(
     if n_cand == 0:
         return np.zeros((0, nlin), dtype=np.float64)
 
+    inner_mode, theta_mode = _spherical_boundary_mode_codes(
+        spherical_inner_boundary,
+        spherical_theta_boundary,
+    )
+
     if chunk_size is None or chunk_size >= n_cand:
-        return _dispatch_compute_beta(
+        beta, step_limit_hits = _dispatch_compute_beta(
             mesh=mesh,
             tracer=tracer,
             candidate_idx=candidate_idx,
@@ -783,9 +1048,19 @@ def compute_escape_probabilities_healpix(
             velocity_xyz=velocity_xyz,
             a_line=a_line,
             max_ray_steps=int(max_ray_steps),
+            inner_boundary_mode=inner_mode,
+            theta_boundary_mode=theta_mode,
         )
+        _warn_ray_step_limit(
+            coordinate_system=mesh.coord_system,
+            step_limit_hits=step_limit_hits,
+            total_rays=int(n_cand * dirs.shape[0]),
+            max_ray_steps=int(max_ray_steps),
+        )
+        return beta
 
     out = np.empty((n_cand, nlin), dtype=np.float64)
+    step_limit_hits = 0
     for start in range(0, n_cand, int(chunk_size)):
         end = min(start + int(chunk_size), n_cand)
         t0 = time.perf_counter()
@@ -795,7 +1070,7 @@ def compute_escape_probabilities_healpix(
             end,
             n_cand,
         )
-        out[start:end] = _dispatch_compute_beta(
+        beta_chunk, chunk_step_limit_hits = _dispatch_compute_beta(
             mesh=mesh,
             tracer=tracer,
             candidate_idx=candidate_idx[start:end],
@@ -805,7 +1080,11 @@ def compute_escape_probabilities_healpix(
             velocity_xyz=velocity_xyz,
             a_line=a_line,
             max_ray_steps=int(max_ray_steps),
+            inner_boundary_mode=inner_mode,
+            theta_boundary_mode=theta_mode,
         )
+        out[start:end] = beta_chunk
+        step_limit_hits += chunk_step_limit_hits
         logger.info(
             "HEALPix escape beta chunk done: cells %d:%d / %d (%.2f s)",
             start,
@@ -813,6 +1092,12 @@ def compute_escape_probabilities_healpix(
             n_cand,
             time.perf_counter() - t0,
         )
+    _warn_ray_step_limit(
+        coordinate_system=mesh.coord_system,
+        step_limit_hits=step_limit_hits,
+        total_rays=int(n_cand * dirs.shape[0]),
+        max_ray_steps=int(max_ray_steps),
+    )
     return out
 
 
@@ -827,9 +1112,11 @@ def _dispatch_compute_beta(
     velocity_xyz,
     a_line,
     max_ray_steps,
+    inner_boundary_mode,
+    theta_boundary_mode,
 ):
     if mesh.coord_system == "cartesian":
-        return compute_beta_cartesian(
+        return _compute_beta_cartesian_with_diagnostics(
             candidate_idx,
             cell_centers,
             dirs,
@@ -842,7 +1129,7 @@ def _dispatch_compute_beta(
             max_ray_steps,
         )
     if mesh.coord_system == "spherical":
-        return compute_beta_spherical(
+        return _compute_beta_spherical_with_diagnostics(
             candidate_idx,
             cell_centers,
             dirs,
@@ -853,6 +1140,8 @@ def _dispatch_compute_beta(
             np.ascontiguousarray(tracer.theta_edges, dtype=np.float64),
             np.ascontiguousarray(tracer.phi_edges, dtype=np.float64),
             max_ray_steps,
+            inner_boundary_mode,
+            theta_boundary_mode,
         )
     raise ValueError(
         "HEALPix escape kernel requires spherical or cartesian mesh, "

@@ -1230,11 +1230,6 @@ class RadImage:
             Molecule name (e.g., 'co')
         """
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
-        if self._has_external_population_inputs(molecule):
-            logger.info(
-                "Preserving staged external-population molecule file for %s", molecule
-            )
-            return
         moldata_dir = REPO_ROOT / "data" / "moldata"
         install_validated_molecule_file(
             species=molecule,

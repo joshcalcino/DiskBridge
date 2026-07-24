@@ -387,7 +387,10 @@ def _integrate_all_rays_spherical_dda_multi(
     nt = fields_stack.shape[2]
     nphi = fields_stack.shape[3]
 
-    N_all = np.zeros((n_cells, n_dirs, n_fields), dtype=np.float64)
+    # Leave pages untouched until their owning worker initializes a ray row.
+    # This parallel first-touch avoids serially faulting a multi-GiB result on
+    # one NUMA node before the ray march begins.
+    N_all = np.empty((n_cells, n_dirs, n_fields), dtype=np.float64)
 
     rmin = r_edges[0]
     rmax = r_edges[-1]
@@ -410,6 +413,8 @@ def _integrate_all_rays_spherical_dda_multi(
         z0 = cell_centers[i, 2]
 
         for j in range(n_dirs):
+            for k in range(n_fields):
+                N_all[i, j, k] = 0.0
             vx = directions[j, 0]
             vy = directions[j, 1]
             vz = directions[j, 2]
@@ -540,7 +545,9 @@ def _integrate_all_rays_cartesian_dda_multi(
     ny = fields_stack.shape[2]
     nz = fields_stack.shape[3]
 
-    N_all = np.zeros((n_cells, n_dirs, n_fields), dtype=np.float64)
+    # Initialize each ray row on the worker that will populate it so large
+    # outputs receive parallel NUMA first-touch.
+    N_all = np.empty((n_cells, n_dirs, n_fields), dtype=np.float64)
 
     xmin = x_edges[0]
     xmax = x_edges[-1]
@@ -569,6 +576,8 @@ def _integrate_all_rays_cartesian_dda_multi(
         z0 = cell_centers[i, 2]
 
         for j in range(n_dirs):
+            for k in range(n_fields):
+                N_all[i, j, k] = 0.0
             vx = directions[j, 0]
             vy = directions[j, 1]
             vz = directions[j, 2]

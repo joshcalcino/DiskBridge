@@ -338,6 +338,26 @@ def test_spherical_oblique_uniform_columns_match_first_radial_boundary():
     np.testing.assert_allclose(actual, expected, rtol=2.0e-9, atol=2.0e-9)
 
 
+@pytest.mark.parametrize(
+    "mesh,tracer_cls",
+    [
+        (_make_uniform_cartesian_mesh(ncells=2, L_cm=2.0), CartesianHealpixRayTracer),
+        (_make_small_spherical_mesh(), SphericalHealpixRayTracer),
+    ],
+    ids=("cartesian", "spherical"),
+)
+def test_ray_outputs_are_zero_when_direction_exits_before_traversal(mesh, tracer_cls):
+    """Parallel first-touch must initialize rows that take an early exit."""
+    tracer = tracer_cls(mesh, nside=1)
+    center = np.asarray([tracer.cell_center_xyz(0, 0, 0)], dtype=np.float64)
+    directions = np.zeros((1, 3), dtype=np.float64)
+    fields = np.ones((2, *mesh.shape), dtype=np.float64)
+
+    columns = integrate_rays_multi(tracer, center, directions, fields)
+
+    np.testing.assert_array_equal(columns, np.zeros((1, 1, 2), dtype=np.float64))
+
+
 @pytest.mark.parametrize("geometry", ["cartesian", "spherical"])
 def test_starward_column_includes_source_to_face_segment(geometry):
     """A starward ray integrates its source-to-face and full inner segments."""
@@ -753,6 +773,74 @@ def test_weights_normalised_cartesian():
     np.testing.assert_allclose(W.sum(axis=1), 1.0, atol=1e-12)
 
 
+@pytest.mark.parametrize(
+    "mesh",
+    [_make_uniform_cartesian_mesh(ncells=3, L_cm=3.0), _make_small_spherical_mesh()],
+    ids=("cartesian", "spherical"),
+)
+def test_scalar_extinction_matches_per_bin_columns(mesh):
+    """The lower-memory scalar integral must preserve the per-bin tau formula."""
+    shape = mesh.shape
+    index = np.arange(np.prod(shape), dtype=np.float64).reshape(shape)
+    dust_rho_bins = [1.0e-3 * (1.0 + index), 5.0e-4 * (2.0 + index[::-1])]
+    kext_uv = np.array([0.7, 1.3], dtype=np.float64)
+
+    W, candidate_idx, directions, centers, debug = (
+        compute_uv_direction_weights_healpix(
+            mesh,
+            chi_radmc=np.full(shape, 2.0, dtype=np.float64),
+            nside=1,
+            dust_rho_bins=dust_rho_bins,
+            kext_uv=kext_uv,
+            chi_ext0=0.8,
+            star_uv_luminosity_erg_s=1.0,
+            star_uv_reference_energy_density=1.0,
+            keep_debug_arrays=True,
+            chunk_size=max(1, np.prod(shape) // 3),
+        )
+    )
+
+    ref_idx, ref_dirs, columns = compute_column_rays_healpix(
+        mesh,
+        {"dust_0": dust_rho_bins[0], "dust_1": dust_rho_bins[1]},
+        nside=1,
+        candidate_mask=np.ones(shape, dtype=bool),
+    )
+    tau_reference = (
+        kext_uv[0] * columns["dust_0"] + kext_uv[1] * columns["dust_1"]
+    )
+    np.testing.assert_array_equal(candidate_idx, ref_idx)
+    np.testing.assert_allclose(directions, ref_dirs, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        debug["tau_ext_rays"], tau_reference, rtol=2.0e-14, atol=2.0e-14
+    )
+
+    tracer = (
+        CartesianHealpixRayTracer(mesh, nside=1)
+        if mesh.coord_system == "cartesian"
+        else SphericalHealpixRayTracer(mesh, nside=1)
+    )
+    star_columns = integrate_starward_rays_multi(
+        tracer,
+        centers,
+        np.stack(dust_rho_bins, axis=0),
+        candidate_idx=(candidate_idx if mesh.coord_system == "spherical" else None),
+    )
+    tau_star_reference = star_columns @ kext_uv
+    np.testing.assert_allclose(
+        debug["tau_star"], tau_star_reference, rtol=2.0e-14, atol=2.0e-14
+    )
+
+    contribution_sum = debug["uv_total_contrib"].sum(axis=1, keepdims=True)
+    expected = np.divide(
+        debug["uv_total_contrib"],
+        contribution_sum,
+        out=np.full_like(W, 1.0 / W.shape[1]),
+        where=contribution_sum > 0.0,
+    )
+    np.testing.assert_allclose(W, expected, rtol=0.0, atol=2.0e-14)
+
+
 def test_weights_uniform_when_isotropic_dominates():
     """If chi_radmc >> chi_ext_dir + chi_star, weights should be near-uniform.
 
@@ -836,6 +924,83 @@ def test_closure_diagnostics_increase_memory_estimate():
 
     assert with_diag["retained_diagnostics_bytes"] > base["retained_diagnostics_bytes"]
     assert with_diag["estimated_peak_bytes"] > base["estimated_peak_bytes"]
+
+
+def test_w_rays_memory_estimate_counts_one_chunk_ray_map():
+    """Per-bin count may change inputs, but must not multiply ray-map storage."""
+    n_cells = 1_000
+    chunk_cells = 125
+    npix = 192
+    two_bins = _estimate_w_rays_memory_bytes(
+        n_cells=n_cells,
+        chunk_cells=chunk_cells,
+        npix=npix,
+        nbin=2,
+        include_star=False,
+    )
+    twenty_bins = _estimate_w_rays_memory_bytes(
+        n_cells=n_cells,
+        chunk_cells=chunk_cells,
+        npix=npix,
+        nbin=20,
+        include_star=False,
+    )
+
+    expected_chunk_map = chunk_cells * npix * np.dtype(np.float64).itemsize
+    assert two_bins["chunk_ray_map_bytes"] == expected_chunk_map
+    assert twenty_bins["chunk_ray_map_bytes"] == expected_chunk_map
+    assert twenty_bins["dust_column_bytes"] == 0
+    assert twenty_bins["normalization_temp_bytes"] == 0
+    assert twenty_bins["dense_ray_map_count"] == 1
+    assert (
+        twenty_bins["persistent_input_bytes"] - two_bins["persistent_input_bytes"]
+        == 18 * n_cells * np.dtype(np.float64).itemsize
+    )
+    assert twenty_bins["estimated_peak_bytes"] == (
+        twenty_bins["persistent_bytes"]
+        + twenty_bins["chunk_incremental_bytes"]
+        + twenty_bins["retained_diagnostics_bytes"]
+        + twenty_bins["diagnostic_concatenation_bytes"]
+    )
+
+
+def test_zero_source_and_outer_weight_rows_are_fully_initialized():
+    """Every np.empty-backed W row must be written on exceptional branches."""
+    mesh = _make_uniform_cartesian_mesh(ncells=3, L_cm=3.0)
+    shape = mesh.shape
+    dust = 1.0e-2 * (
+        1.0 + np.arange(np.prod(shape), dtype=np.float64).reshape(shape)
+    )
+    common = {
+        "mesh": mesh,
+        "chi_radmc": np.zeros(shape, dtype=np.float64),
+        "nside": 1,
+        "dust_rho_bins": [dust],
+        "kext_uv": np.array([1.0]),
+        "chi_ext0": 0.0,
+        "star_uv_luminosity_erg_s": 0.0,
+        "chunk_size": 4,
+    }
+
+    W_zero, *_ = compute_uv_direction_weights_healpix(**common)
+    np.testing.assert_allclose(W_zero, 1.0 / 12.0, rtol=0.0, atol=0.0)
+
+    W_uniform, *_ = compute_uv_direction_weights_healpix(
+        **common,
+        isotropic_outside_r_cm=0.0,
+        outer_weight_mode="uniform",
+    )
+    np.testing.assert_allclose(W_uniform, 1.0 / 12.0, rtol=0.0, atol=0.0)
+
+    W_tau, *_ = compute_uv_direction_weights_healpix(
+        **common,
+        isotropic_outside_r_cm=0.0,
+        outer_weight_mode="tau",
+    )
+    assert np.all(np.isfinite(W_tau))
+    assert np.all(W_tau >= 0.0)
+    np.testing.assert_allclose(W_tau.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-12)
+    assert np.any(np.ptp(W_tau, axis=1) > 1.0e-6)
 
 
 def test_chunked_weights_match_single_chunk():
@@ -984,6 +1149,22 @@ def test_weights_require_kext_uv():
             nside=1,
             dust_rho_bins=[rho],
             kext_uv=np.array([]),
+            chi_ext0=1.0,
+            star_uv_luminosity_erg_s=0.0,
+        )
+
+
+def test_weights_require_one_opacity_per_dust_bin():
+    """The scalar extinction field needs an explicit one-to-one bin mapping."""
+    mesh = _make_uniform_cartesian_mesh(ncells=2)
+    shape = mesh.shape
+    with pytest.raises(ValueError, match="one opacity per dust density bin"):
+        compute_uv_direction_weights_healpix(
+            mesh,
+            chi_radmc=np.ones(shape, dtype=np.float64),
+            nside=1,
+            dust_rho_bins=[np.ones(shape), np.ones(shape)],
+            kext_uv=np.array([100.0]),
             chi_ext0=1.0,
             star_uv_luminosity_erg_s=0.0,
         )
