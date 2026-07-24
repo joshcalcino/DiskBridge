@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Optional, Union, TYPE_CHECKING
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union, TYPE_CHECKING
 from pathlib import Path
 import numpy as np
 
@@ -333,38 +333,34 @@ class Model:
         self,
         rho_disk_min: Quantity,
         *,
-        fthres: Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]] = 2.0,
-        fthres_vr: Optional[Union[float, np.ndarray, Callable[[np.ndarray], np.ndarray]]] = None,
-        fthres_vr_inner: Optional[float] = None,
+        max_poloidal_mach: float = 1.0,
+        rotational_support_factor: float = 2.0,
         rho_core_min: Optional[Quantity] = None,
-        r_max_for_axis: Optional[Quantity] = None,
+        r_max_for_axis: Quantity,
         n_r_bins: Optional[int] = None,
         n_theta_bins: Optional[int] = None,
-        r_max: Optional[Quantity] = None,
-        weight_mode: str = "cell",
-        weight_delta_bins: float = 3.0,
-        weight_m0: float = 0.25,
+        weight_mode: str = "soft_connected",
+        weight_m0: float = 0.50,
         weight_floor: float = 1e-4,
         soft_delta: Union[float, Mapping[str, float]] = 0.20,
+        kinematic_smoothing_bins: Tuple[float, float, float] = (2.0, 1.0, 2.0),
     ) -> SubModel:
         from .masking import set_mask_from_joos_disk as _set_mask_from_joos_disk
 
         return _set_mask_from_joos_disk(
             self,
             rho_disk_min,
-            fthres=fthres,
-            fthres_vr=fthres_vr,
-            fthres_vr_inner=fthres_vr_inner,
+            max_poloidal_mach=max_poloidal_mach,
+            rotational_support_factor=rotational_support_factor,
             rho_core_min=rho_core_min,
             r_max_for_axis=r_max_for_axis,
             n_r_bins=n_r_bins,
             n_theta_bins=n_theta_bins,
-            r_max=r_max,
             weight_mode=weight_mode,
-            weight_delta_bins=weight_delta_bins,
             weight_m0=weight_m0,
             weight_floor=weight_floor,
             soft_delta=soft_delta,
+            kinematic_smoothing_bins=kinematic_smoothing_bins,
         )
 
     def set_mask_from_array(

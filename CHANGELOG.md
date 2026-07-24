@@ -8,6 +8,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- Conservative finite-time radial dust surface-density transport helpers with
+  pressure drift, turbulent diffusion, absorbing inner outflow, no imposed
+  outer inflow, explicit mass-loss diagnostics, and a coherent smoothed radial
+  gas background with bounded negative pressure slopes that prevent artificial
+  outer dust traps.
 - The standalone 1--500 au DiskBridge disc validation now generates
   chemistry-derived LTE/non-LTE [C I] 1-0 and HCO+ 4-3 channel figures from one
   physical RADMC-3D/GOW17 run, without abundance or collider scaling.
@@ -34,6 +39,17 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Joos disc weights now evaluate the full loaded mesh and enforce both vertical
+  and outward radial connectivity. `r_max_for_axis` is solely the required
+  angular-momentum support aperture; the physical `r_max`, implicit
+  `fthres_vr_inner` ramp, and unused `weight_delta_bins` arguments were removed.
+- The Joos disc classifier now uses one explicit poloidal-Mach limit instead of
+  separate orbital-to-radial and orbital-to-vertical velocity thresholds.
+  Density-weighted smoothed gas with transonic or slower poloidal motion,
+  rotational support, and sufficient density seeds the connected disc. Bondi
+  All-Stars uses the default `max_poloidal_mach = 1`, rejecting supersonic
+  infalling streamers from the settled-disc dust component. The connected
+  continuous weight is now the public default rather than an opt-in mode.
 - Directional UV-weight construction now ray-integrates one opacity-weighted
   dust-extinction field instead of retaining per-bin ray columns. Parallel
   first-touch and fused source normalization remove redundant ray-sized
@@ -81,12 +97,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - Soft Joos disc weights no longer snap high scores to exactly one. Their
   complementary ISM fractions therefore remain smooth and positive, removing
   artificial sharp changes in settled-disc/ISM dust-density ratio maps.
-- Joos disc-axis measurement now always has finite radial support: an explicit
-  `r_max_for_axis` takes precedence, otherwise the mask `r_max` is reused, and
-  calls supplying neither are rejected. Empty or degenerate axis selections
-  also raise instead of silently broadening the density population or choosing
-  positive z. The Bondi All-Stars workflow explicitly uses each snapshot's
-  adopted disc radius for both axis measurement and masking.
+- Joos disc-axis measurement now always has finite radial support through the
+  required `r_max_for_axis`. Empty or degenerate axis selections raise instead
+  of silently broadening the density population or choosing positive z.
 - The high-level GOW17 equilibrium slab now translates physical incident
   Draine units to the native solver according to radiation geometry: beamed
   slabs retain `G0 = 2 chi`, while one-sided isotropic slabs use `G0 = chi`.

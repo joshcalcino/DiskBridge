@@ -1,7 +1,7 @@
-# db-keywords: disk-mask, units, model, mesh, field, io
+# db-keywords: disk-mask, dust, units, model, mesh, field, io
 # db-role: canonical
 # db-scope: package
-# db-purpose: Package module for disk-mask, units, model, mesh.
+# db-purpose: Public model, mesh, mask, and radial dust-transport API.
 
 from pathlib import Path
 from typing import Mapping, Optional, Union
@@ -11,6 +11,15 @@ from .field import Field
 from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .downsample import downsample_model
+from .dust_transport import (
+    RadialGasBackground,
+    RadialTransportDiagnostics,
+    build_smoothed_radial_gas_background,
+    dust_diffusivity,
+    evolve_radial_surface_density,
+    pressure_drift_velocity,
+    smoothed_log_pressure_gradient,
+)
 from .masking import set_mask_from_joos_disk
 from .microturbulence import ensure_microturbulence_field, microturbulence_spatially_constant
 
@@ -70,9 +79,16 @@ __all__ = [
     "ClipIndexer",
     "compute_clip_indexer",
     "downsample_model",
+    "build_smoothed_radial_gas_background",
+    "dust_diffusivity",
+    "evolve_radial_surface_density",
     "ensure_microturbulence_field",
     "microturbulence_spatially_constant",
     "load_model",
     "puff_up_model",
+    "pressure_drift_velocity",
+    "RadialGasBackground",
+    "RadialTransportDiagnostics",
     "set_mask_from_joos_disk",
+    "smoothed_log_pressure_gradient",
 ]

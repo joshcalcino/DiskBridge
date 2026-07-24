@@ -14,7 +14,13 @@ from __future__ import annotations
 import diskbridge
 from diskbridge import Model, Quantity, read_params, units
 from diskbridge.chemistry import ChemistryResult, load_chemistry_outputs, run_chemistry
-from diskbridge.model import Field, Mesh, set_mask_from_joos_disk
+from diskbridge.model import (
+    Field,
+    Mesh,
+    RadialGasBackground,
+    build_smoothed_radial_gas_background,
+    set_mask_from_joos_disk,
+)
 from diskbridge.radmc3d import RadData, RadImage, RadModel, RadMolecule, RadWriter
 
 
@@ -32,6 +38,8 @@ def test_public_subpackage_exports_are_available():
     assert Field is not None
     assert Mesh is not None
     assert set_mask_from_joos_disk is not None
+    assert RadialGasBackground is not None
+    assert callable(build_smoothed_radial_gas_background)
     assert ChemistryResult is not None
     assert callable(load_chemistry_outputs)
     assert callable(run_chemistry)

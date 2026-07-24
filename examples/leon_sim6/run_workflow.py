@@ -291,11 +291,6 @@ for WEIGHT_MODE in WEIGHT_MODES_TO_TEST:
         fig.savefig(output, dpi=220)
         plt.close(fig)
     
-    fthres = 2.0
-    
-    r_max_au = float(r_max.to("au").magnitude)
-    fthres_vr_inner = 1.0
-    
     r_plot_au = mesh.centers("r").to("au").magnitude
     r_positive = r_plot_au[np.isfinite(r_plot_au) & (r_plot_au > 0.0)]
     r_min_au = float(np.min(r_positive))
@@ -311,17 +306,11 @@ for WEIGHT_MODE in WEIGHT_MODES_TO_TEST:
         xlim=(r_min_au, 300.0),
     )
     
-    def fthres_vr_inner_relaxed(R_au: np.ndarray) -> np.ndarray:
-        R_au = np.asarray(R_au, dtype=float)
-        R_au = np.clip(R_au, r_min_au, r_max_au)
-        x = np.log(R_au / r_min_au) / np.log(r_max_au / r_min_au)
-        return fthres_vr_inner + (fthres - fthres_vr_inner) * x
-    
     disk = model.set_mask_from_joos_disk(
         rho_disk_min=rho_disk_min,
-        r_max=r_max,
-        fthres=fthres,
-        fthres_vr=fthres_vr_inner_relaxed,
+        r_max_for_axis=r_max,
+        max_poloidal_mach=1.0,
+        rotational_support_factor=2.0,
         weight_mode=WEIGHT_MODE,
     )
     
