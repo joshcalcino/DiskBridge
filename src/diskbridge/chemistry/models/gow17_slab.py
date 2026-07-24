@@ -70,6 +70,23 @@ def _uniform_scalar(name: str, values: np.ndarray) -> float:
     return value
 
 
+def _native_slab_boundary_G0(chi: float, field_geo: int) -> float:
+    """Translate physical incident Draine units to the native slab boundary.
+
+    The native radiation implementation applies a factor of one half to every
+    geometry. A one-sided beam therefore needs ``G0 = 2 chi`` to present the
+    requested field at the illuminated face. The isotropic geometries describe
+    a field incident over one hemisphere, so their physical face intensity is
+    already ``chi / 2`` and the native solver receives ``G0 = chi``.
+    """
+
+    if field_geo == 0:
+        return 2.0 * float(chi)
+    if field_geo in (1, 2):
+        return float(chi)
+    raise ValueError(f"unsupported slab field_geo={field_geo}; expected 0, 1, or 2")
+
+
 def _default_y0(*, const_temp: bool, Tgas: float) -> np.ndarray:
     y0 = np.zeros(N_Y, dtype=np.float64)
     y0[I_HEP] = 1.450654e-08
@@ -125,6 +142,8 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
 
     nH0 = _uniform_scalar("nH", nH_cm3)
     chi0 = _uniform_scalar("incident chi", chi_arr)
+    field_geo = int(cfg["field_geo"])
+    native_G0 = _native_slab_boundary_G0(chi0, field_geo)
     Tdust0 = _uniform_scalar("Tdust", Tdust_K)
     T0 = _uniform_scalar("Tgas", T_K) if const_temp else float(T_K.reshape(-1)[0])
 
@@ -192,12 +211,12 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
 
     slab = _gow17.solve_slab_1d_equilibrium(
         nH=float(nH0),
-        G0=2.0 * float(chi0),
+        G0=float(native_G0),
         ngrid=int(ncells),
         NH_total=float(NH_total),
         logNH=bool(cfg["logNH"]),
         NH_min=float(NH_min),
-        field_geo=int(cfg["field_geo"]),
+        field_geo=field_geo,
         isdust=bool(cfg["isdust"]),
         isfsH2=bool(cfg["isfsH2"]),
         isfsCO=bool(cfg["isfsCO"]),
@@ -307,7 +326,8 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
     F_CO_pdes_total = F_CO_pdes_photon + (
         F_CRUV_CO_pdes_arr.reshape(shape) if enable_co_phase else 0.0
     )
-    G_CO = chi_arr * theta_co_arr
+    incident_face_chi = 0.5 * native_G0
+    G_CO = incident_face_chi * theta_co_arr
     fields = {
         "co_ice": Quantity(y_out[..., I_CO_ICE] * nH_cm3, "cm^-3"),
         "Tgas": Quantity(T_out, "K"),
@@ -327,8 +347,8 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
         "theta_c": Quantity(theta_c_arr, "dimensionless"),
         "chi_eff": Quantity(G_CO, "dimensionless"),
         "G_CO_diss_actual": Quantity(G_CO, "dimensionless"),
-        "G_C_ion_actual": Quantity(chi_arr * theta_c_arr, "dimensionless"),
-        "G_H2_diss_actual": Quantity(chi_arr * theta_h2_arr, "dimensionless"),
+        "G_C_ion_actual": Quantity(incident_face_chi * theta_c_arr, "dimensionless"),
+        "G_H2_diss_actual": Quantity(incident_face_chi * theta_h2_arr, "dimensionless"),
         "F_CRUV_CO_pdes": Quantity(
             (
                 F_CRUV_CO_pdes_arr.reshape(shape)
@@ -364,6 +384,9 @@ def run_gow17_slab_equilibrium(rad: "RadModel", config: dict) -> ChemistryResult
             "model": _MODEL_NAME,
             "enable_co_phase": bool(enable_co_phase),
             "radiation_mode": "incident_slab",
+            "incident_chi_draine": float(chi0),
+            "native_boundary_G0": float(native_G0),
+            "field_geo": field_geo,
             "b_H2_kms_scalar": float(b_H2_kms),
             "b_CO_kms_scalar": float(b_CO_kms),
             "shielding_linewidth": shielding_linewidth_meta,

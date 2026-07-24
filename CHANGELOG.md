@@ -34,6 +34,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Directional UV-weight construction now ray-integrates one opacity-weighted
+  dust-extinction field instead of retaining per-bin ray columns. Parallel
+  first-touch and fused source normalization remove redundant ray-sized
+  temporaries while preserving the public weights and diagnostic products.
 - Supported line species now download their canonical current online LAMDA
   files during solving, staging, and imaging, without a cached, legacy, or
   user-supplied molecule-file path. HCO+ uses the current separate para-H2 and
@@ -74,6 +78,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- The high-level GOW17 equilibrium slab now translates physical incident
+  Draine units to the native solver according to radiation geometry: beamed
+  slabs retain `G0 = 2 chi`, while one-sided isotropic slabs use `G0 = chi`.
+  Its returned actual dissociation and ionization fields use the same
+  illuminated-face normalization.
 - Native and Python incident-slab GOW17 chemistry now attenuate the external
   CO-photodesorption continuum as `exp(-1.8 A_V)` instead of reusing the much
   broader dust-heating ISRF attenuation. Native slab atomic-carbon shielding
@@ -126,6 +135,16 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Added a gas-phase GOW17 Figure 23 reproduction using the paper's one-sided
+  60-degree isotropic approximation, unit incident field, 1000-zone grid, and
+  original numerical controls at `nH = 100` and `1000 cm^-3`. It disables CO
+  phase chemistry, overlays current DiskBridge profiles on vector curves
+  extracted from the published figure. Both this workflow and the CO
+  freeze-out comparison now keep figures, numerical outputs, extracted paper
+  curves, and reports in dedicated artifact folders with complete provenance.
+- Added a deterministic complete directional UV-weight benchmark that records
+  scientific samples, row closure, wall time, CPU occupancy, sampled RSS
+  history, and known-array memory estimates for baseline/optimized comparison.
 - Added `validation/gow17_fig23`, a two-panel equilibrium slab comparison at
   `nH = 100` and `1000 cm^-3` showing CO, C, C+, HCO+, OHx, CHx, O, and O+
   with CO phase chemistry disabled and enabled. The enabled branch inherits

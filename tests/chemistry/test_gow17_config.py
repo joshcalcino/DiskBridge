@@ -64,6 +64,7 @@ from diskbridge.chemistry.models.gow17 import (
     _summarize_equilibrium_solver_diagnostics,
     run_gow17,
 )
+from diskbridge.chemistry.models.gow17_slab import _native_slab_boundary_G0
 import diskbridge.chemistry.models.gow17_timestep as gow17_timestep_module
 from diskbridge.chemistry.models.gow17_timestep import Gow17TimeStepper
 from diskbridge.chemistry.registry import available_models, get_model_callable
@@ -175,6 +176,21 @@ def test_slab_equilibrium_model_name_is_explicit_without_legacy_alias():
     )
     with pytest.raises(ValueError):
         get_model_callable("gow17_slab")
+
+
+@pytest.mark.parametrize(
+    ("field_geo", "expected_G0"),
+    [(0, 4.0), (1, 2.0), (2, 2.0)],
+)
+def test_slab_boundary_G0_respects_radiation_geometry(field_geo, expected_G0):
+    """Native boundary normalization preserves the physical incident field."""
+
+    assert _native_slab_boundary_G0(2.0, field_geo) == expected_G0
+
+
+def test_slab_boundary_G0_rejects_unknown_geometry():
+    with pytest.raises(ValueError, match="field_geo"):
+        _native_slab_boundary_G0(1.0, 3)
 
 
 def test_default_gow17_temperature_mode_is_computed():

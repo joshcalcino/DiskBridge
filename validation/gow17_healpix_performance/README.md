@@ -2,11 +2,11 @@
 
 ## Overview
 
-This validation measures HEALPix DDA ray marching, the variable-linewidth
-Visser CO shielding stage, the complete post-ray shielding algebra, the
-directional Omukai cooling reduction, and the native GOW17 per-cell CVODE
-stage at scales relevant to the Bondi All-Stars run. It is a performance and
-numerical-comparison workflow, not a pytest test.
+This validation measures HEALPix DDA ray marching, directional UV-weight
+construction, the variable-linewidth Visser CO shielding stage, the complete
+post-ray shielding algebra, the directional Omukai cooling reduction, and the
+native GOW17 per-cell CVODE stage at scales relevant to the Bondi All-Stars
+run. It is a performance and numerical-comparison workflow, not a pytest test.
 The largest default shielding case has
 `349,525` cells and `192` HEALPix directions (`nside=4`), for `67,108,800`
 interpolation samples per call.
@@ -23,6 +23,7 @@ Run the driver from the repository root:
 
 ```bash
 python validation/gow17_healpix_performance/run.py
+NUMBA_NUM_THREADS=16 python validation/gow17_healpix_performance/run_w_rays.py
 NUMBA_NUM_THREADS=16 python validation/gow17_healpix_performance/run_postprocess.py
 OMP_NUM_THREADS=16 python validation/gow17_healpix_performance/run_solver.py
 ```
@@ -40,6 +41,27 @@ measures effective H2/CO linewidths, H2 and C shielding, variable-linewidth CO
 shielding, uniform or weighted directional reductions, and the combined H2*CO
 PDR factor. Its default is the full `349,525 x 192` production chunk. Set
 `NUMBA_NUM_THREADS` to the worker count being measured.
+
+The W-ray driver measures the complete directional UV-weight builder on a
+deterministic spherical `60 x 40 x 8` mesh with 192 directions and 20 dust
+bins. It includes both external and stellar optical depths, uses a full-mesh
+chunk by default, and records row normalization, sampled weights, process CPU
+occupancy, sampled RSS history, and the builder's known-array memory estimate.
+Its output includes `summary.json`, `output_samples.npz`, and
+`w_rays_diagnostics.png`.
+
+For a bounded production-geometry scaling comparison, retain the native mesh
+and distribute a deterministic candidate sample through it:
+
+```bash
+NUMBA_NUM_THREADS=18 python validation/gow17_healpix_performance/run_w_rays.py \
+  --shape 486,146,330 --candidate-count 250000 --chunk-size 250000 \
+  --min-repeats 1 --sustained-seconds 0.01
+```
+
+The output records every native worker's cumulative CPU time at 0.1-second
+cadence. This command is a scaling sample, not the default sustained validation
+and not a substitute for the full cached-RADMC cluster comparison.
 
 Useful optional controls are the drivers' size lists, `--min-repeats`,
 `--sustained-seconds`, and `--output-root`. Defaults represent the acceptance
@@ -79,14 +101,23 @@ multiple Numba threads. The directional Omukai benchmark uses deterministic
 cells that mix full column inversion with inexpensive early-return cases so
 that scheduling behavior is measured without changing the cooling problem.
 
+The W-ray comparison exercises the production algebra that forms one scalar
+extinction coefficient from all dust bins, integrates external and starward
+optical depths, applies source weights and outer-boundary rules, and normalizes
+every candidate row. It therefore measures the complete allocation lifetime
+that was absent from the original isolated DDA benchmark.
+
 The native-solver comparison tests whether one SUNDIALS/CVODE allocation per
 OpenMP worker can replace one allocation per cell without changing any solver
 input, equation, tolerance, status, or state output. It records sampled outputs
 instead of all states to keep validation artifacts small.
 
-This is an isolated kernel/batch validation. It does not establish complete
-Bondi wall time, filesystem throughput, or scientific equivalence after all 30
-coupled updates; those require the planned same-input cluster A/B run.
+This is an isolated kernel/batch validation. The local W-ray case is much
+smaller than the 23,415,480-cell production mesh. Current RSS sampling is exact
+on Linux; other platforms may provide only a process high-water mark. These
+drivers do not establish complete Bondi wall time, filesystem throughput, or
+scientific equivalence after all 30 coupled updates; those require the planned
+same-input cluster A/B run.
 
 ## References
 
