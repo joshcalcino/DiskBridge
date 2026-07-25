@@ -18,6 +18,7 @@ from diskbridge.model import (
     Field,
     Mesh,
     RadialGasBackground,
+    apply_radial_dust_transport,
     build_smoothed_radial_gas_background,
     set_mask_from_joos_disk,
 )
@@ -39,6 +40,7 @@ def test_public_subpackage_exports_are_available():
     assert Mesh is not None
     assert set_mask_from_joos_disk is not None
     assert RadialGasBackground is not None
+    assert callable(apply_radial_dust_transport)
     assert callable(build_smoothed_radial_gas_background)
     assert ChemistryResult is not None
     assert callable(load_chemistry_outputs)

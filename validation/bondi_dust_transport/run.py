@@ -44,7 +44,7 @@ RHO_CORE_MIN = 10.0 * RHO_DISK_MIN
 JOOS_MAX_POLOIDAL_MACH = 1.0
 JOOS_ROTATIONAL_SUPPORT_FACTOR = 2.0
 SETTLING_ALPHA = 1.0e-2
-TRANSPORT_TIME = 30_000.0 * diskbridge.units("yr")
+TRANSPORT_TIME = 50_000.0 * diskbridge.units("yr")
 DUST_NBIN = 15
 DUST_SIZE_THRESHOLDS_UM = (0.1, 1.0, 10.0, 100.0)
 REPRESENTATIVE_SIZE_TARGETS_UM = (0.068, 3.16, 147.0)
@@ -273,7 +273,7 @@ def _plot_transport_profiles(
         )
     ax.set_yscale("log")
     ax.set_ylabel(r"dust $\Sigma$ [g cm$^{-2}$]")
-    ax.legend(title="solid: 30 kyr; dashed: initial", fontsize=8)
+    ax.legend(title="solid: 50 kyr; dashed: initial", fontsize=8)
 
     ax = axes[1, 1]
     gas_safe = np.maximum(gas_sigma, np.max(gas_sigma) * 1.0e-15)
@@ -402,7 +402,7 @@ def _plot_largest_bin_azimuth(
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), constrained_layout=True)
     for ax, values, title in (
         (axes[0], before, "initial"),
-        (axes[1], after, "after 30 kyr"),
+        (axes[1], after, "after 50 kyr"),
     ):
         image = ax.pcolormesh(
             radius,
@@ -512,7 +512,7 @@ def _plot_cumulative_threshold_profiles(
             radius_au,
             np.maximum(result["sigma_final"], floor),
             color="tab:blue",
-            label="after 30 kyr",
+            label="after 50 kyr",
         )
         ax.set_xscale("log")
         ax.set_yscale("log")
@@ -574,7 +574,7 @@ def _plot_cumulative_threshold_rphi(
         label=r"$\Sigma_{\rm dust}(a>a_{\rm thresh})$ [g cm$^{-2}$]",
     )
     fig.suptitle(
-        "m05_9_dm_f140_c10: azimuthal dust surface density after 30 kyr"
+        "m05_9_dm_f140_c10: azimuthal dust surface density after 50 kyr"
     )
     fig.savefig(output, dpi=180)
     plt.close(fig)

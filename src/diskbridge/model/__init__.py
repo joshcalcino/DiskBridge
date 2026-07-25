@@ -12,8 +12,11 @@ from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .downsample import downsample_model
 from .dust_transport import (
+    RadialDustBinTransport,
+    RadialDustTransportResult,
     RadialGasBackground,
     RadialTransportDiagnostics,
+    apply_radial_dust_transport,
     build_smoothed_radial_gas_background,
     dust_diffusivity,
     evolve_radial_surface_density,
@@ -79,6 +82,7 @@ __all__ = [
     "ClipIndexer",
     "compute_clip_indexer",
     "downsample_model",
+    "apply_radial_dust_transport",
     "build_smoothed_radial_gas_background",
     "dust_diffusivity",
     "evolve_radial_surface_density",
@@ -87,6 +91,8 @@ __all__ = [
     "load_model",
     "puff_up_model",
     "pressure_drift_velocity",
+    "RadialDustBinTransport",
+    "RadialDustTransportResult",
     "RadialGasBackground",
     "RadialTransportDiagnostics",
     "set_mask_from_joos_disk",

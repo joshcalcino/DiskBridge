@@ -1091,6 +1091,7 @@ def set_mask_from_joos_disk(
             axis_order=mesh.axis_names(),
             attrs={
                 "source": "joos_disk",
+                "disk_axis_cartesian": tuple(float(value) for value in k_hat),
                 "r_max_for_axis_au": float(r_max_for_axis.to("au").magnitude),
                 "max_poloidal_mach": float(max_poloidal_mach),
                 "rotational_support_factor": float(rotational_support_factor),
@@ -1113,6 +1114,15 @@ def set_mask_from_joos_disk(
         model.gas_register("disk_weight", w_field)
 
     disk_region = model.set_mask_from_array(mask, is_a_disk=True)
+    disk_region.mask = Field(
+        data=disk_region.mask.data,
+        quantity=disk_region.mask.quantity,
+        axis_order=disk_region.mask.axis_order,
+        attrs={
+            "source": "joos_disk",
+            "disk_axis_cartesian": tuple(float(value) for value in k_hat),
+        },
+    )
     model.gas_register("disk_mask", disk_region.mask)
     return disk_region
 

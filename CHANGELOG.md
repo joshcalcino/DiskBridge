@@ -9,10 +9,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 ### Added
 
 - Conservative finite-time radial dust surface-density transport helpers with
-  pressure drift, turbulent diffusion, absorbing inner outflow, no imposed
-  outer inflow, explicit mass-loss diagnostics, and a coherent smoothed radial
-  gas background with bounded negative pressure slopes that prevent artificial
-  outer dust traps.
+  pressure drift, turbulent diffusion, absorbing inner outflow, an open outer
+  diffusion boundary with no imposed inflow, explicit mass-loss diagnostics,
+  and a coherent smoothed radial gas background with bounded negative pressure
+  slopes that prevent artificial outer dust traps.
 - The standalone 1--500 au DiskBridge disc validation now generates
   chemistry-derived LTE/non-LTE [C I] 1-0 and HCO+ 4-3 channel figures from one
   physical RADMC-3D/GOW17 run, without abundance or collider scaling.
@@ -39,6 +39,17 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Bondi All-Stars dust construction now applies 50 kyr of finite-time radial
+  drift and turbulent diffusion to every settled-disc grain bin before adding
+  the complementary proportional ISM component. Gas and dust are projected
+  conservatively into cylindrical annuli about the measured Joos disc axis and
+  evolved on the smoothed trap-free gas background. Only the connected annular
+  disc reservoir is transported; gains use a coherent settled-disc template
+  rather than amplifying low-weight material. Run summaries include the disc
+  axis, active annuli, and per-bin conservation diagnostics. Every maintained
+  Bondi snapshot dust directory includes a before/after radial-transport figure,
+  and the density, D/G, vertical, boundary, and azimuthal figures identify the
+  post-50-kyr state.
 - Joos disc weights now evaluate the full loaded mesh and enforce both vertical
   and outward radial connectivity. `r_max_for_axis` is solely the required
   angular-momentum support aperture; the physical `r_max`, implicit
@@ -94,6 +105,14 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Radial dust diffusion no longer reflects from the last connected disc
+  annulus. The outer boundary now uses zero exterior settled-dust concentration
+  and records the one-way escaped flux, preventing fake outer rings while
+  preserving the full mass budget.
+- Model-level radial dust transport no longer treats native spherical shells
+  as disc annuli or divides evolved columns by negligible unsupported columns.
+  Detached outer soft-mask material therefore remains ISM dominated instead of
+  being amplified into spurious settled-disc dust blobs.
 - Soft Joos disc weights no longer snap high scores to exactly one. Their
   complementary ISM fractions therefore remain smooth and positive, removing
   artificial sharp changes in settled-disc/ISM dust-density ratio maps.
@@ -157,6 +176,20 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Regenerated all nine maintained `m20_8_dmid_f120_c10` dust diagnostics after
+  opening the outer diffusion boundary. The final total settled-dust column
+  decreases through each of the outer eight connected annuli, with the last
+  annulus at 0.284 times the preceding column instead of forming a bright ring.
+- Regenerated the `m20_8_dm_f250_c10` density, D/G, vertical, radial, boundary,
+  and azimuthal dust diagnostics with disc-frame cylindrical transport. In the
+  formerly contaminated `R = 450--510 au`, `z = 60--300 au` region, the maximum
+  settled-disc D/G fell from `4.82e-4` to `3.34e-9`; the connected transport
+  reservoir ends at 421.6 au without using a fixed material `r_max`.
+- Regenerated both maintained 14-snapshot Bondi dust atlases with the corrected
+  transport: five interface/density/D/G/radial/vertical products and four
+  azimuthal boundary/surface products per snapshot. All 126 figures and both
+  combined summaries use `disc_cylindrical_radius` and snapshot-specific
+  connected annular support.
 - A full-native 23,415,480-cell Bondi hydro/mask A/B reduced the contaminated
   `m10_8_dm_f250_c10` Joos tilt from 27.178 degrees with 50,000-au support to
   0.079 degrees with 387.1-au support and removed its pinwheel-like mask. The

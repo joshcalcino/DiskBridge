@@ -8,13 +8,18 @@
 import numpy as np
 
 from diskbridge._units import Quantity, units
+from diskbridge.model.core import Model, SubModel
+from diskbridge.model.dust import Dust
 from diskbridge.model.dust_transport import (
+    apply_radial_dust_transport,
     build_smoothed_radial_gas_background,
     dust_diffusivity,
     evolve_radial_surface_density,
     pressure_drift_velocity,
     smoothed_log_pressure_gradient,
 )
+from diskbridge.model.field import Field
+from diskbridge.model.mesh import Axis, Mesh
 
 
 def test_smoothed_gas_background_preserves_supported_power_law_and_ideal_gas_closure():
@@ -139,7 +144,7 @@ def test_zero_duration_returns_input_without_steps():
     assert diagnostics.final_mass == diagnostics.initial_mass
 
 
-def test_diffusion_conserves_mass_with_closed_boundaries():
+def test_diffusion_leaves_through_open_outer_boundary():
     edges, sigma_d, sigma_g = _transport_inputs()
     evolved, diagnostics = evolve_radial_surface_density(
         edges,
@@ -151,13 +156,14 @@ def test_diffusion_conserves_mass_with_closed_boundaries():
     )
 
     assert np.all(evolved.magnitude >= 0.0)
-    assert np.isclose(
-        diagnostics.final_mass.to("g").magnitude,
-        diagnostics.initial_mass.to("g").magnitude,
-        rtol=1.0e-12,
-    )
+    assert evolved[-1] < sigma_d[-1]
+    initial = diagnostics.initial_mass.to("g").magnitude
+    final = diagnostics.final_mass.to("g").magnitude
+    outer = diagnostics.outer_mass_lost.to("g").magnitude
+    assert final < initial
     assert diagnostics.inner_mass_lost.to("g").magnitude == 0.0
-    assert diagnostics.outer_mass_lost.to("g").magnitude == 0.0
+    assert outer > 0.0
+    assert np.isclose(initial - final, outer, rtol=1.0e-12)
 
 
 def test_inward_advection_only_loses_mass_through_inner_boundary():
@@ -178,6 +184,224 @@ def test_inward_advection_only_loses_mass_through_inner_boundary():
     assert final < initial
     assert np.isclose(initial - final, inner, rtol=1.0e-10)
     assert diagnostics.outer_mass_lost.to("g").magnitude == 0.0
+
+
+def test_apply_radial_transport_registers_cylindrical_settled_density():
+    """The model helper must realize its evolved column in disc annuli."""
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([10.0, 20.0, 30.0, 40.0, 50.0]), "au")),
+        theta=Axis(
+            edges=Quantity(
+                np.pi / 2.0 + np.array([-0.20, -0.05, 0.05, 0.20]),
+                "radian",
+            )
+        ),
+        phi=Axis(
+            edges=Quantity(
+                np.array([-0.5 * np.pi, 0.5 * np.pi, 1.5 * np.pi]),
+                "radian",
+            )
+        ),
+    )
+    model.coord_system = model.mesh.coord_system
+    model.gas = SubModel(model)
+    model.dust = Dust(model)
+    model.variables["mstar"] = Quantity(1.0, "solar_mass")
+
+    radius = model.mesh.centers("r").to("au").magnitude
+    shape = model.mesh.shape
+    angular_pattern = np.array([0.8, 1.2])[None, None, :]
+    density = (
+        1.0e-14
+        * (radius / radius[0])[:, None, None] ** -2.0
+        * np.ones((1, shape[1], 1))
+        * angular_pattern
+    )
+    temperature = (
+        120.0
+        * (radius / radius[0])[:, None, None] ** -0.5
+        * np.ones((1, shape[1], shape[2]))
+    )
+    pressure = (
+        Quantity(density, "g/cm^3")
+        * units("k_B")
+        * Quantity(temperature, "K")
+        / (2.35 * units("m_H"))
+    ).to("dyn/cm^2")
+    axis_order = model.mesh.axis_names()
+    for name, data in (
+        ("density", Quantity(density, "g/cm^3")),
+        ("temperature", Quantity(temperature, "K")),
+        ("pressure", pressure),
+    ):
+        model.gas_register(name, Field(name, data, axis_order))
+    model.gas_register(
+        "disk_weight",
+        Field(
+            "disk_weight",
+            Quantity(np.ones(shape), "dimensionless"),
+            axis_order,
+            attrs={
+                "disk_axis_cartesian": (np.sin(0.5), 0.0, np.cos(0.5)),
+                "weight_m0": 0.5,
+                "weight_floor": 1.0e-4,
+            },
+        ),
+    )
+
+    model.dust.add_component_from_mask(
+        "disk_weight",
+        mode="settling",
+        amin=Quantity(90.0, "um"),
+        amax=Quantity(110.0, "um"),
+        nbin=1,
+        dust_to_gas_ratio=0.01,
+        alpha=0.01,
+        delta=0.01,
+        mean_molecular_weight=2.35,
+    )
+    initial = model.dust["bin_0"]["density"].data.to("g/cm^3").magnitude.copy()
+
+    result = apply_radial_dust_transport(
+        model,
+        Quantity(50_000.0, "yr"),
+        smoothing_bins=1,
+    )
+    transported_field = model.dust["bin_0"]["density"]
+    transported = transported_field.data.to("g/cm^3").magnitude
+
+    assert len(result.bins) == 1
+    assert transported_field.attrs["radial_transport"] is True
+    assert transported_field.attrs["transport_time_yr"] == 50_000.0
+    assert transported_field.attrs["transport_coordinate"] == "disc_cylindrical_radius"
+    assert (
+        result.bins[0].final_mean_radius.to("au").magnitude
+        < result.bins[0].initial_mean_radius.to("au").magnitude
+    )
+    assert np.all(np.isfinite(transported))
+    assert np.all(transported >= 0.0)
+    assert np.max(np.abs(transported - initial)) > 1.0e-6 * np.max(initial)
+
+    radial_edges = model.mesh.edges("r").to("cm").magnitude
+    radius_grid, theta_grid, phi_grid = np.meshgrid(
+        model.mesh.centers("r").to("cm").magnitude,
+        model.mesh.centers("theta").to("radian").magnitude,
+        model.mesh.centers("phi").to("radian").magnitude,
+        indexing="ij",
+    )
+    x_grid = radius_grid * np.sin(theta_grid) * np.cos(phi_grid)
+    y_grid = radius_grid * np.sin(theta_grid) * np.sin(phi_grid)
+    z_grid = radius_grid * np.cos(theta_grid)
+    axis = np.array([np.sin(0.5), 0.0, np.cos(0.5)])
+    height = x_grid * axis[0] + y_grid * axis[1] + z_grid * axis[2]
+    cylindrical_radius = np.sqrt(np.maximum(radius_grid**2 - height**2, 0.0))
+    radial_bin = np.digitize(cylindrical_radius, radial_edges) - 1
+    dr3 = np.diff(radial_edges**3) / 3.0
+    dcos = np.cos(model.mesh.edges("theta").to("radian").magnitude[:-1]) - np.cos(
+        model.mesh.edges("theta").to("radian").magnitude[1:]
+    )
+    dphi = np.diff(model.mesh.edges("phi").to("radian").magnitude)
+    volume = dr3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
+    valid = (radial_bin >= 0) & (radial_bin < radial_edges.size - 1)
+    mass = np.bincount(
+        radial_bin[valid],
+        weights=transported[valid] * volume[valid],
+        minlength=radial_edges.size - 1,
+    )
+    realized = mass / (np.pi * np.diff(radial_edges**2))
+    assert np.allclose(
+        realized,
+        result.bins[0].final_surface_density.to("g/cm^2").magnitude,
+    )
+    diagnostics = result.bins[0].diagnostics
+    accounted = (
+        diagnostics.final_mass
+        + diagnostics.inner_mass_lost
+        + diagnostics.outer_mass_lost
+    ).to("g").magnitude
+    assert np.isclose(accounted, diagnostics.initial_mass.to("g").magnitude)
+
+
+def test_transport_does_not_amplify_unsupported_soft_weight_blob():
+    """An isolated outer mask tail is not part of the 1-D disc reservoir."""
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.arange(10.0, 70.0, 10.0), "au")),
+        theta=Axis(
+            edges=Quantity(
+                np.pi / 2.0 + np.array([-0.25, -0.08, 0.08, 0.25]),
+                "radian",
+            )
+        ),
+        phi=Axis(edges=Quantity(np.array([0.0, np.pi, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = model.mesh.coord_system
+    model.gas = SubModel(model)
+    model.dust = Dust(model)
+    model.variables["mstar"] = Quantity(1.0, "solar_mass")
+    shape = model.mesh.shape
+    radius = model.mesh.centers("r").to("au").magnitude
+    density = 1.0e-14 * (radius / radius[0])[:, None, None] ** -2.0 * np.ones(
+        (1, shape[1], shape[2])
+    )
+    temperature = 120.0 * (radius / radius[0])[:, None, None] ** -0.5 * np.ones(
+        (1, shape[1], shape[2])
+    )
+    pressure = (
+        Quantity(density, "g/cm^3")
+        * units("k_B")
+        * Quantity(temperature, "K")
+        / (2.35 * units("m_H"))
+    ).to("dyn/cm^2")
+    axis_order = model.mesh.axis_names()
+    for name, data in (
+        ("density", Quantity(density, "g/cm^3")),
+        ("temperature", Quantity(temperature, "K")),
+        ("pressure", pressure),
+    ):
+        model.gas_register(name, Field(name, data, axis_order))
+
+    weight = np.zeros(shape, dtype=float)
+    weight[:3] = 1.0
+    weight[-1, 0, 0] = 2.0e-4
+    model.gas_register(
+        "disk_weight",
+        Field(
+            "disk_weight",
+            Quantity(weight, "dimensionless"),
+            axis_order,
+            attrs={
+                "disk_axis_cartesian": (0.0, 0.0, 1.0),
+                "weight_m0": 0.5,
+                "weight_floor": 1.0e-4,
+            },
+        ),
+    )
+    model.dust.add_component_from_mask(
+        "disk_weight",
+        mode="settling",
+        amin=Quantity(0.09, "um"),
+        amax=Quantity(0.11, "um"),
+        nbin=1,
+        dust_to_gas_ratio=0.01,
+        alpha=0.01,
+        delta=0.01,
+        mean_molecular_weight=2.35,
+    )
+    initial = model.dust["bin_0"]["density"].data.to("g/cm^3").magnitude.copy()
+
+    result = apply_radial_dust_transport(
+        model,
+        Quantity(50_000.0, "yr"),
+        smoothing_bins=1,
+    )
+    transported = model.dust["bin_0"]["density"].data.to("g/cm^3").magnitude
+
+    assert np.array_equal(result.active_annuli, np.array([True, True, True, False, False]))
+    assert initial[-1, 0, 0] > 0.0
+    assert transported[-1, 0, 0] == initial[-1, 0, 0]
+    assert np.max(np.abs(transported[:3] - initial[:3])) > 0.0
 
 
 def test_diffusion_remains_positive_across_sharp_gas_edge():

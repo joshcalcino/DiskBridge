@@ -184,6 +184,10 @@ def test_soft_connected_mode_produces_fractional_weight_on_tiny_model():
     assert np.nanmin(w) >= 0.0
     assert np.nanmax(w) <= 1.0
     assert np.any((w > 0.0) & (w < 1.0))
+    assert np.allclose(
+        model.gas["disk_weight"].attrs["disk_axis_cartesian"],
+        model.gas["disk_mask"].attrs["disk_axis_cartesian"],
+    )
 
 
 def test_transonic_poloidal_limit_rejects_fast_infall():
