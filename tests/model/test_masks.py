@@ -25,6 +25,7 @@ from diskbridge.model.masking import (
     _compute_joos_criterion_data,
     _apply_radial_midplane_connectivity,
     _cylindrical_midplane_support,
+    _midplane_density_support,
     _soft_cut_from_ratio,
 )
 from diskbridge.model.mesh import Axis, Mesh
@@ -188,6 +189,22 @@ def test_soft_connected_mode_produces_fractional_weight_on_tiny_model():
         model.gas["disk_weight"].attrs["disk_axis_cartesian"],
         model.gas["disk_mask"].attrs["disk_axis_cartesian"],
     )
+
+    model.set_mask_from_joos_disk(
+        rho_disk_min=Quantity(0.1, "g/cm^3"),
+        rho_core_min=Quantity(0.1, "g/cm^3"),
+        r_max_for_axis=Quantity(2.0, "cm"),
+        soft_delta={"mach": 0.20, "rot": 0.20, "rho": 0.30},
+        weight_m0=0.50,
+        weight_floor=1e-4,
+        rho_midplane_min=Quantity(0.2, "g/cm^3"),
+        midplane_density_softness_dex=0.30,
+        midplane_density_smoothing_bins=1.0,
+    )
+    support = model.gas["disk_midplane_density_support"]
+    assert support.data.shape == shape
+    assert support.attrs["rho_midplane_min_g_cm3"] == 0.2
+    assert support.attrs["azimuthal_statistic"] == "median"
 
 
 def test_transonic_poloidal_limit_rejects_fast_infall():
@@ -449,6 +466,95 @@ def test_cylindrical_support_uses_the_cells_midplane_footpoint():
     assert np.allclose(support[0], 0.9)
     assert np.allclose(connected[1, 2], 0.8)
     assert np.all(connected[1, 1] == 0.0)
+
+
+def test_midplane_density_support_uses_robust_annular_profile_for_full_column():
+    """A dense midplane supports its atmosphere; one streamer cannot support an annulus."""
+    shape = (3, 3, 5)
+    density = np.full(shape, 1.0e-6, dtype=float)
+    density[:, 1, :] = np.array(
+        [
+            [100.0, 100.0, 100.0, 100.0, 1.0e8],
+            [10.0, 10.0, 10.0, 10.0, 1.0e8],
+            [1.0, 1.0, 1.0, 1.0, 1.0e8],
+        ]
+    )
+    radius = np.broadcast_to(
+        (np.arange(3, dtype=float) + 0.5)[:, None, None],
+        shape,
+    )
+    theta = np.broadcast_to(
+        np.array([-0.2, 0.0, 0.2])[None, :, None],
+        shape,
+    )
+    phi = np.broadcast_to(
+        np.linspace(-np.pi, np.pi, shape[2], endpoint=False)[None, None, :],
+        shape,
+    )
+    zeros = np.zeros(shape, dtype=float)
+    frame = DiskFrameData(
+        k_hat=np.array([0.0, 0.0, 1.0]),
+        R_d=radius,
+        z_d=zeros,
+        vR_d=Quantity(zeros, "cm/s"),
+        vphi_d=Quantity(zeros, "cm/s"),
+        vz_d=Quantity(zeros, "cm/s"),
+        theta_from_midplane=theta,
+        phi_d=phi,
+    )
+
+    cell_score, profile, radial_score = _midplane_density_support(
+        Quantity(density, "g/cm^3"),
+        frame,
+        np.ones(shape, dtype=bool),
+        Quantity(np.arange(4, dtype=float), "cm"),
+        Quantity(10.0, "g/cm^3"),
+        softness_dex=0.30,
+        smoothing_bins=1.0e-6,
+        floor=0.0,
+    )
+
+    assert np.allclose(profile, [100.0, 10.0, 1.0])
+    assert np.isclose(radial_score[1], 0.5)
+    assert radial_score[0] > radial_score[1] > radial_score[2]
+    assert np.allclose(cell_score[:, 0, :], radial_score[:, None])
+    assert np.allclose(cell_score[:, 2, :], radial_score[:, None])
+
+
+def test_midplane_density_support_rejects_invalid_parameters():
+    shape = (1, 1, 1)
+    zeros = np.zeros(shape, dtype=float)
+    frame = DiskFrameData(
+        k_hat=np.array([0.0, 0.0, 1.0]),
+        R_d=np.full(shape, 0.5),
+        z_d=zeros,
+        vR_d=Quantity(zeros, "cm/s"),
+        vphi_d=Quantity(zeros, "cm/s"),
+        vz_d=Quantity(zeros, "cm/s"),
+        theta_from_midplane=zeros,
+    )
+    common = (
+        Quantity(np.ones(shape), "g/cm^3"),
+        frame,
+        np.ones(shape, dtype=bool),
+        Quantity(np.array([0.0, 1.0]), "cm"),
+        Quantity(0.1, "g/cm^3"),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "softness"):
+        _midplane_density_support(
+            *common,
+            softness_dex=0.0,
+            smoothing_bins=1.0,
+            floor=0.0,
+        )
+    with np.testing.assert_raises_regex(ValueError, "smoothing"):
+        _midplane_density_support(
+            *common,
+            softness_dex=0.3,
+            smoothing_bins=0.0,
+            floor=0.0,
+        )
 
 
 def test_connected_coherence_rejects_narrow_streamer_and_detached_island():

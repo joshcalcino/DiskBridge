@@ -12,10 +12,13 @@ from .core import Model, puff_up_model
 from .clipping import ClipIndexer, compute_clip_indexer
 from .downsample import downsample_model
 from .dust_transport import (
+    RadialAmaxDustBin,
+    RadialAmaxResult,
     RadialDustBinTransport,
     RadialDustTransportResult,
     RadialGasBackground,
     RadialTransportDiagnostics,
+    apply_radial_amax,
     apply_radial_dust_transport,
     build_smoothed_radial_gas_background,
     dust_diffusivity,
@@ -82,6 +85,7 @@ __all__ = [
     "ClipIndexer",
     "compute_clip_indexer",
     "downsample_model",
+    "apply_radial_amax",
     "apply_radial_dust_transport",
     "build_smoothed_radial_gas_background",
     "dust_diffusivity",
@@ -91,6 +95,8 @@ __all__ = [
     "load_model",
     "puff_up_model",
     "pressure_drift_velocity",
+    "RadialAmaxDustBin",
+    "RadialAmaxResult",
     "RadialDustBinTransport",
     "RadialDustTransportResult",
     "RadialGasBackground",

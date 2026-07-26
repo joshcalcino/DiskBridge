@@ -1,4 +1,4 @@
-"""Tests for conservative finite-time radial dust transport."""
+"""Tests for conservative and parameterized radial dust distributions."""
 
 # db-keywords: dust, model, arrays, coordinates, units
 # db-role: validation
@@ -6,11 +6,15 @@
 # db-purpose: Protect radial drift signs, diffusion, and mass conservation.
 
 import numpy as np
+import pytest
+from scipy.special import erfc
 
 from diskbridge._units import Quantity, units
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.dust import Dust
 from diskbridge.model.dust_transport import (
+    _smooth_radial_amax_distribution,
+    apply_radial_amax,
     apply_radial_dust_transport,
     build_smoothed_radial_gas_background,
     dust_diffusivity,
@@ -126,6 +130,81 @@ def test_dust_diffusivity_decreases_with_stokes_number():
     ).to("cm^2/s").magnitude
 
     assert np.all(np.diff(diffusion) < 0.0)
+
+
+def test_smooth_radial_amax_is_bounded_and_locally_normalized():
+    """The smooth cutoff follows analytic a_max and depletes large grains."""
+    radius = np.array([0.0, 100.0, 250.0, 500.0])
+    sizes = np.array([10.0, 100.0, 1_000.0])
+    base_fractions = np.array([0.2, 0.3, 0.5])
+    radial_amax, retention, fractions = (
+        _smooth_radial_amax_distribution(
+            radius,
+            sizes,
+            base_fractions,
+            minimum_grain_size=1.0,
+            maximum_grain_size=1_000.0,
+            reference_amax=100.0,
+            reference_radius=250.0,
+            radial_exponent=2.0,
+            transition_width_dex=0.25,
+        )
+    )
+
+    expected_amax = np.array([1_000.0, 625.0, 100.0, 25.0])
+    assert np.allclose(radial_amax, expected_amax)
+    expected_retention = 0.5 * erfc(
+        (np.log10(sizes[:, None]) - np.log10(expected_amax[None, :]))
+        / (np.sqrt(2.0) * 0.25)
+    )
+    assert np.allclose(
+        retention,
+        expected_retention,
+    )
+    assert retention[1, 2] == pytest.approx(0.5)
+    assert np.all(np.diff(radial_amax) < 0.0)
+    assert np.all(np.diff(retention, axis=1) <= 0.0)
+    assert np.all(fractions >= 0.0)
+    assert np.allclose(np.sum(fractions, axis=0), 1.0)
+    assert fractions[-1, -1] < fractions[-1, 0]
+
+    for keyword in (
+        "minimum_grain_size",
+        "maximum_grain_size",
+        "reference_amax",
+        "reference_radius",
+        "radial_exponent",
+        "transition_width_dex",
+    ):
+        parameters = {
+            "minimum_grain_size": 1.0,
+            "maximum_grain_size": 1_000.0,
+            "reference_amax": 100.0,
+            "reference_radius": 250.0,
+            "radial_exponent": 2.0,
+            "transition_width_dex": 0.25,
+        }
+        parameters[keyword] = 0.0
+        with pytest.raises(ValueError, match=keyword):
+            _smooth_radial_amax_distribution(
+                radius,
+                sizes,
+                base_fractions,
+                **parameters,
+            )
+
+    with pytest.raises(ValueError, match="reference_amax"):
+        _smooth_radial_amax_distribution(
+            radius,
+            sizes,
+            base_fractions,
+            minimum_grain_size=1.0,
+            maximum_grain_size=1_000.0,
+            reference_amax=2_000.0,
+            reference_radius=250.0,
+            radial_exponent=2.0,
+            transition_width_dex=0.25,
+        )
 
 
 def test_zero_duration_returns_input_without_steps():
@@ -402,6 +481,112 @@ def test_transport_does_not_amplify_unsupported_soft_weight_blob():
     assert initial[-1, 0, 0] > 0.0
     assert transported[-1, 0, 0] == initial[-1, 0, 0]
     assert np.max(np.abs(transported[:3] - initial[:3])) > 0.0
+
+
+def test_radial_amax_sets_total_column_through_connected_soft_tail():
+    """The radial a_max must not stop at the mask's boolean 0.5 boundary."""
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.arange(10.0, 70.0, 10.0), "au")),
+        theta=Axis(
+            edges=Quantity(
+                np.pi / 2.0 + np.array([-0.25, -0.08, 0.08, 0.25]),
+                "radian",
+            )
+        ),
+        phi=Axis(edges=Quantity(np.array([0.0, np.pi, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = model.mesh.coord_system
+    model.gas = SubModel(model)
+    model.dust = Dust(model)
+    shape = model.mesh.shape
+    radius = model.mesh.centers("r").to("au").magnitude
+    density = 2.0e-13 * (radius / radius[0])[:, None, None] ** -2.0 * np.ones(
+        (1, shape[1], shape[2])
+    )
+    density[2] *= 1.0e-4
+    temperature = 100.0 * (radius / radius[0])[:, None, None] ** -0.5 * np.ones(
+        (1, shape[1], shape[2])
+    )
+    pressure = (
+        Quantity(density, "g/cm^3")
+        * units("k_B")
+        * Quantity(temperature, "K")
+        / (2.35 * units("m_H"))
+    ).to("dyn/cm^2")
+    axis_order = model.mesh.axis_names()
+    for name, data in (
+        ("density", Quantity(density, "g/cm^3")),
+        ("temperature", Quantity(temperature, "K")),
+        ("pressure", pressure),
+    ):
+        model.gas_register(name, Field(name, data, axis_order))
+
+    weight = np.zeros(shape, dtype=float)
+    weight[:3] = 1.0
+    weight[3] = 0.1
+    weight[4] = 0.01
+    model.gas_register(
+        "disk_weight",
+        Field(
+            "disk_weight",
+            Quantity(weight, "dimensionless"),
+            axis_order,
+            attrs={
+                "disk_axis_cartesian": (0.0, 0.0, 1.0),
+                "weight_m0": 0.5,
+                "weight_floor": 1.0e-4,
+            },
+        ),
+    )
+    model.dust.add_component_from_mask(
+        "disk_weight",
+        mode="settling",
+        amin=Quantity(0.1, "um"),
+        amax=Quantity(1_000.0, "um"),
+        nbin=2,
+        power_index=3.0,
+        dust_to_gas_ratio=0.01,
+        alpha=0.01,
+        delta=0.01,
+        mean_molecular_weight=2.35,
+    )
+    result = apply_radial_amax(
+        model,
+        reference_amax=Quantity(100.0, "um"),
+        reference_radius=Quantity(25.0, "au"),
+        radial_exponent=2.0,
+        transition_width_dex=0.25,
+    )
+
+    assert np.all(result.active_annuli)
+    fractions = np.asarray([bin_result.mass_fraction for bin_result in result.bins])
+    assert np.allclose(np.sum(fractions, axis=0), 1.0)
+    assert fractions[-1, 2] < fractions[-1, 0]
+    final_total = np.sum(
+        [
+            bin_result.final_surface_density.to("g/cm^2").magnitude
+            for bin_result in result.bins
+        ],
+        axis=0,
+    )
+    expected_total = (
+        result.dust_to_gas_ratio
+        * result.disc_gas_surface_density.to("g/cm^2").magnitude
+    )
+    assert np.allclose(
+        final_total,
+        expected_total,
+    )
+    amax = result.maximum_grain_size.to("um").magnitude
+    assert np.all(np.diff(amax) < 0.0)
+    for index in range(2):
+        field = model.dust[f"bin_{index}"]["density"]
+        assert field.attrs["radial_amax"] is True
+        assert field.attrs["reference_amax_um"] == 100.0
+        assert field.attrs["reference_radius_au"] == 25.0
+        assert field.attrs["radial_exponent"] == 2.0
+        assert field.attrs["transition_width_dex"] == 0.25
 
 
 def test_diffusion_remains_positive_across_sharp_gas_edge():

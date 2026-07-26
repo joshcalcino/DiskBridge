@@ -344,6 +344,9 @@ class Model:
         weight_floor: float = 1e-4,
         soft_delta: Union[float, Mapping[str, float]] = 0.20,
         kinematic_smoothing_bins: Tuple[float, float, float] = (2.0, 1.0, 2.0),
+        rho_midplane_min: Optional[Quantity] = None,
+        midplane_density_softness_dex: float = 0.30,
+        midplane_density_smoothing_bins: float = 2.0,
     ) -> SubModel:
         from .masking import set_mask_from_joos_disk as _set_mask_from_joos_disk
 
@@ -361,6 +364,9 @@ class Model:
             weight_floor=weight_floor,
             soft_delta=soft_delta,
             kinematic_smoothing_bins=kinematic_smoothing_bins,
+            rho_midplane_min=rho_midplane_min,
+            midplane_density_softness_dex=midplane_density_softness_dex,
+            midplane_density_smoothing_bins=midplane_density_smoothing_bins,
         )
 
     def set_mask_from_array(

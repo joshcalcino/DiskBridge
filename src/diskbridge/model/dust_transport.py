@@ -1,9 +1,9 @@
-"""Finite-time radial transport for axisymmetric dust surface densities."""
+"""Axisymmetric radial prescriptions for dust surface densities."""
 
 # db-keywords: dust, model, arrays, coordinates, units
 # db-role: canonical
 # db-scope: package
-# db-purpose: Conservative finite-time radial dust drift and diffusion.
+# db-purpose: Conservative radial drift/diffusion and parameterized radial grain-size distributions.
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.special import erfc
 
 from diskbridge._units import Quantity, units
 
@@ -134,6 +135,82 @@ class RadialDustTransportResult:
     transport_time: Quantity
     gas_background: RadialGasBackground
     bins: tuple[RadialDustBinTransport, ...]
+    disc_axis: np.ndarray
+    active_annuli: np.ndarray
+
+
+@dataclass(frozen=True)
+class RadialAmaxDustBin:
+    """Radial result for one bin in a smooth maximum-grain-size profile.
+
+    Attributes
+    ----------
+    bin_index : int
+        Global dust-bin index in the model.
+    grain_size : Quantity
+        Representative grain radius.
+    initial_surface_density, final_surface_density : Quantity
+        Settled-disc columns before and after redistribution [mass / area], shape
+        ``(nr,)``.
+    retention : ndarray
+        Smooth retention weight relative to the local maximum grain size,
+        shape ``(nr,)``.
+    mass_fraction : ndarray
+        Locally normalized fraction of the settled dust column assigned to
+        this bin, shape ``(nr,)``.
+    """
+
+    bin_index: int
+    grain_size: Quantity
+    initial_surface_density: Quantity
+    final_surface_density: Quantity
+    retention: np.ndarray
+    mass_fraction: np.ndarray
+
+
+@dataclass(frozen=True)
+class RadialAmaxResult:
+    """Result of applying a smooth radial maximum-grain-size profile.
+
+    Attributes
+    ----------
+    reference_amax : Quantity
+        Maximum-grain-size profile value at ``reference_radius``.
+    reference_radius : Quantity
+        Cylindrical radius at which ``a_max = reference_amax``.
+    radial_exponent : float
+        Positive exponent in ``a_max proportional to R**(-radial_exponent)``.
+    transition_width_dex : float
+        Standard-deviation width of the smooth size cutoff in dex.
+    dust_to_gas_ratio : float
+        Total settled dust-to-gas surface-density ratio imposed on active
+        annuli.
+    disc_gas_surface_density : Quantity
+        Actual mask-weighted gas column that sets the total dust budget
+        [mass / area], shape ``(nr,)``.
+    radius : Quantity
+        Cylindrical annulus centres [length], shape ``(nr,)``.
+    maximum_grain_size : Quantity
+        Bounded radial maximum-grain-size profile, shape ``(nr,)``.
+    bins : tuple of RadialAmaxDustBin
+        Per-bin radial distributions in global bin order.
+    disc_axis : ndarray
+        Unit angular-momentum axis defining cylindrical disc coordinates,
+        shape ``(3,)``.
+    active_annuli : ndarray
+        Connected radial support on which tapering is applied, shape
+        ``(nr,)``.
+    """
+
+    reference_amax: Quantity
+    reference_radius: Quantity
+    radial_exponent: float
+    transition_width_dex: float
+    dust_to_gas_ratio: float
+    disc_gas_surface_density: Quantity
+    radius: Quantity
+    maximum_grain_size: Quantity
+    bins: tuple[RadialAmaxDustBin, ...]
     disc_axis: np.ndarray
     active_annuli: np.ndarray
 
@@ -876,6 +953,326 @@ def _reconstruct_cylindrical_density(
     return Quantity(transported, "g/cm^3")
 
 
+def _smooth_radial_amax_distribution(
+    radius: np.ndarray,
+    grain_sizes: np.ndarray,
+    base_mass_fractions: np.ndarray,
+    minimum_grain_size: float,
+    maximum_grain_size: float,
+    reference_amax: float,
+    reference_radius: float,
+    radial_exponent: float,
+    transition_width_dex: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return radial ``a_max``, smooth retention, and normalized fractions."""
+    radial_centres = np.asarray(radius, dtype=float)
+    sizes = np.asarray(grain_sizes, dtype=float)
+    fractions = np.asarray(base_mass_fractions, dtype=float)
+    if radial_centres.ndim != 1 or radial_centres.size < 1:
+        raise ValueError("radius must be a non-empty one-dimensional array")
+    if np.any(~np.isfinite(radial_centres)) or np.any(radial_centres < 0.0):
+        raise ValueError("radius must be finite and non-negative")
+    if sizes.ndim != 1 or sizes.size < 1:
+        raise ValueError("grain_sizes must be a non-empty one-dimensional array")
+    if np.any(~np.isfinite(sizes)) or np.any(sizes <= 0.0):
+        raise ValueError("grain_sizes must be finite and positive")
+    if fractions.shape != sizes.shape:
+        raise ValueError("base_mass_fractions must have shape (nbin,)")
+    if np.any(~np.isfinite(fractions)) or np.any(fractions <= 0.0):
+        raise ValueError("base_mass_fractions must be finite and positive")
+    for name, value in (
+        ("minimum_grain_size", minimum_grain_size),
+        ("maximum_grain_size", maximum_grain_size),
+        ("reference_amax", reference_amax),
+        ("reference_radius", reference_radius),
+        ("radial_exponent", radial_exponent),
+        ("transition_width_dex", transition_width_dex),
+    ):
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    if minimum_grain_size >= maximum_grain_size:
+        raise ValueError("minimum_grain_size must be smaller than maximum_grain_size")
+    if not minimum_grain_size <= reference_amax <= maximum_grain_size:
+        raise ValueError(
+            "reference_amax must lie within the configured grain-size interval"
+        )
+
+    fractions = fractions / np.sum(fractions)
+    with np.errstate(divide="ignore", over="ignore", under="ignore"):
+        radial_amax = float(reference_amax) * np.power(
+            radial_centres / float(reference_radius),
+            -float(radial_exponent),
+        )
+    radial_amax[radial_centres == 0.0] = float(maximum_grain_size)
+    radial_amax = np.clip(
+        radial_amax,
+        float(minimum_grain_size),
+        float(maximum_grain_size),
+    )
+    log_size_offset = (
+        np.log10(sizes[:, None]) - np.log10(radial_amax[None, :])
+    ) / (np.sqrt(2.0) * float(transition_width_dex))
+    retention = np.clip(0.5 * erfc(log_size_offset), 0.0, 1.0)
+    weighted = fractions[:, None] * retention
+    normalization = np.sum(weighted, axis=0)
+    if np.any(~np.isfinite(normalization)) or np.any(normalization <= 0.0):
+        raise ValueError("radial a_max has no finite local normalization")
+    return radial_amax, retention, weighted / normalization[None, :]
+
+
+def apply_radial_amax(
+    model: "Model",
+    *,
+    reference_amax: Quantity = Quantity(100.0, "um"),
+    reference_radius: Quantity = Quantity(250.0, "au"),
+    radial_exponent: float = 2.0,
+    transition_width_dex: float = 0.25,
+    component_index: int = 0,
+) -> RadialAmaxResult:
+    """Apply a smooth radial maximum-grain-size profile.
+
+    The local profile is ``a_max = reference_amax *
+    (R / reference_radius)**(-radial_exponent)``, bounded by the configured
+    component size interval. Each representative bin is retained through a
+    complementary-error-function turnover in log grain size and the resulting
+    fractions are normalized at every radius. The actual mask-weighted disc
+    gas column sets the total settled dust column. Existing three-dimensional
+    settling templates are rescaled in cylindrical annuli about the measured
+    disc axis; other components and annuli outside connected disc support are
+    unchanged.
+
+    Parameters
+    ----------
+    model : Model
+        Spherical model containing gas fields and an already configured dust
+        component whose mask records ``disk_axis_cartesian`` metadata.
+    reference_amax : Quantity, optional
+        Maximum-grain-size profile value at ``reference_radius``.
+    reference_radius : Quantity, optional
+        Positive cylindrical radius at which ``a_max = reference_amax``.
+    radial_exponent : float, optional
+        Positive exponent controlling how rapidly ``a_max`` decreases outward.
+    transition_width_dex : float, optional
+        Positive standard-deviation width of the smooth bin turnover in dex.
+    component_index : int, optional
+        Settled dust component to redistribute.
+
+    Returns
+    -------
+    RadialAmaxResult
+        Per-bin radial distributions and the actual gas-column budget.
+
+    Raises
+    ------
+    ValueError
+        If the mesh, mask metadata, component, profiles, or prescription
+        parameters are invalid.
+    KeyError
+        If required gas or dust fields are unavailable.
+
+    Notes
+    -----
+    This is a parameterized radial size distribution, not time evolution or a
+    dust-growth calculation. See the dust guide for the governing equations.
+    """
+    from diskbridge.model.field import Field
+    from diskbridge.model.utils import field_data_as_order
+
+    if model.mesh is None or model.mesh.coord_system != "spherical":
+        raise ValueError("radial a_max requires a spherical model mesh")
+    if model.gas is None or model.dust is None:
+        raise ValueError("radial a_max requires gas and dust submodels")
+    if int(component_index) != component_index:
+        raise ValueError("component_index must be an integer")
+    component_index = int(component_index)
+    if component_index < 0 or component_index >= len(model.dust._components):
+        raise ValueError(f"dust component {component_index} does not exist")
+    reference_amax_um = float(reference_amax.to("um").magnitude)
+    reference_radius_au = float(reference_radius.to("au").magnitude)
+    for name, value in (
+        ("reference_amax", reference_amax_um),
+        ("reference_radius", reference_radius_au),
+        ("radial_exponent", radial_exponent),
+        ("transition_width_dex", transition_width_dex),
+    ):
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    radial_exponent = float(radial_exponent)
+    transition_width_dex = float(transition_width_dex)
+
+    component = model.dust._components[component_index]
+    if component.mask is None:
+        raise ValueError("radial a_max requires a component mask or weight")
+    minimum_size_um = float(component.distribution.amin.to("um").magnitude)
+    maximum_size_um = float(component.distribution.amax.to("um").magnitude)
+    if not minimum_size_um <= reference_amax_um <= maximum_size_um:
+        raise ValueError(
+            "reference_amax must lie within the component grain-size interval"
+        )
+    disc_axis = _disc_axis_from_mask(component.mask)
+    geometry = _disc_cylindrical_geometry(model, disc_axis)
+    target_order = model.mesh.axis_names()
+    weight = np.clip(
+        np.asarray(
+            field_data_as_order(component.mask, target_order)
+            .to("dimensionless")
+            .magnitude,
+            dtype=float,
+        ),
+        0.0,
+        1.0,
+    )
+    seed_min = float(component.mask.attrs.get("weight_m0", np.nan))
+    weight_floor = float(component.mask.attrs.get("weight_floor", np.nan))
+    if not np.isfinite(seed_min) or not np.isfinite(weight_floor):
+        raise ValueError(
+            "radial a_max requires weight_m0 and weight_floor mask metadata"
+        )
+    support_min = max(weight_floor, np.nextafter(0.0, 1.0))
+    active_annuli = _connected_annular_support(
+        weight,
+        geometry,
+        seed_min=support_min,
+    )
+
+    gas_density = field_data_as_order(model.gas["density"], target_order).to(
+        "g/cm^3"
+    )
+    disc_gas_surface_density = _cylindrical_surface_density(
+        model,
+        gas_density * weight,
+        geometry,
+    ).to("g/cm^2")
+    gas_sigma_values = np.asarray(
+        disc_gas_surface_density.magnitude,
+        dtype=float,
+    )
+    if not np.any(gas_sigma_values > 0.0):
+        raise ValueError("component-weighted gas surface density is empty")
+    if np.any(~np.isfinite(gas_sigma_values)) or np.any(gas_sigma_values < 0.0):
+        raise ValueError("component-weighted gas surface density is invalid")
+    global_bin_indices = sorted(
+        int(name.split("_")[-1])
+        for name, (mapped_component, _) in model.dust._global_bins.items()
+        if mapped_component == component_index
+    )
+    if not global_bin_indices:
+        raise ValueError(f"dust component {component_index} contains no grain bins")
+
+    sizes: list[Quantity] = []
+    initial_densities: list[Quantity] = []
+    initial_columns: list[Quantity] = []
+    base_fractions: list[float] = []
+    for bin_index in global_bin_indices:
+        dust_bin = model.dust[f"bin_{bin_index}"]
+        _, local_bin_index = model.dust._global_bins[f"bin_{bin_index}"]
+        sizes.append(dust_bin.size)
+        initial_density = field_data_as_order(
+            dust_bin["density"], target_order
+        ).to("g/cm^3")
+        initial_densities.append(initial_density)
+        initial_columns.append(
+            _cylindrical_surface_density(
+                model,
+                initial_density,
+                geometry,
+            ).to("g/cm^2")
+        )
+        base_fractions.append(
+            float(component.distribution.mass_fractions[local_bin_index])
+        )
+
+    radius = model.mesh.centers("r").to("au")
+    maximum_grain_size_um, retention, local_fractions = (
+        _smooth_radial_amax_distribution(
+            np.asarray(radius.magnitude, dtype=float),
+            np.asarray(
+                [size.to("um").magnitude for size in sizes],
+                dtype=float,
+            ),
+            np.asarray(base_fractions, dtype=float),
+            minimum_size_um,
+            maximum_size_um,
+            reference_amax_um,
+            reference_radius_au,
+            radial_exponent,
+            transition_width_dex,
+        )
+    )
+    target_total = (
+        float(component.dust_to_gas_ratio) * disc_gas_surface_density
+    ).to("g/cm^2")
+
+    bin_results: list[RadialAmaxDustBin] = []
+    for position, bin_index in enumerate(global_bin_indices):
+        initial_column = initial_columns[position]
+        final_values = np.asarray(
+            initial_column.to("g/cm^2").magnitude,
+            dtype=float,
+        ).copy()
+        desired = (
+            target_total * local_fractions[position]
+        ).to("g/cm^2").magnitude
+        final_values[active_annuli] = desired[active_annuli]
+        final_column = Quantity(final_values, "g/cm^2")
+        redistributed_density = _reconstruct_cylindrical_density(
+            initial_densities[position],
+            initial_column,
+            final_column,
+            weight,
+            geometry,
+            active_annuli,
+            seed_min=seed_min,
+            weight_floor=weight_floor,
+        )
+        model.dust.register(
+            f"density_bin_{bin_index}",
+            Field(
+                quantity="density",
+                data=redistributed_density,
+                axis_order=target_order,
+                attrs={
+                    "radial_amax": True,
+                    "reference_amax_um": reference_amax_um,
+                    "reference_radius_au": reference_radius_au,
+                    "radial_exponent": radial_exponent,
+                    "transition_width_dex": transition_width_dex,
+                    "component_index": component_index,
+                    "bin_index": bin_index,
+                    "amax_coordinate": "disc_cylindrical_radius",
+                    "total_dust_column_source": "actual_mask_weighted_disc_gas",
+                    "disk_axis_cartesian": tuple(
+                        float(value) for value in disc_axis
+                    ),
+                },
+            ),
+        )
+        bin_results.append(
+            RadialAmaxDustBin(
+                bin_index=bin_index,
+                grain_size=sizes[position],
+                initial_surface_density=initial_column,
+                final_surface_density=final_column,
+                retention=np.asarray(retention[position], dtype=float),
+                mass_fraction=np.asarray(local_fractions[position], dtype=float),
+            )
+        )
+
+    return RadialAmaxResult(
+        reference_amax=reference_amax.to("um"),
+        reference_radius=reference_radius.to("au"),
+        radial_exponent=radial_exponent,
+        transition_width_dex=transition_width_dex,
+        dust_to_gas_ratio=float(component.dust_to_gas_ratio),
+        disc_gas_surface_density=disc_gas_surface_density,
+        radius=radius,
+        maximum_grain_size=Quantity(maximum_grain_size_um, "um"),
+        bins=tuple(bin_results),
+        disc_axis=np.asarray(disc_axis, dtype=float),
+        active_annuli=active_annuli,
+    )
+
+
 def apply_radial_dust_transport(
     model: "Model",
     transport_time: Quantity,
@@ -1187,6 +1584,9 @@ __all__ = [
     "RadialDustTransportResult",
     "RadialGasBackground",
     "RadialTransportDiagnostics",
+    "RadialAmaxDustBin",
+    "RadialAmaxResult",
+    "apply_radial_amax",
     "apply_radial_dust_transport",
     "build_smoothed_radial_gas_background",
     "dust_diffusivity",

@@ -39,17 +39,36 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
-- Bondi All-Stars dust construction now applies 50 kyr of finite-time radial
-  drift and turbulent diffusion to every settled-disc grain bin before adding
-  the complementary proportional ISM component. Gas and dust are projected
-  conservatively into cylindrical annuli about the measured Joos disc axis and
-  evolved on the smoothed trap-free gas background. Only the connected annular
-  disc reservoir is transported; gains use a coherent settled-disc template
-  rather than amplifying low-weight material. Run summaries include the disc
-  axis, active annuli, and per-bin conservation diagnostics. Every maintained
-  Bondi snapshot dust directory includes a before/after radial-transport figure,
-  and the density, D/G, vertical, boundary, and azimuthal figures identify the
-  post-50-kyr state.
+- Bondi All-Stars local production, cluster staging, and maintained dust
+  diagnostics now consume one canonical `bondi_defaults.py` setup containing
+  the accepted connected Joos mask, mass-scaled midplane-density support,
+  settling, and radial-`a_max` settings. Per-run configuration names the
+  angular-momentum estimator aperture `AXIS_SUPPORT_AU`; it is not a material
+  disk radius. The committed local run selects `m20_8_dmid_f120_c10` with its
+  matching 2-Msun stellar and `chi=1` radiation parameters.
+- Bondi All-Stars dust construction now uses a locally normalized ten-bin
+  radial maximum-grain-size profile instead of assigning a finite transport
+  age. The profile has `a_max = 100 um` at 100 au, decreases as `R**-2`, and
+  applies a smooth 0.25-dex complementary-error-function turnover across bin
+  sizes. The total settled dust column remains `0.01` times the actual
+  mask-weighted disc gas column; no smoothed gas background enters the size
+  mix. All configured grain bins remain present, no hard bin cutoff is imposed,
+  and disconnected soft-mask tails are not amplified. Maintained Bondi
+  directories include `settled_dust_radial_amax.png`,
+  `settled_dust_size_threshold_sideon.png`,
+  `settled_dust_size_ceiling_sideon.png`,
+  `settled_dust_size_threshold_profiles.png`, and
+  `settled_dust_size_threshold_faceon.png`, exposing all ten bins and
+  cumulative dust above 0.1, 1, 10, and 100 microns. Standalone
+  `settled_dust_total_dust_to_gas_sideon.png` and
+  `settled_dust_total_dust_to_gas_faceon.png` products show the cell-local
+  total of every disc and ISM dust bin relative to gas in phi-averaged edge-on
+  and azimuth-preserving top-down views.
+- Bondi All-Stars settled-disc weights now include an azimuthal-median,
+  disc-frame midplane-density support score. The mass-scaled density midpoint
+  is `1.5e-17 (Mstar/Msun) g/cm^3`, with a 0.50-dex transition, so diffuse
+  captured material fades into the ISM component without a geometric outer
+  radius or a higher local atmosphere density floor.
 - Joos disc weights now evaluate the full loaded mesh and enforce both vertical
   and outward radial connectivity. `r_max_for_axis` is solely the required
   angular-momentum support aperture; the physical `r_max`, implicit
@@ -113,6 +132,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   as disc annuli or divides evolved columns by negligible unsupported columns.
   Detached outer soft-mask material therefore remains ISM dominated instead of
   being amplified into spurious settled-disc dust blobs.
+- Radial maximum-grain-size redistribution now covers the full contiguous soft
+  mask tail down to `weight_floor`, rather than stopping at the boolean 0.5
+  contour and leaving an unmodified large-grain ring immediately outside it.
 - Soft Joos disc weights no longer snap high scores to exactly one. Their
   complementary ISM fractions therefore remain smooth and positive, removing
   artificial sharp changes in settled-disc/ISM dust-density ratio maps.
@@ -176,20 +198,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
-- Regenerated all nine maintained `m20_8_dmid_f120_c10` dust diagnostics after
-  opening the outer diffusion boundary. The final total settled-dust column
-  decreases through each of the outer eight connected annuli, with the last
-  annulus at 0.284 times the preceding column instead of forming a bright ring.
-- Regenerated the `m20_8_dm_f250_c10` density, D/G, vertical, radial, boundary,
-  and azimuthal dust diagnostics with disc-frame cylindrical transport. In the
-  formerly contaminated `R = 450--510 au`, `z = 60--300 au` region, the maximum
-  settled-disc D/G fell from `4.82e-4` to `3.34e-9`; the connected transport
-  reservoir ends at 421.6 au without using a fixed material `r_max`.
-- Regenerated both maintained 14-snapshot Bondi dust atlases with the corrected
-  transport: five interface/density/D/G/radial/vertical products and four
-  azimuthal boundary/surface products per snapshot. All 126 figures and both
-  combined summaries use `disc_cylindrical_radius` and snapshot-specific
-  connected annular support.
+- Regenerated the maintained interface and azimuthal diagnostics for the
+  representative `m20_8_dmid_f120_c10` snapshot with the smooth radial
+  maximum-grain-size prescription. The total settled column follows the actual
+  mask-weighted gas, while the normalized bin fractions vary continuously with
+  the prescribed local `a_max(R)`.
 - A full-native 23,415,480-cell Bondi hydro/mask A/B reduced the contaminated
   `m10_8_dm_f250_c10` Joos tilt from 27.178 degrees with 50,000-au support to
   0.079 degrees with 387.1-au support and removed its pinwheel-like mask. The

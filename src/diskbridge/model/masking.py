@@ -609,6 +609,106 @@ def _cylindrical_midplane_support(
     return np.clip(connected, 0.0, 1.0), support
 
 
+def _midplane_density_support(
+    rho: Quantity,
+    disk_frame: DiskFrameData,
+    valid: np.ndarray,
+    r_edges: Quantity,
+    rho_midplane_min: Quantity,
+    *,
+    softness_dex: float,
+    smoothing_bins: float,
+    floor: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return a smooth annular midplane-density support score.
+
+    The density nearest the disc-frame midplane is accumulated on the existing
+    cylindrical ``(R, phi)`` grid. Its azimuthal median is smoothed in log
+    density before being compared with ``rho_midplane_min``. The resulting
+    radial score is also mapped back to every native cell at the same
+    disc-frame cylindrical radius so the condition can cap a complete vertical
+    column without imposing a local density cut on the disc atmosphere.
+    """
+    threshold = np.asarray(
+        rho_midplane_min.to(rho.units).magnitude,
+        dtype=float,
+    )
+    if threshold.ndim != 0 or not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("rho_midplane_min must be a finite positive scalar density")
+    if not np.isfinite(softness_dex) or softness_dex <= 0.0:
+        raise ValueError("midplane_density_softness_dex must be positive and finite")
+    if not np.isfinite(smoothing_bins) or smoothing_bins <= 0.0:
+        raise ValueError("midplane_density_smoothing_bins must be positive and finite")
+    if disk_frame.R_d.shape != rho.shape or valid.shape != rho.shape:
+        raise ValueError("density, disk-frame geometry, and validity must match")
+
+    edges = np.asarray(r_edges.to_base_units().magnitude, dtype=float)
+    nr = edges.size - 1
+    nphi = rho.shape[2]
+    phi_bins = _disk_phi_bins(disk_frame, nphi)
+    rho_values = np.asarray(rho.to_base_units().magnitude, dtype=float)
+    midplane = np.full((nr, nphi), -np.inf, dtype=float)
+
+    for ir in range(rho.shape[0]):
+        for iphi in range(nphi):
+            populated = np.flatnonzero(valid[ir, :, iphi])
+            if populated.size == 0:
+                continue
+            mid = int(
+                populated[
+                    np.argmin(
+                        np.abs(
+                            disk_frame.theta_from_midplane[ir, populated, iphi]
+                        )
+                    )
+                ]
+            )
+            value = float(rho_values[ir, mid, iphi])
+            r_bin = int(np.digitize(disk_frame.R_d[ir, mid, iphi], edges) - 1)
+            if r_bin < 0 or r_bin >= nr or not np.isfinite(value) or value <= 0.0:
+                continue
+            p_bin = int(phi_bins[ir, mid, iphi])
+            midplane[r_bin, p_bin] = max(midplane[r_bin, p_bin], value)
+
+    midplane[midplane == -np.inf] = np.nan
+    profile = np.full(nr, np.nan, dtype=float)
+    populated_rows = np.any(np.isfinite(midplane), axis=1)
+    profile[populated_rows] = np.nanmedian(midplane[populated_rows], axis=1)
+    populated_radius = np.flatnonzero(np.isfinite(profile) & (profile > 0.0))
+    if populated_radius.size == 0:
+        raise ValueError("No positive disc-frame midplane densities were found")
+    missing_radius = np.flatnonzero(~np.isfinite(profile) | (profile <= 0.0))
+    if missing_radius.size:
+        profile[missing_radius] = np.interp(
+            missing_radius,
+            populated_radius,
+            profile[populated_radius],
+        )
+
+    log_profile = gaussian_filter1d(
+        np.log10(profile),
+        sigma=float(smoothing_bins),
+        mode="nearest",
+    )
+    smooth_profile = np.power(10.0, log_profile)
+    radial_score = _soft_cut_from_ratio(
+        smooth_profile / float(threshold),
+        float(softness_dex) * np.log(10.0),
+        floor,
+    )
+
+    cell_score = np.zeros_like(rho_values, dtype=np.float32)
+    for ir in range(rho.shape[0]):
+        r_bin = np.digitize(disk_frame.R_d[ir], edges).astype(np.int32) - 1
+        in_grid = valid[ir] & (r_bin >= 0) & (r_bin < nr)
+        if np.any(in_grid):
+            cell_score[ir, in_grid] = radial_score[
+                np.clip(r_bin[in_grid], 0, nr - 1)
+            ]
+
+    return cell_score, smooth_profile, radial_score
+
+
 def _apply_connected_midplane_coherence(
     values: np.ndarray,
     midplane_support: np.ndarray,
@@ -831,6 +931,7 @@ def _build_disk_weight(
     weight_floor: float,
     r_edges: Optional[Quantity] = None,
     theta_edges: Optional[np.ndarray] = None,
+    midplane_density_score: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     mode = str(weight_mode).lower()
     if mode in {"cell", "binary", "hard"}:
@@ -854,6 +955,16 @@ def _build_disk_weight(
             r_edges,
             seed_min=float(weight_m0),
         )
+        if midplane_density_score is not None:
+            density_score = np.asarray(midplane_density_score, dtype=float)
+            if density_score.shape != (len(r_edges) - 1,):
+                raise ValueError(
+                    "midplane_density_score must match the cylindrical radial bins"
+                )
+            midplane_support = np.minimum(
+                midplane_support,
+                density_score[:, None],
+            )
         w_midplane, _w_radial, _radial_support, _coverage, _coherence = (
             _apply_connected_midplane_coherence(
                 w_local,
@@ -897,6 +1008,9 @@ def set_mask_from_joos_disk(
     weight_floor: float = 1e-4,
     soft_delta: Union[float, Mapping[str, float]] = 0.20,
     kinematic_smoothing_bins: Tuple[float, float, float] = (2.0, 1.0, 2.0),
+    rho_midplane_min: Optional[Quantity] = None,
+    midplane_density_softness_dex: float = 0.30,
+    midplane_density_smoothing_bins: float = 2.0,
 ) -> "SubModel":
     """Create a disk region mask using the Joos et al. (2012) kinematic/pressure criteria.
 
@@ -910,7 +1024,8 @@ def set_mask_from_joos_disk(
     3) For ``soft_connected``, extracts density-weighted bulk kinematics,
        requires radial connection to a disc-like cylindrical midplane
        footpoint, caps narrow outer sectors by their annular coherence, and
-       prevents vertical re-entry with a weakest-link connection to the
+       optionally requires a dense azimuthally coherent midplane reservoir,
+       and prevents vertical re-entry with a weakest-link connection to the
        midplane on each side.
     4) Registers the boolean mask as model.gas["disk_mask"].
     5) Returns a SubModel with the same boolean mask.
@@ -958,6 +1073,16 @@ def set_mask_from_joos_disk(
     kinematic_smoothing_bins : tuple of float, optional
         Gaussian sigma in native ``(r, theta, phi)`` cells for the
         density-weighted velocity background used by ``soft_connected``.
+    rho_midplane_min : Quantity or None, optional
+        Midplane gas density giving a support score of 0.5. When provided for
+        ``soft_connected``, the smoothed azimuthal-median density at each
+        disc-frame cylindrical radius caps the full vertical column. This is
+        separate from the cell-local ``rho_disk_min`` criterion.
+    midplane_density_softness_dex : float, optional
+        Logistic transition width in dex around ``rho_midplane_min``.
+    midplane_density_smoothing_bins : float, optional
+        Gaussian smoothing width in cylindrical radial bins for the
+        azimuthal-median log midplane-density profile.
 
     Returns
     -------
@@ -1054,10 +1179,15 @@ def set_mask_from_joos_disk(
     ) > 0.5
 
     mode = str(weight_mode).lower()
+    connected_mode = mode in {"soft-connected", "soft_connected"}
+    if rho_midplane_min is not None and not connected_mode:
+        raise ValueError(
+            "rho_midplane_min is only supported with weight_mode='soft_connected'"
+        )
     if mode != "none":
         weight_frame = disk_frame
         weight_criteria = criteria
-        if mode in {"soft-connected", "soft_connected"}:
+        if connected_mode:
             weight_frame = _smooth_disk_frame_kinematics(
                 rho,
                 disk_frame,
@@ -1072,6 +1202,24 @@ def set_mask_from_joos_disk(
                 float(max_poloidal_mach),
                 float(rotational_support_factor),
             )
+        midplane_density_cell_score = None
+        midplane_density_profile = None
+        midplane_density_score = None
+        if rho_midplane_min is not None:
+            (
+                midplane_density_cell_score,
+                midplane_density_profile,
+                midplane_density_score,
+            ) = _midplane_density_support(
+                rho,
+                weight_frame,
+                valid,
+                r_edges,
+                rho_midplane_min,
+                softness_dex=float(midplane_density_softness_dex),
+                smoothing_bins=float(midplane_density_smoothing_bins),
+                floor=float(weight_floor),
+            )
         w_disk = _build_disk_weight(
             mask,
             weight_criteria,
@@ -1082,9 +1230,57 @@ def set_mask_from_joos_disk(
             weight_floor=weight_floor,
             r_edges=r_edges,
             theta_edges=theta_edges,
+            midplane_density_score=midplane_density_score,
         )
-        if mode in {"soft-connected", "soft_connected"}:
+        if connected_mode:
             mask = w_disk >= 0.5
+        if midplane_density_cell_score is not None:
+            model.gas_register(
+                "disk_midplane_density_support",
+                Field(
+                    data=Quantity(
+                        np.clip(midplane_density_cell_score, 0.0, 1.0),
+                        "dimensionless",
+                    ),
+                    quantity="mask",
+                    axis_order=mesh.axis_names(),
+                    attrs={
+                        "source": "disc_frame_midplane_density",
+                        "rho_midplane_min_g_cm3": float(
+                            rho_midplane_min.to("g/cm^3").magnitude
+                        ),
+                        "softness_dex": float(midplane_density_softness_dex),
+                        "smoothing_bins": float(midplane_density_smoothing_bins),
+                        "azimuthal_statistic": "median",
+                        "radial_profile_min_g_cm3": float(
+                            Quantity(midplane_density_profile, rho.units)
+                            .to("g/cm^3")
+                            .magnitude.min()
+                        ),
+                        "radial_profile_max_g_cm3": float(
+                            Quantity(midplane_density_profile, rho.units)
+                            .to("g/cm^3")
+                            .magnitude.max()
+                        ),
+                        "radial_centres_au": tuple(
+                            float(value)
+                            for value in (
+                                0.5 * (r_edges[:-1] + r_edges[1:])
+                            ).to("au").magnitude
+                        ),
+                        "radial_profile_g_cm3": tuple(
+                            float(value)
+                            for value in Quantity(
+                                midplane_density_profile,
+                                rho.units,
+                            ).to("g/cm^3").magnitude
+                        ),
+                        "radial_support_score": tuple(
+                            float(value) for value in midplane_density_score
+                        ),
+                    },
+                ),
+            )
         w_field = Field(
             data=Quantity(np.clip(w_disk, 0.0, 1.0), "dimensionless"),
             quantity="mask",
@@ -1109,6 +1305,17 @@ def set_mask_from_joos_disk(
                 "midplane_connectivity": "radial_weakest_link",
                 "azimuthal_coherence": "phi_mean_running_minimum",
                 "vertical_connectivity": "midplane_weakest_link",
+                "rho_midplane_min_g_cm3": (
+                    None
+                    if rho_midplane_min is None
+                    else float(rho_midplane_min.to("g/cm^3").magnitude)
+                ),
+                "midplane_density_softness_dex": float(
+                    midplane_density_softness_dex
+                ),
+                "midplane_density_smoothing_bins": float(
+                    midplane_density_smoothing_bins
+                ),
             },
         )
         model.gas_register("disk_weight", w_field)
