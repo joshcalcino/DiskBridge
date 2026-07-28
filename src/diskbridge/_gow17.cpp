@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -1041,6 +1042,7 @@ static py::dict reduce_directional_co_cooling(
     double *mean_ptr = mean_cooling.mutable_data();
     double *equivalent_cooling_ptr = equivalent_cooling.mutable_data();
     std::atomic<long long> failures{0};
+    std::atomic<long long> local_bracket_fallbacks{0};
 
     py::gil_scoped_release release;
     #pragma omp parallel for schedule(guided)
@@ -1065,11 +1067,118 @@ static py::dict reduce_directional_co_cooling(
         const double scale = std::max(std::abs(rate_min_col), 1.0e-300);
         const double tol = rtol * scale;
         if (!std::isfinite(target) || !std::isfinite(rate_min_col) ||
-            !std::isfinite(rate_max_col) || rate_max_col > rate_min_col + tol ||
-            target > rate_min_col + tol || target < rate_max_col - tol) {
+            !std::isfinite(rate_max_col)) {
             equivalent_ptr[i] = std::numeric_limits<double>::quiet_NaN();
             equivalent_cooling_ptr[i] = std::numeric_limits<double>::quiet_NaN();
             failures.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        const bool endpoint_brackets_target =
+            rate_max_col <= rate_min_col + tol &&
+            target <= rate_min_col + tol && target >= rate_max_col - tol;
+        if (!endpoint_brackets_target) {
+            // Interpolated Omukai fit parameters can produce a shallow local
+            // cusp. Recover all brackets visible in the directional samples.
+            std::vector<std::pair<double, double>> samples;
+            samples.reserve(static_cast<std::size_t>(ndirs));
+            double q_reference = 0.0;
+            bool finite_samples = true;
+            for (py::ssize_t k = 0; k < ndirs; ++k) {
+                const double q = std::log10(row[k] * 1.0e5 + 1.0e13);
+                const double rate = Thermo::CoolingCOR(
+                    1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i], temperature_ptr[i], row[k]);
+                if (!std::isfinite(q) || !std::isfinite(rate)) {
+                    finite_samples = false;
+                    break;
+                }
+                q_reference += q;
+                samples.emplace_back(q, rate);
+            }
+            if (!finite_samples) {
+                equivalent_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+                equivalent_cooling_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+                failures.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            q_reference /= static_cast<double>(ndirs);
+            std::sort(samples.begin(), samples.end());
+
+            // Multiple roots are possible across the cusp. Prefer the one
+            // that best represents the directional column population.
+            double best_q = std::numeric_limits<double>::quiet_NaN();
+            double best_rate = std::numeric_limits<double>::quiet_NaN();
+            double best_distance = std::numeric_limits<double>::infinity();
+            for (const auto &sample : samples) {
+                if (std::abs(sample.second - target) <= tol) {
+                    const double distance = std::abs(sample.first - q_reference);
+                    if (distance < best_distance ||
+                        (distance == best_distance && sample.first < best_q)) {
+                        best_q = sample.first;
+                        best_rate = sample.second;
+                        best_distance = distance;
+                    }
+                }
+            }
+
+            for (py::ssize_t k = 0; k + 1 < ndirs; ++k) {
+                double q_lo = samples[static_cast<std::size_t>(k)].first;
+                double q_hi = samples[static_cast<std::size_t>(k + 1)].first;
+                double f_lo = samples[static_cast<std::size_t>(k)].second - target;
+                const double f_hi =
+                    samples[static_cast<std::size_t>(k + 1)].second - target;
+                const bool sign_change =
+                    (f_lo < 0.0 && f_hi > 0.0) || (f_lo > 0.0 && f_hi < 0.0);
+                if (!sign_change || q_lo == q_hi) {
+                    continue;
+                }
+
+                double q_mid = q_lo;
+                double rate_mid = samples[static_cast<std::size_t>(k)].second;
+                for (int iteration = 0; iteration < max_iter; ++iteration) {
+                    q_mid = 0.5 * (q_lo + q_hi);
+                    const double col_mid =
+                        std::max((std::pow(10.0, q_mid) - 1.0e13) / 1.0e5, 0.0);
+                    rate_mid = Thermo::CoolingCOR(
+                        1.0, nHI_ptr[i], nH2_ptr[i], ne_ptr[i],
+                        temperature_ptr[i], col_mid);
+                    const double f_mid = rate_mid - target;
+                    if (!std::isfinite(rate_mid) || std::abs(f_mid) <= tol) {
+                        break;
+                    }
+                    const bool root_in_lower_half =
+                        (f_lo < 0.0 && f_mid > 0.0) ||
+                        (f_lo > 0.0 && f_mid < 0.0);
+                    if (root_in_lower_half) {
+                        q_hi = q_mid;
+                    } else {
+                        q_lo = q_mid;
+                        f_lo = f_mid;
+                    }
+                }
+                if (!std::isfinite(rate_mid) ||
+                    std::abs(rate_mid - target) > 5.0 * tol) {
+                    continue;
+                }
+                const double distance = std::abs(q_mid - q_reference);
+                if (distance < best_distance ||
+                    (distance == best_distance && q_mid < best_q)) {
+                    best_q = q_mid;
+                    best_rate = rate_mid;
+                    best_distance = distance;
+                }
+            }
+
+            if (!std::isfinite(best_q) || !std::isfinite(best_rate)) {
+                equivalent_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+                equivalent_cooling_ptr[i] = std::numeric_limits<double>::quiet_NaN();
+                failures.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            equivalent_ptr[i] =
+                std::max((std::pow(10.0, best_q) - 1.0e13) / 1.0e5, 0.0);
+            equivalent_cooling_ptr[i] = best_rate;
+            local_bracket_fallbacks.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
@@ -1114,6 +1223,7 @@ static py::dict reduce_directional_co_cooling(
     out["NCOeff_equivalent"] = equivalent;
     out["mean_cooling_coefficient"] = mean_cooling;
     out["equivalent_cooling_coefficient"] = equivalent_cooling;
+    out["local_bracket_fallback_cells"] = local_bracket_fallbacks.load();
     return out;
 }
 

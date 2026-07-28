@@ -2521,6 +2521,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         chunk_size = max(1, chunk_size)
         ray_seconds = 0.0
         reduction_seconds = 0.0
+        local_bracket_fallback_cells = 0
         directional_min = np.inf
         directional_max = 0.0
         n_candidates = int(candidate_idx.shape[0])
@@ -2551,6 +2552,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 columns=np.ascontiguousarray(columns),
             )
             reduction_seconds += time.perf_counter() - reduction_started
+            local_bracket_fallback_cells += int(
+                reduced["local_bracket_fallback_cells"]
+            )
             NCOeff_external_arr[flat_idx] = np.asarray(
                 reduced["NCOeff_equivalent"], dtype=np.float64
             )
@@ -2565,6 +2569,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
                 "update": len(co_cooling_update_diagnostics) + 1,
                 "ray_seconds": float(ray_seconds),
                 "reduction_seconds": float(reduction_seconds),
+                "local_bracket_fallback_cells": local_bracket_fallback_cells,
                 "directional_min_internal": float(directional_min),
                 "directional_max_internal": float(directional_max),
                 "equivalent_min_internal": float(percentiles[0]),
@@ -2582,10 +2587,12 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             }
         )
         logger.info(
-            "GOW17 directional CO cooling update %d: rays=%.3f s, reduction=%.3f s",
+            "GOW17 directional CO cooling update %d: rays=%.3f s, "
+            "reduction=%.3f s, local-bracket cells=%d",
             len(co_cooling_update_diagnostics),
             ray_seconds,
             reduction_seconds,
+            local_bracket_fallback_cells,
         )
 
     def _prepare_hybrid_cooling_reducer(
@@ -2608,6 +2615,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         ) = _directional_cooling_state(y_state, b_co_cm_s)
         stats = {
             "reduction_seconds": 0.0,
+            "local_bracket_fallback_cells": 0,
             "finite_min_internal": np.inf,
             "finite_max_internal": 0.0,
             "hybrid_min_internal": np.inf,
@@ -2664,6 +2672,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             NCOeff_external_arr[flat_idx] = np.asarray(
                 reduced["NCOeff_equivalent"], dtype=np.float64
             )
+            stats["local_bracket_fallback_cells"] += int(
+                reduced["local_bracket_fallback_cells"]
+            )
             stats["reduction_seconds"] += time.perf_counter() - started
 
         return {"co_cooling_nco_over_b": density_over_width}, _reduce_chunk, stats
@@ -2684,6 +2695,9 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             "update": len(co_cooling_update_diagnostics) + 1,
             "ray_seconds": 0.0,
             "reduction_seconds": float(stats["reduction_seconds"]),
+            "local_bracket_fallback_cells": int(
+                stats["local_bracket_fallback_cells"]
+            ),
             "finite_min_internal": float(stats["finite_min_internal"]),
             "finite_max_internal": float(stats["finite_max_internal"]),
             "directional_min_internal": float(stats["hybrid_min_internal"]),
@@ -2715,10 +2729,11 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         co_cooling_update_diagnostics.append(entry)
         logger.info(
             "GOW17 hybrid CO cooling update %d: reduction=%.3f s, "
-            "Sobolev-limited=%.3f",
+            "Sobolev-limited=%.3f, local-bracket cells=%d",
             len(co_cooling_update_diagnostics),
             float(stats["reduction_seconds"]),
             entry["sobolev_limited_fraction"],
+            entry["local_bracket_fallback_cells"],
         )
 
     def _project(y: np.ndarray, indices: np.ndarray | None = None) -> np.ndarray:

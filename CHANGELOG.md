@@ -124,6 +124,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Directional GOW17 CO-cooling reduction now handles shallow non-monotonic
+  interpolation cusps by bracketing sorted directional samples and choosing
+  the inverse nearest their mean logarithmic column. The normal monotonic
+  endpoint path is unchanged, and production diagnostics report how many
+  cells required local bracketing.
 - Radial dust diffusion no longer reflects from the last connected disc
   annulus. The outer boundary now uses zero exterior settled-dust concentration
   and records the one-way escaped flux, preventing fake outer rings while
