@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+import hashlib
 import json
 import re
 
@@ -16,6 +17,7 @@ import shutil
 
 from diskbridge._logging import logger
 from diskbridge._config import get_config
+from diskbridge._params import _parse_param_file
 from diskbridge._units import units, Quantity
 from diskbridge.model import Model
 from diskbridge.model.field import Field
@@ -33,14 +35,100 @@ from diskbridge.model.profiles import (
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
 from diskbridge.radmc3d.uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
+    default_isrf_path,
     draine_references_for_product_partitions,
     draine_reference_for_product,
     uv_product_edges_from_specs,
+    uv_product_schema_hash,
     uv_product_specs_from_config,
     validate_uv_chemistry_config,
 )
+from diskbridge.radmc3d.cache import build_mesh_cache_context
 from .wavelengths import build_mcmono_wavelengths
 from .data import combine_mean_intensity_files, radial_shell_mean_intensity
+
+
+_SEGMENTED_PARAM_KEYS = (
+    "segmented_tol",
+    "segmented_r_clip_min",
+    "segmented_max_splits",
+    "segmented_stop_factor",
+    "segmented_nphot_ratio",
+    "segmented_final_nphot_multiplier",
+    "segmented_outer_weight_mode",
+)
+
+_SEGMENTED_RT_INPUT_NAMES = (
+    "amr_grid.inp",
+    "dust_density.binp",
+    "dustopac.inp",
+    "external_source.inp",
+    "stars.inp",
+    "wavelength_micron.inp",
+)
+
+
+def _validate_temperature_binary(
+    path: Path,
+    *,
+    expected_ncells: int,
+    expected_nspec: int,
+) -> None:
+    """Validate a binary RADMC-3D dust-temperature header and file size."""
+    with path.open("rb") as handle:
+        header = np.fromfile(handle, dtype=np.int64, count=4)
+    if header.size != 4:
+        raise ValueError(f"Incomplete dust-temperature header: {path}")
+    if int(header[0]) != 1 or int(header[1]) not in {4, 8}:
+        raise ValueError(f"Unsupported dust-temperature binary header: {path}")
+    if int(header[2]) != int(expected_ncells):
+        raise ValueError(
+            f"Dust-temperature cell count mismatch in {path}: "
+            f"{int(header[2])} != {int(expected_ncells)}"
+        )
+    if int(header[3]) != int(expected_nspec):
+        raise ValueError(
+            f"Dust-temperature species count mismatch in {path}: "
+            f"{int(header[3])} != {int(expected_nspec)}"
+        )
+    expected_size = 32 + int(header[1]) * int(header[2]) * int(header[3])
+    if path.stat().st_size != expected_size:
+        raise ValueError(
+            f"Incomplete dust-temperature payload in {path}: "
+            f"{path.stat().st_size} bytes != {expected_size}"
+        )
+
+
+def _validate_mean_intensity_binary(
+    path: Path,
+    *,
+    expected_ncells: int,
+    expected_nwavelengths: int,
+) -> None:
+    """Validate a binary RADMC-3D mean-intensity header and file size."""
+    with path.open("rb") as handle:
+        header = np.fromfile(handle, dtype=np.int64, count=4)
+    if header.size != 4:
+        raise ValueError(f"Incomplete mean-intensity header: {path}")
+    if int(header[0]) != 2 or int(header[1]) not in {4, 8}:
+        raise ValueError(f"Unsupported mean-intensity binary header: {path}")
+    if int(header[2]) != int(expected_ncells):
+        raise ValueError(
+            f"Mean-intensity cell count mismatch in {path}: "
+            f"{int(header[2])} != {int(expected_ncells)}"
+        )
+    if int(header[3]) != int(expected_nwavelengths):
+        raise ValueError(
+            f"Mean-intensity wavelength count mismatch in {path}: "
+            f"{int(header[3])} != {int(expected_nwavelengths)}"
+        )
+    nwavelengths = int(header[3])
+    expected_size = 32 + 8 * nwavelengths + int(header[1]) * int(header[2]) * nwavelengths
+    if path.stat().st_size != expected_size:
+        raise ValueError(
+            f"Incomplete mean-intensity payload in {path}: "
+            f"{path.stat().st_size} bytes != {expected_size}"
+        )
 
 
 @dataclass(frozen=True)
@@ -219,9 +307,247 @@ class SegmentedRadRunner:
         if not work_dir:
             raise ValueError(f"Segment metadata is missing work_dir: {segment_entry}")
         segment_dir = Path(str(work_dir))
-        if not segment_dir.is_absolute():
+        if segment_dir.is_absolute():
+            if not segment_dir.exists():
+                relocated = self.base_model_dir / "segments" / segment_dir.name
+                if relocated.exists():
+                    segment_dir = relocated
+        else:
             segment_dir = self.base_model_dir / segment_dir
         return segment_dir
+
+    def _rt_input_fingerprints(self) -> dict[str, dict[str, Any]]:
+        """Return exact fingerprints of continuum RT inputs that define a run."""
+        inputs_dir = self.base_model_dir / "radmc3d_inputs"
+        paths = [inputs_dir / name for name in _SEGMENTED_RT_INPUT_NAMES]
+        paths.extend(sorted(inputs_dir.glob("dustkappa_*.inp")))
+        return {
+            path.name: {
+                "size_bytes": int(path.stat().st_size),
+                "sha256": sha256_file(path),
+            }
+            for path in paths
+            if path.is_file()
+        }
+
+    @staticmethod
+    def _read_cache_context(path: Path) -> dict[str, Any]:
+        """Read one output cache context as a JSON object."""
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing RADMC-3D cache context: {path}")
+        with path.open("r") as handle:
+            value = json.load(handle)
+        if not isinstance(value, dict):
+            raise ValueError(f"RADMC-3D cache context is not an object: {path}")
+        return value
+
+    @staticmethod
+    def _parameter_snapshots_match(
+        current_path: Path,
+        saved_path: Path,
+        keys: tuple[str, ...],
+    ) -> bool:
+        """Return whether selected copied parameter values are unchanged."""
+        if not current_path.is_file() or not saved_path.is_file():
+            return False
+        current = _parse_param_file(current_path)
+        saved = _parse_param_file(saved_path)
+        missing = object()
+        return all(current.get(key, missing) == saved.get(key, missing) for key in keys)
+
+    def _validate_completed_segmented_rt(
+        self,
+        *,
+        expected_summary: dict[str, Any],
+        wavelengths_um: np.ndarray,
+        product_specs: list[Any],
+    ) -> tuple[bool, str]:
+        """Return whether the terminal segmented products can be reused safely."""
+        from diskbridge.radmc3d.model import (
+            _MCMONO_EXTRA_PARAM_KEYS,
+            _MCTHERM_PARAM_KEYS,
+        )
+
+        summary_path = self.base_model_dir / "segments" / "segmented_rt_summary.json"
+        if not summary_path.is_file():
+            return False, "no completed segmented RT manifest"
+        try:
+            with summary_path.open("r") as handle:
+                summary = json.load(handle)
+            if not isinstance(summary, dict):
+                return False, "segmented RT manifest is not a JSON object"
+
+            for key, expected in expected_summary.items():
+                actual = summary.get(key)
+                if actual is None and key in {
+                    "segmented_r_clip_min_au",
+                    "segmented_max_splits",
+                    "segmented_stop_factor",
+                    "segmented_nphot_ratio",
+                }:
+                    # Manifests written before restart-safe reuse recorded
+                    # these values only in the saved parameter snapshots.
+                    continue
+                if isinstance(expected, float):
+                    matches = actual is not None and bool(
+                        np.isclose(float(actual), expected, rtol=0.0, atol=1.0e-12)
+                    )
+                else:
+                    matches = actual == expected
+                if not matches:
+                    return False, f"manifest setting {key!r} changed ({actual!r} != {expected!r})"
+
+            entries = summary.get("segments")
+            if not isinstance(entries, list) or not entries:
+                return False, "segmented RT manifest contains no segments"
+            if not all(isinstance(entry, dict) for entry in entries):
+                return False, "segmented RT manifest contains a non-object segment entry"
+            levels = [int(entry.get("level", -1)) for entry in entries]
+            if levels != list(range(len(entries))):
+                return False, f"segment levels are not contiguous: {levels}"
+            final_indices = [
+                index for index, entry in enumerate(entries) if bool(entry.get("is_final", False))
+            ]
+            if final_indices != [len(entries) - 1]:
+                return False, "manifest does not end in exactly one terminal segment"
+            if not entries[-1].get("terminal_reason"):
+                return False, "terminal segment has no completion reason"
+
+            saved_fingerprints = summary.get("rt_input_fingerprints")
+            if saved_fingerprints is not None:
+                current_fingerprints = self._rt_input_fingerprints()
+                if current_fingerprints != saved_fingerprints:
+                    return False, "continuum RT input fingerprints changed"
+
+            current_params = self.base_model_dir / "params.txt"
+            param_keys = (
+                _MCTHERM_PARAM_KEYS
+                + _MCMONO_EXTRA_PARAM_KEYS
+                + _SEGMENTED_PARAM_KEYS
+            )
+            expected_wavelength_hash = hashlib.sha256(
+                np.asarray(wavelengths_um, dtype=np.float64).tobytes()
+            ).hexdigest()
+            expected_mesh_root = build_mesh_cache_context(self.base_model.mesh)
+            expected_schema_hash = uv_product_schema_hash(product_specs)
+            segment_zero_source_hash: str | None = None
+            base_source = self.base_model_dir / "radmc3d_inputs" / "external_source.inp"
+            if base_source.is_file():
+                segment_zero_source_hash = sha256_file(base_source)
+
+            for entry in entries:
+                segment_dir = self._resolve_segment_work_dir(entry)
+                parsed_level, parsed_rmax_au = self._parse_segment_dir(segment_dir)
+                level = int(entry["level"])
+                if parsed_level != level:
+                    return False, f"segment level disagrees with directory name: {segment_dir}"
+                if level == 0 and parsed_rmax_au is None:
+                    segment_model = self.base_model
+                else:
+                    rmax_au = entry.get("r_max_au", parsed_rmax_au)
+                    if rmax_au is None:
+                        return False, f"segment has no outer radius: {segment_dir}"
+                    definition = SegmentDefinition(
+                        name=f"segment_{level:02d}",
+                        bounds={"r": (None, float(rmax_au) * units("au"))},
+                        work_dir=segment_dir,
+                    )
+                    segment_model, _ = self._build_segment_model_and_indexer(definition)
+
+                if segment_model.mesh is None:
+                    return False, f"segment has no mesh: {segment_dir}"
+                ncells = int(np.prod(segment_model.mesh.shape))
+                nspec = int(segment_model.dust.nbin) if segment_model.dust is not None else 0
+                if nspec < 1:
+                    return False, f"segment has no dust species: {segment_dir}"
+
+                output_root = segment_dir / "radmc3d_outputs"
+                temp_path = output_root / "temperature" / "dust_temperature.bdat"
+                mono_path = output_root / "mcmono" / "mean_intensity.bout"
+                _validate_temperature_binary(
+                    temp_path,
+                    expected_ncells=ncells,
+                    expected_nspec=nspec,
+                )
+                _validate_mean_intensity_binary(
+                    mono_path,
+                    expected_ncells=ncells,
+                    expected_nwavelengths=int(wavelengths_um.size),
+                )
+
+                temp_dir = output_root / "temperature"
+                mono_dir = output_root / "mcmono"
+                if not self._parameter_snapshots_match(
+                    current_params,
+                    temp_dir / "params.txt",
+                    param_keys,
+                ):
+                    return False, f"temperature parameter snapshot changed for {segment_dir.name}"
+                if not self._parameter_snapshots_match(
+                    current_params,
+                    mono_dir / "params.txt",
+                    param_keys,
+                ):
+                    return False, f"mcmono parameter snapshot changed for {segment_dir.name}"
+
+                temp_cache = self._read_cache_context(temp_dir / "cache_context.json")
+                mono_cache = self._read_cache_context(mono_dir / "cache_context.json")
+                expected_mesh = (
+                    expected_mesh_root
+                    if level == 0
+                    else build_mesh_cache_context(segment_model.mesh)
+                )
+                for key, expected in expected_mesh.items():
+                    if temp_cache.get(key) != expected or mono_cache.get(key) != expected:
+                        return False, f"mesh cache identity changed for {segment_dir.name}"
+                if int(temp_cache.get("nphot", -1)) != int(entry.get("nphot_thermal", -2)):
+                    return False, f"temperature photon count changed for {segment_dir.name}"
+                if int(mono_cache.get("nphot", -1)) != int(entry.get("nphot_mono", -2)):
+                    return False, f"mcmono photon count changed for {segment_dir.name}"
+                if temp_cache.get("external_source_enabled") != mono_cache.get(
+                    "external_source_enabled"
+                ) or temp_cache.get("external_source_sha256") != mono_cache.get(
+                    "external_source_sha256"
+                ):
+                    return False, f"temperature/mcmono source identity differs for {segment_dir.name}"
+                if (
+                    level == 0
+                    and bool(temp_cache.get("external_source_enabled", False))
+                    and segment_zero_source_hash is None
+                ):
+                    return False, "base external radiation source is missing"
+                if (
+                    level == 0
+                    and bool(temp_cache.get("external_source_enabled", False))
+                    and segment_zero_source_hash is not None
+                ):
+                    if temp_cache.get("external_source_sha256") != segment_zero_source_hash:
+                        return False, "base external radiation source changed"
+
+                expected_mono = {
+                    "wavelengths_size": int(wavelengths_um.size),
+                    "wavelengths_sha256": expected_wavelength_hash,
+                    "uv_product_schema_sha256": expected_schema_hash,
+                    "uv_product_reference_isrf_hash": sha256_file(default_isrf_path()),
+                    "uv_products_enabled": True,
+                    "uv_product_mode": "disc_segment_only",
+                }
+                for key, expected in expected_mono.items():
+                    if mono_cache.get(key) != expected:
+                        return False, f"mcmono cache setting {key!r} changed for {segment_dir.name}"
+
+            terminal = entries[-1]
+            if int(terminal.get("nphot_thermal", -1)) != int(
+                expected_summary["nphot_thermal_final"]
+            ):
+                return False, "terminal thermal photon budget changed"
+            if int(terminal.get("nphot_mono", -1)) != int(
+                expected_summary["nphot_mono_final"]
+            ):
+                return False, "terminal mcmono photon budget changed"
+        except (FileNotFoundError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            return False, str(exc)
+        return True, "completed terminal segmented RT products are compatible"
 
     def _segment_uv_band_for_diagnostics(self) -> tuple[Quantity, Quantity]:
         """Return the broad UV-product band used by final segment diagnostics."""
@@ -1499,7 +1825,7 @@ class SegmentedRadRunner:
         segmented_final_nphot_multiplier : float, optional
             Packet multiplier for the terminal science calculation.
         force : bool, optional
-            Recompute cached RADMC-3D outputs.
+            Skip completed-product reuse and recompute RADMC-3D outputs.
         diagnostic_plots : bool, optional
             Write merged and per-segment diagnostics.
         plots_dir : str or pathlib.Path, optional
@@ -1606,6 +1932,49 @@ class SegmentedRadRunner:
             tolerance,
         )
 
+        expected_completed_summary = {
+            "mode": "noise_aware_inherited_uv",
+            "mcmono_wavelength_source": "uv",
+            "segmented_final_nphot_multiplier": final_multiplier,
+            "segmented_tol": tolerance,
+            "segmented_r_clip_min_au": r_clip_min_au,
+            "segmented_max_splits": max_splits,
+            "segmented_stop_factor": stop_factor,
+            "segmented_nphot_ratio": ratio,
+            "stellar_fraction_threshold": float(
+                runtime_mode.stellar_fraction_threshold
+            ),
+            "nphot_thermal_nominal": nominal_thermal,
+            "nphot_mono_nominal": nominal_mono,
+            "nphot_thermal_final": final_thermal,
+            "nphot_mono_final": final_mono,
+            "uv_product_mode": "all_segments_measured",
+        }
+        if not force:
+            compatible, reason = self._validate_completed_segmented_rt(
+                expected_summary=expected_completed_summary,
+                wavelengths_um=wavelengths_um,
+                product_specs=product_specs,
+            )
+            if compatible:
+                logger.info(
+                    "Reusing completed segmented RADMC-3D products before scout: %s",
+                    reason,
+                )
+                try:
+                    return self.load_segmented_rt_outputs(
+                        diagnostic_plots=diagnostic_plots,
+                        plots_dir=plots_dir,
+                    )
+                except (FileNotFoundError, OSError, ValueError) as exc:
+                    logger.warning(
+                        "Completed segmented RT products failed while loading (%s); "
+                        "recomputing",
+                        exc,
+                    )
+            else:
+                logger.info("Completed segmented RT products are not reusable: %s", reason)
+
         base_opacity_dir = self.base_model_dir / "radmc3d_inputs"
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
         if not list(base_opacity_dir.glob("dustkappa_*.inp")):
@@ -1614,6 +1983,7 @@ class SegmentedRadRunner:
             )
         if not list(base_opacity_dir.glob("dustkappa_*.inp")):
             raise RuntimeError(f"No dustkappa_*.inp files found in {base_opacity_dir}")
+        rt_input_fingerprints = self._rt_input_fingerprints()
 
         merged_temperature: Optional[Quantity] = None
         merged_chi: Optional[Quantity] = None
@@ -1931,6 +2301,10 @@ class SegmentedRadRunner:
             "mcmono_wavelength_source": "uv",
             "segmented_final_nphot_multiplier": final_multiplier,
             "segmented_tol": tolerance,
+            "segmented_r_clip_min_au": r_clip_min_au,
+            "segmented_max_splits": max_splits,
+            "segmented_stop_factor": stop_factor,
+            "segmented_nphot_ratio": ratio,
             "stellar_fraction_threshold": runtime_mode.stellar_fraction_threshold,
             "nphot_thermal_nominal": nominal_thermal,
             "nphot_mono_nominal": nominal_mono,
@@ -1951,10 +2325,12 @@ class SegmentedRadRunner:
             "outer_product_policy": None,
             "uv_product_measured_mask": measured_mask,
             "segment_id": segment_id,
+            "rt_input_fingerprints": rt_input_fingerprints,
         }
         summary_path = self.base_model_dir / "segments" / "segmented_rt_summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(
+        summary_tmp = summary_path.with_suffix(".json.tmp")
+        summary_tmp.write_text(
             json.dumps(
                 jsonable(
                     {
@@ -1968,6 +2344,7 @@ class SegmentedRadRunner:
             )
             + "\n"
         )
+        summary_tmp.replace(summary_path)
         if diagnostic_plots:
             plot_output_dir = (
                 Path(plots_dir)
