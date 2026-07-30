@@ -8,12 +8,37 @@ from __future__ import annotations
 from typing import Tuple
 
 import numpy as np
-from numba import get_num_threads, njit, prange
+from numba import (
+    get_num_threads,
+    njit,
+    parallel_chunksize,
+    prange,
+    threading_layer,
+)
+
+
+_SPHERICAL_TBB_PACKETS_PER_WORKER = 128
 
 
 def _as_f64(name: str, x) -> np.ndarray:
     a = np.asarray(x, dtype=np.float64)
     return a
+
+
+def _spherical_parallel_chunksize(
+    n_cells: int,
+    n_workers: int,
+    layer: str,
+) -> int:
+    """Return bounded TBB packet size, or zero for static scheduling."""
+    if layer != "tbb" or n_workers <= 1:
+        return 0
+    target_packets = n_workers * _SPHERICAL_TBB_PACKETS_PER_WORKER
+    if n_cells < target_packets:
+        return 0
+    cells_per_worker = (n_cells + n_workers - 1) // n_workers
+    padded_work = n_workers * cells_per_worker
+    return max(1, (padded_work + target_packets - 1) // target_packets)
 
 
 @njit(cache=True, parallel=True)
@@ -296,16 +321,15 @@ def _t_to_radius_boundary(
 
 
 @njit(cache=True)
-def _t_to_theta_boundary(
+def _t_to_theta_boundary_from_cos(
     x: float,
     y: float,
     z: float,
     dx: float,
     dy: float,
     dz: float,
-    theta_edge: float,
+    c: float,
 ) -> float:
-    c = np.cos(theta_edge)
     c2 = c * c
     s2 = 1.0 - c2
 
@@ -338,16 +362,35 @@ def _t_to_theta_boundary(
 
 
 @njit(cache=True)
-def _t_to_phi_boundary(
+def _t_to_theta_boundary(
+    x: float,
+    y: float,
+    z: float,
+    dx: float,
+    dy: float,
+    dz: float,
+    theta_edge: float,
+) -> float:
+    return _t_to_theta_boundary_from_cos(
+        x,
+        y,
+        z,
+        dx,
+        dy,
+        dz,
+        np.cos(theta_edge),
+    )
+
+
+@njit(cache=True)
+def _t_to_phi_boundary_from_trig(
     x: float,
     y: float,
     dx: float,
     dy: float,
-    phi_edge: float,
+    c: float,
+    s: float,
 ) -> float:
-    c = np.cos(phi_edge)
-    s = np.sin(phi_edge)
-
     denom = dy * c - dx * s
     if np.abs(denom) < 1e-14:
         return np.inf
@@ -366,6 +409,24 @@ def _t_to_phi_boundary(
         if radial_projection >= -1.0e-10 * max(hit_radius, 1.0):
             return t
     return np.inf
+
+
+@njit(cache=True)
+def _t_to_phi_boundary(
+    x: float,
+    y: float,
+    dx: float,
+    dy: float,
+    phi_edge: float,
+) -> float:
+    return _t_to_phi_boundary_from_trig(
+        x,
+        y,
+        dx,
+        dy,
+        np.cos(phi_edge),
+        np.sin(phi_edge),
+    )
 
 
 @njit(cache=True, parallel=True)
@@ -396,6 +457,15 @@ def _integrate_all_rays_spherical_dda_multi(
     rmax = r_edges[-1]
 
     two_pi = 2.0 * np.pi
+
+    theta_cos = np.empty(theta_edges.size, dtype=np.float64)
+    for edge_index in range(theta_edges.size):
+        theta_cos[edge_index] = np.cos(theta_edges[edge_index])
+    phi_cos = np.empty(phi_edges.size, dtype=np.float64)
+    phi_sin = np.empty(phi_edges.size, dtype=np.float64)
+    for edge_index in range(phi_edges.size):
+        phi_cos[edge_index] = np.cos(phi_edges[edge_index])
+        phi_sin[edge_index] = np.sin(phi_edges[edge_index])
 
     # Transpose the conceptual (worker, cell) work grid so every static
     # worker block samples the complete native cell order instead of one
@@ -461,28 +531,39 @@ def _integrate_all_rays_spherical_dda_multi(
                 if t_r_lo < t_min:
                     t_min = t_r_lo
                 if ir < nr:
-                    t_r_hi = _t_to_radius_boundary(x, y, z, dx, dy, dz, r_edges[ir + 1])
+                    t_r_hi = _t_to_radius_boundary(
+                        x, y, z, dx, dy, dz, r_edges[ir + 1]
+                    )
                     if t_r_hi < t_min:
                         t_min = t_r_hi
 
                 if it > 0:
-                    th_lo = theta_edges[it]
-                    t_th_lo = _t_to_theta_boundary(x, y, z, dx, dy, dz, th_lo)
+                    t_th_lo = _t_to_theta_boundary_from_cos(
+                        x, y, z, dx, dy, dz, theta_cos[it]
+                    )
                     if t_th_lo < t_min:
                         t_min = t_th_lo
                 if it < nt - 1:
-                    th_hi = theta_edges[it + 1]
-                    t_th_hi = _t_to_theta_boundary(x, y, z, dx, dy, dz, th_hi)
+                    t_th_hi = _t_to_theta_boundary_from_cos(
+                        x, y, z, dx, dy, dz, theta_cos[it + 1]
+                    )
                     if t_th_hi < t_min:
                         t_min = t_th_hi
 
-                phi_lo = phi_edges[ip]
-                t_phi_lo = _t_to_phi_boundary(x, y, dx, dy, phi_lo)
+                t_phi_lo = _t_to_phi_boundary_from_trig(
+                    x, y, dx, dy, phi_cos[ip], phi_sin[ip]
+                )
                 if t_phi_lo < t_min:
                     t_min = t_phi_lo
 
-                phi_hi = phi_edges[ip + 1]
-                t_phi_hi = _t_to_phi_boundary(x, y, dx, dy, phi_hi)
+                t_phi_hi = _t_to_phi_boundary_from_trig(
+                    x,
+                    y,
+                    dx,
+                    dy,
+                    phi_cos[ip + 1],
+                    phi_sin[ip + 1],
+                )
                 if t_phi_hi < t_min:
                     t_min = t_phi_hi
 
@@ -786,6 +867,7 @@ def integrate_rays_multi(
     directions = _as_f64("directions", directions)
     fields_stack = _as_f64("fields_stack", fields_stack)
     edges = _tracer_edges_float64(tracer, kind)
+    n_workers = int(get_num_threads())
 
     if kind == "cartesian":
         return _integrate_all_rays_cartesian_dda_multi(
@@ -794,16 +876,22 @@ def integrate_rays_multi(
             fields_stack,
             *edges,
             max_steps,
-            int(get_num_threads()),
+            n_workers,
         )
-    return _integrate_all_rays_spherical_dda_multi(
-        cell_centers,
-        directions,
-        fields_stack,
-        *edges,
-        max_steps,
-        int(get_num_threads()),
+    chunksize = _spherical_parallel_chunksize(
+        cell_centers.shape[0],
+        n_workers,
+        threading_layer(),
     )
+    with parallel_chunksize(chunksize):
+        return _integrate_all_rays_spherical_dda_multi(
+            cell_centers,
+            directions,
+            fields_stack,
+            *edges,
+            max_steps,
+            n_workers,
+        )
 
 
 def integrate_rays_with_pathlength(
