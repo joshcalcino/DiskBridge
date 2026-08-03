@@ -6,11 +6,15 @@
 # db-purpose: Protect paired UV estimator, split, and inherited-source contracts.
 
 from pathlib import Path
+from types import SimpleNamespace
+import hashlib
+import json
 
 import numpy as np
 import pytest
 
 from diskbridge._units import Quantity
+from diskbridge._params import DEFAULT_PARAMS_FILE
 from diskbridge.model.core import Model
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.model.profiles import (
@@ -21,6 +25,8 @@ from diskbridge.radmc3d.data import (
     combine_mean_intensity_files,
     radial_shell_mean_intensity,
 )
+from diskbridge.radmc3d.cache import build_mesh_cache_context
+from diskbridge._config import get_config
 from diskbridge.radmc3d.model import (
     RADMC_PHOTON_COUNT_MAX,
     RadModel,
@@ -31,6 +37,13 @@ from diskbridge.radmc3d.segmented import (
     _calibrate_inherited_spectrum,
     _clip_parent_temperature_to_child,
     _matches_serialized_mcmono_grid,
+    _validate_mean_intensity_binary,
+    _validate_temperature_binary,
+)
+from diskbridge.radmc3d.uv_products import (
+    default_isrf_path,
+    uv_product_schema_hash,
+    uv_product_specs_from_config,
 )
 
 
@@ -288,3 +301,252 @@ def test_segment_setup_does_not_overwrite_existing_external_source(
     runner._setup_segment(object(), work_dir, tmp_path / "opacities")
 
     assert source_path.read_text() == "stale spectrum\n"
+
+
+def _write_temperature_binary(path: Path, *, ncells: int, nspec: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        np.asarray([1, 8, ncells, nspec], dtype=np.int64).tofile(handle)
+        np.zeros(ncells * nspec, dtype=np.float64).tofile(handle)
+
+
+def _completed_segment_fixture(tmp_path: Path) -> tuple[SegmentedRadRunner, dict, np.ndarray, list]:
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([1.0, 2.0, 3.0]), "au")),
+        theta=Axis(edges=Quantity(np.array([0.0, np.pi]), "radian")),
+        phi=Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = "spherical"
+    model.dust = SimpleNamespace(nbin=2)
+
+    base_dir = tmp_path / "run"
+    segment_dir = base_dir / "segments" / "segment_00_full"
+    temp_dir = segment_dir / "radmc3d_outputs" / "temperature"
+    mono_dir = segment_dir / "radmc3d_outputs" / "mcmono"
+    base_dir.mkdir(parents=True)
+    params_text = Path(DEFAULT_PARAMS_FILE).read_text()
+    (base_dir / "params.txt").write_text(params_text)
+    temp_dir.mkdir(parents=True)
+    mono_dir.mkdir(parents=True)
+    (temp_dir / "params.txt").write_text(params_text)
+    (mono_dir / "params.txt").write_text(params_text)
+
+    wavelengths = np.array([0.0912, 0.11, 0.2067], dtype=np.float64)
+    ncells = int(np.prod(model.mesh.shape))
+    _write_temperature_binary(
+        temp_dir / "dust_temperature.bdat",
+        ncells=ncells,
+        nspec=2,
+    )
+    _write_mean_intensity(
+        mono_dir / "mean_intensity.bout",
+        np.zeros((wavelengths.size, ncells)),
+        frequencies=np.ones(wavelengths.size),
+    )
+
+    specs = uv_product_specs_from_config(
+        get_config().get("radmc3d", {}).get("uv_products", {})
+    )
+    mesh_context = build_mesh_cache_context(model.mesh)
+    temperature_context = {
+        "nphot": 1000,
+        "external_source_enabled": False,
+        **mesh_context,
+    }
+    mono_context = {
+        "nphot": 1000,
+        "external_source_enabled": False,
+        "wavelengths_size": int(wavelengths.size),
+        "wavelengths_sha256": hashlib.sha256(wavelengths.tobytes()).hexdigest(),
+        "uv_product_schema_sha256": uv_product_schema_hash(specs),
+        "uv_product_reference_isrf_hash": hashlib.sha256(
+            default_isrf_path().read_bytes()
+        ).hexdigest(),
+        "uv_products_enabled": True,
+        "uv_product_mode": "disc_segment_only",
+        **mesh_context,
+    }
+    (temp_dir / "cache_context.json").write_text(json.dumps(temperature_context))
+    (mono_dir / "cache_context.json").write_text(json.dumps(mono_context))
+
+    expected = {
+        "mode": "noise_aware_inherited_uv",
+        "mcmono_wavelength_source": "uv",
+        "segmented_final_nphot_multiplier": 1.0,
+        "segmented_tol": 0.01,
+        "stellar_fraction_threshold": 0.01,
+        "nphot_thermal_nominal": 1000,
+        "nphot_mono_nominal": 1000,
+        "nphot_thermal_final": 1000,
+        "nphot_mono_final": 1000,
+        "uv_product_mode": "all_segments_measured",
+    }
+    manifest = {
+        **expected,
+        "segments": [
+            {
+                "level": 0,
+                "work_dir": "/relocated/cluster/run/segments/segment_00_full",
+                "r_max_au": 3.0,
+                "nphot_thermal": 1000,
+                "nphot_mono": 1000,
+                "is_final": True,
+                "terminal_reason": "maximum split level reached",
+            }
+        ],
+    }
+    summary_path = base_dir / "segments" / "segmented_rt_summary.json"
+    summary_path.write_text(json.dumps(manifest))
+    return SegmentedRadRunner(model, base_dir), expected, wavelengths, specs
+
+
+def test_completed_terminal_products_are_accepted_before_scout_budget(tmp_path: Path) -> None:
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert compatible, reason
+
+
+def test_completed_terminal_products_reject_changed_final_budget(tmp_path: Path) -> None:
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+    expected["nphot_thermal_final"] = 2000
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert not compatible
+    assert "nphot_thermal_final" in reason
+
+
+def test_completed_terminal_products_reject_truncated_binary(tmp_path: Path) -> None:
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+    mean_path = (
+        runner.base_model_dir
+        / "segments"
+        / "segment_00_full"
+        / "radmc3d_outputs"
+        / "mcmono"
+        / "mean_intensity.bout"
+    )
+    mean_path.write_bytes(mean_path.read_bytes()[:-8])
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert not compatible
+    assert "Incomplete mean-intensity payload" in reason
+
+
+def test_completed_terminal_products_reject_changed_physical_input(tmp_path: Path) -> None:
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+    inputs_dir = runner.base_model_dir / "radmc3d_inputs"
+    inputs_dir.mkdir()
+    density_path = inputs_dir / "dust_density.binp"
+    density_path.write_bytes(b"original density")
+    summary_path = runner.base_model_dir / "segments" / "segmented_rt_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["rt_input_fingerprints"] = runner._rt_input_fingerprints()
+    summary_path.write_text(json.dumps(summary))
+    density_path.write_bytes(b"changed density")
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert not compatible
+    assert reason == "continuum RT input fingerprints changed"
+
+
+def test_force_is_the_only_way_to_bypass_completed_product_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import diskbridge
+
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([1.0, 2.0]), "au")),
+        theta=Axis(edges=Quantity(np.array([0.0, np.pi]), "radian")),
+        phi=Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = "spherical"
+    monkeypatch.setattr(
+        diskbridge,
+        "params",
+        SimpleNamespace(
+            segmented_tol=0.01,
+            segmented_r_clip_min=Quantity(1.0, "au"),
+            segmented_stop_factor=0.9,
+            segmented_nphot_ratio=0.1,
+            segmented_final_nphot_multiplier=1.0,
+            segmented_max_splits=1,
+            nphot_thermal=100,
+            nphot_mono=100,
+            uv_n_wavelengths=5,
+        ),
+    )
+    runner = SegmentedRadRunner(model, tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_validate_completed_segmented_rt",
+        lambda **kwargs: (True, "compatible"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_segmented_rt_outputs",
+        lambda **kwargs: {"loaded_existing": True},
+    )
+
+    assert runner.run_segmented_rt(force=False) == {"loaded_existing": True}
+
+    monkeypatch.setattr(
+        "diskbridge.radmc3d.writer.RadWriter.compute_and_write_dust_opacities",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("recompute entered")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_validate_completed_segmented_rt",
+        lambda **kwargs: (False, "incompatible"),
+    )
+    with pytest.raises(RuntimeError, match="recompute entered"):
+        runner.run_segmented_rt(force=False)
+
+    called = False
+
+    def fail_if_validated(**kwargs):
+        nonlocal called
+        called = True
+        return True, "compatible"
+
+    monkeypatch.setattr(runner, "_validate_completed_segmented_rt", fail_if_validated)
+    with pytest.raises(RuntimeError, match="recompute entered"):
+        runner.run_segmented_rt(force=True)
+    assert not called
+
+
+def test_binary_restart_validation_checks_exact_payload_sizes(tmp_path: Path) -> None:
+    temperature = tmp_path / "dust_temperature.bdat"
+    mean = tmp_path / "mean_intensity.bout"
+    _write_temperature_binary(temperature, ncells=2, nspec=3)
+    _write_mean_intensity(
+        mean,
+        np.zeros((4, 2)),
+        frequencies=np.ones(4),
+    )
+
+    _validate_temperature_binary(temperature, expected_ncells=2, expected_nspec=3)
+    _validate_mean_intensity_binary(mean, expected_ncells=2, expected_nwavelengths=4)

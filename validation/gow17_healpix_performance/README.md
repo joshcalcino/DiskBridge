@@ -63,6 +63,112 @@ The output records every native worker's cumulative CPU time at 0.1-second
 cadence. This command is a scaling sample, not the default sustained validation
 and not a substitute for the full cached-RADMC cluster comparison.
 
+Use `--candidate-layout contiguous --candidate-start OFFSET` to exercise the
+native C-order spatial bands used by production chunking. Plot a completed
+old/current pair on common absolute-time and fractional-time axes with:
+
+```bash
+python validation/gow17_healpix_performance/plot_scheduler_ab.py \
+  OLD_OUTPUT_ROOT CURRENT_OUTPUT_ROOT --output-directory COMPARISON_OUTPUT
+```
+
+The comparison also records wall time, the final below-half-allocation tail,
+source hashes, and bitwise equality of the saved numerical samples.
+
+### Bounded PDR ray field-count diagnostic
+
+`run_pdr_ray_fields.py` isolates the canonical spherical
+`integrate_rays_multi()` call from RADMC-3D, post-ray shielding algebra, and
+chemistry. Its cluster workload uses the Bondi production shape
+`(486, 146, 330)`, 192 directions, a contiguous 120,000-cell native-order band
+beginning at flat offset 11,500,000, and either five or six deterministic input
+fields. One invocation performs one Numba warm-up outside the timed interval
+and one measured traversal, then writes `summary.json`, `output_samples.npz`,
+and `ray_fields_diagnostics.png` below a timestamped directory.
+
+Exercise the real driver locally at a small scale with:
+
+```bash
+NUMBA_NUM_THREADS=4 python \
+  validation/gow17_healpix_performance/run_pdr_ray_fields.py \
+  --shape 12,8,6 --candidate-count 96 --candidate-start 100 \
+  --nside 1 --field-count 6 --source-revision local-check
+```
+
+The cluster launcher runs immutable source snapshots sequentially on one node:
+
+- `419a58a`: pre-cyclic canonical traversal;
+- `3501a25`: importable direct successor to cyclic-scheduling commit
+  `95ffcfd`, with the identical `healpix_utils.py` ray kernel;
+- `702c397`: deployed Bondi production source;
+- `9b20be5`: accepted edge-cache and backend-aware scheduling source.
+
+Five and six fields are compared for the first three revisions; the latest
+revision runs the production six-field workload. Materialize each snapshot as
+`source_<revision>/src/` below the Slurm submission directory, then submit the
+same launcher once to each node family:
+
+```bash
+sbatch --partition=milan --nodelist='dave[1-147]' \
+  run_cluster_pdr_ray_diagnostic.slurm
+sbatch --partition=turin-c run_cluster_pdr_ray_diagnostic.slurm
+```
+
+The explicit Dave node list is required because OzSTAR's submission plugin may
+expand the nominal `milan` partition to other compatible CPU partitions.
+
+Each job requests 64 CPUs, 24 GiB, and a hard 30-minute limit. The launcher
+records host, partition, source hashes, software versions, CPU topology,
+threading backend, binding, and timestamps. It finishes by writing
+`comparison.json` and `comparison.png` under `outputs/<job-id>/`. Do not report
+field or scheduler ratios across different jobs when the same-node comparison
+is available.
+
+Inspect the six-over-five field ratio within a revision and the
+`3501a25/419a58a` ratio at fixed field count. Bitwise-equal saved samples for
+those two revisions confirm that the scheduling comparison preserves the
+sampled ray arithmetic. The Turin job is a node-family control. This benchmark
+uses deterministic production-shaped geometry rather than a loaded Bondi
+snapshot and does not include W-ray construction, post-processing, or the
+directional Omukai reducer. If it does not reproduce the Milan slowdown, a
+separate bounded 32-versus-64-core NUMA comparison is required before changing
+production placement or scheduling.
+
+The laptop tail-scheduling campaign uses the exact factor-two Bondi mesh
+coarsening `243 x 73 x 165` (`2,926,935` cells), 192 directions, and one
+uniformly distributed candidate chunk. Run separate processes with 4, 8, and
+12 Numba threads; compare the 12-thread result against the unchanged source.
+The summary reports both whole-call and final-decile sampled worker occupancy.
+Calibrate candidate count first and keep the complete campaign below the
+agreed 20-minute wall-time ceiling.
+
+The canonical spherical ray kernel uses bounded dynamic packets only when the
+initialized Numba threading layer is `tbb`. OpenMP and workqueue execute that
+same kernel with static chunksize zero. Every summary records
+`numba_threading_layer`; do not attribute dynamic load balancing to a run whose
+summary reports a non-TBB backend.
+
+The sustained local TBB acceptance case uses the native `(486, 146, 330)`
+mesh, a contiguous 350,000-candidate band beginning at flat offset 11,500,000,
+192 directions, and 18 threads. Run old and current sources in separate
+processes with `NUMBA_THREADING_LAYER=tbb`, require each summary to report
+`tbb`, and compare them with `plot_scheduler_ab.py`. The accepted three-repeat
+result and shared CPU trace are under
+`outputs/tbb_scheduler_local/long_18_tbb_*`.
+
+To measure complete live Bondi jobs rather than an isolated kernel, run:
+
+```bash
+python validation/gow17_healpix_performance/run_cluster_cpu_timeline.py
+```
+
+The live monitor discovers running 64-core Bondi All-Stars jobs, reads their
+cumulative Slurm CPU counters without modifying the jobs, and differences
+successive samples to recover interval core usage. Its timestamped output
+contains raw JSON, derived NPZ arrays, an ensemble heatmap, per-job time-series
+panels, and a summary. Values plotted above the requested allocation are capped
+only for display; the raw values retain Slurm counter/timestamp uncertainty.
+
 Useful optional controls are the drivers' size lists, `--min-repeats`,
 `--sustained-seconds`, and `--output-root`. Defaults represent the acceptance
 workloads; reducing them changes the performance validation and should not be
@@ -88,7 +194,9 @@ peak RSS, and whether throughput remains stable at the largest size.
 Each driver isolates reusable DiskBridge codebase behavior. None measures
 Slurm binding, requested CPU count, the configured chunk-memory budget,
 checkpoint cadence, or the complete coupled shielding/chemistry update. Those
-are separate Bondi pipeline and end-to-end measurements.
+are separate Bondi pipeline and end-to-end measurements. The live cluster CPU
+monitor is the exception: it measures the complete running workflow but cannot
+identify internal phases unless the corresponding job emits stage markers.
 
 The implementation is warmed before measurement so Numba compilation time is
 excluded; production jobs likewise compile once and reuse the kernels over

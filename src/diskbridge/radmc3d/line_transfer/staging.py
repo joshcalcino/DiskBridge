@@ -22,9 +22,6 @@ from diskbridge.radmc3d.colliders import (
 )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-
-
 def _resolve_manifest_path(path_value: str, *, base_dir: Path) -> Path:
     path = Path(path_value)
     if path.is_absolute() or path.exists():
@@ -242,7 +239,6 @@ def prepare_nonlte_line_run(
 
     molecule_dst = install_validated_molecule_file(
         species=species,
-        moldata_dir=_REPO_ROOT / "data" / "moldata",
         inputs_dir=work_inputs,
     )
 
@@ -298,8 +294,8 @@ def prepare_external_population_line_run(
 ) -> Path:
     """Stage a single-species RADMC-3D ``lines_mode = 50`` run.
 
-    The molecule file is downloaded through the canonical online LAMDA
-    installer and must match the hash recorded by the population solve.
+    The molecule file is copied from DiskBridge's installed LAMDA snapshot and
+    must match the hash recorded by the population solve.
     """
 
     species = str(species).lower().strip()
@@ -427,17 +423,16 @@ def prepare_external_population_line_run(
     if not expected_molecule_sha256:
         raise ValueError(
             "Solver manifest does not record molecule_sha256; cannot verify "
-            "current online LAMDA data."
+            "the installed LAMDA data."
         )
     molecule_dst = install_validated_molecule_file(
         species=species,
-        moldata_dir=_REPO_ROOT / "data" / "moldata",
         inputs_dir=work_inputs,
     )
     molecule_sha256 = sha256_file(molecule_dst)
     if molecule_sha256 != expected_molecule_sha256:
         raise ValueError(
-            "Current online LAMDA molecule file does not match the file used by "
+            "Installed LAMDA molecule file does not match the file used by "
             "the external population solver; rerun the population solve."
         )
     staged[molecule_dst.name] = str(molecule_dst)

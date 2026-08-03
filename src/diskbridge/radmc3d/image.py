@@ -18,9 +18,6 @@ import numpy as np
 import shutil
 import datetime
 
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent
-REPO_ROOT = PACKAGE_ROOT.parent.parent
-
 from astropy.io import fits
 from diskbridge._logging import logger
 from .utils import _extract_radmc_errors, create_radmc3d_symlinks, cleanup_symlink_paths, run_radmc3d_and_log
@@ -1230,10 +1227,8 @@ class RadImage:
             Molecule name (e.g., 'co')
         """
         self.inputs_dir.mkdir(parents=True, exist_ok=True)
-        moldata_dir = REPO_ROOT / "data" / "moldata"
         install_validated_molecule_file(
             species=molecule,
-            moldata_dir=moldata_dir,
             inputs_dir=self.inputs_dir,
         )
         logger.info("Installed validated official LAMDA moldata for %s", molecule)

@@ -29,19 +29,18 @@ from diskbridge.radmc3d.line_transfer import (
 
 
 _REPO = Path(__file__).resolve().parents[2]
-_CO_LAMDA = _REPO / "data" / "moldata" / "co.dat"
+_CO_LAMDA = _REPO / "src" / "diskbridge" / "data" / "moldata" / "co.dat"
 
 
 @pytest.fixture(autouse=True)
-def canonical_online_lamda_installer(
+def canonical_installed_lamda_installer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[str, Path]]:
-    """Replace network access while recording every canonical install call."""
+    """Record use of the canonical installed molecule-data path."""
 
     calls: list[tuple[str, Path]] = []
 
-    def install(species: str, moldata_dir: str | Path, inputs_dir: str | Path) -> Path:
-        del moldata_dir
+    def install(species: str, inputs_dir: str | Path) -> Path:
         species = str(species).lower().strip()
         assert species == "co"
         destination = Path(inputs_dir) / f"molecule_{species}.inp"
@@ -126,7 +125,7 @@ def _make_chemistry_result(shape, n_co: float = 1.0e3, n_h2: float = 1.0e8):
 
 def test_solve_and_write_healpix_levelpop_smoke(
     tmp_path: Path,
-    canonical_online_lamda_installer: list[tuple[str, Path]],
+    canonical_installed_lamda_installer: list[tuple[str, Path]],
 ):
     rad, shape = _make_cartesian_rad(tmp_path, n=4)
     chem = _make_chemistry_result(shape, n_co=10.0)
@@ -148,7 +147,7 @@ def test_solve_and_write_healpix_levelpop_smoke(
     )
     assert path.exists()
     assert path.name == "levelpop_co.dat"
-    assert canonical_online_lamda_installer == [
+    assert canonical_installed_lamda_installer == [
         ("co", out_dir / "molecule_co.inp")
     ]
 
@@ -243,7 +242,7 @@ def test_collision_temperature_endpoint_holding_is_audited(tmp_path: Path):
 
 def test_prepare_external_population_run_and_validation(
     tmp_path: Path,
-    canonical_online_lamda_installer: list[tuple[str, Path]],
+    canonical_installed_lamda_installer: list[tuple[str, Path]],
 ):
     rad, shape = _make_cartesian_rad(tmp_path, n=3)
     chem = _make_chemistry_result(shape, n_co=5.0)
@@ -293,7 +292,7 @@ def test_prepare_external_population_run_and_validation(
         levelpop_file=levelpop_path,
         copy_mode="copy",
     )
-    assert canonical_online_lamda_installer == [
+    assert canonical_installed_lamda_installer == [
         ("co", levelpop_dir / "molecule_co.inp"),
         ("co", work / "radmc3d_inputs" / "molecule_co.inp"),
     ]

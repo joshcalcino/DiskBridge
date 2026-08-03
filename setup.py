@@ -99,7 +99,15 @@ def main() -> None:
         install_requires=meta["install_requires"],
         package_dir={"": "src"},
         packages=find_packages("src"),
-        package_data={"diskbridge": ["data/*", "templates/*"]},
+        package_data={
+            "diskbridge": [
+                "config.toml",
+                "params.txt",
+                "data/*",
+                "data/moldata/*.dat",
+                "templates/*",
+            ]
+        },
         ext_modules=[_gow17_extension()],
         zip_safe=False,
     )

@@ -65,9 +65,6 @@ from .se_solver import (
 )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-
-
 @dataclass(frozen=True)
 class HealpixSEConfig:
     """Configuration for the 3D HEALPix non-LTE solver.
@@ -823,8 +820,8 @@ def solve_and_write_healpix_levelpop(
     species : str
         Lowercased species name (``"co"``, ``"catom"``, or ``"hco+"``).
     output_dir : path
-        Directory in which to stage the current online LAMDA molecule file and
-        write ``levelpop_<species>.dat`` and its manifest.
+        Directory in which to stage the installed LAMDA molecule file and write
+        ``levelpop_<species>.dat`` and its manifest.
     config : HealpixSEConfig
 
     Returns
@@ -856,7 +853,6 @@ def solve_and_write_healpix_levelpop(
 
     molecule_file = install_validated_molecule_file(
         species=species,
-        moldata_dir=_REPO_ROOT / "data" / "moldata",
         inputs_dir=output_dir,
     )
     molecule = parse_lamda_molecule_file(molecule_file)

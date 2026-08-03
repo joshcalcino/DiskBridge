@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,10 +20,10 @@ import pytest
 
 from diskbridge._params import default_line_colliders_for_species
 from diskbridge.radmc3d.image import RadImage, _line_mode_uses_gas_temperature
+import diskbridge.radmc3d.colliders as collider_module
 from diskbridge.radmc3d.colliders import (
-    LAMDA_URLS,
+    INSTALLED_LAMDA_DIR,
     assert_lamda_collision_order,
-    ensure_official_lamda_file,
     gow17_lamda_colliders,
     install_validated_molecule_file,
     read_lamda_collision_order,
@@ -177,7 +176,7 @@ def test_line_colliders_are_configured_only_for_known_nonlte_species() -> None:
 
 
 def test_strict_lamda_collision_policy_matches_official_order() -> None:
-    moldata = Path(__file__).resolve().parents[2] / "data" / "moldata"
+    moldata = INSTALLED_LAMDA_DIR
     assert gow17_lamda_colliders("co") == ["p-h2", "o-h2"]
     assert read_lamda_collision_order(moldata / "co.dat") == ["p-h2", "o-h2"]
     assert_lamda_collision_order(moldata / "co.dat", gow17_lamda_colliders("co"))
@@ -206,85 +205,48 @@ def test_strict_lamda_collision_policy_matches_official_order() -> None:
     )
 
 
-def test_supported_lamda_urls_have_no_legacy_xpol_path() -> None:
-    assert LAMDA_URLS["hco+"] == (
-        "https://home.strw.leidenuniv.nl/~moldata/datafiles/hco%2B.dat"
-    )
-    assert all("xpol" not in url.lower() for url in LAMDA_URLS.values())
+def test_supported_lamda_species_ship_as_installed_package_data() -> None:
+    for species in ("co", "catom", "hco+"):
+        path = INSTALLED_LAMDA_DIR / f"{species}.dat"
+        assert path.is_file()
+        assert path.stat().st_size > 0
 
 
-def test_catom_molecule_file_is_refreshed_and_reordered_to_active_colliders(
+def test_catom_installed_molecule_is_reordered_to_active_colliders(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    moldata = Path(__file__).resolve().parents[2] / "data" / "moldata"
-    source = moldata / "catom.dat"
-    local_moldata = tmp_path / "moldata"
-    local_moldata.mkdir()
-    local_file = local_moldata / "catom.dat"
-    local_file.write_text("stale local data\n")
-    downloads: list[str] = []
+    staged = install_validated_molecule_file("catom", tmp_path)
 
-    def fake_download(command: list[str], *, check: bool):
-        assert check is True
-        downloads.append(command[-1])
-        shutil.copyfile(source, command[-2])
-
-    monkeypatch.setattr(
-        "diskbridge.radmc3d.colliders.subprocess.run",
-        fake_download,
-    )
-    staged = install_validated_molecule_file("catom", local_moldata, tmp_path)
-
-    assert len(downloads) == 1
-    assert local_file.read_bytes() == source.read_bytes()
     assert read_lamda_collision_order(staged) == ["h", "p-h2", "o-h2", "e"]
     assert_lamda_collision_order(staged, gow17_lamda_colliders("catom"))
 
 
-def test_lamda_download_failure_does_not_fall_back_to_stale_file(
+def test_missing_installed_lamda_file_fails_without_creating_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    local_file = tmp_path / "co.dat"
-    local_file.write_text("stale local data\n")
+    missing = tmp_path / "missing_moldata"
+    monkeypatch.setattr(collider_module, "INSTALLED_LAMDA_DIR", missing)
 
-    def fail_download(command: list[str], *, check: bool):
-        raise RuntimeError("network unavailable")
+    with pytest.raises(FileNotFoundError, match="Reinstall DiskBridge"):
+        install_validated_molecule_file("co", tmp_path / "inputs")
 
-    monkeypatch.setattr(
-        "diskbridge.radmc3d.colliders.subprocess.run",
-        fail_download,
-    )
-
-    with pytest.raises(RuntimeError, match="network unavailable"):
-        ensure_official_lamda_file("co", tmp_path)
-
-    assert local_file.read_text() == "stale local data\n"
-    assert list(tmp_path.glob(".co.*.download")) == []
+    assert not (tmp_path / "inputs" / "molecule_co.inp").exists()
 
 
-def test_malformed_lamda_download_does_not_replace_local_file(
+def test_malformed_installed_lamda_file_fails_without_creating_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    local_file = tmp_path / "hco+.dat"
-    local_file.write_text("previous valid local data\n")
-
-    def malformed_download(command: list[str], *, check: bool):
-        assert check is True
-        Path(command[-2]).write_text("not a LAMDA molecule file\n")
-
-    monkeypatch.setattr(
-        "diskbridge.radmc3d.colliders.subprocess.run",
-        malformed_download,
-    )
+    moldata = tmp_path / "moldata"
+    moldata.mkdir()
+    (moldata / "hco+.dat").write_text("not a LAMDA molecule file\n")
+    monkeypatch.setattr(collider_module, "INSTALLED_LAMDA_DIR", moldata)
 
     with pytest.raises(ValueError, match="missing required collision block"):
-        ensure_official_lamda_file("hco+", tmp_path)
+        install_validated_molecule_file("hco+", tmp_path / "inputs")
 
-    assert local_file.read_text() == "previous valid local data\n"
-    assert list(tmp_path.glob(".hco+.*.download")) == []
+    assert not (tmp_path / "inputs" / "molecule_hco+.inp").exists()
 
 
 def test_radimage_strict_gow17_lamda_lines_inp_for_catom(tmp_path: Path) -> None:
@@ -304,19 +266,19 @@ def test_radimage_strict_gow17_lamda_lines_inp_for_catom(tmp_path: Path) -> None
     )
 
 
-def test_radimage_refreshes_online_molecule_for_external_populations(
+def test_radimage_installs_packaged_molecule_for_external_populations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     image = _radimage_stub(tmp_path, line_mode=50)
     (tmp_path / "levelpop_co.dat").write_text("staged populations\n")
     (tmp_path / "external_levelpop_manifest_co.json").write_text("{}\n")
-    calls: list[tuple[str, Path, Path]] = []
+    calls: list[tuple[str, Path]] = []
 
-    def install(species: str, moldata_dir: str | Path, inputs_dir: str | Path) -> Path:
+    def install(species: str, inputs_dir: str | Path) -> Path:
         destination = Path(inputs_dir) / f"molecule_{species}.inp"
-        destination.write_text("current online molecule\n")
-        calls.append((species, Path(moldata_dir), Path(inputs_dir)))
+        destination.write_text("installed molecule\n")
+        calls.append((species, Path(inputs_dir)))
         return destination
 
     monkeypatch.setattr(
@@ -328,9 +290,9 @@ def test_radimage_refreshes_online_molecule_for_external_populations(
 
     assert len(calls) == 1
     assert calls[0][0] == "co"
-    assert calls[0][2] == tmp_path
+    assert calls[0][1] == tmp_path
     assert (tmp_path / "molecule_co.inp").read_text() == (
-        "current online molecule\n"
+        "installed molecule\n"
     )
 
 
@@ -415,20 +377,9 @@ def test_validation_rejects_tgas_eq_tdust_true(tmp_path: Path) -> None:
 
 def test_prepare_nonlte_line_run_stages_co_h2_smoke(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_inputs = _write_base_inputs(tmp_path / "source", include_gas_temperature=True)
     work = tmp_path / "line_rt" / "co_J3_h2_lvg"
-    source_molecule = Path(__file__).resolve().parents[2] / "data" / "moldata" / "co.dat"
-
-    def fake_download(command: list[str], *, check: bool):
-        assert check is True
-        shutil.copyfile(source_molecule, command[-2])
-
-    monkeypatch.setattr(
-        "diskbridge.radmc3d.colliders.subprocess.run",
-        fake_download,
-    )
     species = SpeciesLineConfig(
         species="co",
         line_mode=3,

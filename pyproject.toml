@@ -44,5 +44,10 @@ where = ["src"]
 include = ["diskbridge*"]
 
 [tool.setuptools.package-data]
-diskbridge = ["data/*", "templates/*"]
-
+diskbridge = [
+  "config.toml",
+  "params.txt",
+  "data/*",
+  "data/moldata/*.dat",
+  "templates/*",
+]

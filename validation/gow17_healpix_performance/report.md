@@ -19,6 +19,8 @@ within each comparison.
 | Six-field spherical DDA, 19,200 cells x 192 rays | 3.302 s | 2.917 s | 1.13x | column checksum identical; exact toy regressions |
 | Directional UV weights, 250,000 candidates, 8 CPUs | 474.43 s | 253.05 s | 1.87x | sampled max abs `6.94e-18` |
 | Directional UV weights, 250,000 candidates, 18 CPUs | 273.99 s | 134.27 s | 2.04x | sampled max abs `6.94e-18` |
+| Coarsened Bondi W rays, 150,000 candidates, 12 CPUs | 49.219 s | 39.386 s | 1.25x | sampled values bit-for-bit identical |
+| Native-order W rays, 350,000 candidates, 18 TBB threads | 197.16 s | 172.64 s | 1.14x | sampled values bit-for-bit identical |
 | Directional Omukai reduction, 1,200,000 cells | 1.048 s | 1.023 s | 1.02x | equivalent-column checksum identical |
 
 The complete post-ray comparison includes effective H2 and CO linewidths, H2
@@ -68,6 +70,144 @@ Machine-readable summaries, raw per-thread samples, and plots are under
 `outputs/w_rays_scaling/production_geometry_250k/`; the combined interpretation
 is in `analysis/scaling_summary.json` and `analysis/scaling_comparison.png`.
 
+### Laptop spherical-tail scheduling check
+
+A later bounded-scheduling check used the exact factor-two coarsening of the
+Bondi mesh, `(243, 73, 165)` or 2,926,935 cells. One chunk contained 150,000
+candidates distributed uniformly through the mesh, with `nside=4`. The
+32-packet dynamic scheduler took 196.31, 131.37, and 99.62 seconds at 4, 8,
+and 12 cores. These correspond to 1.49x and 1.97x speedups over four cores,
+or 74.7% and 65.7% parallel efficiency.
+
+At 12 cores, the cyclic-static implementation took 85.51 seconds. Dynamic
+schedules with 32, 64, and 128 packets per worker took 99.62, 88.71, and 86.90
+seconds: 16.5%, 3.7%, and 1.6% slower, respectively. The 128-packet schedule
+reached 96.3% median occupancy in the final time decile, but it still did not
+provide a wall-time improvement. All sampled weights, candidate indices,
+directions, centers, and row sums were bit-for-bit identical, and peak RSS did
+not increase materially.
+
+That unconditional bounded scheduler failed the laptop performance acceptance
+gate and was reverted. Those runs used Numba `workqueue`, which cannot provide
+TBB work stealing. Raw summaries and per-thread histories are under
+`outputs/w_rays_tail_scaling/`.
+
+The current scheduler policy therefore applies 128 bounded packets per worker
+only when Numba reports the `tbb` threading layer. OpenMP and workqueue run the
+same kernel with static chunksize zero. On the local workqueue backend, an
+identical 30,000-candidate contiguous coarsened-Bondi workload took 8.477
+seconds before and 8.467 seconds after adding the selector, with bit-for-bit
+identical saved outputs. This establishes a neutral static fallback, not a TBB
+speed result.
+
+A longer fallback run used 18 threads, the complete `(486, 146, 330)` mesh,
+the contiguous 350,000-candidate band beginning at flat offset 11,500,000, and
+192 directions. Three workqueue/static repetitions took 175.48, 189.86, and
+199.36 seconds, with a median 16.76 effective cores and 5.663 GiB sampled peak
+RSS. Per-repeat median and final-decile occupancy were 94.3--94.7% and
+94.0--94.7%; only 2.42--2.95 seconds per repetition fell below half of the
+18-core allocation. These longer measurements show that the non-TBB fallback
+does not stall on this native-order chunk. They remain inapplicable to TBB
+dynamic-speed claims.
+
+An isolated conda-forge environment provided Numba 0.65.0 and the native
+Apple-silicon TBB backend for a direct local comparison. Both summaries report
+`numba_threading_layer=tbb`. On the same full mesh, contiguous 350,000-cell
+band, 192 directions, and 18 threads, the unchanged TBB runner took 190.92,
+197.16, and 201.05 seconds. The bounded-packet runner took 166.94, 172.64, and
+174.94 seconds, reducing the median wall time by 12.4% (1.14x).
+
+Median active cores increased from 17.14 to 17.66, and final-decile occupancy
+increased from 98.35% to 98.75%. Sampled peak RSS changed by 0.32%, from 5.260
+to 5.277 GiB. Saved weights, row sums, candidate indices, centers, and
+directions are bit-for-bit identical. Raw summaries and the shared CPU trace
+are under `outputs/tbb_scheduler_local/long_18_tbb_*`. This accepts the local
+TBB scheduler change; the 64-core cluster run remains necessary to quantify
+its production-node benefit.
+
+### Balanced-worker follow-up
+
+A three-repeat follow-up retained cyclic-static assignment and optimized the
+work performed by those already-balanced workers. Spherical theta and phi mesh
+edges are fixed, but the DDA previously recalculated their trigonometric
+factors at every boundary test. The accepted kernel prepares these small edge
+tables once per integration call and reuses them without changing ray order or
+column summation order.
+
+On the same 150,000-candidate coarsened Bondi workload, median wall times were
+134.56 versus 108.14 seconds at 4 threads, 71.01 versus 56.84 seconds at 8
+threads, and 49.22 versus 39.39 seconds at 12 threads. The optimized kernel was
+19.6--20.0% faster at every count. Median and final-decile occupancy remained
+above 99%, sampled peak RSS remained 1.372--1.373 GiB, and saved weights,
+normalization sums, candidate indices, centers, and directions were bit-for-bit
+identical. Individual wall times and native-thread histories are under
+`outputs/scheduler_phase2f/`.
+
+Plain contiguous cell bands, cyclic blocks of 4 or 16 cells, and one-time
+direction normalization did not improve the balanced cyclic baseline and were
+removed. This result does not overturn the bounded-dynamic rejection: it shows
+that lowering repeated per-ray work, rather than adding scheduler packets, was
+the effective optimization.
+
+The later three-repeat 12-thread baseline (49.22 seconds) is faster than the
+earlier single 85.51-second scheduling observation because the campaigns ran
+under different laptop load and thermal state. The accepted percentage uses
+only the adjacent three-repeat old/new pairs above; 39.39 seconds must not be
+compared directly with the earlier 85.51-second observation.
+
+### Live 64-core Bondi CPU timeline
+
+A read-only 21.8-minute Slurm trace sampled all thirteen running 64-core Bondi
+jobs at approximately six-second cadence. Interval core usage is the change in
+cumulative Slurm CPU seconds divided by measured wall time. Every job reached
+the full allocation, but every job also fell below 4.2 active cores. Per-job
+median usage ranged from 50.0 to 63.5 cores, and jobs spent 10.4--26.7% of
+sampled intervals below 32 cores.
+
+Individual traces show repeated plateaus near 64 cores, smooth multi-minute
+declines to one or a few cores, and abrupt returns to 64. These events are
+staggered across separate nodes, ruling out a shared affinity cap or
+synchronized cluster outage. The morphology is consistent with static workers
+finishing unequal chunk workloads, followed by all workers starting the next
+chunk. Buffered job logs do not contain per-chunk stage markers, so the exact
+function attribution remains an inference rather than a direct log match.
+
+These jobs use commit `702c397` and spherical-kernel SHA-256 `5f729983f6df`;
+they do not contain the later local edge-trigonometry optimization. The live
+result shows that high occupancy in the uniformly sampled 12-thread laptop
+case does not establish sustained occupancy for native 64-core jobs. Raw
+samples, derived arrays, summary statistics, an ensemble heatmap, and per-job
+panels are under `outputs/cluster_cpu_timeline/20260729T164950Z/`.
+
+### Native-order old/current comparison
+
+A local A/B used a contiguous 350,000-candidate band at flat offset 11,500,000
+on the complete `(486, 146, 330)` mesh with 18 threads. The unchanged runner
+took 205.01 seconds and the current edge-cached runner took 163.55 seconds, a
+20.2% reduction. Saved weights, row sums, indices, centers, and directions were
+bit-for-bit identical.
+
+The current runner still exhibited the abrupt low-core tail. One-second-
+smoothed time below half of the allocation was 5.81 seconds unchanged and 6.19
+seconds current. The edge-cache change therefore improves the parallel work
+but does not correct worker completion imbalance. The shared trace and summary
+are under `outputs/scheduler_phase2h/local_old_vs_current_18/`.
+
+The same-node 64-core A/B subsequently completed as Slurm job `14918324` on
+`dave307`. The unchanged source took 108.01 seconds and the current source took
+84.70 seconds, a 21.6% improvement. Sampled peak RSS was 4.63 versus 4.66 GiB,
+and all saved numerical samples were bit-for-bit identical.
+
+The utilization result is unambiguous: both traces fall from approximately 64
+cores to approximately one core over the final decile. With a one-second
+median suppressing the brief final rebound, the below-half-allocation interval
+is 7.40 seconds unchanged and 5.89 seconds current. These are nearly identical
+fractions of wall time, 6.85% and 6.96%. Final-decile median occupancy is 1.685%
+for both, or about 1.08 active cores. The edge cache accelerates the parallel
+work but does not fix the worker-completion collapse. Downloaded summaries,
+raw traces, job log, and the shared plot are under
+`outputs/scheduler_phase2h/cluster_job_14918324/`.
+
 Machine-readable complete-postprocessing results are in:
 
 - unchanged: `outputs/postprocess/20260714T121912Z_89b2cffb1a14`
@@ -98,6 +238,24 @@ Machine-readable native-solver results and plots are in:
 
 - unchanged: `outputs/solver/20260714T100127Z_46cd16d57f5c`
 - optimized: `outputs/solver/20260714T095941Z_489d8ec07cd7`
+
+### Bounded PDR ray field-count diagnostic
+
+Two read-only production-kernel diagnostics were submitted on 2026-08-03 from
+`/fred/oz015/jcalcino/validation/gow17_pdr_ray_diagnostic_20260803`:
+
+- job `15038473`, constrained to Milan-generation `dave[1-147]` nodes;
+- job `15038471` on the `turin-c` partition.
+
+Each job requests 64 CPUs, 24 GiB, and at most 30 minutes. Within one node it
+sequentially measures 120,000 contiguous native-order candidates at five and
+six fields using immutable source snapshots `419a58a`, `3501a25`, and
+`702c397`, plus the six-field current source `9b20be5`. The source snapshots'
+`healpix_utils.py` SHA-256 prefixes are `c5902472e11b`, `4452d53112ce`,
+`5f729983f6df`, and `a51e9d6e121b`, respectively. Results remain pending; no
+production Bondi job was changed or interrupted. The original unstarted Milan
+submission `15038470` was cancelled and replaced after OzSTAR expanded its
+eligible partitions beyond Dave nodes; no benchmark work was lost.
 
 ## Bondi pipeline settings
 

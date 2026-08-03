@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from diskbridge._constants import H_PLANCK, K_B
+from diskbridge.radmc3d.colliders import INSTALLED_LAMDA_DIR
 from diskbridge.radmc3d.line_transfer.escape_healpix import (
     _beta_of_tau,
     compute_beta_cartesian,
@@ -36,8 +37,7 @@ from diskbridge.radmc3d.line_transfer.se_solver import (
 )
 
 
-_REPO = Path(__file__).resolve().parents[2]
-_CO_LAMDA = _REPO / "data" / "moldata" / "co.dat"
+_CO_LAMDA = INSTALLED_LAMDA_DIR / "co.dat"
 
 
 # ---------------------------------------------------------------------------

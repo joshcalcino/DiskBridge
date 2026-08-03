@@ -22,8 +22,14 @@ Verifies:
 import numpy as np
 import pytest
 import healpy as hp
-from numba import get_num_threads, set_num_threads
+from numba import (
+    get_num_threads,
+    get_parallel_chunksize,
+    set_num_threads,
+    set_parallel_chunksize,
+)
 
+import diskbridge.chemistry.shielding.healpix_utils as healpix_utils_module
 from diskbridge._units import Quantity
 from diskbridge._constants import U_DRAINE, C_LIGHT, H_PLANCK, K_B
 from diskbridge.model.mesh import Mesh, Axis
@@ -216,6 +222,58 @@ def test_healpix_columns_are_exactly_independent_of_numba_thread_count(mesh):
     np.testing.assert_array_equal(idx_many, idx_one)
     np.testing.assert_array_equal(dirs_many, dirs_one)
     np.testing.assert_array_equal(cols_many["density"], cols_one["density"])
+
+
+def test_spherical_tbb_packets_are_exact_and_scheduler_state_is_scoped(monkeypatch):
+    """TBB packet scheduling must preserve rays and not leak caller state."""
+
+    assert healpix_utils_module._spherical_parallel_chunksize(4096, 4, "tbb") > 0
+    assert healpix_utils_module._spherical_parallel_chunksize(4096, 4, "omp") == 0
+    assert (
+        healpix_utils_module._spherical_parallel_chunksize(4096, 4, "workqueue")
+        == 0
+    )
+    original_threads = get_num_threads()
+    original_chunksize = get_parallel_chunksize()
+    if original_threads < 2:
+        pytest.skip("thread-count comparison requires at least two Numba workers")
+    mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.geomspace(1.0, 30.0, 10), "cm")),
+        theta=Axis(edges=Quantity(np.linspace(0.2, np.pi - 0.2, 9), "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 10), "rad")),
+    )
+    base = np.arange(np.prod(mesh.shape), dtype=np.float64).reshape(mesh.shape)
+    fields = {
+        "a": np.ascontiguousarray(1.0 + base),
+        "b": np.ascontiguousarray(np.exp((base % 31.0) / 31.0)),
+    }
+    mask = np.ones(mesh.shape, dtype=bool)
+    try:
+        set_num_threads(min(4, original_threads))
+        set_parallel_chunksize(7)
+        monkeypatch.setattr(
+            healpix_utils_module,
+            "threading_layer",
+            lambda: "workqueue",
+        )
+        idx_static, dirs_static, cols_static = compute_column_rays_healpix(
+            mesh, fields, nside=1, candidate_mask=mask
+        )
+        assert get_parallel_chunksize() == 7
+
+        monkeypatch.setattr(healpix_utils_module, "threading_layer", lambda: "tbb")
+        idx_tbb, dirs_tbb, cols_tbb = compute_column_rays_healpix(
+            mesh, fields, nside=1, candidate_mask=mask
+        )
+        assert get_parallel_chunksize() == 7
+    finally:
+        set_parallel_chunksize(original_chunksize)
+        set_num_threads(original_threads)
+
+    np.testing.assert_array_equal(idx_tbb, idx_static)
+    np.testing.assert_array_equal(dirs_tbb, dirs_static)
+    for name in fields:
+        np.testing.assert_array_equal(cols_tbb[name], cols_static[name])
 
 
 def test_cartesian_plus_x_column_matches_1d_half_cell_convention():

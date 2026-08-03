@@ -84,12 +84,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   dust-extinction field instead of retaining per-bin ray columns. Parallel
   first-touch and fused source normalization remove redundant ray-sized
   temporaries while preserving the public weights and diagnostic products.
-- Supported line species now download their canonical current online LAMDA
-  files during solving, staging, and imaging, without a cached, legacy, or
-  user-supplied molecule-file path. HCO+ uses the current separate para-H2 and
-  ortho-H2 collision tables. Collision coefficients always use the nearest
-  tabulated temperature endpoint outside the table range while the physical
-  gas temperature remains unchanged.
+- Supported line species now use a pinned, validated LAMDA snapshot installed
+  with DiskBridge, without runtime network access or a user-supplied molecule-
+  file path. HCO+ uses the current separate para-H2 and ortho-H2 collision
+  tables. Exact molecule-file hashes remain in line-transfer provenance, and
+  collision coefficients always use the nearest tabulated temperature endpoint
+  outside the table range while the physical gas temperature remains unchanged.
 - GOW17 molecular shielding now recomputes the H2 and CO Doppler widths from
   the current gas temperature at each existing non-local update. Directional
   CO cooling consumes the same current CO width during the fused shielding
@@ -124,6 +124,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Segmented RADMC-3D restarts now validate and load compatible terminal
+  products before considering the lower-budget scout pass. Terminal photon
+  counts, mesh and source identities, wavelength/product metadata, parameter
+  snapshots, physical input fingerprints, and exact binary payload sizes are
+  checked; `force=True` remains the explicit recomputation path.
 - Directional GOW17 CO-cooling reduction now handles shallow non-monotonic
   interpolation cusps by bracketing sorted directional samples and choosing
   the inverse nearest their mean logarithmic column. The normal monotonic

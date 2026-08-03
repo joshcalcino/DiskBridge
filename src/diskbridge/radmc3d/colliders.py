@@ -1,22 +1,15 @@
-# db-keywords: gow17, radmc3d, field, io, serialization, paths
+# db-keywords: gow17, radmc3d, molecule-data, field, io, serialization, paths
 # db-role: canonical
 # db-scope: package
 # db-purpose: Package module for gow17, radmc3d, field, io.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import shutil
-import subprocess
-import tempfile
 
 
-LAMDA_URLS = {
-    "co": "https://home.strw.leidenuniv.nl/~moldata/datafiles/co.dat",
-    "catom": "https://home.strw.leidenuniv.nl/~moldata/datafiles/catom.dat",
-    "hco+": "https://home.strw.leidenuniv.nl/~moldata/datafiles/hco%2B.dat",
-}
+INSTALLED_LAMDA_DIR = Path(__file__).resolve().parents[1] / "data" / "moldata"
 
 LAMDA_COLLIDER_ID_TO_NAME = {
     1: "h2",
@@ -157,83 +150,74 @@ def write_reordered_lamda_file(
     return destination
 
 
-def ensure_official_lamda_file(species: str, moldata_dir: str | Path) -> Path:
-    """Download the current canonical LAMDA file for ``species``.
-
-    The online file is fetched on every call and atomically replaces the local
-    copy only after a successful download. Network failures are propagated;
-    an existing local file is never used as a fallback.
-
-    Parameters
-    ----------
-    species : str
-        Supported LAMDA species identifier.
-    moldata_dir : path-like
-        Directory in which the refreshed canonical file is stored.
-
-    Returns
-    -------
-    pathlib.Path
-        Refreshed local file path.
-    """
+def _installed_lamda_file(species: str) -> Path:
+    """Return and validate the installed LAMDA source file for ``species``."""
 
     species = str(species).lower().strip()
-    moldata_dir = Path(moldata_dir)
-    moldata_dir.mkdir(parents=True, exist_ok=True)
-    if species not in LAMDA_URLS:
-        raise ValueError(f"No official LAMDA URL configured for {species!r}")
-    path = moldata_dir / f"{species}.dat"
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{species}.",
-        suffix=".download",
-        dir=moldata_dir,
-    )
-    os.close(fd)
-    temporary_path = Path(temporary_name)
-    try:
-        if shutil.which("curl") is None:
-            raise RuntimeError(
-                "Current online LAMDA staging requires the 'curl' executable"
-            )
-        subprocess.run(
-            [
-                "curl",
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--output",
-                str(temporary_path),
-                LAMDA_URLS[species],
-            ],
-            check=True,
+    if species not in GOW17_LAMDA_COLLIDERS:
+        raise ValueError(
+            f"No installed LAMDA data are configured for {species!r}. "
+            f"Supported line species are {sorted(GOW17_LAMDA_COLLIDERS)}."
         )
-        if temporary_path.stat().st_size == 0:
-            raise ValueError(f"LAMDA returned an empty file for {species!r}")
-        available_colliders = read_lamda_collision_order(temporary_path)
-        missing_colliders = [
-            collider
-            for collider in gow17_lamda_colliders(species)
-            if collider not in available_colliders
-        ]
-        if missing_colliders:
-            raise ValueError(
-                f"Downloaded LAMDA file for {species!r} is missing required "
-                f"collision block(s): {missing_colliders}"
-            )
-        temporary_path.replace(path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    path = INSTALLED_LAMDA_DIR / f"{species}.dat"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"DiskBridge is missing its installed LAMDA file for {species!r}: "
+            f"{path}. Reinstall DiskBridge from a complete package."
+        )
+    if path.stat().st_size == 0:
+        raise ValueError(f"Installed LAMDA file is empty for {species!r}: {path}")
+
+    available_colliders = read_lamda_collision_order(path)
+    missing_colliders = [
+        collider
+        for collider in gow17_lamda_colliders(species)
+        if collider not in available_colliders
+    ]
+    if missing_colliders:
+        raise ValueError(
+            f"Installed LAMDA file for {species!r} is missing required "
+            f"collision block(s): {missing_colliders}"
+        )
     return path
 
 
 def install_validated_molecule_file(
     species: str,
-    moldata_dir: str | Path,
     inputs_dir: str | Path,
 ) -> Path:
+    """Install pinned LAMDA data into a RADMC-3D input directory.
+
+    DiskBridge ships a validated molecular-data snapshot as package data. This
+    function performs no network access. It selects the installed file for the
+    supported species, orders collision blocks according to the strict GOW17
+    collider policy, and writes ``molecule_<species>.inp``.
+
+    Parameters
+    ----------
+    species : str
+        Supported LAMDA species identifier: ``"co"``, ``"catom"``, or
+        ``"hco+"``.
+    inputs_dir : path-like
+        RADMC-3D input directory receiving the molecule file.
+
+    Returns
+    -------
+    pathlib.Path
+        Installed ``molecule_<species>.inp`` path.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the DiskBridge installation does not contain the required source
+        file.
+    ValueError
+        If the species is unsupported or the installed file does not contain
+        the required collision blocks.
+    """
+
     species = str(species).lower().strip()
-    source = ensure_official_lamda_file(species, moldata_dir)
+    source = _installed_lamda_file(species)
     destination = Path(inputs_dir) / f"molecule_{species}.inp"
     expected = gow17_lamda_colliders(species)
     actual = read_lamda_collision_order(source)
