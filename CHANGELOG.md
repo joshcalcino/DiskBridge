@@ -8,6 +8,20 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
+- A Bondi All-Stars snapshot analysis now pairs the two snapshots from each of
+  the three `0.5`, `1.0`, and `2.0 Msun` hydro simulations sharing the fixed
+  `ISMDens = 3e-21 g cm^-3` background. It color-codes strict
+  `ism_weight > 0.9999` total-volume histograms across three radial shells
+  spanning the full 50,000 au domain, with equivalent mass-density and
+  `n_H = rho / (1.4 m_H)` figure sets and machine-readable distributions.
+  Companion all-cell complementary cumulative figures combine all cells within
+  5000 au in paired-snapshot panels, span `1e-22`--`1e-14 g cm^-3`, use a
+  logarithmic aperture-volume axis, and internally stack every
+  density-threshold bar by signed
+  `2 * disk_weight - 1` with a diverging symmetric-log colour scale from
+  ISM-like through mixed to disk-like material. Matched cumulative gas-mass
+  fractions retain the same aperture, axes, and colour encoding to expose
+  small dense structures that occupy little volume.
 - Conservative finite-time radial dust surface-density transport helpers with
   pressure drift, turbulent diffusion, absorbing inner outflow, an open outer
   diffusion boundary with no imposed inflow, explicit mass-loss diagnostics,
@@ -39,6 +53,15 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Segmented UV transport can optionally recover a failed low-budget scout with
+  one independently seeded final-budget monochromatic run. The runner combines
+  all scout and retry packets with count weights, recomputes unequal-budget
+  uncertainty, and retries boundary selection without wasting the initial
+  scout or launching a redundant terminal UV calculation.
+- Bondi All-Stars now maintains only the ten `_8` snapshots. The four 0.5-Msun
+  `_9` snapshots, whose ambient densities are ten times lower, are preserved
+  separately under `examples/bondi_low_density/` and are excluded from current
+  staging and maintained diagnostics.
 - Bondi All-Stars local production, cluster staging, and maintained dust
   diagnostics now consume one canonical `bondi_defaults.py` setup containing
   the accepted connected Joos mask, mass-scaled midplane-density support,
@@ -208,6 +231,26 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
+- Promoted the accepted Bondi streamer abundance figures into the manuscript.
+  The paper candidates show CO, C, C+, CHx, HCO+, and neutral H from `1e-12`
+  to `1e-1`, with all six species in a single-row legend on the established
+  `8.5888 x 7.92`-inch paper canvas.
+- Bondi All-Stars one-dimensional streamer histories now archive every ordered
+  GOW17 state component for both time-dependent and equilibrium branches,
+  alongside derived neutral H, C, and O. Combined abundance figures show CO,
+  C, C+, CHx, HCO+, and H in a single-row species legend over the displayed
+  range `1e-12` to `1e-1`. Neutral H is the sole plotted atomic-gas proxy,
+  while CO-poor H2-fraction summaries test whether CO loss occurs while the
+  infall remains predominantly molecular.
+- The Bondi All-Stars streamer plotter now exports the combined abundance figures
+  as both PNG and vector PDF, with inward ticks on all four panel edges,
+  an explicit two-point inter-row gap, compact canvases, and a buffered header
+  above the grids. Y-axis labels appear on alternate decades while all
+  logarithmic tick marks remain visible.
+- Made the Bondi All-Stars one-dimensional streamer comparison explicitly use
+  a 0.1-Draine ambient field, added a matched one-Draine six-case grid, and
+  recorded the resulting chemistry and temperature sensitivity in a direct
+  comparison report.
 - Regenerated the maintained interface and azimuthal diagnostics for the
   representative `m20_8_dmid_f120_c10` snapshot with the smooth radial
   maximum-grain-size prescription. The total settled column follows the actual
@@ -255,12 +298,14 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   production accretion rates `3e-9`, `1e-8`, and `5e-8 Msun yr^-1`,
   respectively, spectrum-aware UV products, strict
   thermochemical-equilibrium tracking, evolved gas energy, fixed dust
-  temperature, concurrent star-level execution, and density-specific
-  carbon-chemistry figures comparing all three masses at stream-front distances
-  near `3000`, `1000`, and `500 au` with compact LaTeX-style publication
-  labels and matching vector-PDF exports, plus density-specific stream-front gas
-  temperature histories versus physical time and full evolving/equilibrium
-  gas-temperature profiles at the same three distances.
+  temperature, concurrent star-level execution, and complete ordered GOW17
+  state archives for both chemistry branches. Each density has one combined
+  CO, C, C+, CHx, HCO+, and H profile figure comparing all
+  three masses at stream-front distances near `3000`, `1000`, and `500 au`,
+  with a single-row species legend, a displayed upper limit of `1e-1`, and
+  matching vector-PDF exports. Density-specific stream-front
+  gas-temperature histories and full evolving/equilibrium temperature
+  profiles are retained for both the fiducial and one-Draine grids.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining

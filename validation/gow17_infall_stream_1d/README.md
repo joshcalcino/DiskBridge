@@ -264,12 +264,12 @@ Interpretation:
 
 Chemistry is evolved with `diskbridge.chemistry.models.gow17_timestep.Gow17TimeStepper`, which uses the reduced network implemented in `diskbridge._gow17`.
 
-The tracked outputs highlighted by this validation are:
-
-- `CO`
-- `C`
-- `C+`
-- `CHx`
+Every recorded snapshot archives the complete ordered GOW17 state, not a
+selected species subset. The component inventory is `He+`, `OHx`, `CHx`, `CO`,
+`C+`, `HCO+`, `H2`, `H+`, `H3+`, `H2+`, `S+`, `Si+`, `O+`, `CO_ice`, and the
+thermal-energy state. Neutral H, C, and O plus the electron abundance are also
+saved as named derived abundances from the network's elemental and charge
+budgets.
 
 The model can be run in two modes:
 
@@ -417,7 +417,8 @@ Each star is run at exactly two uniform hydrogen-nuclei densities:
 values. They are not intended to represent the volume-filling, lower-density
 gas in the Bondi simulations.
 
-The committed configuration uses `stellar_products` radiation, enables the
+The baseline configuration explicitly adopts an additive ambient field of
+`min_chi = 0.1` in Draine units. It uses `stellar_products` radiation, enables the
 infall equilibrium branch, disables the loose presentation-equilibrium
 controls, and does not generate movies. Gas-energy evolution and the grey dust
 temperature estimate are configured as `evolve_energy = true` and
@@ -451,24 +452,57 @@ python validation/gow17_infall_stream_1d/plot_bondi_all_stars.py
 Pass `--overwrite` to the plotting command only when intentionally replacing
 the existing `plots/bondi_all_stars/` figure set.
 
+The matched one-Draine comparison is defined in
+`bondi_all_stars_chi1.toml`. It changes only `min_chi` from `0.1` to `1.0` and
+writes to independent directories:
+
+```bash
+python validation/gow17_infall_stream_1d/run_bondi_all_stars.py \
+  --config validation/gow17_infall_stream_1d/bondi_all_stars_chi1.toml \
+  --output-root \
+  validation/gow17_infall_stream_1d/outputs/bondi_all_stars_chi1
+
+python validation/gow17_infall_stream_1d/plot_bondi_all_stars.py \
+  --config validation/gow17_infall_stream_1d/bondi_all_stars_chi1.toml \
+  --output-root \
+  validation/gow17_infall_stream_1d/outputs/bondi_all_stars_chi1 \
+  --plots-root validation/gow17_infall_stream_1d/plots/bondi_all_stars_chi1
+```
+
+The runner and plotter refuse to replace either comparison directory unless
+`--overwrite` is supplied explicitly.
+
 The plotter selects the saved equilibrium snapshots nearest stream-front
-distances of `3000`, `1000`, and `500 au`. For each density it writes a carbon
-profile figure as both PNG and vector PDF, with stellar mass arranged by column and front distance by row,
-a gas-temperature profile figure with the same layout, and a stream-front
-gas-temperature history versus physical time. The carbon panels use
+distances of `3000`, `1000`, and `500 au`. For each density it writes one PNG
+and vector-PDF abundance figure containing `CO`, `C`, `C+`, `CHx`, `HCO+`,
+and `H` together, a PNG gas-temperature profile figure
+with the same mass-by-column and distance-by-row layout, and a PNG stream-front
+gas-temperature history versus physical time. Every abundance curve uses
+`n_i/n_H`. Neutral H is the sole plotted atomic-gas proxy. H2 and the other
+hydrogen-bearing species remain in the complete archive, and the separate
+CO-poor diagnostic uses `2 x(H2)` as the fraction of hydrogen nuclei bound in
+H2. The abundance panels span `1e-12` to `1e-1`; values above that display
+range are intentionally clipped. The six-species legend occupies one row. The
+abundance panels
+use inward major and minor ticks on all four spines and a two-point vertical
+spacing. Y-axis labels are shown every second decade while all logarithmic tick
+marks are retained. The abundance panels also use
 LaTeX-style serif notation, put `M_star` near the lower right of the top-row
 panels, and put exact `r_front` labels near the lower left of the left-column panels.
 The boxed species and branch legends share one top edge above the panel grid,
 with the left edge of the species box aligned to the left-column y axis. A
 concise `n_H` density label is centered above the middle column at a larger
 font size, and the panel gaps are slightly reduced.
-Colored carbon lines are
+Colored abundance lines are
 labelled only by species, while temperature-history colors identify stellar
 mass. Separate line-style legends identify solid values as time-dependent and dashed
 values as local equilibrium. Both temperature diagnostics use a logarithmic
 Kelvin axis; the history panels use elapsed time in kyr and their different
 endpoints reflect the mass-dependent free-fall durations. Exact sampled radii,
-times, and temperature ranges are recorded in the plot summary and report.
+times, temperature ranges, and H2 fractions in CO-poor profile cells are
+recorded in the plot summary and report. The CO-poor summary reports thresholds
+at 50% and 10% of the elemental carbon abundance; these are exploratory
+diagnostic cuts, not physical discontinuities.
 
 ## Output Files
 
@@ -481,13 +515,18 @@ Each top-level run directory contains:
 Each density subdirectory contains:
 
 - `history.npz`: output-cadence histories for abundances, front position, `chi`,
-  and temperature, including the full `(n_snapshots, n_cells)` `Tgas_hist` and
+  and temperature. `gow17_y_hist` has shape
+  `(n_snapshots, n_cells, n_state_components)` and stores every ordered GOW17
+  state component; `gow17_state_component_names` and
+  `gow17_state_component_indices` define its final axis. The file also stores
+  convenient named profiles for CO, C, C+, CHx, HCO+, O, O+, OHx, H2, H, and
+  electrons,
+  including the full `(n_snapshots, n_cells)` `Tgas_hist` and
   scalar `Tgas_front`, plus internal adaptive-step diagnostics (`t_internal_s`,
   `dt_internal_s`, `r_face_internal_cm`, `chi_face_internal`). If
-  `track_infall_equilibrium=True`, this file also includes `xco_eq_hist`,
-  `xc_eq_hist`, `xcp_eq_hist`, `xchx_eq_hist`, `Tgas_eq_hist`,
-  `Tgas_front_eq`, and `Tdust_front_eq`; unsampled equilibrium rows remain
-  `NaN`.
+  `track_infall_equilibrium=True`, `gow17_y_eq_hist` provides the matching full
+  equilibrium state, and named equilibrium abundance and temperature histories
+  are included; unsampled equilibrium rows remain `NaN`.
 - `abundances_init_relax.mp4`: movie of the initial relaxation phase, if enabled
   This movie records only a bounded set of relaxation snapshots and is capped to the configured runtime limit (`20 s` by default).
 - `abundances_vs_time.mp4`: movie of the infall evolution
@@ -505,14 +544,9 @@ The Bondi grid writes:
 - `outputs/bondi_all_stars/<star-id>/`: the canonical per-star `inputs.json`,
   `scan_summary.json`, density directories, and `history.npz` files described
   above.
-- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e5.png`: CO, C, C+,
-  CHx, and HCO+ profiles for all three stars at the three selected distances,
-  using only `nH = 1e5 cm^-3`.
-- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e6.png`: the same
-  mass-by-distance comparison using only `nH = 1e6 cm^-3`.
-- `plots/bondi_all_stars/carbon_profiles_by_distance_nH_1e5.pdf` and
-  `carbon_profiles_by_distance_nH_1e6.pdf`: vector exports of the two carbon
-  figures for manuscript use.
+- `plots/bondi_all_stars/abundance_profiles_by_distance_nH_1e5.{png,pdf}` and
+  `abundance_profiles_by_distance_nH_1e6.{png,pdf}`: combined CO, C, C+, CHx,
+  HCO+, and H profiles at the two densities, displayed from `1e-12` to `1e-1`.
 - `plots/bondi_all_stars/tgas_front_vs_time_nH_1e5.png`: time-dependent and sampled
   equilibrium stream-front gas temperature versus physical time for all three
   stellar masses at `nH = 1e5 cm^-3`.
@@ -524,8 +558,13 @@ The Bondi grid writes:
 - `plots/bondi_all_stars/tgas_profiles_by_distance_nH_1e6.png`: the same
   mass-by-distance temperature profiles using only `nH = 1e6 cm^-3`.
 - `plots/bondi_all_stars/summary.json` and `report.md`: figure inventory and
-  exact distance/time samples, front and profile temperature ranges, line
-  conventions, validation checks, and human-review guidance.
+  exact distance/time samples, front and profile temperature ranges, CO-poor
+  molecular-state statistics, line conventions, validation checks, and
+  human-review guidance.
+- `outputs/bondi_all_stars_chi1/` and `plots/bondi_all_stars_chi1/`: the
+  corresponding matched products for the exploratory one-Draine ambient field.
+- `plots/bondi_all_stars_chi1/comparison_to_chi0p1.md`: quantitative CO and
+  gas-temperature differences between the matched ambient-field grids.
 
 ## Important Assumptions And Limitations
 

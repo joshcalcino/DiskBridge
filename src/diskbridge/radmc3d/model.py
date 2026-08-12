@@ -1516,6 +1516,7 @@ class RadModel:
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
+        segmented_full_nphot_retry: Optional[bool] = None,
         force: bool = False,
         diagnostic_plots: bool = False,
         plots_dir: Optional[str | Path] = None,
@@ -1540,6 +1541,9 @@ class RadModel:
             Maximum number of radial split updates.
         segmented_final_nphot_multiplier : float, optional
             Multiplier for the terminal segment photon count.
+        segmented_full_nphot_retry : bool, optional
+            Whether to combine a failed scout with one independent
+            final-budget UV estimator and retry split selection.
         force : bool, optional
             Recompute outputs even when cached outputs are available.
         diagnostic_plots : bool, optional
@@ -1567,6 +1571,7 @@ class RadModel:
             mcmono_wavelengths_um=mcmono_wavelengths_um,
             max_splits=max_splits,
             segmented_final_nphot_multiplier=segmented_final_nphot_multiplier,
+            segmented_full_nphot_retry=segmented_full_nphot_retry,
             force=force,
             diagnostic_plots=diagnostic_plots,
             plots_dir=plots_dir,

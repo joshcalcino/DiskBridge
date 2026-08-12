@@ -134,6 +134,32 @@ directional Omukai reducer. If it does not reproduce the Milan slowdown, a
 separate bounded 32-versus-64-core NUMA comparison is required before changing
 production placement or scheduling.
 
+### Same-Dave NUMA diagnostic
+
+`run_cluster_pdr_numa_diagnostic.slurm` distinguishes thread scaling from
+memory placement on one Dave node. A single 64-CPU allocation runs the deployed
+`702c397` six-field source twice in each of three cases: 32 CPUs with default
+first-touch placement, 64 CPUs with default placement, and 64 CPUs with memory
+interleaved across NUMA nodes. Every case uses the production mesh, 192
+directions, and the same contiguous 20,000-cell band. The launcher records the
+Slurm CPU masks, CPU/socket/NUMA topology, source hashes, software environment,
+and the normal per-run JSON, NPZ, and PNG outputs.
+
+Materialize `source_702c397/src/` beside the launcher and submit it only to a
+Dave node:
+
+```bash
+sbatch --partition=milan --nodelist='dave[1-147]' \
+  run_cluster_pdr_numa_diagnostic.slurm
+```
+
+Compare the two repetitions rather than a single timing. Healthy 32-to-64-core
+scaling should materially reduce wall time. If default 64-core scaling is poor
+but `numactl --interleave=all` improves it, first-touch NUMA placement is the
+likely limiting factor. If both 64-core cases are similar, profile the corrected
+spherical-boundary kernel before changing production placement. This bounded
+diagnostic does not include chemistry or change production jobs.
+
 The laptop tail-scheduling campaign uses the exact factor-two Bondi mesh
 coarsening `243 x 73 x 165` (`2,926,935` cells), 192 directions, and one
 uniformly distributed candidate chunk. Run separate processes with 4, 8, and

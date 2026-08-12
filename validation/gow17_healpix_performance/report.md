@@ -252,10 +252,30 @@ sequentially measures 120,000 contiguous native-order candidates at five and
 six fields using immutable source snapshots `419a58a`, `3501a25`, and
 `702c397`, plus the six-field current source `9b20be5`. The source snapshots'
 `healpix_utils.py` SHA-256 prefixes are `c5902472e11b`, `4452d53112ce`,
-`5f729983f6df`, and `a51e9d6e121b`, respectively. Results remain pending; no
-production Bondi job was changed or interrupted. The original unstarted Milan
-submission `15038470` was cancelled and replaced after OzSTAR expanded its
-eligible partitions beyond Dave nodes; no benchmark work was lost.
+`5f729983f6df`, and `a51e9d6e121b`, respectively. The deployed six-field
+`702c397` traversal took 262.93 s on `dave16` and 49.68 s on `gina18`.
+At fixed six fields, `702c397` was 1.189x slower than `419a58a` on Dave but
+0.748x its time on Gina, showing a source-by-node interaction rather than a
+single portable regression.
+
+A same-runtime local bisect then measured six importable revisions on the
+production mesh with 192 directions, six fields, a fixed 20,000-cell native
+band, and 18 threads. Revisions through `a067a50` took 9.56--10.39 s;
+`8ce498e` stepped to 14.36 s and later revisions remained at 14.50--14.60 s.
+The 1.481x step is the spherical half-cone/half-plane and tied-crossing
+correctness fix. It changes 42.44% of sampled columns relative to the old
+traversal, so reverting it would restore incorrect oblique-ray columns.
+
+Same-Dave NUMA job `15149978` completed on `dave78` in 3m31s. Across two
+repetitions, median wall times were 15.476 s with 32 default cores, 43.177 s
+with 64 default cores, and 8.897 s with 64 cores under
+`numactl --interleave=all`. Default 64-core placement was 2.790x slower than
+the one-socket 32-core case. Interleaving was 4.853x faster than default 64,
+raising effective use from 44.66 to 62.09 cores. Dave exposes eight NUMA
+domains, four per socket. All sampled columns across all six runs are
+bit-for-bit identical and peak RSS is unchanged. First-touch NUMA placement is
+therefore the dominant actionable Dave slowdown. The accepted Bondi launch
+policy runs both Python Slurm steps under `numactl --interleave=all`.
 
 ## Bondi pipeline settings
 
@@ -263,25 +283,26 @@ These are pipeline choices, not reusable DiskBridge code changes:
 
 - derive OpenMP and Numba thread counts from `SLURM_CPUS_PER_TASK` and bind the
   single task to cores;
-- checkpoint every five astrochem updates;
+- interleave process memory across the allocated node's NUMA domains;
+- checkpoint after every astrochem update during production recovery;
 - remove the unused pre-RT full-model snapshot;
-- retain the 64-CPU, 240-GiB request and 8-GiB shielding chunk budget until a
-  same-node scaling and memory trial supports changing them.
+- retain the 64-CPU, 240-GiB request and 8-GiB shielding chunk budget.
 
 The parallel kernels, fused reductions, in-place linewidth storage, and
 revised live-array accounting above are codebase changes. Thread binding,
 checkpoint cadence, CPU/memory requests, and the selected 8-GiB budget remain
 Bondi pipeline choices.
 
-At `every=5`, a 30-update run writes six compact checkpoints, projected at
-about 20.8 GB total. Based on the historical 2.37-hour update duration, the
-maximum completed work exposed to an interruption is about 11.8 hours.
+At `every=1`, the observed 3.465 GB latest-only checkpoint is atomically
+replaced after each completed update. A 30-update run generates about 104 GB of
+cumulative writes while retaining one checkpoint and exposing only the current
+update to an interruption.
 
 ## Remaining validation
 
-No optimized Bondi job has yet been submitted. The next isolated cluster trial
-must record `shielding_s`, `chemistry_s`, `step_s`, checkpoint throughput, CPU
-efficiency, and peak RSS, then compare the final shielding, chemistry state,
-temperature, and status diagnostics against an unchanged run with identical
-physics inputs. CPU-count and chunk-memory tuning remain pipeline experiments
-and must not be attributed to codebase speedups.
+The interleaved recovery batch must record `shielding_s`, `chemistry_s`,
+`step_s`, checkpoint throughput, CPU efficiency, and peak RSS, then compare the
+first Dave update against the bounded NUMA prediction. Final shielding,
+chemistry state, temperature, and status diagnostics still require the planned
+representative scientific comparison. CPU-count and chunk-memory tuning remain
+pipeline experiments and must not be attributed to codebase speedups.

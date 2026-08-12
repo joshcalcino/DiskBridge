@@ -99,6 +99,7 @@ class Params:
     segmented_stop_factor: float
     segmented_nphot_ratio: float
     segmented_final_nphot_multiplier: float
+    segmented_full_nphot_retry: bool
     segmented_outer_weight_mode: str
 
     # star

@@ -55,6 +55,7 @@ _SEGMENTED_PARAM_KEYS = (
     "segmented_stop_factor",
     "segmented_nphot_ratio",
     "segmented_final_nphot_multiplier",
+    "segmented_full_nphot_retry",
     "segmented_outer_weight_mode",
 )
 
@@ -1133,6 +1134,70 @@ class SegmentedRadRunner:
             if np.asarray(value.magnitude).ndim == 3
         }
 
+    @staticmethod
+    def _paired_uv_uncertainty(
+        *,
+        first_products: dict[str, Quantity],
+        second_products: dict[str, Quantity],
+        first_intensity_path: Path,
+        second_intensity_path: Path,
+        volumes: np.ndarray,
+        first_weight: float,
+        noise_tolerance: float,
+    ) -> tuple[
+        dict[str, dict[str, np.ndarray]],
+        dict[str, np.ndarray],
+        np.ndarray,
+    ]:
+        """Return radial uncertainty metrics for two independent UV estimates."""
+        product_metrics: dict[str, dict[str, np.ndarray]] = {}
+        for name in sorted(set(first_products) & set(second_products)):
+            first = first_products[name]
+            second = second_products[name].to(first.units)
+            metrics = paired_radial_uncertainty_metrics(
+                first.magnitude,
+                second.magnitude,
+                volumes,
+                first_weight=first_weight,
+                tolerance=noise_tolerance,
+            )
+            metrics.pop("sigma")
+            if name != "chi_broad":
+                metrics.pop("mean")
+            product_metrics[name] = metrics
+
+        frequencies1, shell_j1 = radial_shell_mean_intensity(
+            first_intensity_path, volumes
+        )
+        frequencies2, shell_j2 = radial_shell_mean_intensity(
+            second_intensity_path, volumes
+        )
+        if not np.array_equal(frequencies1, frequencies2):
+            raise ValueError("Independent UV-estimator frequency grids differ")
+        weight1 = float(first_weight)
+        weight2 = 1.0 - weight1
+        shell_j_mean = weight1 * shell_j1 + weight2 * shell_j2
+        shell_j_sigma = np.sqrt(weight1 * weight2) * np.abs(shell_j1 - shell_j2)
+        shell_j_fractional = np.divide(
+            shell_j_sigma,
+            np.abs(shell_j_mean),
+            out=np.where(shell_j_sigma == 0.0, 0.0, np.inf),
+            where=np.abs(shell_j_mean) > 0.0,
+        )
+        wavelength_metrics = {
+            "frequencies_hz": frequencies1,
+            "shell_mean": shell_j_mean,
+            "shell_sigma": shell_j_sigma,
+            "shell_fractional": shell_j_fractional,
+            "shell_fractional_max": np.max(shell_j_fractional, axis=1),
+        }
+
+        reliable = np.all(shell_j_fractional <= float(noise_tolerance), axis=1)
+        for metrics in product_metrics.values():
+            reliable &= metrics["shell_fractional"] <= float(noise_tolerance)
+            reliable &= metrics["cell_fractional_p99"] <= float(noise_tolerance)
+        return product_metrics, wavelength_metrics, reliable
+
     def _run_paired_uv_scout(
         self,
         rad: "RadModel",
@@ -1192,50 +1257,15 @@ class SegmentedRadRunner:
             compute_products=True,
         )
         volumes = compute_cell_volumes(rad.model)
-        product_metrics: dict[str, dict[str, np.ndarray]] = {}
-        for name in sorted(set(estimator_products[0]) & set(estimator_products[1])):
-            first = estimator_products[0][name]
-            second = estimator_products[1][name].to(first.units)
-            metrics = paired_radial_uncertainty_metrics(
-                first.magnitude,
-                second.magnitude,
-                volumes,
-                first_weight=first_weight,
-                tolerance=noise_tolerance,
-            )
-            metrics.pop("sigma")
-            if name != "chi_broad":
-                metrics.pop("mean")
-            product_metrics[name] = metrics
-
-        frequencies1, shell_j1 = radial_shell_mean_intensity(
-            estimator_dirs[0] / "mean_intensity.bout", volumes
+        product_metrics, wavelength_metrics, reliable = self._paired_uv_uncertainty(
+            first_products=estimator_products[0],
+            second_products=estimator_products[1],
+            first_intensity_path=estimator_dirs[0] / "mean_intensity.bout",
+            second_intensity_path=estimator_dirs[1] / "mean_intensity.bout",
+            volumes=volumes,
+            first_weight=first_weight,
+            noise_tolerance=noise_tolerance,
         )
-        frequencies2, shell_j2 = radial_shell_mean_intensity(
-            estimator_dirs[1] / "mean_intensity.bout", volumes
-        )
-        if not np.array_equal(frequencies1, frequencies2):
-            raise ValueError("Paired scout frequency grids differ")
-        shell_j_mean = first_weight * shell_j1 + (1.0 - first_weight) * shell_j2
-        shell_j_sigma = 0.5 * np.abs(shell_j1 - shell_j2)
-        shell_j_fractional = np.divide(
-            shell_j_sigma,
-            np.abs(shell_j_mean),
-            out=np.where(shell_j_sigma == 0.0, 0.0, np.inf),
-            where=np.abs(shell_j_mean) > 0.0,
-        )
-        wavelength_metrics = {
-            "frequencies_hz": frequencies1,
-            "shell_mean": shell_j_mean,
-            "shell_sigma": shell_j_sigma,
-            "shell_fractional": shell_j_fractional,
-            "shell_fractional_max": np.max(shell_j_fractional, axis=1),
-        }
-
-        reliable = np.all(shell_j_fractional <= float(noise_tolerance), axis=1)
-        for metrics in product_metrics.values():
-            reliable &= metrics["shell_fractional"] <= float(noise_tolerance)
-            reliable &= metrics["cell_fractional_p99"] <= float(noise_tolerance)
 
         metadata = {
             "seeds": list(seeds),
@@ -1258,6 +1288,116 @@ class SegmentedRadRunner:
             wavelength_metrics=wavelength_metrics,
             reliable_shells=reliable,
             estimator_dirs=estimator_dirs,
+        )
+
+    def _run_full_nphot_retry(
+        self,
+        rad: "RadModel",
+        *,
+        scout: PairedScoutResult,
+        nphot: int,
+        wavelengths_um: np.ndarray,
+        uv_min: Quantity,
+        uv_max: Quantity,
+        noise_tolerance: float,
+        level: int,
+        force: bool,
+    ) -> PairedScoutResult:
+        """Combine a failed scout with one independent final-budget estimator."""
+        scout_nphot = int(scout.metadata["nphot_total"])
+        retry_nphot = int(nphot)
+        if scout_nphot < 1 or retry_nphot < 1:
+            raise ValueError("Full-photon scout retry requires positive packet counts")
+
+        canonical_dir = rad.outputs_dir / "mcmono"
+        scout_intensity_path = canonical_dir / "mean_intensity.bout"
+        scout_products = self._copy_uv_products(rad)
+        scout_hash = sha256_file(scout_intensity_path)
+
+        retry_seed = 32452843 + int(level)
+        if retry_seed in set(int(seed) for seed in scout.metadata.get("seeds", [])):
+            raise ValueError("Full-photon retry seed must differ from scout seeds")
+        retry_dir = rad.outputs_dir / "mcmono_full_nphot_retry"
+        rad.compute_mcmono(
+            nphot=retry_nphot,
+            output_dir=retry_dir,
+            force=force,
+            wavelengths_um=wavelengths_um,
+            uv_min=uv_min,
+            uv_max=uv_max,
+            compute_uv_products=True,
+            iseed=retry_seed,
+        )
+        retry_products = self._copy_uv_products(rad)
+        retry_intensity_path = retry_dir / "mean_intensity.bout"
+        retry_hash = sha256_file(retry_intensity_path)
+
+        total_nphot = scout_nphot + retry_nphot
+        scout_weight = scout_nphot / float(total_nphot)
+        volumes = compute_cell_volumes(rad.model)
+        product_metrics, wavelength_metrics, reliable = self._paired_uv_uncertainty(
+            first_products=scout_products,
+            second_products=retry_products,
+            first_intensity_path=scout_intensity_path,
+            second_intensity_path=retry_intensity_path,
+            volumes=volumes,
+            first_weight=scout_weight,
+            noise_tolerance=noise_tolerance,
+        )
+
+        combined_path = canonical_dir / "mean_intensity_full_nphot_retry.bout"
+        binary_metadata = combine_mean_intensity_files(
+            scout_intensity_path,
+            retry_intensity_path,
+            combined_path,
+            first_weight=scout_weight,
+        )
+        combined_path.replace(scout_intensity_path)
+        for name in (
+            "mcmono_wavelength_micron.inp",
+            "cache_context.json",
+            "params.txt",
+        ):
+            source = retry_dir / name
+            if source.is_file():
+                shutil.copy2(source, canonical_dir / name)
+        rad._postprocess_chi(
+            scout_intensity_path,
+            uv_min,
+            uv_max,
+            compute_products=True,
+        )
+
+        initial_metadata_path = canonical_dir / "paired_scout.json"
+        archived_initial_metadata_path = canonical_dir / "paired_scout_initial.json"
+        if initial_metadata_path.is_file():
+            initial_metadata_path.replace(archived_initial_metadata_path)
+        metadata = {
+            "mode": "full_nphot_retry",
+            "initial_scout": scout.metadata,
+            "initial_scout_metadata_file": str(archived_initial_metadata_path),
+            "initial_scout_sha256": scout_hash,
+            "retry_seed": int(retry_seed),
+            "retry_nphot": int(retry_nphot),
+            "retry_sha256": retry_hash,
+            "nphot_estimators": [int(scout_nphot), int(retry_nphot)],
+            "nphot_total": int(total_nphot),
+            "first_weight": float(scout_weight),
+            "binary": binary_metadata,
+            "noise_tolerance": float(noise_tolerance),
+            "canonical_scout_sha256": sha256_file(scout_intensity_path),
+        }
+        metadata_path = canonical_dir / "full_nphot_retry.json"
+        metadata_path.write_text(
+            json.dumps(jsonable(metadata), indent=2, sort_keys=True) + "\n"
+        )
+        metadata["metadata_file"] = str(metadata_path)
+        return PairedScoutResult(
+            metadata=metadata,
+            products=product_metrics,
+            wavelength_metrics=wavelength_metrics,
+            reliable_shells=reliable,
+            estimator_dirs=scout.estimator_dirs + (retry_dir,),
         )
 
     @staticmethod
@@ -1796,6 +1936,7 @@ class SegmentedRadRunner:
         mcmono_wavelengths_um: Optional[np.ndarray] = None,
         max_splits: Optional[int] = None,
         segmented_final_nphot_multiplier: Optional[float] = None,
+        segmented_full_nphot_retry: Optional[bool] = None,
         force: bool = False,
         diagnostic_plots: bool = False,
         plots_dir: Optional[str | Path] = None,
@@ -1824,6 +1965,10 @@ class SegmentedRadRunner:
             Maximum number of child boundaries.
         segmented_final_nphot_multiplier : float, optional
             Packet multiplier for the terminal science calculation.
+        segmented_full_nphot_retry : bool, optional
+            Whether a failed low-budget scout receives one independent
+            final-budget UV estimator that is combined with the scout before
+            split selection is retried.
         force : bool, optional
             Skip completed-product reuse and recompute RADMC-3D outputs.
         diagnostic_plots : bool, optional
@@ -1880,6 +2025,11 @@ class SegmentedRadRunner:
             )
         _validate_radmc_photon_count(final_thermal, name="segmented final nphot_thermal")
         _validate_radmc_photon_count(final_mono, name="segmented final nphot_mono")
+        full_nphot_retry = bool(
+            getattr(params, "segmented_full_nphot_retry", False)
+            if segmented_full_nphot_retry is None
+            else segmented_full_nphot_retry
+        )
 
         max_splits = int(params.segmented_max_splits if max_splits is None else max_splits)
         if max_splits < 0:
@@ -1924,11 +2074,13 @@ class SegmentedRadRunner:
 
         logger.info(
             "Noise-aware segmented RT: scout mctherm=%d, paired mcmono total=%d, "
-            "final mctherm=%d, final mcmono=%d, segmented_tol=%.3g",
+            "final mctherm=%d, final mcmono=%d, full-nphot retry=%s, "
+            "segmented_tol=%.3g",
             scout_thermal,
             scout_mono,
             final_thermal,
             final_mono,
+            full_nphot_retry,
             tolerance,
         )
 
@@ -1936,6 +2088,7 @@ class SegmentedRadRunner:
             "mode": "noise_aware_inherited_uv",
             "mcmono_wavelength_source": "uv",
             "segmented_final_nphot_multiplier": final_multiplier,
+            "segmented_full_nphot_retry": full_nphot_retry,
             "segmented_tol": tolerance,
             "segmented_r_clip_min_au": r_clip_min_au,
             "segmented_max_splits": max_splits,
@@ -1997,6 +2150,7 @@ class SegmentedRadRunner:
         photon_packages = {
             "scout_thermal": 0,
             "scout_mono": 0,
+            "full_nphot_retry_mono": 0,
             "boundary_calibration_mono": 0,
             "final_thermal": 0,
             "final_mono": 0,
@@ -2007,6 +2161,40 @@ class SegmentedRadRunner:
         parent_rad: Optional[RadModel] = None
         parent_scout: Optional[PairedScoutResult] = None
         parent_split_info: Optional[dict[str, Any]] = None
+
+        def select_split(
+            rad: RadModel,
+            scout: PairedScoutResult,
+            stellar_array: np.ndarray,
+            outer_rmax_au: float,
+        ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+            try:
+                split_radius, raw_split_info = find_noise_aware_split(
+                    rad.model.mesh.edges("r").to("au").magnitude,
+                    scout.reliable_shells,
+                    stellar_array,
+                    stellar_fraction_threshold=runtime_mode.stellar_fraction_threshold,
+                    r_clip_min_au=r_clip_min_au,
+                )
+            except ValueError as exc:
+                return None, str(exc)
+            split_info = {
+                key: value for key, value in raw_split_info.items() if key.endswith("_idx")
+            }
+            split_info["r_split_au"] = float(split_radius)
+            radial_centers_au = np.asarray(
+                rad.model.mesh.centers("r").to("au").magnitude,
+                dtype=np.float64,
+            )
+            split_info["comparison_shell_r_au"] = float(
+                radial_centers_au[int(split_info["comparison_shell_idx"])]
+            )
+            split_info["source_shell_r_au"] = float(
+                radial_centers_au[int(split_info["source_shell_idx"])]
+            )
+            if float(split_radius) >= stop_factor * float(outer_rmax_au):
+                return split_info, "insufficient_radial_reduction"
+            return split_info, None
 
         for level in range(max_splits + 1):
             known_terminal = level >= max_splits
@@ -2069,7 +2257,10 @@ class SegmentedRadRunner:
                 )
 
             terminal_reason: Optional[str] = "maximum_splits" if known_terminal else None
+            split_info: Optional[dict[str, Any]] = None
             metrics_file: Optional[Path] = None
+            initial_metrics_file: Optional[Path] = None
+            full_retry_used = False
             stellar_array: Optional[np.ndarray] = None
             if known_terminal:
                 self._run_segment_rt(
@@ -2108,6 +2299,49 @@ class SegmentedRadRunner:
                 )
                 metrics_file = self._write_scout_diagnostics(rad, scout, stellar_profiles)
 
+                split_info, terminal_reason = select_split(
+                    rad,
+                    scout,
+                    stellar_array,
+                    current_outer_rmax_au,
+                )
+                if (
+                    terminal_reason is not None
+                    and full_nphot_retry
+                    and scout_mono < final_mono
+                ):
+                    initial_metrics_file = metrics_file.with_name(
+                        "uv_scout_metrics_initial.npz"
+                    )
+                    metrics_file.replace(initial_metrics_file)
+                    scout = self._run_full_nphot_retry(
+                        rad,
+                        scout=scout,
+                        nphot=final_mono,
+                        wavelengths_um=wavelengths_um,
+                        uv_min=uv_min,
+                        uv_max=uv_max,
+                        noise_tolerance=tolerance,
+                        level=level,
+                        force=force,
+                    )
+                    full_retry_used = True
+                    photon_packages["full_nphot_retry_mono"] += (
+                        int(final_mono) * n_mcmono_wavelengths
+                    )
+                    stellar_array, stellar_profiles = self._stellar_screen_profiles(
+                        rad, scout, product_specs
+                    )
+                    metrics_file = self._write_scout_diagnostics(
+                        rad, scout, stellar_profiles
+                    )
+                    split_info, terminal_reason = select_split(
+                        rad,
+                        scout,
+                        stellar_array,
+                        current_outer_rmax_au,
+                    )
+
             if boundary_calibration is not None:
                 calibration_path = rad.outputs_dir / "mcmono" / "boundary_calibration.json"
                 calibration_path.write_text(
@@ -2131,47 +2365,28 @@ class SegmentedRadRunner:
                 )
                 joins.append(join)
 
-            split_info: Optional[dict[str, Any]] = None
-            if not known_terminal:
-                if stellar_array is None:
-                    raise RuntimeError("Intermediate segment is missing stellar-screen profiles")
-                try:
-                    split_radius, raw_split_info = find_noise_aware_split(
-                        rad.model.mesh.edges("r").to("au").magnitude,
-                        scout.reliable_shells,
-                        stellar_array,
-                        stellar_fraction_threshold=runtime_mode.stellar_fraction_threshold,
-                        r_clip_min_au=r_clip_min_au,
-                    )
-                    split_info = {
-                        key: value
-                        for key, value in raw_split_info.items()
-                        if key.endswith("_idx")
-                    }
-                    split_info["r_split_au"] = float(split_radius)
-                    radial_centers_au = np.asarray(
-                        rad.model.mesh.centers("r").to("au").magnitude,
-                        dtype=np.float64,
-                    )
-                    split_info["comparison_shell_r_au"] = float(
-                        radial_centers_au[int(split_info["comparison_shell_idx"])]
-                    )
-                    split_info["source_shell_r_au"] = float(
-                        radial_centers_au[int(split_info["source_shell_idx"])]
-                    )
-                    if float(split_radius) >= stop_factor * current_outer_rmax_au:
-                        terminal_reason = "insufficient_radial_reduction"
-                except ValueError as exc:
-                    terminal_reason = str(exc)
+            if not known_terminal and stellar_array is None:
+                raise RuntimeError("Intermediate segment is missing stellar-screen profiles")
+
+            segment_mono_nphot = (
+                final_mono if known_terminal or full_retry_used else scout_mono
+            )
 
             segment_entry: dict[str, Any] = {
                 "level": int(level),
                 "work_dir": str(work_dir),
                 "r_max_au": float(current_outer_rmax_au),
                 "nphot_thermal": int(final_thermal if known_terminal else scout_thermal),
-                "nphot_mono": int(final_mono if known_terminal else scout_mono),
+                "nphot_mono": int(segment_mono_nphot),
+                "effective_nphot_mono": int(
+                    scout.metadata.get("nphot_total", segment_mono_nphot)
+                ),
                 "scout": None if known_terminal else jsonable(scout.metadata),
                 "scout_metrics_file": str(metrics_file) if metrics_file is not None else None,
+                "initial_scout_metrics_file": (
+                    str(initial_metrics_file) if initial_metrics_file is not None else None
+                ),
+                "full_nphot_retry_used": bool(full_retry_used),
                 "noise_reliable_shell_count": (
                     None
                     if known_terminal
@@ -2199,7 +2414,7 @@ class SegmentedRadRunner:
                         force=True,
                     )
                     photon_packages["final_thermal"] += int(final_thermal)
-                if final_mono != scout_mono:
+                if final_mono != segment_mono_nphot:
                     rad.compute_mcmono(
                         nphot=final_mono,
                         output_dir=rad.outputs_dir / "mcmono",
@@ -2212,11 +2427,12 @@ class SegmentedRadRunner:
                     photon_packages["final_mono"] += (
                         int(final_mono) * n_mcmono_wavelengths
                     )
+                    segment_entry["effective_nphot_mono"] = int(final_mono)
                 segment_entry["nphot_thermal"] = int(final_thermal)
                 segment_entry["nphot_mono"] = int(final_mono)
                 segment_entry["terminal_reason"] = terminal_reason
                 segment_entry["scout_canonical_replaced_by_final"] = bool(
-                    final_mono != scout_mono
+                    final_mono != segment_mono_nphot
                 )
             elif terminal_reason is not None:
                 segment_entry["terminal_reason"] = terminal_reason
@@ -2300,6 +2516,7 @@ class SegmentedRadRunner:
             "mode": "noise_aware_inherited_uv",
             "mcmono_wavelength_source": "uv",
             "segmented_final_nphot_multiplier": final_multiplier,
+            "segmented_full_nphot_retry": full_nphot_retry,
             "segmented_tol": tolerance,
             "segmented_r_clip_min_au": r_clip_min_au,
             "segmented_max_splits": max_splits,

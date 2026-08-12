@@ -1,6 +1,6 @@
 ---
 name: diskbridge-documenter
-description: Update DiskBridge documentation, NumPy-style docstrings, README files, validation READMEs, or CHANGELOG release notes. Use when user-facing behavior, APIs, config, outputs, physics assumptions, or validation workflows need documentation.
+description: Update DiskBridge documentation, NumPy-style docstrings, analysis or validation READMEs, and CHANGELOG release notes. Use when user-facing behavior, APIs, config, outputs, physics assumptions, example analyses, or validation workflows need documentation.
 ---
 
 # DiskBridge Documenter Skill
@@ -41,14 +41,21 @@ Use:
 - `README.md` for high-level project usage;
 - `tests/README.md` for local pytest organization and naming standards;
 - NumPy-style docstrings for public functions/classes;
+- `examples/<workflow>/plots/<analysis>/README.md` for descriptive
+  measurements, inventories, atlases, and exploratory plots of an example's
+  existing outputs;
 - `validation/<case>/README.md` for validation workflows in the repo-level
-  `validation/` directory;
+  `validation/` directory, but only when the workflow tests a stated claim
+  against an explicit expectation or comparison and defines how to interpret
+  success or failure;
 - `CHANGELOG.md` for release-facing summaries;
 - `projects/active/` or `projects/completed/` for implementation plans and progress logs.
 
 Do not document or create a `tests/validation/` convention. Validation
 workflows are not pytest suites; they live under `validation/<case>/`. Do not
 document validation-specific helper pytest files as an expected practice.
+Do not route a workflow to `validation/` merely because it creates plots,
+archives arrays, takes a long time, or needs human inspection.
 
 ## What To Document
 

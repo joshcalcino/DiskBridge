@@ -24,13 +24,13 @@ From the repository root:
 python validation/bondi_dust_transport/run.py
 ```
 
-The local Bondi snapshot must be present under
-`examples/bondi_all_stars/7_b_0.5_300_9_d2_small_dm`. Existing outputs are
+The local low-density Bondi snapshot must be present under
+`examples/bondi_low_density/data/7_b_0.5_300_9_d2_small_dm`. Existing outputs are
 preserved unless `--overwrite` is passed.
 
 All generated plots, arrays, and summaries are written to the established
 snapshot directory:
-`examples/bondi_all_stars/plots/completed_uv_fields/m05_9_dm_f140_c10/`.
+`examples/bondi_low_density/plots/completed_uv_fields/m05_9_dm_f140_c10/`.
 The validation directory contains only the driver and this README.
 
 ## Deep dive

@@ -33,6 +33,7 @@ from diskbridge.radmc3d.model import (
     _validate_radmc_photon_count,
 )
 from diskbridge.radmc3d.segmented import (
+    PairedScoutResult,
     SegmentedRadRunner,
     _calibrate_inherited_spectrum,
     _clip_parent_temperature_to_child,
@@ -157,6 +158,114 @@ def test_paired_radial_metrics_keep_infinite_zero_signal_uncertainty() -> None:
 
     assert np.isinf(metrics["cell_fractional_p99"][0])
     assert np.isinf(metrics["cell_fractional_max"][0])
+
+
+def test_paired_radial_metrics_scale_unequal_packet_budgets() -> None:
+    first = np.ones((1, 1, 1))
+    second = np.full_like(first, 3.0)
+    first_weight = 1.0 / 11.0
+
+    metrics = paired_radial_uncertainty_metrics(
+        first,
+        second,
+        np.ones_like(first),
+        first_weight=first_weight,
+    )
+
+    expected_sigma = np.sqrt(first_weight * (1.0 - first_weight)) * 2.0
+    expected_mean = first_weight + (1.0 - first_weight) * 3.0
+    assert metrics["sigma"].item() == pytest.approx(expected_sigma)
+    assert metrics["shell_fractional"].item() == pytest.approx(
+        expected_sigma / expected_mean
+    )
+
+
+def test_full_nphot_retry_combines_scout_with_distinct_seed(
+    tmp_path: Path,
+) -> None:
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([1.0, 2.0]), "au")),
+        theta=Axis(edges=Quantity(np.array([0.0, np.pi]), "radian")),
+        phi=Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = "spherical"
+    runner = SegmentedRadRunner(model, tmp_path / "run")
+    frequencies = np.array([1.0e15, 2.0e15])
+    outputs_dir = tmp_path / "segment" / "radmc3d_outputs"
+    canonical_dir = outputs_dir / "mcmono"
+    _write_mean_intensity(
+        canonical_dir / "mean_intensity.bout",
+        np.ones((2, 1)),
+        frequencies=frequencies,
+    )
+    (canonical_dir / "paired_scout.json").write_text("{}\n")
+
+    class DummyRad:
+        def __init__(self) -> None:
+            self.model = model
+            self.outputs_dir = outputs_dir
+            self.uv_products = {
+                "chi_broad": Quantity(np.ones((1, 1, 1)), "dimensionless")
+            }
+            self.calls: list[dict[str, object]] = []
+
+        def compute_mcmono(self, **kwargs) -> None:
+            self.calls.append(dict(kwargs))
+            output_dir = Path(kwargs["output_dir"])
+            _write_mean_intensity(
+                output_dir / "mean_intensity.bout",
+                np.full((2, 1), 3.0),
+                frequencies=frequencies,
+            )
+            (output_dir / "mcmono_wavelength_micron.inp").write_text("2\n")
+            (output_dir / "cache_context.json").write_text('{"nphot": 100}\n')
+            (output_dir / "params.txt").write_text("nphot_mono = 100\n")
+            self.uv_products = {
+                "chi_broad": Quantity(np.full((1, 1, 1), 3.0), "dimensionless")
+            }
+
+        def _postprocess_chi(self, *args, **kwargs) -> None:
+            combined = (10.0 * 1.0 + 100.0 * 3.0) / 110.0
+            self.uv_products = {
+                "chi_broad": Quantity(
+                    np.full((1, 1, 1), combined), "dimensionless"
+                )
+            }
+
+    rad = DummyRad()
+    scout = PairedScoutResult(
+        metadata={"seeds": [104729, 104730], "nphot_total": 10},
+        products={},
+        wavelength_metrics={},
+        reliable_shells=np.array([False]),
+        estimator_dirs=(),
+    )
+
+    combined = runner._run_full_nphot_retry(
+        rad,
+        scout=scout,
+        nphot=100,
+        wavelengths_um=np.array([0.1, 0.2]),
+        uv_min=Quantity(91.2, "nm"),
+        uv_max=Quantity(206.7, "nm"),
+        noise_tolerance=1.0,
+        level=0,
+        force=False,
+    )
+
+    assert len(rad.calls) == 1
+    assert rad.calls[0]["nphot"] == 100
+    assert rad.calls[0]["iseed"] not in scout.metadata["seeds"]
+    np.testing.assert_allclose(
+        _read_payload(canonical_dir / "mean_intensity.bout"),
+        (10.0 * 1.0 + 100.0 * 3.0) / 110.0,
+    )
+    assert combined.metadata["nphot_estimators"] == [10, 100]
+    assert combined.metadata["nphot_total"] == 110
+    assert (canonical_dir / "paired_scout_initial.json").is_file()
+    assert (canonical_dir / "full_nphot_retry.json").is_file()
+    assert json.loads((canonical_dir / "cache_context.json").read_text())["nphot"] == 100
 
 
 def test_inherited_spectrum_calibration_matches_parent_shell() -> None:
@@ -536,6 +645,54 @@ def test_force_is_the_only_way_to_bypass_completed_product_reuse(
     with pytest.raises(RuntimeError, match="recompute entered"):
         runner.run_segmented_rt(force=True)
     assert not called
+
+
+def test_full_nphot_retry_option_is_part_of_restart_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import diskbridge
+
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([1.0, 2.0]), "au")),
+        theta=Axis(edges=Quantity(np.array([0.0, np.pi]), "radian")),
+        phi=Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "radian")),
+    )
+    model.coord_system = "spherical"
+    monkeypatch.setattr(
+        diskbridge,
+        "params",
+        SimpleNamespace(
+            segmented_tol=0.01,
+            segmented_r_clip_min=Quantity(1.0, "au"),
+            segmented_stop_factor=0.9,
+            segmented_nphot_ratio=0.1,
+            segmented_final_nphot_multiplier=1.0,
+            segmented_full_nphot_retry=False,
+            segmented_max_splits=1,
+            nphot_thermal=100,
+            nphot_mono=100,
+            uv_n_wavelengths=5,
+        ),
+    )
+    runner = SegmentedRadRunner(model, tmp_path)
+    captured: dict[str, object] = {}
+
+    def accept_completed(**kwargs):
+        captured.update(kwargs["expected_summary"])
+        return True, "compatible"
+
+    monkeypatch.setattr(runner, "_validate_completed_segmented_rt", accept_completed)
+    monkeypatch.setattr(
+        runner,
+        "load_segmented_rt_outputs",
+        lambda **kwargs: {"loaded_existing": True},
+    )
+
+    runner.run_segmented_rt(segmented_full_nphot_retry=True)
+
+    assert captured["segmented_full_nphot_retry"] is True
 
 
 def test_binary_restart_validation_checks_exact_payload_sizes(tmp_path: Path) -> None:

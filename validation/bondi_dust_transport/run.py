@@ -31,10 +31,10 @@ ROOT = Path(__file__).resolve().parents[2]
 CASE_NAME = "m05_9_dm_f140_c10"
 OUTPUT_DIR = (
     ROOT
-    / "examples/bondi_all_stars/plots/completed_uv_fields"
+    / "examples/bondi_low_density/plots/completed_uv_fields"
     / CASE_NAME
 )
-DATA_DIR = ROOT / "examples/bondi_all_stars/7_b_0.5_300_9_d2_small_dm"
+DATA_DIR = ROOT / "examples/bondi_low_density/data/7_b_0.5_300_9_d2_small_dm"
 FRAME = 140
 STELLAR_MASS = 0.5 * diskbridge.units("solar_mass")
 AXIS_SUPPORT = 504.7830094260165 * diskbridge.units("au")

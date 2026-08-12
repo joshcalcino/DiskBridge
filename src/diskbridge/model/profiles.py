@@ -128,7 +128,8 @@ def paired_radial_uncertainty_metrics(
     volumes : ndarray
         Cell volumes with the same shape.
     first_weight : float, optional
-        Packet-count weight assigned to ``first``.
+        Packet-count weight assigned to ``first``. The uncertainty assumes
+        the weights are proportional to the two independent packet counts.
     tolerance : float, optional
         Fractional uncertainty used for the reported failing volume fraction.
 
@@ -150,7 +151,8 @@ def paired_radial_uncertainty_metrics(
         raise ValueError("first_weight must be in [0, 1]")
     weight2 = 1.0 - weight1
     mean = weight1 * first + weight2 * second
-    sigma = 0.5 * np.abs(first - second)
+    sigma_factor = np.sqrt(weight1 * weight2)
+    sigma = sigma_factor * np.abs(first - second)
     denominator = np.abs(mean)
     cell_fractional = np.divide(
         sigma,
@@ -174,7 +176,7 @@ def paired_radial_uncertainty_metrics(
         first_mean = float(np.sum(first[ir].ravel() * shell_weights) / total_weight)
         second_mean = float(np.sum(second[ir].ravel() * shell_weights) / total_weight)
         shell_mean[ir] = weight1 * first_mean + weight2 * second_mean
-        shell_sigma = 0.5 * abs(first_mean - second_mean)
+        shell_sigma = sigma_factor * abs(first_mean - second_mean)
         shell_fractional[ir] = (
             shell_sigma / abs(shell_mean[ir])
             if shell_mean[ir] != 0.0

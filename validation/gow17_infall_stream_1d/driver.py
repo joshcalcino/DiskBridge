@@ -47,8 +47,43 @@ I_CHX = _gow17.I_CHX
 I_HCOP = _gow17.I_HCOP
 I_CP = _gow17.I_CP
 I_H2 = _gow17.I_H2
+I_HP = _gow17.I_HP
+I_H3P = _gow17.I_H3P
+I_H2P = _gow17.I_H2P
+I_OHX = _gow17.I_OHX
+I_OP = _gow17.I_OP
+I_HEP = _gow17.I_HEP
+I_SP = _gow17.I_SP
+I_SIP = _gow17.I_SIP
 XC_STD = _gow17.XC_STD
+XO_STD = _gow17.XO_STD
 N_Y = _gow17.N_Y
+
+_GOW17_STATE_COMPONENTS = (
+    ("He+", _gow17.I_HEP),
+    ("OHx", _gow17.I_OHX),
+    ("CHx", _gow17.I_CHX),
+    ("CO", _gow17.I_CO),
+    ("C+", _gow17.I_CP),
+    ("HCO+", _gow17.I_HCOP),
+    ("H2", _gow17.I_H2),
+    ("H+", _gow17.I_HP),
+    ("H3+", _gow17.I_H3P),
+    ("H2+", _gow17.I_H2P),
+    ("S+", _gow17.I_SP),
+    ("Si+", _gow17.I_SIP),
+    ("O+", _gow17.I_OP),
+    ("CO_ice", _gow17.I_CO_ICE),
+    ("energy", _gow17.I_E),
+)
+GOW17_STATE_COMPONENT_NAMES = tuple(
+    name for name, _index in sorted(_GOW17_STATE_COMPONENTS, key=lambda item: item[1])
+)
+GOW17_STATE_COMPONENT_INDICES = tuple(
+    index for _name, index in sorted(_GOW17_STATE_COMPONENTS, key=lambda item: item[1])
+)
+if GOW17_STATE_COMPONENT_INDICES != tuple(range(N_Y)):
+    raise RuntimeError("GOW17 state-component inventory does not cover the full state")
 
 RADIATION_MODE_DRAINE_SCALAR = "draine_scalar"
 RADIATION_MODE_STELLAR_PRODUCTS = "stellar_products"
@@ -522,6 +557,51 @@ def _neutral_c_abundance(y: np.ndarray, Zg: float) -> np.ndarray:
     return np.maximum(xC, 0.0)
 
 
+def _neutral_o_abundance(y: np.ndarray, Zg: float) -> np.ndarray:
+    """Return neutral atomic oxygen abundance per H nucleus."""
+
+    xOtot = float(Zg) * float(XO_STD)
+    xO = xOtot - (
+        y[..., I_OHX]
+        + y[..., I_CO]
+        + y[..., I_CO_ICE]
+        + y[..., I_HCOP]
+        + y[..., I_OP]
+    )
+    return np.maximum(xO, 0.0)
+
+
+def _neutral_h_abundance(y: np.ndarray) -> np.ndarray:
+    """Return neutral atomic hydrogen abundance per H nucleus."""
+
+    xH = 1.0 - (
+        y[..., I_OHX]
+        + y[..., I_CHX]
+        + y[..., I_HCOP]
+        + 3.0 * y[..., I_H3P]
+        + 2.0 * y[..., I_H2P]
+        + y[..., I_HP]
+        + 2.0 * y[..., I_H2]
+    )
+    return np.maximum(xH, 0.0)
+
+
+def _electron_abundance(y: np.ndarray) -> np.ndarray:
+    """Return electron abundance per H nucleus from charge conservation."""
+
+    return (
+        y[..., I_HEP]
+        + y[..., I_CP]
+        + y[..., I_HCOP]
+        + y[..., I_H3P]
+        + y[..., I_H2P]
+        + y[..., I_HP]
+        + y[..., I_SP]
+        + y[..., I_SIP]
+        + y[..., I_OP]
+    )
+
+
 def _extract_abundance_profiles(y: np.ndarray, Zg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return (
         np.asarray(y[:, I_CO], dtype=float).copy(),
@@ -953,6 +1033,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xcp_hist = np.zeros_like(xco_hist)
     xchx_hist = np.zeros_like(xco_hist)
     xhcop_hist = np.zeros_like(xco_hist)
+    xo_hist = np.zeros_like(xco_hist)
+    xop_hist = np.zeros_like(xco_hist)
+    xohx_hist = np.zeros_like(xco_hist)
+    xh2_hist = np.zeros_like(xco_hist)
+    xh_hist = np.zeros_like(xco_hist)
+    xe_hist = np.zeros_like(xco_hist)
+    gow17_y_hist = np.zeros((n_output_steps + 1, ncells, N_Y), dtype=float)
     Tgas_hist = np.zeros_like(xco_hist)
 
     Tgas_front = np.zeros_like(t_hist)
@@ -962,6 +1049,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
     xcp_eq_hist = None
     xchx_eq_hist = None
     xhcop_eq_hist = None
+    xo_eq_hist = None
+    xop_eq_hist = None
+    xohx_eq_hist = None
+    xh2_eq_hist = None
+    xh_eq_hist = None
+    xe_eq_hist = None
+    gow17_y_eq_hist = None
     Tgas_eq_hist = None
     Tgas_front_eq = None
     Tdust_front_eq = None
@@ -988,6 +1082,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xcp_eq_hist = np.full_like(xco_hist, np.nan)
         xchx_eq_hist = np.full_like(xco_hist, np.nan)
         xhcop_eq_hist = np.full_like(xco_hist, np.nan)
+        xo_eq_hist = np.full_like(xco_hist, np.nan)
+        xop_eq_hist = np.full_like(xco_hist, np.nan)
+        xohx_eq_hist = np.full_like(xco_hist, np.nan)
+        xh2_eq_hist = np.full_like(xco_hist, np.nan)
+        xh_eq_hist = np.full_like(xco_hist, np.nan)
+        xe_eq_hist = np.full_like(xco_hist, np.nan)
+        gow17_y_eq_hist = np.full_like(gow17_y_hist, np.nan)
         Tgas_eq_hist = np.full_like(xco_hist, np.nan)
         Tgas_front_eq = np.full_like(t_hist, np.nan)
         Tdust_front_eq = np.full_like(t_hist, np.nan)
@@ -1000,17 +1101,31 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         xcp_store: np.ndarray,
         xchx_store: np.ndarray,
         xhcop_store: np.ndarray,
+        xo_store: np.ndarray,
+        xop_store: np.ndarray,
+        xohx_store: np.ndarray,
+        xh2_store: np.ndarray,
+        xh_store: np.ndarray,
+        xe_store: np.ndarray,
+        gow17_y_store: np.ndarray,
         Tgas_profile_store: np.ndarray,
         Tgas_store: np.ndarray,
         Tdust_store: np.ndarray,
         k: int,
     ) -> None:
         y = np.asarray(rad_local.gow17_y, dtype=float).reshape(ncells, N_Y)
+        gow17_y_store[k, :, :] = y
         xco_store[k, :] = y[:, I_CO]
         xcp_store[k, :] = y[:, I_CP]
         xchx_store[k, :] = y[:, I_CHX]
         xhcop_store[k, :] = y[:, I_HCOP]
         xc_store[k, :] = _neutral_c_abundance(y, cfg.Zg)
+        xo_store[k, :] = _neutral_o_abundance(y, cfg.Zg)
+        xop_store[k, :] = y[:, I_OP]
+        xohx_store[k, :] = y[:, I_OHX]
+        xh2_store[k, :] = y[:, I_H2]
+        xh_store[k, :] = _neutral_h_abundance(y)
+        xe_store[k, :] = _electron_abundance(y)
 
         Tdust_store[k] = float(rad_local.dust_temperature.to("K").magnitude.reshape(-1)[i_front])
         if cfg.evolve_energy and getattr(rad_local, "Tgas_gow17", None) is not None:
@@ -1032,6 +1147,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xcp_store=xcp_hist,
             xchx_store=xchx_hist,
             xhcop_store=xhcop_hist,
+            xo_store=xo_hist,
+            xop_store=xop_hist,
+            xohx_store=xohx_hist,
+            xh2_store=xh2_hist,
+            xh_store=xh_hist,
+            xe_store=xe_hist,
+            gow17_y_store=gow17_y_hist,
             Tgas_profile_store=Tgas_hist,
             Tgas_store=Tgas_front,
             Tdust_store=Tdust_front,
@@ -1046,6 +1168,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xcp_store=xcp_eq_hist,
                 xchx_store=xchx_eq_hist,
                 xhcop_store=xhcop_eq_hist,
+                xo_store=xo_eq_hist,
+                xop_store=xop_eq_hist,
+                xohx_store=xohx_eq_hist,
+                xh2_store=xh2_eq_hist,
+                xh_store=xh_eq_hist,
+                xe_store=xe_eq_hist,
+                gow17_y_store=gow17_y_eq_hist,
                 Tgas_profile_store=Tgas_eq_hist,
                 Tgas_store=Tgas_front_eq,
                 Tdust_store=Tdust_front_eq,
@@ -1198,6 +1327,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
             xcp_hist = xcp_hist[: k + 1, :]
             xchx_hist = xchx_hist[: k + 1, :]
             xhcop_hist = xhcop_hist[: k + 1, :]
+            xo_hist = xo_hist[: k + 1, :]
+            xop_hist = xop_hist[: k + 1, :]
+            xohx_hist = xohx_hist[: k + 1, :]
+            xh2_hist = xh2_hist[: k + 1, :]
+            xh_hist = xh_hist[: k + 1, :]
+            xe_hist = xe_hist[: k + 1, :]
+            gow17_y_hist = gow17_y_hist[: k + 1, :, :]
             Tgas_hist = Tgas_hist[: k + 1, :]
             Tgas_front = Tgas_front[: k + 1]
             Tdust_front = Tdust_front[: k + 1]
@@ -1207,6 +1343,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 xcp_eq_hist = xcp_eq_hist[: k + 1, :]
                 xchx_eq_hist = xchx_eq_hist[: k + 1, :]
                 xhcop_eq_hist = xhcop_eq_hist[: k + 1, :]
+                xo_eq_hist = xo_eq_hist[: k + 1, :]
+                xop_eq_hist = xop_eq_hist[: k + 1, :]
+                xohx_eq_hist = xohx_eq_hist[: k + 1, :]
+                xh2_eq_hist = xh2_eq_hist[: k + 1, :]
+                xh_eq_hist = xh_eq_hist[: k + 1, :]
+                xe_eq_hist = xe_eq_hist[: k + 1, :]
+                gow17_y_eq_hist = gow17_y_eq_hist[: k + 1, :, :]
                 Tgas_eq_hist = Tgas_eq_hist[: k + 1, :]
                 Tgas_front_eq = Tgas_front_eq[: k + 1]
                 Tdust_front_eq = Tdust_front_eq[: k + 1]
@@ -1227,6 +1370,19 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
         "xcp_hist": xcp_hist,
         "xchx_hist": xchx_hist,
         "xhcop_hist": xhcop_hist,
+        "xo_hist": xo_hist,
+        "xop_hist": xop_hist,
+        "xohx_hist": xohx_hist,
+        "xh2_hist": xh2_hist,
+        "xh_hist": xh_hist,
+        "xe_hist": xe_hist,
+        "gow17_state_component_names": np.asarray(
+            GOW17_STATE_COMPONENT_NAMES, dtype="U16"
+        ),
+        "gow17_state_component_indices": np.asarray(
+            GOW17_STATE_COMPONENT_INDICES, dtype=np.int64
+        ),
+        "gow17_y_hist": gow17_y_hist,
         "Tgas_hist": Tgas_hist,
         "Tgas_front": Tgas_front,
         "Tdust_front": Tdust_front,
@@ -1258,6 +1414,13 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
                 "xcp_eq_hist": xcp_eq_hist,
                 "xchx_eq_hist": xchx_eq_hist,
                 "xhcop_eq_hist": xhcop_eq_hist,
+                "xo_eq_hist": xo_eq_hist,
+                "xop_eq_hist": xop_eq_hist,
+                "xohx_eq_hist": xohx_eq_hist,
+                "xh2_eq_hist": xh2_eq_hist,
+                "xh_eq_hist": xh_eq_hist,
+                "xe_eq_hist": xe_eq_hist,
+                "gow17_y_eq_hist": gow17_y_eq_hist,
                 "Tgas_eq_hist": Tgas_eq_hist,
                 "Tgas_front_eq": Tgas_front_eq,
                 "Tdust_front_eq": Tdust_front_eq,

@@ -44,7 +44,15 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
    accepted.
 9. Define implementation steps.
 10. Define fast pytest tests, including simple objective physics invariants when appropriate.
-11. Define validation work separately from tests when checks are slower, broader, data-heavy, or need human interpretation. Validation workflows belong under the repo-level `validation/` directory, not under `tests/` or `tests/validation/`. Do not propose pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue.
+11. Classify evidence work before choosing a directory. Use
+    `validation/<case>/` only when the plan states (a) the scientific claim or
+    code behavior being tested, (b) its reference, benchmark, invariant,
+    controlled comparison, or explicit expected behavior, and (c) what result
+    supports or contradicts it. Runtime, data volume, plots, reports, and human
+    interpretation are not sufficient. Put descriptive measurements,
+    inventories, snapshot atlases, and exploratory plots beside the owning
+    example or project, normally `examples/<workflow>/plots/<analysis>/`.
+    Keep fast objective invariants in pytest.
 12. Define documentation updates.
 13. Define risks and human decisions.
 14. Define completion criteria.
@@ -95,6 +103,8 @@ The plan's capability map review must state:
 - Do not use the plan to document stable user-facing behavior. Use `docs/` for that.
 - Do not hide subjective physics validation inside pytest.
 - Do not move simple objective physics invariants out of pytest only because they are physics-based.
+- Do not place descriptive or exploratory analysis in `validation/` without a
+  tested claim, an evidentiary expectation, and a stated interpretation rule.
 - Do not create `tests/validation/`. Use `validation/<case>/` for validation
   workflows. Do not add pytest files for validation-specific helpers.
 - If a plan replaces another plan, mark the old plan as superseded and move it to `projects/superseded/`.

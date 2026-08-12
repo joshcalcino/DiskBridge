@@ -1,20 +1,46 @@
 ---
 name: diskbridge-validation
-description: Design, create, run, or review larger DiskBridge physics validation workflows. Use for full pipelines, code comparisons, scientific diagnostics, plots, validation reports, or human-interpreted checks. Do not use for fast pytest tests.
+description: Design, create, run, or review larger DiskBridge physics validations that test a stated scientific or code-behavior claim against an explicit expectation, reference, benchmark, invariant, or controlled comparison. Do not use for descriptive analyses, routine plots of existing outputs, inventories, atlases, exploratory measurements without an expected result, or fast pytest tests.
 ---
 
 # DiskBridge Validation Skill
 
-Use this skill when the user asks to validate physics with a larger workflow, compare against another code, reproduce a paper result, run a full pipeline, generate diagnostic plots, or decide whether new physics behaves plausibly.
+Use this skill when the user asks to validate physics with a larger workflow,
+compare against another code, reproduce a paper result, test an end-to-end
+pipeline expectation, generate diagnostic plots as evidence for a stated
+validation question, or decide whether new physics behaves plausibly against
+an explicit expectation.
 
 DiskBridge is single-user development code. Validation workflows use the
 canonical current API, config, and output format. Update a maintained workflow
 in place and remove superseded modes; do not add migration or compatibility
 paths unless the user explicitly requests them.
 
+## Validation Gate
+
+Classify work by the question it answers, not by runtime, dataset size, plot
+count, report generation, or need for human interpretation. Before creating or
+using `validation/<case>/`, state all three of the following:
+
+1. The scientific claim or code behavior being tested.
+2. The reference, benchmark, invariant, controlled comparison, or explicit
+   expected behavior that supplies evidence.
+3. What result would support or contradict the claim.
+
+If any item is missing, do not call the work a validation and do not place it
+under `validation/`.
+
+Descriptive measurements of existing runs—including distributions,
+inventories, snapshot atlases, and exploratory plots—belong beside the owning
+example or project, such as `examples/<workflow>/plots/<analysis>/`. A plot may
+be evidence within a validation, but producing a scientific plot does not make
+the workflow a validation.
+
 ## Definition Of A Validation
 
-A DiskBridge validation is a physics-oriented workflow that is too slow, broad, data-heavy, interpretive, or workflow-oriented to run on every ordinary code change. It may be multi-step, subjective, or require human interpretation.
+A DiskBridge validation is a broader physics or workflow check that passes the
+validation gate and is too slow, data-heavy, multi-step, or interpretive for
+ordinary pytest coverage.
 
 It should answer questions like:
 
@@ -28,7 +54,11 @@ It should answer questions like:
 
 Tests go in `tests/` and use pytest for production code behavior and small objective physics invariants. Do not add pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue. Do not create `tests/validation/`; that name is reserved for the repo-level `validation/` workflow tree.
 
-Validations go in the repository-level `validation/` directory and must not use pytest as their main driver. Use validations for slower pipelines, comparisons to papers or other codes, generated diagnostic plots, archived outputs, and human-interpreted scientific judgment.
+Validations go in the repository-level `validation/` directory and must not use
+pytest as their main driver. Comparisons to papers or other codes, controlled
+physics comparisons, and end-to-end expectation checks are typical examples.
+Slow pipelines, archived outputs, diagnostic plots, and human judgment are not
+sufficient unless the validation gate is also satisfied.
 
 Validations should produce human-readable outputs such as plots, tables, JSON summaries, markdown reports, saved comparison arrays, or logs with exact commands and config choices.
 
@@ -80,7 +110,8 @@ Existing validations may use established `out/` directories, but new validations
 - Do not move a simple objective physics invariant out of pytest only because it is physics-based.
 - Include plots.
 - Save enough metadata to reproduce the run.
-- Clearly state whether the validation is quantitative, qualitative, or exploratory.
+- Clearly state whether the evidence and acceptance interpretation are
+  quantitative or qualitative.
 - Do not overwrite previous validation outputs unless the script has an explicit `--overwrite` option.
 - If the validation depends on unavailable external data, provide a small synthetic fallback only if it still answers the scientific question.
 - Prefer a single readable validation entry point that runs with no required
