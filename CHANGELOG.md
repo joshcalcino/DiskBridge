@@ -34,6 +34,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   (`stop` or `vacuum_cavity`) and truncated-theta (`vacuum` or
   `boundary_cell_to_rmax`) policies in `HealpixSEConfig`. Ray-step exhaustion
   returns the truncated result with one aggregated warning.
+- External HEALPix non-LTE solves can restrict the iterative solve with an
+  optional emitting-species abundance floor relative to hydrogen nuclei.
+  Positive-density cells outside the active mask retain local LTE populations
+  in final and optional checkpoint level-population files, while manifests and
+  checkpoint fingerprints record the selection inputs and cell counts.
 - Stable HEALPix shielding validation report under
   `docs/testing/spherical_healpix_shielding.md`, covering the exact Cartesian
   reduction, boundary-screen test, absorption and scattering RADMC-3D
@@ -53,6 +58,14 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Bondi All-Stars line-only Slurm jobs now request 48 GB of memory, retaining
+  substantial headroom over the approximately 18 GB observed peak instead of
+  reserving 240 GB.
+- Bondi All-Stars line imaging can now explicitly render physical GOW17 HCO+
+  J=4-3 LTE cubes for both dust and gas temperature choices, with a directly
+  viewable channel-map PNG written beside every selected-species FITS cube.
+- Bondi All-Stars line imaging also supports the 492.160651 GHz `[C I]`
+  3P1--3P0 ALMA Band 8 line from the physical GOW17 atomic-carbon abundance.
 - Segmented UV transport can optionally recover a failed low-budget scout with
   one independently seeded final-budget monochromatic run. The runner combines
   all scout and retry packets with count weights, recomputes unequal-budget

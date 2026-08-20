@@ -26,6 +26,11 @@ from diskbridge.radmc3d.line_transfer import (
     validate_external_population_run,
     solve_and_write_healpix_levelpop,
 )
+from diskbridge.radmc3d.line_transfer.molecular_rates import (
+    lte_populations,
+    parse_lamda_molecule_file,
+)
+from diskbridge.radmc3d.writer import RadWriter
 
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -200,6 +205,171 @@ def test_solve_and_write_healpix_levelpop_smoke(
                 spherical_theta_boundary="vacuum",
             ),
         )
+
+
+@pytest.mark.parametrize("floor", [-1.0, np.nan, np.inf])
+def test_healpix_se_config_rejects_invalid_abundance_floor(floor: float):
+    with pytest.raises(ValueError, match="species_abundance_floor"):
+        HealpixSEConfig(species_abundance_floor=floor)
+
+
+def test_abundance_floor_requires_species_abundance(tmp_path: Path):
+    rad, shape = _make_cartesian_rad(tmp_path, n=2)
+    chem = _make_chemistry_result(shape, n_co=10.0)
+
+    with pytest.raises(KeyError, match=r"abundances\['co'\]"):
+        solve_and_write_healpix_levelpop(
+            rad=rad,
+            chemistry_result=chem,
+            species="co",
+            output_dir=tmp_path / "missing_abundance",
+            config=HealpixSEConfig(species_abundance_floor=1.0e-8),
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_kind", "message"),
+    [
+        ("shape", "abundance shape"),
+        ("nonfinite", "non-finite"),
+        ("negative", "negative"),
+    ],
+)
+def test_abundance_floor_rejects_invalid_species_abundance(
+    tmp_path: Path,
+    invalid_kind: str,
+    message: str,
+):
+    rad, shape = _make_cartesian_rad(tmp_path, n=2)
+    chem = _make_chemistry_result(shape, n_co=10.0)
+    if invalid_kind == "shape":
+        abundance = np.full((1, 1, 1), 1.0e-6)
+    else:
+        abundance = np.full(shape, 1.0e-6)
+        abundance.flat[0] = np.nan if invalid_kind == "nonfinite" else -1.0
+    chem.abundances = {"co": Quantity(abundance, "dimensionless")}
+
+    with pytest.raises(ValueError, match=message):
+        solve_and_write_healpix_levelpop(
+            rad=rad,
+            chemistry_result=chem,
+            species="co",
+            output_dir=tmp_path / invalid_kind,
+            config=HealpixSEConfig(species_abundance_floor=1.0e-8),
+        )
+
+
+def test_abundance_floor_uses_lte_for_excluded_positive_cells(tmp_path: Path):
+    """Excluded emitters retain normalized LTE populations and line opacity."""
+
+    rad, shape = _make_cartesian_rad(tmp_path, n=2)
+    n_co = 10.0
+    chem = _make_chemistry_result(shape, n_co=n_co)
+    abundance = np.full(shape, 1.0e-10)
+    chem.abundances = {"co": Quantity(abundance, "dimensionless")}
+
+    output_dir = tmp_path / "abundance_floor"
+    path = solve_and_write_healpix_levelpop(
+        rad=rad,
+        chemistry_result=chem,
+        species="co",
+        output_dir=output_dir,
+        config=HealpixSEConfig(species_abundance_floor=1.0e-8),
+    )
+
+    molecule = parse_lamda_molecule_file(_CO_LAMDA)
+    expected = n_co * lte_populations(molecule, np.array([30.0]))[0]
+    tokens = path.read_text().split()
+    n_cells = int(tokens[1])
+    n_levels = int(tokens[2])
+    populations = np.asarray(
+        tokens[3 + n_levels : 3 + n_levels + n_cells * n_levels],
+        dtype=float,
+    ).reshape(n_cells, n_levels)
+    np.testing.assert_allclose(
+        populations,
+        np.broadcast_to(expected, populations.shape),
+        rtol=1.0e-12,
+    )
+    np.testing.assert_allclose(populations.sum(axis=1), n_co, rtol=1.0e-12)
+    assert np.all(populations[:, 1:] > 0.0)
+
+    manifest = json.loads(
+        (output_dir / "external_levelpop_manifest_co.json").read_text()
+    )
+    assert manifest["species_abundance_floor"] == pytest.approx(1.0e-8)
+    assert manifest["species_abundance_range_per_h_nucleus"] == pytest.approx(
+        [1.0e-10, 1.0e-10]
+    )
+    assert manifest["cell_counts"] == {
+        "lte_fallback_species_cells": int(np.prod(shape)),
+        "solved_nonzero_species_cells": 0,
+        "species_below_abundance_floor_cells": int(np.prod(shape)),
+        "species_below_density_floor_cells": 0,
+        "species_candidate_cells": 0,
+        "species_zero_cells": 0,
+        "total_grid_cells": int(np.prod(shape)),
+        "zero_or_below_floor_species_cells": int(np.prod(shape)),
+    }
+
+
+def test_abundance_floor_selects_only_abundant_cells(tmp_path: Path):
+    """The abundance mask limits SE cells and is checkpoint-fingerprinted."""
+
+    rad, shape = _make_cartesian_rad(tmp_path, n=2)
+    n_co = 10.0
+    chem = _make_chemistry_result(shape, n_co=n_co)
+    abundance = np.full(shape, 1.0e-6)
+    abundance[0, :, :] = 1.0e-10
+    chem.abundances = {"co": Quantity(abundance, "dimensionless")}
+
+    output_dir = tmp_path / "partial_abundance_floor"
+    path = solve_and_write_healpix_levelpop(
+        rad=rad,
+        chemistry_result=chem,
+        species="co",
+        output_dir=output_dir,
+        config=HealpixSEConfig(
+            nside=1,
+            maxiter=20,
+            convcrit=1.0e-3,
+            max_ray_steps=200,
+            species_abundance_floor=1.0e-8,
+        ),
+    )
+
+    manifest = json.loads(
+        (output_dir / "external_levelpop_manifest_co.json").read_text()
+    )
+    assert manifest["cell_counts"]["species_candidate_cells"] == 4
+    assert manifest["cell_counts"]["lte_fallback_species_cells"] == 4
+    checkpoint = json.loads(
+        (output_dir / "checkpoints" / "checkpoint_latest_co.json").read_text()
+    )
+    assert checkpoint["fingerprint"]["version"] == 3
+    assert checkpoint["fingerprint"]["species_abundance_floor"] == pytest.approx(
+        1.0e-8
+    )
+    assert checkpoint["fingerprint"]["species_abundance_sha256"] is not None
+
+    molecule = parse_lamda_molecule_file(_CO_LAMDA)
+    expected_lte = n_co * lte_populations(molecule, np.array([30.0]))[0]
+    tokens = path.read_text().split()
+    n_cells = int(tokens[1])
+    n_levels = int(tokens[2])
+    populations = np.asarray(
+        tokens[3 + n_levels : 3 + n_levels + n_cells * n_levels],
+        dtype=float,
+    ).reshape(n_cells, n_levels)
+    excluded = RadWriter.flatten_scalar_to_radmc_order(
+        rad.model.mesh,
+        abundance < 1.0e-8,
+    ).astype(bool)
+    np.testing.assert_allclose(
+        populations[excluded],
+        np.broadcast_to(expected_lte, populations[excluded].shape),
+        rtol=1.0e-12,
+    )
 
 
 def test_collision_temperature_endpoint_holding_is_audited(tmp_path: Path):

@@ -29,6 +29,7 @@ import time
 import numpy as np
 from numba import njit, prange
 
+from diskbridge._constants import K_B
 from diskbridge._logging import logger
 from diskbridge._units import units
 from diskbridge.model.mesh import Axis, Mesh
@@ -79,6 +80,11 @@ class HealpixSEConfig:
         Spherical-grid treatment outside a truncated theta range. ``"vacuum"``
         ends the ray at the theta edge; ``"boundary_cell_to_rmax"`` extends
         the boundary-cell fields through the uncovered angle to ``rmax``.
+    species_abundance_floor : float, optional
+        Minimum emitting-species abundance relative to hydrogen nuclei for the
+        iterative non-LTE solve. Positive-density cells below the floor retain
+        local gas-temperature LTE populations in the written all-cell output.
+        The default of zero disables abundance selection.
     Collision coefficients are held at the nearest tabulated temperature
     boundary outside each collider table's range. The physical gas temperature
     used for LTE populations, detailed balance, and Doppler broadening is not
@@ -95,6 +101,7 @@ class HealpixSEConfig:
     escape_chunk_size: int = 50_000
     allow_unconverged: bool = False
     species_density_floor_cm3: float = 0.0
+    species_abundance_floor: float = 0.0
     overwrite: bool = True
     checkpoint_interval: int = 1
     checkpoint_levelpop: bool = False
@@ -111,6 +118,12 @@ class HealpixSEConfig:
             self.spherical_inner_boundary,
             self.spherical_theta_boundary,
         )
+        abundance_floor = float(self.species_abundance_floor)
+        if not np.isfinite(abundance_floor) or abundance_floor < 0.0:
+            raise ValueError(
+                "species_abundance_floor must be a non-negative finite value, "
+                f"got {abundance_floor}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +156,18 @@ def _species_density_cm3(result, species: str) -> np.ndarray:
             f"chemistry_result.number_densities[{species!r}] is required"
         )
     return _field_to_f64(result.number_densities[species], unit="cm^-3")
+
+
+def _species_abundance_per_h_nucleus(result, species: str) -> np.ndarray:
+    """Return an emitting-species abundance relative to hydrogen nuclei."""
+
+    abundances = getattr(result, "abundances", {})
+    if species not in abundances:
+        raise KeyError(
+            f"chemistry_result.abundances[{species!r}] is required when "
+            "species_abundance_floor is positive"
+        )
+    return _field_to_f64(abundances[species], unit="dimensionless")
 
 
 def _collider_density_cm3(result, name: str, opr: float | None = None) -> np.ndarray:
@@ -309,13 +334,14 @@ def _checkpoint_fingerprint(
     gas_velocity_sha256: str,
     transfer_mesh,
     n_species: np.ndarray,
+    species_abundance: np.ndarray | None,
     Tgas: np.ndarray,
     a_turb: np.ndarray,
     cell_idx: np.ndarray,
     collider_dens_cand: np.ndarray,
 ) -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "species": species,
         "solver": "healpix_escape_probability_statistical_equilibrium",
         "nside": int(config.nside),
@@ -326,6 +352,7 @@ def _checkpoint_fingerprint(
         "spherical_theta_boundary": config.spherical_theta_boundary,
         "collision_temperature_policy": "nearest_table_boundary",
         "species_density_floor_cm3": float(config.species_density_floor_cm3),
+        "species_abundance_floor": float(config.species_abundance_floor),
         "molecule_sha256": molecule_sha256,
         "gas_velocity_sha256": gas_velocity_sha256,
         "n_levels": int(molecule.nlev),
@@ -334,6 +361,11 @@ def _checkpoint_fingerprint(
         "mesh_shape": [int(x) for x in n_species.shape],
         "mesh_edge_hashes": _mesh_edge_hashes(transfer_mesh),
         "species_density_sha256": sha256_array(n_species),
+        "species_abundance_sha256": (
+            None
+            if species_abundance is None
+            else sha256_array(species_abundance)
+        ),
         "temperature_sha256": sha256_array(Tgas),
         "microturbulence_sha256": sha256_array(a_turb),
         "candidate_idx_sha256": sha256_array(cell_idx),
@@ -349,20 +381,26 @@ def _flat_levelpop_radmc_order(
     n_species_cand: np.ndarray,
     cell_idx: np.ndarray,
     n_species: np.ndarray,
+    Tgas: np.ndarray,
 ) -> np.ndarray:
+    """Return all-cell level populations with LTE outside the solve mask."""
+
+    if Tgas.shape != n_species.shape:
+        raise ValueError(
+            f"Tgas shape {Tgas.shape} does not match species-density shape "
+            f"{n_species.shape}"
+        )
     n0, n1, n2 = n_species.shape
     levelpop_full = _scatter_levelpop_to_full(
         fracpop_cand, n_species_cand, cell_idx, molecule.nlev, n0, n1, n2,
     )
-    level_sums = levelpop_full.sum(axis=-1)
-    positive = n_species > 0.0
-    populated = level_sums > 0.0
-    scale = positive & populated
-    if np.any(scale):
-        levelpop_full[scale, :] *= (n_species[scale] / level_sums[scale])[:, None]
-    empty_positive = positive & ~populated
-    if np.any(empty_positive):
-        levelpop_full[empty_positive, 0] = n_species[empty_positive]
+    _normalize_and_fill_levelpop_lte(
+        levelpop_full,
+        n_species,
+        Tgas,
+        molecule.energy_erg,
+        molecule.weight,
+    )
     flat_per_level = np.stack(
         [RadWriter.flatten_scalar_to_radmc_order(mesh, levelpop_full[..., k])
          for k in range(molecule.nlev)],
@@ -399,6 +437,7 @@ def _write_iteration_checkpoint(
     n_species_cand: np.ndarray,
     cell_idx: np.ndarray,
     n_species: np.ndarray,
+    Tgas: np.ndarray,
 ) -> None:
     paths = _checkpoint_paths(output_dir, species, iteration)
     paths["root"].mkdir(parents=True, exist_ok=True)
@@ -425,6 +464,7 @@ def _write_iteration_checkpoint(
             n_species_cand=n_species_cand,
             cell_idx=cell_idx,
             n_species=n_species,
+            Tgas=Tgas,
         )
         levelpop_tmp = paths["levelpop"].with_name(paths["levelpop"].name + ".tmp")
         RadWriter.write_levelpop_dat(
@@ -797,6 +837,52 @@ def _scatter_levelpop_to_full(
     return out
 
 
+@njit(parallel=True, cache=True)
+def _normalize_and_fill_levelpop_lte(
+    levelpop_full: np.ndarray,
+    n_species: np.ndarray,
+    Tgas: np.ndarray,
+    energy_erg: np.ndarray,
+    weight: np.ndarray,
+) -> None:
+    """Normalize solved cells and fill unsolved positive cells with LTE."""
+
+    nlev = levelpop_full.shape[-1]
+    populations = levelpop_full.reshape((-1, nlev))
+    density = n_species.reshape(-1)
+    temperature = Tgas.reshape(-1)
+    for cell in prange(density.size):
+        n_sp = density[cell]
+        if n_sp <= 0.0:
+            continue
+        population_sum = 0.0
+        for level in range(nlev):
+            population_sum += populations[cell, level]
+        if population_sum > 0.0:
+            scale = n_sp / population_sum
+            for level in range(nlev):
+                populations[cell, level] *= scale
+            continue
+        if temperature[cell] <= 0.0:
+            populations[cell, 0] = n_sp
+            continue
+        partition = 0.0
+        kT = K_B * temperature[cell]
+        energy_zero = energy_erg[0]
+        for level in range(nlev):
+            value = weight[level] * np.exp(
+                -(energy_erg[level] - energy_zero) / kT
+            )
+            populations[cell, level] = value
+            partition += value
+        if partition > 0.0:
+            scale = n_sp / partition
+            for level in range(nlev):
+                populations[cell, level] *= scale
+        else:
+            populations[cell, 0] = n_sp
+
+
 # ---------------------------------------------------------------------------
 # Public API: solve and write
 # ---------------------------------------------------------------------------
@@ -816,7 +902,9 @@ def solve_and_write_healpix_levelpop(
     ----------
     rad : RadModel
     chemistry_result : ChemistryResult
-        Provides ``number_densities`` for the species and its colliders.
+        Provides ``number_densities`` for the species and its colliders. When
+        ``config.species_abundance_floor`` is positive, it must also provide
+        the dimensionless abundance in ``abundances[species]``.
     species : str
         Lowercased species name (``"co"``, ``"catom"``, or ``"hco+"``).
     output_dir : path
@@ -904,14 +992,34 @@ def solve_and_write_healpix_levelpop(
     if np.any(n_species < 0.0):
         raise ValueError(f"number density for {species} contains negative values")
     density_floor = float(config.species_density_floor_cm3)
-    if density_floor < 0.0:
+    if not np.isfinite(density_floor) or density_floor < 0.0:
         raise ValueError(
-            f"species_density_floor_cm3 must be non-negative, got {density_floor}"
+            "species_density_floor_cm3 must be a non-negative finite value, "
+            f"got {density_floor}"
         )
-    # By default this skips only exact zero-species cells. If a chemistry model
-    # deliberately uses a numerical abundance floor everywhere, callers can set
-    # an explicit floor and the manifest records that choice.
+    abundance_floor = float(config.species_abundance_floor)
+    species_abundance: np.ndarray | None = None
+    if abundance_floor > 0.0:
+        species_abundance = _species_abundance_per_h_nucleus(
+            chemistry_result,
+            species,
+        )
+        if species_abundance.shape != n_species.shape:
+            raise ValueError(
+                f"abundance shape {species_abundance.shape} for {species} does "
+                f"not match species-density shape {n_species.shape}"
+            )
+        if not np.all(np.isfinite(species_abundance)):
+            raise ValueError(f"abundance for {species} contains non-finite values")
+        if np.any(species_abundance < 0.0):
+            raise ValueError(f"abundance for {species} contains negative values")
+
+    # The default skips only exact zero-species cells. Configured floors limit
+    # the expensive non-LTE iteration; excluded positive-density cells are
+    # filled with local LTE populations when the all-cell file is written.
     cell_mask = n_species > density_floor
+    if species_abundance is not None:
+        cell_mask &= species_abundance >= abundance_floor
 
     collision_temperature_diagnostics = _collision_temperature_diagnostics(
         molecule,
@@ -936,29 +1044,58 @@ def solve_and_write_healpix_levelpop(
     )
     n_cell = cell_idx.shape[0]
     n_total_cells = int(np.prod(n_species.shape))
-    n_zero_species_cells = n_total_cells - n_cell
+    positive_species = n_species > 0.0
+    n_zero_species_cells = int(np.count_nonzero(~positive_species))
+    n_below_density_floor_cells = int(
+        np.count_nonzero(positive_species & (n_species <= density_floor))
+    )
+    if species_abundance is None:
+        n_below_abundance_floor_cells = 0
+    else:
+        n_below_abundance_floor_cells = int(
+            np.count_nonzero(
+                (n_species > density_floor)
+                & (species_abundance < abundance_floor)
+            )
+        )
+    n_lte_fallback_cells = int(np.count_nonzero(positive_species & ~cell_mask))
+    n_excluded_cells = n_total_cells - n_cell
     logger.info(
         f"HEALPix SE for {species}: nside={config.nside}, n_cells={n_cell}, "
-        f"zero_species_cells={n_zero_species_cells}, nlev={molecule.nlev}, nlin={molecule.nlin}, "
+        f"zero_species_cells={n_zero_species_cells}, "
+        f"lte_fallback_cells={n_lte_fallback_cells}, "
+        f"nlev={molecule.nlev}, nlin={molecule.nlin}, "
         f"colliders={list(molecule.collider_names)}"
     )
     cell_counts = {
         "total_grid_cells": n_total_cells,
         "species_candidate_cells": int(n_cell),
         "species_zero_cells": int(n_zero_species_cells),
+        "species_below_density_floor_cells": n_below_density_floor_cells,
+        "species_below_abundance_floor_cells": n_below_abundance_floor_cells,
+        "lte_fallback_species_cells": n_lte_fallback_cells,
         "solved_nonzero_species_cells": int(n_cell),
-        "zero_or_below_floor_species_cells": int(n_zero_species_cells),
+        "zero_or_below_floor_species_cells": int(n_excluded_cells),
     }
     if n_cell == 0:
         logger.warning(
-            "No cells have nonzero %s density; writing all-zero level populations",
+            "No cells meet the %s non-LTE selection floors; writing LTE "
+            "populations in positive-density cells",
             species,
         )
-        _write_levelpop_all_zero(
+        flat_per_level = _flat_levelpop_radmc_order(
             mesh=mesh,
             molecule=molecule,
-            n_cells_shape=n_species.shape,
-            path=levelpop_tmp,
+            fracpop_cand=np.empty((0, molecule.nlev), dtype=np.float64),
+            n_species_cand=np.empty(0, dtype=np.float64),
+            cell_idx=cell_idx,
+            n_species=n_species,
+            Tgas=Tgas,
+        )
+        RadWriter.write_levelpop_dat(
+            levelpop_tmp,
+            levelpop_cm3_radmc_order=flat_per_level,
+            level_numbers_1based=np.arange(1, molecule.nlev + 1, dtype=np.int64),
         )
         levelpop_tmp.replace(levelpop_path)
         _write_manifest(
@@ -974,6 +1111,14 @@ def solve_and_write_healpix_levelpop(
             tgas_range=(float(np.min(Tgas)), float(np.max(Tgas))),
             aturb_range=(float(np.min(a_turb)), float(np.max(a_turb))),
             nsp_range=(float(np.min(n_species)), float(np.max(n_species))),
+            abundance_range=(
+                None
+                if species_abundance is None
+                else (
+                    float(np.min(species_abundance)),
+                    float(np.max(species_abundance)),
+                )
+            ),
             velocity_range=velocity_range,
             gas_velocity_sha256=gas_velocity_sha256,
             beta_range=(1.0, 1.0),
@@ -1022,6 +1167,7 @@ def solve_and_write_healpix_levelpop(
         gas_velocity_sha256=gas_velocity_sha256,
         transfer_mesh=transfer_mesh,
         n_species=n_species,
+        species_abundance=species_abundance,
         Tgas=Tgas,
         a_turb=a_turb,
         cell_idx=cell_idx,
@@ -1205,6 +1351,7 @@ def solve_and_write_healpix_levelpop(
                 n_species_cand=n_species_cand,
                 cell_idx=cell_idx,
                 n_species=n_species,
+                Tgas=Tgas,
             )
         if converged:
             break
@@ -1259,6 +1406,7 @@ def solve_and_write_healpix_levelpop(
         n_species_cand=n_species_cand,
         cell_idx=cell_idx,
         n_species=n_species,
+        Tgas=Tgas,
     )
     n_total = flat_per_level.shape[0]
 
@@ -1282,6 +1430,14 @@ def solve_and_write_healpix_levelpop(
         tgas_range=(float(np.min(Tgas)), float(np.max(Tgas))),
         aturb_range=(float(np.min(a_turb)), float(np.max(a_turb))),
         nsp_range=(float(np.min(n_species)), float(np.max(n_species))),
+        abundance_range=(
+            None
+            if species_abundance is None
+            else (
+                float(np.min(species_abundance)),
+                float(np.max(species_abundance)),
+            )
+        ),
         velocity_range=velocity_range,
         gas_velocity_sha256=gas_velocity_sha256,
         beta_range=final_beta_range,
@@ -1300,17 +1456,6 @@ def solve_and_write_healpix_levelpop(
     return levelpop_path
 
 
-def _write_levelpop_all_zero(*, mesh, molecule, n_cells_shape, path) -> None:
-    """Write a levelpop file with all-zero populations."""
-    n_total = int(np.prod(n_cells_shape))
-    pop = np.zeros((n_total, molecule.nlev), dtype=np.float64)
-    RadWriter.write_levelpop_dat(
-        path,
-        levelpop_cm3_radmc_order=pop,
-        level_numbers_1based=np.arange(1, molecule.nlev + 1, dtype=np.int64),
-    )
-
-
 def _write_manifest(
     *,
     manifest_path: Path,
@@ -1325,6 +1470,7 @@ def _write_manifest(
     tgas_range: tuple[float, float],
     aturb_range: tuple[float, float],
     nsp_range: tuple[float, float],
+    abundance_range: tuple[float, float] | None,
     velocity_range: dict[str, list[float]],
     gas_velocity_sha256: str,
     beta_range: tuple[float, float],
@@ -1350,6 +1496,7 @@ def _write_manifest(
         "collision_temperature_policy": "nearest_table_boundary",
         "allow_unconverged": bool(config.allow_unconverged),
         "species_density_floor_cm3": float(config.species_density_floor_cm3),
+        "species_abundance_floor": float(config.species_abundance_floor),
         "overwrite": bool(config.overwrite),
         "checkpoint_interval": int(config.checkpoint_interval),
         "checkpoint_levelpop": bool(config.checkpoint_levelpop),
@@ -1378,6 +1525,11 @@ def _write_manifest(
         "temperature_range_K": [float(tgas_range[0]), float(tgas_range[1])],
         "microturbulence_range_cm_s": [float(aturb_range[0]), float(aturb_range[1])],
         "species_density_range_cm3": [float(nsp_range[0]), float(nsp_range[1])],
+        "species_abundance_range_per_h_nucleus": (
+            None
+            if abundance_range is None
+            else [float(abundance_range[0]), float(abundance_range[1])]
+        ),
         "velocity_range_cm_s": velocity_range,
         "beta_range": [float(beta_range[0]), float(beta_range[1])],
         "levelpop_file": str(levelpop_path),
