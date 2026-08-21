@@ -64,3 +64,6 @@ validation/segmented_uv/validation.log
 
 # Local dependency builds and caches
 dependencies/
+
+# Local project planning notes
+/projects/
