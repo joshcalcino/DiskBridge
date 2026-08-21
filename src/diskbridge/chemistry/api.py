@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 from pathlib import Path
 import hashlib
 import json
@@ -155,8 +155,10 @@ def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
 def load_chemistry_outputs(
     rad: 'RadModel',
     output_dir: Path,
+    *,
+    species: Sequence[str] | None = None,
 ) -> ChemistryResult:
-    """Load saved chemistry products from RADMC-3D input files.
+    """Load saved chemistry products and reconstruct their abundances.
 
     Parameters
     ----------
@@ -165,39 +167,75 @@ def load_chemistry_outputs(
     output_dir : pathlib.Path
         Directory containing saved chemistry outputs. Files may live directly
         in this directory or under its ``radmc3d_inputs`` subdirectory.
+    species : sequence of str, optional
+        Exact species names to load. By default, load every saved
+        ``numberdens_*.binp`` field.
 
     Returns
     -------
     ChemistryResult
-        Chemistry result reconstructed from saved number-density files and
-        optional gas-temperature output.
+        Chemistry result reconstructed from saved number-density files and the
+        active model's hydrogen-nuclei density. Each loaded abundance is
+        dimensionless and relative to hydrogen nuclei.
 
     Raises
     ------
     FileNotFoundError
-        If no ``numberdens_*.binp`` files exist in the output directory.
+        If no saved number-density files exist, or if an explicitly requested
+        species file is missing.
+    ValueError
+        If ``species`` is empty or the model hydrogen-nuclei density is invalid.
     """
     output_dir = Path(output_dir)
     inputs_dir = output_dir / "radmc3d_inputs"
     data_dir = inputs_dir if inputs_dir.exists() else output_dir
 
-    number_densities = {}
-    for path in sorted(data_dir.glob("numberdens_*.binp")):
-        species = path.stem.removeprefix("numberdens_")
-        number_densities[species] = rad.data.readGasDens(fname=path, ispec=species)
+    if species is None:
+        species_paths = [
+            (path.stem.removeprefix("numberdens_"), path)
+            for path in sorted(data_dir.glob("numberdens_*.binp"))
+        ]
+    else:
+        names = list(dict.fromkeys(str(name).lower().strip() for name in species))
+        if not names or any(not name for name in names):
+            raise ValueError("species must contain at least one non-empty name")
+        species_paths = [(name, data_dir / f"numberdens_{name}.binp") for name in names]
+        missing = [str(path) for _, path in species_paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError(
+                "Missing requested chemistry number-density files: " + ", ".join(missing)
+            )
+
+    number_densities = {
+        name: rad.data.readGasDens(fname=path, ispec=name)
+        for name, path in species_paths
+    }
 
     if not number_densities:
         raise FileNotFoundError(f"No numberdens_*.binp files found in {data_dir}")
 
+    nH = rad.ensure_nH().to("cm^-3")
+    nH_values = np.asarray(nH.magnitude, dtype=np.float64)
+    if not np.all(np.isfinite(nH_values)) or np.any(nH_values <= 0.0):
+        raise ValueError(
+            "Saved chemistry abundances require a finite, positive hydrogen-"
+            "nuclei density in every model cell"
+        )
+    abundances = {
+        name: (number_density.to("cm^-3") / nH).to("dimensionless")
+        for name, number_density in number_densities.items()
+    }
+
     gas_temp_path = data_dir / "gas_temperature.binp"
     if gas_temp_path.exists():
-        rad.gas_temperature = rad.data.readGasTemp(fname=gas_temp_path)
+        rad.read_gas_temperature(gas_temp_path)
 
     meta = {
         "source": "saved_outputs",
         "output_dir": str(output_dir),
         "data_dir": str(data_dir),
         "loaded_species": sorted(number_densities),
+        "abundance_reference": "hydrogen_nuclei",
     }
     for meta_path in (
         output_dir / "chemistry_meta.json",
@@ -211,6 +249,7 @@ def load_chemistry_outputs(
             break
 
     return ChemistryResult(
+        abundances=abundances,
         number_densities=number_densities,
         meta=meta,
     )

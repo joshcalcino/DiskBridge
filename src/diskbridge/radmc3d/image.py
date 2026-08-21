@@ -1129,8 +1129,8 @@ class RadImage:
         if self.nfreq > 1:
             hdu.header['CTYPE3'] = 'VELO-LSR'
             hdu.header['CRPIX3'] = 1
-            hdu.header['CRVAL3'] = -self.widthkms / 2.0 if hasattr(self, 'widthkms') else 0.0
-            hdu.header['CDELT3'] = self.widthkms / self.nfreq if hasattr(self, 'widthkms') else 0.5
+            hdu.header['CRVAL3'] = -self.widthkms if hasattr(self, 'widthkms') else 0.0
+            hdu.header['CDELT3'] = 2.0 * self.widthkms / (self.nfreq - 1) if hasattr(self, 'widthkms') else 0.5
             hdu.header['CUNIT3'] = 'km/s'
             if nu0 > 0:
                 hdu.header['RESTFRQ'] = nu0

@@ -58,6 +58,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Saved chemistry loading can select an exact set of binary number-density
+  fields and now reconstructs their abundances relative to the active model's
+  hydrogen-nuclei density. Bondi All-Stars reuses that canonical loader and its
+  existing line-imaging command for restartable external non-LTE CO 3-2,
+  HCO+ 4-3, and [C I] 1-0 production runs, with one species per explicitly
+  selected run directory and allocation-checked Slurm resources.
 - Bondi All-Stars line-only Slurm jobs now request 48 GB of memory, retaining
   substantial headroom over the approximately 18 GB observed peak instead of
   reserving 240 GB.

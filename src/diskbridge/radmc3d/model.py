@@ -604,15 +604,21 @@ class RadModel:
         except Exception as e:
             raise RuntimeError(f"Failed to update {radmc_inp_path}: {e}")
     
-    def read_gas_temperature(self) -> Quantity:
-        """Read gas_temperature file using radmc3dData.
+    def read_gas_temperature(self, fname: Optional[str | Path] = None) -> Quantity:
+        """Read and attach a saved RADMC-3D gas-temperature field.
+
+        Parameters
+        ----------
+        fname : str or pathlib.Path, optional
+            Explicit ``gas_temperature`` input path. The reader searches the
+            model directory when omitted.
         
         Returns
         -------
         Quantity
             Temperature field in Kelvin with shape matching model mesh
         """
-        self.gas_temperature = self.data.readGasTemp()
+        self.gas_temperature = self.data.readGasTemp(fname=fname)
 
         axis_order = self.model.mesh.axis_names()
         self.model.gas_register(
@@ -625,6 +631,32 @@ class RadModel:
         )
         
         return self.gas_temperature
+
+    def read_microturbulence(self, fname: Optional[str | Path] = None) -> Quantity:
+        """Read and attach a saved RADMC-3D microturbulence field.
+
+        Parameters
+        ----------
+        fname : str or pathlib.Path, optional
+            Explicit ``microturbulence`` input path. The reader searches the
+            model directory when omitted.
+
+        Returns
+        -------
+        Quantity
+            Turbulent Doppler velocity [cm s^-1], with the active mesh shape.
+        """
+        microturbulence = self.data.readVTurb(fname=fname)
+        self.model.gas_register(
+            "microturbulence",
+            Field(
+                quantity="microturbulence",
+                data=microturbulence,
+                axis_order=self.model.mesh.axis_names(),
+                attrs={"source": "radmc3d_input", "spatially_constant": False},
+            ),
+        )
+        return microturbulence
     
     def read_dust_temperature(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
         """Read dust temperature from RADMC-3D output using radmc3dData.
