@@ -10,6 +10,7 @@ soft-weight ranges, threshold behavior, monotonicity, and binary cell mode.
 # db-purpose: Tests for DiskBridge disk-mask weighting contracts.
 
 import numpy as np
+import pytest
 
 from diskbridge._units import Quantity
 from diskbridge.model.coords import spherical_grids
@@ -110,6 +111,93 @@ def test_poloidal_mach_uses_combined_radial_and_vertical_speed():
 
     assert np.isclose(criteria.q_pol.item(), 0.1 / np.hypot(0.08, 0.08))
     assert not criteria.hard_pass.item()
+
+
+@pytest.fixture
+def rotating_model():
+    """Diffuse, subsonic rotating gas isolates the optional density cut."""
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity(np.array([1.0, 2.0]), "cm")),
+        theta=Axis(edges=Quantity(
+            np.pi / 2 + np.array([-0.2, -0.1, 0.0, 0.1, 0.2]), "radian"
+        )),
+        phi=Axis(edges=Quantity(np.array([0.0, 1.0]), "radian")),
+    )
+    model.coord_system = model.mesh.coord_system
+    model.gas = SubModel(model)
+    for name, value, unit in (
+        ("density", 1e-24, "g/cm^3"),
+        ("pressure", 1e-26, "dyn/cm^2"),
+        ("vr", 0.01, "cm/s"),
+        ("vphi", 1.0, "cm/s"),
+        ("vtheta", 0.0, "cm/s"),
+    ):
+        model.gas_register(name, Field(
+            name, Quantity(np.full(model.mesh.shape, value), unit),
+            model.mesh.axis_names(),
+        ))
+    return model
+
+
+@pytest.mark.parametrize("mode", ["none", "cell", "soft", "soft_connected"])
+def test_local_density_criterion_is_opt_in(rotating_model, mode):
+    """Only an explicit local threshold excludes otherwise disk-like gas."""
+    model = rotating_model
+    common = dict(
+        rho_core_min=Quantity(5e-25, "g/cm^3"),
+        r_max_for_axis=Quantity(2.0, "cm"),
+        weight_mode=mode,
+        soft_delta={"mach": 0.2, "rot": 0.2},
+    )
+    region = model.set_mask_from_joos_disk(**common)
+    selected = region.mask.data.magnitude.copy()
+    assert np.any(selected)
+    axis = region.mask.attrs["disk_axis_cartesian"]
+    if mode != "none":
+        default_weight = model.gas["disk_weight"].data.magnitude.copy()
+        assert np.all(default_weight[selected] > 0.5)
+        assert model.gas["disk_weight"].attrs["rho_disk_min_g_cm3"] is None
+
+    common["soft_delta"] = {"mach": 0.2, "rot": 0.2, "rho": 0.3}
+    region = model.set_mask_from_joos_disk(
+        rho_disk_min=Quantity(1e-20, "kg/m^3"), **common
+    )
+    assert not np.any(region.mask.data.magnitude)
+    assert np.allclose(region.mask.attrs["disk_axis_cartesian"], axis)
+    if mode != "none":
+        enabled_weight = model.gas["disk_weight"].data.magnitude
+        assert np.all(enabled_weight <= default_weight)
+        assert np.any(enabled_weight < default_weight)
+        assert model.gas["disk_weight"].attrs["rho_disk_min_g_cm3"] == pytest.approx(1e-23)
+
+
+@pytest.mark.parametrize("threshold", [0.0, -1.0, np.nan, np.inf])
+def test_local_density_criterion_rejects_invalid_threshold(rotating_model, threshold):
+    with pytest.raises(ValueError, match="rho_disk_min.*positive finite"):
+        rotating_model.set_mask_from_joos_disk(
+            rho_disk_min=Quantity(threshold, "g/cm^3"),
+            rho_core_min=Quantity(5e-25, "g/cm^3"),
+            r_max_for_axis=Quantity(2.0, "cm"),
+        )
+
+
+def test_midplane_density_support_remains_independent(rotating_model):
+    """Disabling the local cut does not disable the column's density cap."""
+    model = rotating_model
+    model.set_mask_from_joos_disk(
+        rho_core_min=Quantity(5e-25, "g/cm^3"),
+        r_max_for_axis=Quantity(2.0, "cm"),
+        rho_midplane_min=Quantity(2e-24, "g/cm^3"),
+        soft_delta={"mach": 0.2, "rot": 0.2},
+    )
+    assert np.all(model.gas["disk_midplane_density_support"].data.magnitude < 0.5)
+    assert not np.any(model.gas["disk_mask"].data.magnitude)
+
+
+def test_axis_density_is_explicit(rotating_model):
+    with pytest.raises(TypeError, match="rho_core_min"):
+        rotating_model.set_mask_from_joos_disk(r_max_for_axis=Quantity(2.0, "cm"))
 
 
 def test_cell_mode_stays_binary():
@@ -706,4 +794,5 @@ def test_joos_axis_support_is_required():
     with np.testing.assert_raises_regex(TypeError, "r_max_for_axis"):
         model.set_mask_from_joos_disk(
             rho_disk_min=Quantity(0.1, "g/cm^3"),
+            rho_core_min=Quantity(0.1, "g/cm^3"),
         )

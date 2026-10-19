@@ -45,7 +45,7 @@ class JoosCriterionData:
     valid: np.ndarray
     q_pol: np.ndarray
     q_rot: np.ndarray
-    q_rho: np.ndarray
+    q_rho: Optional[np.ndarray]
     hard_pass: np.ndarray
 
 
@@ -256,7 +256,7 @@ def _compute_joos_criterion_data(
     disk_frame: DiskFrameData,
     Pth: Quantity,
     valid: np.ndarray,
-    rho_disk_min: Quantity,
+    rho_disk_min: Optional[Quantity],
     max_poloidal_mach: float,
     rotational_support_factor: float,
 ) -> JoosCriterionData:
@@ -272,7 +272,6 @@ def _compute_joos_criterion_data(
     rho_base = rho.to_base_units().magnitude
     rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units().magnitude
     P = Pth.to_base_units().magnitude
-    rho_min = float(rho_disk_min.to_base_units().magnitude)
 
     sound_speed = np.sqrt(_safe_ratio(P, rho_base))
     q_pol = _safe_ratio(
@@ -280,16 +279,18 @@ def _compute_joos_criterion_data(
         np.hypot(vR_abs, vz_abs),
     )
     q_rot = _safe_ratio(rot, rotational_support_factor * P)
-    q_rho = _safe_ratio(rho_base, np.full_like(rho_base, rho_min, dtype=float))
-    for q in (q_pol, q_rot, q_rho):
+    for q in (q_pol, q_rot):
         q[~valid] = 0.0
 
-    hard_pass = (
-        valid
-        & (q_pol > 1.0)
-        & (q_rot > 1.0)
-        & (q_rho > 1.0)
-    )
+    hard_pass = valid & (q_pol > 1.0) & (q_rot > 1.0)
+    q_rho = None
+    if rho_disk_min is not None:
+        rho_min = float(rho_disk_min.to(rho.to_base_units().units).magnitude)
+        if not np.isfinite(rho_min) or rho_min <= 0.0:
+            raise ValueError("rho_disk_min must be a positive finite density or None")
+        q_rho = _safe_ratio(rho_base, np.full_like(rho_base, rho_min))
+        q_rho[~valid] = 0.0
+        hard_pass &= q_rho > 1.0
     return JoosCriterionData(
         valid=valid,
         q_pol=q_pol,
@@ -459,12 +460,14 @@ def _compute_local_soft_joos_weight(
         _soft_delta_value(soft_delta, "rot"),
         weight_floor,
     )
-    s_rho = _soft_cut_from_ratio(
-        criteria.q_rho,
-        _soft_delta_value(soft_delta, "rho"),
-        weight_floor,
-    )
-    w_local = np.minimum.reduce([s_pol, s_rot, s_rho])
+    w_local = np.minimum(s_pol, s_rot)
+    if criteria.q_rho is not None:
+        s_rho = _soft_cut_from_ratio(
+            criteria.q_rho,
+            _soft_delta_value(soft_delta, "rho"),
+            weight_floor,
+        )
+        w_local = np.minimum(w_local, s_rho)
     w_local[~criteria.valid] = 0.0
     return np.clip(w_local, 0.0, 1.0)
 
@@ -995,11 +998,11 @@ def _build_disk_weight(
 # db-role: canonical
 def set_mask_from_joos_disk(
     model: "Model",
-    rho_disk_min: Quantity,
+    rho_disk_min: Optional[Quantity] = None,
     *,
     max_poloidal_mach: float = 1.0,
     rotational_support_factor: float = 2.0,
-    rho_core_min: Optional[Quantity] = None,
+    rho_core_min: Quantity,
     r_max_for_axis: Quantity,
     n_r_bins: Optional[int] = None,
     n_theta_bins: Optional[int] = None,
@@ -1020,7 +1023,7 @@ def set_mask_from_joos_disk(
     2) Evaluates Joos-style criteria directly on individual cells:
        - poloidal motion is subsonic
        - rotational support dominates over thermal pressure
-       - density exceeds rho_disk_min
+       - optionally, density exceeds rho_disk_min
     3) For ``soft_connected``, extracts density-weighted bulk kinematics,
        requires radial connection to a disc-like cylindrical midplane
        footpoint, caps narrow outer sectors by their annular coherence, and
@@ -1039,8 +1042,10 @@ def set_mask_from_joos_disk(
     ----------
     model : Model
         DiskBridge model with a spherical mesh and gas fields.
-    rho_disk_min : Quantity
-        Minimum gas density to be considered disc-like.
+    rho_disk_min : Quantity or None, optional
+        Optional minimum local gas density to be considered disc-like.
+        The default, ``None``, disables both the hard density cut and its
+        continuous score. Supply a positive finite density to enable it.
     max_poloidal_mach : float, optional
         Maximum settled-flow poloidal Mach number. The sound speed is
         ``sqrt(P/rho)`` and the poloidal speed is ``hypot(v_R,d, v_z,d)`` in
@@ -1049,9 +1054,9 @@ def set_mask_from_joos_disk(
         Minimum ratio denominator for rotational kinetic pressure versus
         thermal pressure. A cell passes when
         ``0.5 rho v_phi,d**2 > rotational_support_factor P``.
-    rho_core_min : Quantity or None, optional
-        Density defining the axis-estimation core. Defaults to ten times
-        ``rho_disk_min``.
+    rho_core_min : Quantity
+        Density defining the axis-estimation core, independently of the
+        optional local disk-density criterion.
     r_max_for_axis : Quantity
         Finite radius supporting only the angular-momentum axis estimate. It
         does not truncate the material mask or weight.
@@ -1069,7 +1074,8 @@ def set_mask_from_joos_disk(
         Scores at or below this value are truncated to zero.
     soft_delta : float or mapping, optional
         Shared or criterion-specific softness in log-ratio space. Mapping keys
-        are ``"mach"``, ``"rot"``, ``"rho"``, or ``"default"``.
+        are ``"mach"``, ``"rot"``, ``"rho"``, or ``"default"``. The
+        ``"rho"`` width is used only when ``rho_disk_min`` is provided.
     kinematic_smoothing_bins : tuple of float, optional
         Gaussian sigma in native ``(r, theta, phi)`` cells for the
         density-weighted velocity background used by ``soft_connected``.
@@ -1131,9 +1137,6 @@ def set_mask_from_joos_disk(
         theta_c.to("radian"),
         phi_c.to("radian"),
     )
-
-    if rho_core_min is None:
-        rho_core_min = 10.0 * rho_disk_min
 
     k_hat = _compute_disk_orientation(
         model, rho, dV, r_grid, theta_grid, phi_grid,
@@ -1291,6 +1294,11 @@ def set_mask_from_joos_disk(
                 "r_max_for_axis_au": float(r_max_for_axis.to("au").magnitude),
                 "max_poloidal_mach": float(max_poloidal_mach),
                 "rotational_support_factor": float(rotational_support_factor),
+                "rho_disk_min_g_cm3": (
+                    None
+                    if rho_disk_min is None
+                    else float(rho_disk_min.to("g/cm^3").magnitude)
+                ),
                 "weight_mode": str(weight_mode),
                 "soft_delta": (
                     dict(soft_delta)

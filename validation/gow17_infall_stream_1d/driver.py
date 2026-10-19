@@ -94,6 +94,8 @@ RADIATION_MODES = (RADIATION_MODE_DRAINE_SCALAR, RADIATION_MODE_STELLAR_PRODUCTS
 class InfallStream1DConfig:
     n_cells: int = 512
     stream_length_au: float = 1000.0
+    stream_grid_spacing: str = "linear"
+    stream_inner_cell_width_au: float | None = None
 
     nH_list_cm3: tuple[float, ...] = (1e4, 1e5, 1e6, 1e7)
 
@@ -159,11 +161,75 @@ class InfallStream1DConfig:
     shielding_outer_1d: str = "min"
 
 
+def _stream_edges_au(cfg: InfallStream1DConfig) -> np.ndarray:
+    """Construct streamer cell edges in au.
+
+    The ``geometric_width`` grid retains an edge at the illuminated face
+    (``x = 0``) while increasing successive cell widths geometrically.  This
+    provides logarithmic grading without introducing an arbitrary positive
+    coordinate offset.
+    """
+
+    n_cells = int(cfg.n_cells)
+    length_au = float(cfg.stream_length_au)
+    if n_cells < 1:
+        raise ValueError("n_cells must be positive")
+    if not np.isfinite(length_au) or length_au <= 0.0:
+        raise ValueError("stream_length_au must be finite and positive")
+
+    spacing = str(cfg.stream_grid_spacing).strip().lower()
+    if spacing == "linear":
+        return np.linspace(0.0, length_au, n_cells + 1, dtype=float)
+    if spacing != "geometric_width":
+        raise ValueError(
+            "stream_grid_spacing must be 'linear' or 'geometric_width'"
+        )
+
+    first_width_au = cfg.stream_inner_cell_width_au
+    if first_width_au is None:
+        raise ValueError(
+            "stream_inner_cell_width_au is required for geometric_width spacing"
+        )
+    first_width_au = float(first_width_au)
+    if not np.isfinite(first_width_au) or first_width_au <= 0.0:
+        raise ValueError("stream_inner_cell_width_au must be finite and positive")
+
+    uniform_width_au = length_au / n_cells
+    if first_width_au >= uniform_width_au:
+        raise ValueError(
+            "stream_inner_cell_width_au must be smaller than the uniform cell "
+            "width for an outward-expanding geometric_width grid"
+        )
+
+    def geometric_length(ratio: float) -> float:
+        log_ratio = np.log(ratio)
+        return first_width_au * np.expm1(n_cells * log_ratio) / np.expm1(log_ratio)
+
+    ratio_low = 1.0
+    ratio_high = 1.01
+    while geometric_length(ratio_high) < length_au:
+        ratio_high = 1.0 + 2.0 * (ratio_high - 1.0)
+
+    for _ in range(100):
+        ratio_mid = 0.5 * (ratio_low + ratio_high)
+        if geometric_length(ratio_mid) < length_au:
+            ratio_low = ratio_mid
+        else:
+            ratio_high = ratio_mid
+    ratio = 0.5 * (ratio_low + ratio_high)
+
+    widths_au = first_width_au * ratio ** np.arange(n_cells, dtype=float)
+    edges_au = np.concatenate(([0.0], np.cumsum(widths_au)))
+    edges_au[-1] = length_au
+    if np.any(np.diff(edges_au) <= 0.0):
+        raise RuntimeError("constructed streamer grid is not strictly increasing")
+    return edges_au
+
+
 def _build_stream_model(cfg: InfallStream1DConfig, *, nH_cm3: float) -> tuple[RadModel, np.ndarray]:
     m_H = units("m_H")
 
-    L_cm = float(cfg.stream_length_au) * float(AU)
-    x_edges_cm = np.linspace(0.0, L_cm, int(cfg.n_cells) + 1, dtype=float)
+    x_edges_cm = _stream_edges_au(cfg) * float(AU)
     x_cent_cm = 0.5 * (x_edges_cm[:-1] + x_edges_cm[1:])
 
     mesh = Mesh.cartesian(

@@ -18,6 +18,12 @@ alias, or compatibility guidance unless the user explicitly requests it.
 
 Development history belongs in `projects/`. Release-facing summaries belong in `CHANGELOG.md`. Stable user-facing explanations belong in `docs/`.
 
+Ongoing research projects, private production campaigns, paper-specific
+figures, cluster jobs, and project-only parameter choices are not release
+changes. Record them only in `projects/` (or the project's own ignored working
+tree), never in `CHANGELOG.md`. A project workflow belongs in stable docs only
+after the user explicitly promotes it to a supported public example.
+
 ## Documentation Standard
 
 The `docs/` tree is a Sphinx site (myst-parser, autodoc/autosummary, numpydoc, sphinxcontrib-bibtex, pydata-sphinx-theme). The authoring standard is `docs/contributing/documentation.md`. Read it before writing documentation and follow it:
@@ -77,7 +83,10 @@ Avoid long scientific essays in function docstrings. Put extended explanations i
 
 ## Release Notes
 
-Update `CHANGELOG.md` when a change affects public APIs, config keys, file outputs, physics behavior, validation workflows, performance-relevant behavior, or user-facing documentation.
+Update `CHANGELOG.md` when a change affects supported public APIs, config keys,
+file outputs, physics behavior, validation workflows, performance-relevant
+behavior, or user-facing documentation. Do not add entries for internal
+research projects or unpublished project examples.
 
 Use categories:
 

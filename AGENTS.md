@@ -1,5 +1,31 @@
 # AGENTS.md
 
+## Mandatory Cluster Rules
+
+The user has repeatedly prohibited old OzSTAR access and replacement Python
+environments. These rules cover diagnosis, transfers, builds, tests,
+preflights, and production; stale scripts and project notes are not exceptions.
+
+- NEVER connect to `ozstar.swin.edu.au`, including SSH, SCP, SFTP, rsync,
+  tunnels, aliases, IP addresses, or jump-host access. Read-only connections
+  are also prohibited. Use only `jcalcino@nt.swin.edu.au` for cluster login.
+- NEVER submit, compile, install, test, or run on `skylake` or the old
+  `farnarkle*`, `bryan*`, and `john*` nodes. Verify the actual host and target
+  partition before cluster execution. If NT is unavailable or the host is
+  unexpected, stop; never fall back to old OzSTAR.
+- NEVER create, clone, replace, migrate, or delete a cluster Python
+  environment. Retain `python-scientific/3.13.1-foss-2025a` and
+  `/fred/oz015/jcalcino/python_env`. A failed module lookup does not authorize
+  a different module, direct Python binary, or replacement environment.
+- Editable installs rebuild native extensions in the shared source checkout.
+  They can affect the existing production environment even when invoked from
+  a different environment. Before an authorized rebuild, identify the binary
+  and all consumers. Test `diskbridge._gow17` directly and run a tiny
+  chemistry solve on the intended NT compute architecture before production
+  submission; `import diskbridge` alone does not test the chemistry binary.
+- Correct forbidden endpoints in scripts before using them. Never reproduce
+  old cluster commands from historical notes or execution logs.
+
 ## DiskBridge Context
 
 DiskBridge is a scientific astrophysics codebase for post-processing hydrodynamic simulations, RADMC-3D workflows, chemistry, shielding, dust, gas temperature, and line-transfer preparation. It is research code in active development.
@@ -34,6 +60,18 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 - Documentation should describe current behavior only, not previous corrections or change history.
 - Ask for clarification when critical scientific or workflow information is missing.
 
+## Git History Safety
+
+- Never rewrite Git history unless the user explicitly authorizes the exact
+  history-rewriting operation in the current request.
+- By default, do not amend commits, rebase, move branch tips with reset,
+  filter history, delete refs to discard history, or force-push.
+- Do not infer permission to rewrite history from a cleanup request, a request
+  to remove files, or a general Git request. If rewriting appears necessary,
+  stop and ask first.
+- Use additive commits and normal non-force pushes unless the user explicitly
+  directs otherwise.
+
 ## Project Notes
 
 Projects in progress are tracked in `projects/`. When working on an active project, update the relevant project markdown file before editing code. Keep project notes concise and current, and remove stale information rather than accumulating history.
@@ -63,6 +101,12 @@ For any non-trivial change, create or update a project plan before editing code.
 Project plans live in `projects/active/` while work is ongoing. When complete, move them to `projects/completed/`. If replaced, move them to `projects/superseded/`. If discarded, move them to `projects/abandoned/`.
 
 Stable user-facing documentation belongs in `docs/`. Documentation must describe current behavior only, not the history of corrections or previous implementations. Release-facing summaries belong in `CHANGELOG.md`.
+
+`CHANGELOG.md` covers supported DiskBridge behavior only. Do not put active
+research projects, private production campaigns, paper-specific products,
+cluster jobs, or project-only parameter choices in it. Keep those records in
+`projects/` or the project's ignored working tree unless the user explicitly
+promotes the workflow to a supported public example.
 
 The documentation is a Sphinx site (myst-parser, autodoc/autosummary, numpydoc, sphinxcontrib-bibtex, pydata-sphinx-theme). The authoring standard is `docs/contributing/documentation.md`: Markdown guide pages with an Overview / Usage / Deep dive / References structure, NumPy-style docstrings, and literature cited inline as author-year text with per-page ADS links resolved from `docs/refs.bib`. Follow it for any documentation change.
 

@@ -8,20 +8,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Added
 
-- A Bondi All-Stars snapshot analysis now pairs the two snapshots from each of
-  the three `0.5`, `1.0`, and `2.0 Msun` hydro simulations sharing the fixed
-  `ISMDens = 3e-21 g cm^-3` background. It color-codes strict
-  `ism_weight > 0.9999` total-volume histograms across three radial shells
-  spanning the full 50,000 au domain, with equivalent mass-density and
-  `n_H = rho / (1.4 m_H)` figure sets and machine-readable distributions.
-  Companion all-cell complementary cumulative figures combine all cells within
-  5000 au in paired-snapshot panels, span `1e-22`--`1e-14 g cm^-3`, use a
-  logarithmic aperture-volume axis, and internally stack every
-  density-threshold bar by signed
-  `2 * disk_weight - 1` with a diverging symmetric-log colour scale from
-  ISM-like through mixed to disk-like material. Matched cumulative gas-mass
-  fractions retain the same aperture, axes, and colour encoding to expose
-  small dense structures that occupy little volume.
 - Conservative finite-time radial dust surface-density transport helpers with
   pressure drift, turbulent diffusion, absorbing inner outflow, an open outer
   diffusion boundary with no imposed inflow, explicit mass-loss diagnostics,
@@ -58,59 +44,17 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- The disk-mask local density criterion is optional and disabled by default
+  (`rho_disk_min=None`). The independent axis-selection density `rho_core_min`
+  is now explicit; midplane-density support remains separately configurable.
 - Saved chemistry loading can select an exact set of binary number-density
   fields and now reconstructs their abundances relative to the active model's
-  hydrogen-nuclei density. Bondi All-Stars reuses that canonical loader and its
-  existing line-imaging command for restartable external non-LTE CO 3-2,
-  HCO+ 4-3, and [C I] 1-0 production runs, with one species per explicitly
-  selected run directory and allocation-checked Slurm resources.
-- Bondi All-Stars line-only Slurm jobs now request 48 GB of memory, retaining
-  substantial headroom over the approximately 18 GB observed peak instead of
-  reserving 240 GB.
-- Bondi All-Stars line imaging can now explicitly render physical GOW17 HCO+
-  J=4-3 LTE cubes for both dust and gas temperature choices, with a directly
-  viewable channel-map PNG written beside every selected-species FITS cube.
-- Bondi All-Stars line imaging also supports the 492.160651 GHz `[C I]`
-  3P1--3P0 ALMA Band 8 line from the physical GOW17 atomic-carbon abundance.
+  hydrogen-nuclei density.
 - Segmented UV transport can optionally recover a failed low-budget scout with
   one independently seeded final-budget monochromatic run. The runner combines
   all scout and retry packets with count weights, recomputes unequal-budget
   uncertainty, and retries boundary selection without wasting the initial
   scout or launching a redundant terminal UV calculation.
-- Bondi All-Stars now maintains only the ten `_8` snapshots. The four 0.5-Msun
-  `_9` snapshots, whose ambient densities are ten times lower, are preserved
-  separately under `examples/bondi_low_density/` and are excluded from current
-  staging and maintained diagnostics.
-- Bondi All-Stars local production, cluster staging, and maintained dust
-  diagnostics now consume one canonical `bondi_defaults.py` setup containing
-  the accepted connected Joos mask, mass-scaled midplane-density support,
-  settling, and radial-`a_max` settings. Per-run configuration names the
-  angular-momentum estimator aperture `AXIS_SUPPORT_AU`; it is not a material
-  disk radius. The committed local run selects `m20_8_dmid_f120_c10` with its
-  matching 2-Msun stellar and `chi=1` radiation parameters.
-- Bondi All-Stars dust construction now uses a locally normalized ten-bin
-  radial maximum-grain-size profile instead of assigning a finite transport
-  age. The profile has `a_max = 100 um` at 100 au, decreases as `R**-2`, and
-  applies a smooth 0.25-dex complementary-error-function turnover across bin
-  sizes. The total settled dust column remains `0.01` times the actual
-  mask-weighted disc gas column; no smoothed gas background enters the size
-  mix. All configured grain bins remain present, no hard bin cutoff is imposed,
-  and disconnected soft-mask tails are not amplified. Maintained Bondi
-  directories include `settled_dust_radial_amax.png`,
-  `settled_dust_size_threshold_sideon.png`,
-  `settled_dust_size_ceiling_sideon.png`,
-  `settled_dust_size_threshold_profiles.png`, and
-  `settled_dust_size_threshold_faceon.png`, exposing all ten bins and
-  cumulative dust above 0.1, 1, 10, and 100 microns. Standalone
-  `settled_dust_total_dust_to_gas_sideon.png` and
-  `settled_dust_total_dust_to_gas_faceon.png` products show the cell-local
-  total of every disc and ISM dust bin relative to gas in phi-averaged edge-on
-  and azimuth-preserving top-down views.
-- Bondi All-Stars settled-disc weights now include an azimuthal-median,
-  disc-frame midplane-density support score. The mass-scaled density midpoint
-  is `1.5e-17 (Mstar/Msun) g/cm^3`, with a 0.50-dex transition, so diffuse
-  captured material fades into the ISM component without a geometric outer
-  radius or a higher local atmosphere density floor.
 - Joos disc weights now evaluate the full loaded mesh and enforce both vertical
   and outward radial connectivity. `r_max_for_axis` is solely the required
   angular-momentum support aperture; the physical `r_max`, implicit
@@ -118,10 +62,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - The Joos disc classifier now uses one explicit poloidal-Mach limit instead of
   separate orbital-to-radial and orbital-to-vertical velocity thresholds.
   Density-weighted smoothed gas with transonic or slower poloidal motion,
-  rotational support, and sufficient density seeds the connected disc. Bondi
-  All-Stars uses the default `max_poloidal_mach = 1`, rejecting supersonic
-  infalling streamers from the settled-disc dust component. The connected
-  continuous weight is now the public default rather than an opt-in mode.
+  rotational support, and sufficient density seeds the connected disc. The
+  connected continuous weight is now the public default rather than an opt-in
+  mode.
 - Directional UV-weight construction now ray-integrates one opacity-weighted
   dust-extinction field instead of retaining per-bin ray columns. Parallel
   first-touch and fused source normalization remove redundant ray-sized
@@ -136,10 +79,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   the current gas temperature at each existing non-local update. Directional
   CO cooling consumes the same current CO width during the fused shielding
   traversal; the configured microturbulent field remains fixed.
-- The Bondi All-Stars production chemistry now explicitly includes direct CO
-  desorption by cosmic-ray whole-grain heating using the HH93 70 K duty-cycle
-  approximation with the ProDiMo ionization-rate scaling; CR-induced UV
-  photodesorption remains a separate enabled channel.
 - Variable-linewidth Visser CO shielding, effective linewidths, H2/C shielding
   algebra, and directional reductions now use parallel array kernels. Fused
   H2*CO reductions and in-place linewidth storage remove ray-sized
@@ -250,36 +189,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Validation
 
-- Promoted the accepted Bondi streamer abundance figures into the manuscript.
-  The paper candidates show CO, C, C+, CHx, HCO+, and neutral H from `1e-12`
-  to `1e-1`, with all six species in a single-row legend on the established
-  `8.5888 x 7.92`-inch paper canvas.
-- Bondi All-Stars one-dimensional streamer histories now archive every ordered
-  GOW17 state component for both time-dependent and equilibrium branches,
-  alongside derived neutral H, C, and O. Combined abundance figures show CO,
-  C, C+, CHx, HCO+, and H in a single-row species legend over the displayed
-  range `1e-12` to `1e-1`. Neutral H is the sole plotted atomic-gas proxy,
-  while CO-poor H2-fraction summaries test whether CO loss occurs while the
-  infall remains predominantly molecular.
-- The Bondi All-Stars streamer plotter now exports the combined abundance figures
-  as both PNG and vector PDF, with inward ticks on all four panel edges,
-  an explicit two-point inter-row gap, compact canvases, and a buffered header
-  above the grids. Y-axis labels appear on alternate decades while all
-  logarithmic tick marks remain visible.
-- Made the Bondi All-Stars one-dimensional streamer comparison explicitly use
-  a 0.1-Draine ambient field, added a matched one-Draine six-case grid, and
-  recorded the resulting chemistry and temperature sensitivity in a direct
-  comparison report.
-- Regenerated the maintained interface and azimuthal diagnostics for the
-  representative `m20_8_dmid_f120_c10` snapshot with the smooth radial
-  maximum-grain-size prescription. The total settled column follows the actual
-  mask-weighted gas, while the normalized bin fractions vary continuously with
-  the prescribed local `a_max(R)`.
-- A full-native 23,415,480-cell Bondi hydro/mask A/B reduced the contaminated
-  `m10_8_dm_f250_c10` Joos tilt from 27.178 degrees with 50,000-au support to
-  0.079 degrees with 387.1-au support and removed its pinwheel-like mask. The
-  nearly aligned `m20_8_dmid_f120_c10` control changed from 2.678 to 0.013
-  degrees and retained a 0.9815 mask Jaccard overlap.
 - Added a gas-phase GOW17 Figure 23 reproduction using the paper's one-sided
   60-degree isotropic approximation, unit incident field, 1000-zone grid, and
   strict `reltol = 1e-4` convergence control at `nH = 100` and
@@ -312,19 +221,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - Added `validation/nonlte_ray_boundaries`, which compares the two spherical
   theta and inner boundary policies on the saved PRIZMO/GOW17 disk and checks
   boundary-cell extrapolation against an explicitly widened polar grid.
-- Added a Bondi All-Stars 1D streamer grid for `0.5`, `1.0`, and `2.0 Msun`
-  sources at optimistic `nH = 1e5` and `1e6 cm^-3` densities, with the
-  production accretion rates `3e-9`, `1e-8`, and `5e-8 Msun yr^-1`,
-  respectively, spectrum-aware UV products, strict
-  thermochemical-equilibrium tracking, evolved gas energy, fixed dust
-  temperature, concurrent star-level execution, and complete ordered GOW17
-  state archives for both chemistry branches. Each density has one combined
-  CO, C, C+, CHx, HCO+, and H profile figure comparing all
-  three masses at stream-front distances near `3000`, `1000`, and `500 au`,
-  with a single-row species legend, a displayed upper limit of `1e-1`, and
-  matching vector-PDF exports. Density-specific stream-front
-  gas-temperature histories and full evolving/equilibrium temperature
-  profiles are retained for both the fiducial and one-Draine grids.
 - Calibrated segmented-UV joins reduced shell-mean `chi_broad` offsets from
   0.56-2.15% to 0.04-0.07%. Against the saved full-domain reference, its
   volume-weighted P99 residual improved from 2.89% to 1.35%; the remaining
@@ -334,10 +230,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
   native per-segment and join diagnostics under `plots/segmented_rt/`, UV
   product comparisons under `plots/uv_products/`, and root summary metrics and
   radial comparison only. Plot regeneration no longer runs RADMC-3D.
-- Added `validation/gow17_healpix_performance`, a provenance-rich sustained
-  scaling and numerical-comparison workflow for the Bondi All-Stars `nside=4`
-  interpolation and complete post-ray shielding stages, plus the native GOW17
-  batch solver.
 - Added `validation/cartesian_wedge_uv_weighting`, a Cartesian sphere-plus-cone
   UV validation comparing no shielding, uniform HEALPix shielding, and
   weighted HEALPix shielding chemistry from one shared RADMC-3D transport run

@@ -18,10 +18,11 @@ import numpy as np
 def read_line_fits_cube(path: str | Path) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Read a RADMC-3D line-image FITS cube as ``(nchan, ny, nx)``.
 
-    Returns the cube, velocity axis, and a compact metadata dictionary.
+    Returns the cube, velocity axis in km/s, and a compact metadata dictionary.
     """
 
     from astropy.io import fits
+    import astropy.units as u
 
     path = Path(path)
     with fits.open(path) as hdul:
@@ -40,13 +41,18 @@ def read_line_fits_cube(path: str | Path) -> tuple[np.ndarray, np.ndarray, dict[
     crval = float(header.get("CRVAL3", 0.0))
     cdelt = float(header.get("CDELT3", 1.0))
     crpix = float(header.get("CRPIX3", 1.0))
-    velocities = crval + (np.arange(nchan, dtype=float) + 1.0 - crpix) * cdelt
+    source_velocity_unit = str(header.get("CUNIT3", "km/s"))
+    velocity_scale = (1.0 * u.Unit(source_velocity_unit)).to_value(u.km / u.s)
+    velocities = (
+        crval + (np.arange(nchan, dtype=float) + 1.0 - crpix) * cdelt
+    ) * velocity_scale
     meta = {
         "path": str(path),
         "shape": list(cube.shape),
         "bunit": header.get("BUNIT", ""),
         "restfrq_hz": float(header["RESTFRQ"]) if "RESTFRQ" in header else None,
-        "velocity_unit": header.get("CUNIT3", "km/s"),
+        "velocity_unit": "km/s",
+        "source_velocity_unit": source_velocity_unit,
     }
     return cube, velocities, meta
 
@@ -151,6 +157,26 @@ def _positive_log_norm(values: np.ndarray, *, lower: float = 0.1, upper: float =
     return LogNorm(vmin=vmin, vmax=vmax)
 
 
+def _mask_below_residual_snr(
+    cube: np.ndarray,
+    residual: np.ndarray,
+    *,
+    snr_threshold: float,
+) -> np.ndarray:
+    """Return a cube with voxels below the per-channel residual S/N masked."""
+
+    if residual.shape != cube.shape:
+        raise ValueError(
+            f"Image and residual cube shapes differ: {cube.shape} != {residual.shape}"
+        )
+    noise = np.empty(cube.shape[0], dtype=float)
+    for channel, plane in enumerate(residual):
+        median = float(np.nanmedian(plane))
+        noise[channel] = 1.4826 * float(np.nanmedian(np.abs(plane - median)))
+    threshold = snr_threshold * noise[:, None, None]
+    return np.where(np.isfinite(cube) & (cube >= threshold), cube, np.nan)
+
+
 def plot_channel_maps(
     fits_path: str | Path,
     output_path: str | Path,
@@ -158,12 +184,23 @@ def plot_channel_maps(
     title: str | None = None,
     max_panels: int = 12,
     cmap: str = "inferno",
+    residual_fits_path: str | Path | None = None,
+    snr_threshold: float = 3.0,
 ) -> Path:
-    """Write a grid of representative channel maps."""
+    """Write a grid of representative channel maps.
+
+    When a residual cube is supplied, only emission above the per-channel
+    residual S/N threshold is displayed.
+    """
 
     import matplotlib.pyplot as plt
 
     cube, velocities, meta = read_line_fits_cube(fits_path)
+    if residual_fits_path is not None:
+        residual, _, _ = read_line_fits_cube(residual_fits_path)
+        cube = _mask_below_residual_snr(
+            cube, residual, snr_threshold=snr_threshold
+        )
     nchan = cube.shape[0]
     nshow = min(int(max_panels), nchan)
     indices = np.unique(np.linspace(0, nchan - 1, nshow, dtype=int))
@@ -213,16 +250,28 @@ def plot_moment_maps(
     *,
     title: str | None = None,
     cmap: str = "magma",
+    residual_fits_path: str | Path | None = None,
+    snr_threshold: float = 3.0,
 ) -> Path:
-    """Write moment-0, peak-channel, and velocity-centroid maps."""
+    """Write moment-0, peak-channel, and velocity-centroid maps.
+
+    When a residual cube is supplied, moments include only emission above the
+    per-channel residual S/N threshold.
+    """
 
     import matplotlib.pyplot as plt
 
     cube, velocities, meta = read_line_fits_cube(fits_path)
+    if residual_fits_path is not None:
+        residual, _, _ = read_line_fits_cube(residual_fits_path)
+        cube = _mask_below_residual_snr(
+            cube, residual, snr_threshold=snr_threshold
+        )
     dv = float(np.nanmedian(np.diff(velocities))) if velocities.size > 1 else 1.0
     positive = np.where(np.isfinite(cube), cube, 0.0)
     moment0 = np.sum(positive, axis=0) * abs(dv)
-    peak = np.nanmax(cube, axis=0)
+    peak = np.max(np.where(np.isfinite(cube), cube, -np.inf), axis=0)
+    peak[~np.isfinite(peak)] = np.nan
     denom = np.sum(positive, axis=0)
     centroid = np.divide(
         np.sum(positive * velocities[:, None, None], axis=0),
