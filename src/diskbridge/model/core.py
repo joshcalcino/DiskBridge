@@ -331,7 +331,6 @@ class Model:
     
     def set_mask_from_joos_disk(
         self,
-        rho_disk_min: Optional[Quantity] = None,
         *,
         max_poloidal_mach: float = 1.0,
         rotational_support_factor: float = 2.0,
@@ -339,21 +338,15 @@ class Model:
         r_max_for_axis: Quantity,
         n_r_bins: Optional[int] = None,
         n_theta_bins: Optional[int] = None,
-        weight_mode: str = "soft_connected",
         weight_m0: float = 0.50,
         weight_floor: float = 1e-4,
         soft_delta: Union[float, Mapping[str, float]] = 0.20,
         kinematic_smoothing_bins: Tuple[float, float, float] = (2.0, 1.0, 2.0),
-        rho_midplane_min: Optional[Quantity] = None,
-        midplane_density_softness_dex: float = 0.30,
-        midplane_density_smoothing_bins: float = 2.0,
     ) -> SubModel:
-        """Construct a disk mask with an optional local density criterion.
+        """Construct the smoothed disk weight with saturating connectivity gates.
 
         Parameters
         ----------
-        rho_disk_min : Quantity or None, optional
-            Minimum local gas density. ``None`` disables this criterion.
         rho_core_min : Quantity
             Independent density threshold for estimating the disk axis.
         r_max_for_axis : Quantity
@@ -373,21 +366,16 @@ class Model:
 
         return _set_mask_from_joos_disk(
             self,
-            rho_disk_min,
             max_poloidal_mach=max_poloidal_mach,
             rotational_support_factor=rotational_support_factor,
             rho_core_min=rho_core_min,
             r_max_for_axis=r_max_for_axis,
             n_r_bins=n_r_bins,
             n_theta_bins=n_theta_bins,
-            weight_mode=weight_mode,
             weight_m0=weight_m0,
             weight_floor=weight_floor,
             soft_delta=soft_delta,
             kinematic_smoothing_bins=kinematic_smoothing_bins,
-            rho_midplane_min=rho_midplane_min,
-            midplane_density_softness_dex=midplane_density_softness_dex,
-            midplane_density_smoothing_bins=midplane_density_smoothing_bins,
         )
 
     def set_mask_from_array(

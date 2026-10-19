@@ -44,9 +44,8 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
-- The disk-mask local density criterion is optional and disabled by default
-  (`rho_disk_min=None`). The independent axis-selection density `rho_core_min`
-  is now explicit; midplane-density support remains separately configurable.
+- The disk-mask axis-selection density `rho_core_min` is now explicit and
+  independent of the kinematic material criteria.
 - Saved chemistry loading can select an exact set of binary number-density
   fields and now reconstructs their abundances relative to the active model's
   hydrogen-nuclei density.
@@ -62,9 +61,8 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - The Joos disc classifier now uses one explicit poloidal-Mach limit instead of
   separate orbital-to-radial and orbital-to-vertical velocity thresholds.
   Density-weighted smoothed gas with transonic or slower poloidal motion,
-  rotational support, and sufficient density seeds the connected disc. The
-  connected continuous weight is now the public default rather than an opt-in
-  mode.
+  rotational support seeds the connected disc. The classifier always registers
+  the connected continuous weight and its boolean weight-0.5 selection.
 - Directional UV-weight construction now ray-integrates one opacity-weighted
   dust-extinction field instead of retaining per-bin ray columns. Parallel
   first-touch and fused source normalization remove redundant ray-sized
@@ -105,6 +103,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Connected disk masks propagate smooth gates that saturate at the existing
+  passing seed score, then cap the unchanged local kinematic weight. Passing
+  radial and vertical links no longer impose an ISM complement. Annular
+  coherence uses a bounded cubic with unity at full gate support.
 - Segmented RADMC-3D restarts now validate and load compatible terminal
   products before considering the lower-budget scout pass. Terminal photon
   counts, mesh and source identities, wavelength/product metadata, parameter
@@ -170,6 +172,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Removed
 
+- Removed Joos-mask local and midplane density criteria, their arguments and
+  score widths, alternate weight modes and aliases, and obsolete hard-mask
+  connectivity implementations. The classifier has one saturating-gate path.
 - Removed the selectable `HealpixSEConfig.collision_temperature_policy` and
   the legacy effective-H2 HCO+ LAMDA path from DiskBridge, along with
   external-population APIs that accepted local molecule files.

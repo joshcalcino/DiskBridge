@@ -45,8 +45,6 @@ class JoosCriterionData:
     valid: np.ndarray
     q_pol: np.ndarray
     q_rot: np.ndarray
-    q_rho: Optional[np.ndarray]
-    hard_pass: np.ndarray
 
 
 def _compute_disk_orientation(
@@ -256,150 +254,25 @@ def _compute_joos_criterion_data(
     disk_frame: DiskFrameData,
     Pth: Quantity,
     valid: np.ndarray,
-    rho_disk_min: Optional[Quantity],
     max_poloidal_mach: float,
     rotational_support_factor: float,
 ) -> JoosCriterionData:
-    """Evaluate the settled rotating-disc criteria on individual cells."""
+    """Evaluate the two local settled rotating-disc kinematic margins."""
     if not np.isfinite(max_poloidal_mach) or max_poloidal_mach <= 0.0:
         raise ValueError("max_poloidal_mach must be positive and finite")
     if not np.isfinite(rotational_support_factor) or rotational_support_factor <= 0.0:
         raise ValueError("rotational_support_factor must be positive and finite")
-
-    vphi_abs = np.abs(disk_frame.vphi_d.to_base_units().magnitude)
     vR_abs = np.abs(disk_frame.vR_d.to_base_units().magnitude)
     vz_abs = np.abs(disk_frame.vz_d.to_base_units().magnitude)
     rho_base = rho.to_base_units().magnitude
     rot = (0.5 * rho * (disk_frame.vphi_d.to_base_units() ** 2)).to_base_units().magnitude
     P = Pth.to_base_units().magnitude
-
     sound_speed = np.sqrt(_safe_ratio(P, rho_base))
-    q_pol = _safe_ratio(
-        max_poloidal_mach * sound_speed,
-        np.hypot(vR_abs, vz_abs),
-    )
+    q_pol = _safe_ratio(max_poloidal_mach * sound_speed, np.hypot(vR_abs, vz_abs))
     q_rot = _safe_ratio(rot, rotational_support_factor * P)
     for q in (q_pol, q_rot):
         q[~valid] = 0.0
-
-    hard_pass = valid & (q_pol > 1.0) & (q_rot > 1.0)
-    q_rho = None
-    if rho_disk_min is not None:
-        rho_min = float(rho_disk_min.to(rho.to_base_units().units).magnitude)
-        if not np.isfinite(rho_min) or rho_min <= 0.0:
-            raise ValueError("rho_disk_min must be a positive finite density or None")
-        q_rho = _safe_ratio(rho_base, np.full_like(rho_base, rho_min))
-        q_rho[~valid] = 0.0
-        hard_pass &= q_rho > 1.0
-    return JoosCriterionData(
-        valid=valid,
-        q_pol=q_pol,
-        q_rot=q_rot,
-        q_rho=q_rho,
-        hard_pass=hard_pass,
-    )
-
-
-def _apply_hard_midplane_connectivity(
-    cell_pass: np.ndarray,
-    disk_frame: DiskFrameData,
-    valid: np.ndarray,
-) -> np.ndarray:
-    """Keep the contiguous hard-pass chain around the closest hard-pass midplane cell."""
-    connected = np.zeros_like(cell_pass, dtype=bool)
-    nr, _ntheta, nphi = cell_pass.shape
-    for ir in range(nr):
-        for iphi in range(nphi):
-            populated = np.flatnonzero(valid[ir, :, iphi])
-            if populated.size == 0:
-                continue
-
-            pass_idx = populated[cell_pass[ir, populated, iphi]]
-            if pass_idx.size == 0:
-                continue
-
-            theta_col = disk_frame.theta_from_midplane[ir, populated, iphi]
-            order_local = np.argsort(theta_col)
-            pop_order = populated[order_local]
-            seed = int(pass_idx[np.argmin(np.abs(disk_frame.theta_from_midplane[ir, pass_idx, iphi]))])
-            seed_pos = np.flatnonzero(pop_order == seed)
-            if seed_pos.size == 0:
-                continue
-
-            k = int(seed_pos[0])
-            while k < pop_order.size and cell_pass[ir, pop_order[k], iphi]:
-                connected[ir, pop_order[k], iphi] = True
-                k += 1
-
-            k = int(seed_pos[0]) - 1
-            while k >= 0 and cell_pass[ir, pop_order[k], iphi]:
-                connected[ir, pop_order[k], iphi] = True
-                k -= 1
-
-    return connected
-
-
-def _apply_radial_midplane_connectivity(
-    values: np.ndarray,
-    disk_frame: DiskFrameData,
-    valid: np.ndarray,
-    *,
-    seed_min: float,
-    floor: float,
-) -> np.ndarray:
-    """Keep the outward radial chain connected to the first disc-like column.
-
-    Each azimuth is treated independently. The closest valid cell to the disc
-    midplane represents its radial column. Starting at the first column whose
-    midplane value reaches ``seed_min``, the connected value is capped by the
-    weakest midplane value encountered at smaller radii. Propagation stops when
-    a midplane value reaches ``floor``, so detached outer material cannot
-    re-enter the disc.
-    """
-    if not 0.0 <= floor < seed_min <= 1.0:
-        raise ValueError("radial connectivity requires 0 <= floor < seed_min <= 1")
-
-    array = np.asarray(values, dtype=float)
-    connected = np.zeros_like(array, dtype=float)
-    nr, _ntheta, nphi = array.shape
-
-    for iphi in range(nphi):
-        mid_indices = np.full(nr, -1, dtype=int)
-        mid_values = np.zeros(nr, dtype=float)
-        for ir in range(nr):
-            populated = np.flatnonzero(valid[ir, :, iphi])
-            if populated.size == 0:
-                continue
-            mid = int(
-                populated[
-                    np.argmin(
-                        np.abs(
-                            disk_frame.theta_from_midplane[
-                                ir, populated, iphi
-                            ]
-                        )
-                    )
-                ]
-            )
-            mid_indices[ir] = mid
-            mid_values[ir] = float(array[ir, mid, iphi])
-
-        seeds = np.flatnonzero(mid_values >= seed_min)
-        if seeds.size == 0:
-            continue
-
-        running = float(mid_values[int(seeds[0])])
-        for ir in range(int(seeds[0]), nr):
-            if mid_indices[ir] < 0 or mid_values[ir] <= floor:
-                break
-            running = min(running, float(mid_values[ir]))
-            populated = valid[ir, :, iphi]
-            connected[ir, populated, iphi] = np.minimum(
-                array[ir, populated, iphi],
-                running,
-            )
-
-    return np.clip(connected, 0.0, 1.0)
+    return JoosCriterionData(valid=valid, q_pol=q_pol, q_rot=q_rot)
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -444,6 +317,14 @@ def _soft_delta_value(
     return float(soft_delta)
 
 
+def _connectivity_gate(score: np.ndarray, seed_min: float) -> np.ndarray:
+    """Return a C1 gate that saturates at the existing passing seed score."""
+    if not np.isfinite(seed_min) or not 0.0 < seed_min <= 1.0:
+        raise ValueError("connectivity seed_min must lie in (0, 1]")
+    scaled = np.clip(np.asarray(score, dtype=float) / seed_min, 0.0, 1.0)
+    return scaled**2 * (3.0 - 2.0 * scaled)
+
+
 def _compute_local_soft_joos_weight(
     criteria: JoosCriterionData,
     soft_delta: Union[float, Mapping[str, float]],
@@ -461,13 +342,6 @@ def _compute_local_soft_joos_weight(
         weight_floor,
     )
     w_local = np.minimum(s_pol, s_rot)
-    if criteria.q_rho is not None:
-        s_rho = _soft_cut_from_ratio(
-            criteria.q_rho,
-            _soft_delta_value(soft_delta, "rho"),
-            weight_floor,
-        )
-        w_local = np.minimum(w_local, s_rho)
     w_local[~criteria.valid] = 0.0
     return np.clip(w_local, 0.0, 1.0)
 
@@ -549,167 +423,30 @@ def _cylindrical_midplane_support(
     disk_frame: DiskFrameData,
     valid: np.ndarray,
     r_edges: Quantity,
-    *,
-    seed_min: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Cap cells by the disc score at their cylindrical midplane footpoint.
-
-    Unlike the former fixed-spherical-radius weakest-link walk, this maps each
-    cell to the disc midplane at the same disc-frame cylindrical radius and
-    azimuth. A column is rejected when its midplane footpoint is not disc-like.
-    """
-    if not 0.0 <= seed_min <= 1.0:
-        raise ValueError("weight_m0/seed_min must lie in [0, 1]")
+) -> np.ndarray:
+    """Collect local midplane scores on the disc-frame cylindrical grid."""
     if disk_frame.R_d.shape != w_local.shape or valid.shape != w_local.shape:
         raise ValueError("disk-frame geometry, validity, and weight shapes must match")
-
-    nr = len(r_edges) - 1
-    nphi = w_local.shape[2]
+    nr, nphi = len(r_edges) - 1, w_local.shape[2]
     edges = np.asarray(r_edges.to_base_units().magnitude, dtype=float)
     phi_bins = _disk_phi_bins(disk_frame, nphi)
     support = np.zeros((nr, nphi), dtype=float)
     populated_grid = np.zeros((nr, nphi), dtype=bool)
-
     for ir in range(w_local.shape[0]):
         for iphi in range(nphi):
             populated = np.flatnonzero(valid[ir, :, iphi])
             if populated.size == 0:
                 continue
-            mid = int(
-                populated[
-                    np.argmin(
-                        np.abs(
-                            disk_frame.theta_from_midplane[ir, populated, iphi]
-                        )
-                    )
-                ]
-            )
+            mid = int(populated[np.argmin(np.abs(
+                disk_frame.theta_from_midplane[ir, populated, iphi]
+            ))])
             r_bin = int(np.digitize(disk_frame.R_d[ir, mid, iphi], edges) - 1)
-            if r_bin < 0 or r_bin >= nr:
+            if not 0 <= r_bin < nr:
                 continue
             p_bin = int(phi_bins[ir, mid, iphi])
-            support[r_bin, p_bin] = max(
-                support[r_bin, p_bin],
-                float(w_local[ir, mid, iphi]),
-            )
+            support[r_bin, p_bin] = max(support[r_bin, p_bin], float(w_local[ir, mid, iphi]))
             populated_grid[r_bin, p_bin] = True
-
-    support = _fill_periodic_midplane_holes(support, populated_grid)
-    connected_support = np.where(support >= seed_min, support, 0.0)
-    connected = np.zeros_like(w_local, dtype=float)
-    for ir in range(w_local.shape[0]):
-        r_bin = np.digitize(disk_frame.R_d[ir], edges).astype(np.int32) - 1
-        in_grid = valid[ir] & (r_bin >= 0) & (r_bin < nr)
-        if not np.any(in_grid):
-            continue
-        r_use = np.clip(r_bin, 0, nr - 1)
-        footpoint = connected_support[r_use, phi_bins[ir]]
-        connected[ir, in_grid] = np.minimum(
-            w_local[ir, in_grid],
-            footpoint[in_grid],
-        )
-
-    return np.clip(connected, 0.0, 1.0), support
-
-
-def _midplane_density_support(
-    rho: Quantity,
-    disk_frame: DiskFrameData,
-    valid: np.ndarray,
-    r_edges: Quantity,
-    rho_midplane_min: Quantity,
-    *,
-    softness_dex: float,
-    smoothing_bins: float,
-    floor: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return a smooth annular midplane-density support score.
-
-    The density nearest the disc-frame midplane is accumulated on the existing
-    cylindrical ``(R, phi)`` grid. Its azimuthal median is smoothed in log
-    density before being compared with ``rho_midplane_min``. The resulting
-    radial score is also mapped back to every native cell at the same
-    disc-frame cylindrical radius so the condition can cap a complete vertical
-    column without imposing a local density cut on the disc atmosphere.
-    """
-    threshold = np.asarray(
-        rho_midplane_min.to(rho.units).magnitude,
-        dtype=float,
-    )
-    if threshold.ndim != 0 or not np.isfinite(threshold) or threshold <= 0.0:
-        raise ValueError("rho_midplane_min must be a finite positive scalar density")
-    if not np.isfinite(softness_dex) or softness_dex <= 0.0:
-        raise ValueError("midplane_density_softness_dex must be positive and finite")
-    if not np.isfinite(smoothing_bins) or smoothing_bins <= 0.0:
-        raise ValueError("midplane_density_smoothing_bins must be positive and finite")
-    if disk_frame.R_d.shape != rho.shape or valid.shape != rho.shape:
-        raise ValueError("density, disk-frame geometry, and validity must match")
-
-    edges = np.asarray(r_edges.to_base_units().magnitude, dtype=float)
-    nr = edges.size - 1
-    nphi = rho.shape[2]
-    phi_bins = _disk_phi_bins(disk_frame, nphi)
-    rho_values = np.asarray(rho.to_base_units().magnitude, dtype=float)
-    midplane = np.full((nr, nphi), -np.inf, dtype=float)
-
-    for ir in range(rho.shape[0]):
-        for iphi in range(nphi):
-            populated = np.flatnonzero(valid[ir, :, iphi])
-            if populated.size == 0:
-                continue
-            mid = int(
-                populated[
-                    np.argmin(
-                        np.abs(
-                            disk_frame.theta_from_midplane[ir, populated, iphi]
-                        )
-                    )
-                ]
-            )
-            value = float(rho_values[ir, mid, iphi])
-            r_bin = int(np.digitize(disk_frame.R_d[ir, mid, iphi], edges) - 1)
-            if r_bin < 0 or r_bin >= nr or not np.isfinite(value) or value <= 0.0:
-                continue
-            p_bin = int(phi_bins[ir, mid, iphi])
-            midplane[r_bin, p_bin] = max(midplane[r_bin, p_bin], value)
-
-    midplane[midplane == -np.inf] = np.nan
-    profile = np.full(nr, np.nan, dtype=float)
-    populated_rows = np.any(np.isfinite(midplane), axis=1)
-    profile[populated_rows] = np.nanmedian(midplane[populated_rows], axis=1)
-    populated_radius = np.flatnonzero(np.isfinite(profile) & (profile > 0.0))
-    if populated_radius.size == 0:
-        raise ValueError("No positive disc-frame midplane densities were found")
-    missing_radius = np.flatnonzero(~np.isfinite(profile) | (profile <= 0.0))
-    if missing_radius.size:
-        profile[missing_radius] = np.interp(
-            missing_radius,
-            populated_radius,
-            profile[populated_radius],
-        )
-
-    log_profile = gaussian_filter1d(
-        np.log10(profile),
-        sigma=float(smoothing_bins),
-        mode="nearest",
-    )
-    smooth_profile = np.power(10.0, log_profile)
-    radial_score = _soft_cut_from_ratio(
-        smooth_profile / float(threshold),
-        float(softness_dex) * np.log(10.0),
-        floor,
-    )
-
-    cell_score = np.zeros_like(rho_values, dtype=np.float32)
-    for ir in range(rho.shape[0]):
-        r_bin = np.digitize(disk_frame.R_d[ir], edges).astype(np.int32) - 1
-        in_grid = valid[ir] & (r_bin >= 0) & (r_bin < nr)
-        if np.any(in_grid):
-            cell_score[ir, in_grid] = radial_score[
-                np.clip(r_bin[in_grid], 0, nr - 1)
-            ]
-
-    return cell_score, smooth_profile, radial_score
+    return _fill_periodic_midplane_holes(support, populated_grid)
 
 
 def _apply_connected_midplane_coherence(
@@ -721,25 +458,22 @@ def _apply_connected_midplane_coherence(
     *,
     seed_min: float,
     floor: float,
-    soft_delta: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Apply radial weakest-link and annular coherence to midplane support.
 
-    Each azimuth is propagated outward from its first disc-like seed with a
-    running minimum, so a detached island cannot re-enter after a failed
-    column. The phi-mean of that connected support is smoothed, mapped through
-    the same fuzzy threshold used by the radial Joos criterion, and propagated
-    monotonically outward. An azimuthally narrow streamer therefore decays
-    toward zero rather than defining the outer disc. Both continuous scores cap
-    the local 3-D weight.
+    Raw midplane scores locate each azimuth's first disc-like seed. Their
+    saturating gates are propagated outward with a running minimum, so a
+    detached island cannot re-enter after a failed column. The phi-mean of
+    that connected gate support is smoothed and mapped to
+    a coherence cap with ``C**2 * (3 - 2*C)``. This preserves zero, half, and
+    full support, including unity at full support. The cap is propagated
+    monotonically outward, suppressing narrow streamers. Both continuous
+    gates cap the supplied 3-D connectivity gates.
     """
     if not 0.0 <= floor < seed_min <= 1.0:
         raise ValueError(
             "connected coherence requires 0 <= floor < seed_min <= 1"
         )
-    if not np.isfinite(soft_delta) or soft_delta <= 0.0:
-        raise ValueError("connected coherence soft_delta must be positive")
-
     edges = np.asarray(r_edges.to_base_units().magnitude, dtype=float)
     support = np.asarray(midplane_support, dtype=float)
     if support.ndim != 2:
@@ -750,26 +484,25 @@ def _apply_connected_midplane_coherence(
         raise ValueError("values, disk-frame geometry, and validity must match")
 
     support = np.clip(support, 0.0, 1.0)
+    gate_support = _connectivity_gate(support, seed_min)
     radial_support = np.zeros_like(support, dtype=float)
     for iphi in range(support.shape[1]):
         seeds = np.flatnonzero(support[:, iphi] >= seed_min)
         if seeds.size == 0:
             continue
         start = int(seeds[0])
-        running = float(support[start, iphi])
+        running = float(gate_support[start, iphi])
         for ir in range(start, support.shape[0]):
-            running = min(running, float(support[ir, iphi]))
+            running = min(running, float(gate_support[ir, iphi]))
             if running <= floor:
                 break
             radial_support[ir, iphi] = running
 
     coverage = np.mean(radial_support, axis=1)
     coverage_smooth = gaussian_filter1d(coverage, sigma=2.0, mode="nearest")
-    coherence_score = _soft_cut_from_ratio(
-        coverage_smooth / seed_min,
-        soft_delta,
-        floor,
-    )
+    coverage_smooth = np.clip(coverage_smooth, 0.0, 1.0)
+    coherence_score = coverage_smooth**2 * (3.0 - 2.0 * coverage_smooth)
+    coherence_score[coherence_score <= floor] = 0.0
     coherence = np.zeros_like(coherence_score)
     coherent_seeds = np.flatnonzero(coherence_score >= seed_min)
     if coherent_seeds.size:
@@ -819,7 +552,7 @@ def _apply_vertical_connectivity(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Apply vertical weakest-link connectivity in the disc frame.
 
-    Local scores are accumulated on a cylindrical ``(R, theta_d, phi_d)``
+    Connectivity gates are accumulated on a cylindrical ``(R, theta_d, phi_d)``
     grid. Each side is propagated independently away from the midplane with a
     running minimum, preventing material from re-entering the disc above a
     failed layer without imposing a height or density cutoff.
@@ -924,81 +657,36 @@ def _apply_vertical_connectivity(
 
 
 def _build_disk_weight(
-    hard_mask: np.ndarray,
     criteria: JoosCriterionData,
     disk_frame: DiskFrameData,
     *,
-    weight_mode: str,
     soft_delta: Union[float, Mapping[str, float]],
     weight_m0: float,
     weight_floor: float,
-    r_edges: Optional[Quantity] = None,
-    theta_edges: Optional[np.ndarray] = None,
-    midplane_density_score: Optional[np.ndarray] = None,
+    r_edges: Quantity,
+    theta_edges: np.ndarray,
 ) -> np.ndarray:
-    mode = str(weight_mode).lower()
-    if mode in {"cell", "binary", "hard"}:
-        return hard_mask.astype(float)
-    if mode in {"soft", "soft_joos", "soft-connected", "soft_connected"}:
-        w_local = _compute_local_soft_joos_weight(
-            criteria,
-            soft_delta,
-            weight_floor,
-        )
-        if mode in {"soft", "soft_joos"}:
-            return w_local
-        if r_edges is None or theta_edges is None:
-            raise ValueError(
-                "soft_connected mode requires radial and disc-frame theta edges"
-            )
-        _w_cylindrical, midplane_support = _cylindrical_midplane_support(
-            w_local,
-            disk_frame,
-            criteria.valid,
-            r_edges,
-            seed_min=float(weight_m0),
-        )
-        if midplane_density_score is not None:
-            density_score = np.asarray(midplane_density_score, dtype=float)
-            if density_score.shape != (len(r_edges) - 1,):
-                raise ValueError(
-                    "midplane_density_score must match the cylindrical radial bins"
-                )
-            midplane_support = np.minimum(
-                midplane_support,
-                density_score[:, None],
-            )
-        w_midplane, _w_radial, _radial_support, _coverage, _coherence = (
-            _apply_connected_midplane_coherence(
-                w_local,
-                midplane_support,
-                disk_frame,
-                criteria.valid,
-                r_edges,
-                seed_min=float(weight_m0),
-                floor=float(weight_floor),
-                soft_delta=_soft_delta_value(soft_delta, "mach"),
-            )
-        )
-        w_connected, _vertical_support = _apply_vertical_connectivity(
-            w_midplane,
-            disk_frame,
-            criteria.valid,
-            r_edges,
-            theta_edges,
-            floor=float(weight_floor),
-        )
-        return w_connected
-    raise ValueError(
-        "weight_mode must be one of 'none', 'cell', 'soft', or 'soft_connected'"
+    """Cap local kinematic weights by the accepted connected support gates."""
+    w_local = _compute_local_soft_joos_weight(criteria, soft_delta, weight_floor)
+    midplane_support = _cylindrical_midplane_support(
+        w_local, disk_frame, criteria.valid, r_edges,
     )
+    local_gate = _connectivity_gate(w_local, float(weight_m0))
+    gate_midplane, _, _, _, _ = _apply_connected_midplane_coherence(
+        local_gate, midplane_support, disk_frame, criteria.valid, r_edges,
+        seed_min=float(weight_m0), floor=float(weight_floor),
+    )
+    gate_connected, _ = _apply_vertical_connectivity(
+        gate_midplane, disk_frame, criteria.valid, r_edges, theta_edges,
+        floor=float(weight_floor),
+    )
+    return np.minimum(w_local, gate_connected)
 
 
 # db-keywords: disk-mask
 # db-role: canonical
 def set_mask_from_joos_disk(
     model: "Model",
-    rho_disk_min: Optional[Quantity] = None,
     *,
     max_poloidal_mach: float = 1.0,
     rotational_support_factor: float = 2.0,
@@ -1006,337 +694,124 @@ def set_mask_from_joos_disk(
     r_max_for_axis: Quantity,
     n_r_bins: Optional[int] = None,
     n_theta_bins: Optional[int] = None,
-    weight_mode: str = "soft_connected",
     weight_m0: float = 0.50,
     weight_floor: float = 1e-4,
     soft_delta: Union[float, Mapping[str, float]] = 0.20,
     kinematic_smoothing_bins: Tuple[float, float, float] = (2.0, 1.0, 2.0),
-    rho_midplane_min: Optional[Quantity] = None,
-    midplane_density_softness_dex: float = 0.30,
-    midplane_density_smoothing_bins: float = 2.0,
 ) -> "SubModel":
-    """Create a disk region mask using the Joos et al. (2012) kinematic/pressure criteria.
+    """Construct the smoothed Joos-style disk weight with saturating connectivity.
 
-    This function:
-
-    1) Estimates the disk angular-momentum axis and transforms velocities into a disk frame.
-    2) Evaluates Joos-style criteria directly on individual cells:
-       - poloidal motion is subsonic
-       - rotational support dominates over thermal pressure
-       - optionally, density exceeds rho_disk_min
-    3) For ``soft_connected``, extracts density-weighted bulk kinematics,
-       requires radial connection to a disc-like cylindrical midplane
-       footpoint, caps narrow outer sectors by their annular coherence, and
-       optionally requires a dense azimuthally coherent midplane reservoir,
-       and prevents vertical re-entry with a weakest-link connection to the
-       midplane on each side.
-    4) Registers the boolean mask as model.gas["disk_mask"].
-    5) Returns a SubModel with the same boolean mask.
-
-    By default, it registers the connected continuous material split as
-    ``model.gas["disk_weight"]`` and defines the boolean disc mask at weight
-    0.5. Use ``weight_mode="cell"`` for a binary criterion mask or
-    ``weight_mode="soft"`` for local scores without connectivity.
+    Density-weighted smoothed velocities define the local poloidal-motion and
+    rotational-support scores. Radial, vertical and annular support gates cap
+    their minimum. The function registers ``disk_weight`` and its boolean
+    selection ``disk_mask`` at weight 0.5.
 
     Parameters
     ----------
     model : Model
-        DiskBridge model with a spherical mesh and gas fields.
-    rho_disk_min : Quantity or None, optional
-        Optional minimum local gas density to be considered disc-like.
-        The default, ``None``, disables both the hard density cut and its
-        continuous score. Supply a positive finite density to enable it.
+        Model with a spherical mesh and gas fields.
     max_poloidal_mach : float, optional
-        Maximum settled-flow poloidal Mach number. The sound speed is
-        ``sqrt(P/rho)`` and the poloidal speed is ``hypot(v_R,d, v_z,d)`` in
-        the measured disc frame.
+        Maximum poloidal Mach number, using ``hypot(v_R, v_z)/sqrt(P/rho)``.
     rotational_support_factor : float, optional
-        Minimum ratio denominator for rotational kinetic pressure versus
-        thermal pressure. A cell passes when
-        ``0.5 rho v_phi,d**2 > rotational_support_factor P``.
+        Required rotational-to-thermal ratio: ``0.5*rho*v_phi**2 > factor*P``.
     rho_core_min : Quantity
-        Density defining the axis-estimation core, independently of the
-        optional local disk-density criterion.
+        Gas density defining the independent angular-momentum axis estimator.
     r_max_for_axis : Quantity
-        Finite radius supporting only the angular-momentum axis estimate. It
-        does not truncate the material mask or weight.
+        Finite axis-estimation aperture [length], not a material cutoff.
     n_r_bins, n_theta_bins : int or None, optional
-        Optional radial downsampling and number of disc-frame polar bins.
-    weight_mode : str, optional
-        ``"none"`` skips ``disk_weight``; ``"cell"`` uses the binary mask;
-        ``"soft"`` uses local Joos margins; and the default
-        ``"soft_connected"`` adds
-        cylindrical radial and vertical connectivity plus a midplane annular-
-        coherence cap.
+        Number of cylindrical radial and disc-frame polar bins. Native sizes
+        are used when omitted.
     weight_m0 : float, optional
-        Minimum midplane seed weight for connected classification.
+        Raw midplane seed score and saturation point of the support gates.
     weight_floor : float, optional
-        Scores at or below this value are truncated to zero.
+        Numerical score/gate truncation floor.
     soft_delta : float or mapping, optional
-        Shared or criterion-specific softness in log-ratio space. Mapping keys
-        are ``"mach"``, ``"rot"``, ``"rho"``, or ``"default"``. The
-        ``"rho"`` width is used only when ``rho_disk_min`` is provided.
+        Local sigmoid widths in log-ratio space. Mapping keys are ``"mach"``,
+        ``"rot"`` and ``"default"``.
     kinematic_smoothing_bins : tuple of float, optional
-        Gaussian sigma in native ``(r, theta, phi)`` cells for the
-        density-weighted velocity background used by ``soft_connected``.
-    rho_midplane_min : Quantity or None, optional
-        Midplane gas density giving a support score of 0.5. When provided for
-        ``soft_connected``, the smoothed azimuthal-median density at each
-        disc-frame cylindrical radius caps the full vertical column. This is
-        separate from the cell-local ``rho_disk_min`` criterion.
-    midplane_density_softness_dex : float, optional
-        Logistic transition width in dex around ``rho_midplane_min``.
-    midplane_density_smoothing_bins : float, optional
-        Gaussian smoothing width in cylindrical radial bins for the
-        azimuthal-median log midplane-density profile.
+        Density-weighted Gaussian velocity smoothing sigma in native
+        ``(r, theta, phi)`` cells.
 
     Returns
     -------
     SubModel
-        Disc region with a boolean mask.
+        Disk region registered on the model, with the boolean weight-0.5 mask.
 
     Raises
     ------
     ValueError
-        If the mesh, axis support, binning, or weight parameters are invalid.
+        If geometry, axis support, physical thresholds or weighting controls
+        are invalid.
     KeyError
-        If required gas fields are missing.
+        If required gas fields or criterion softness values are missing.
     """
     mesh = model.mesh
     if mesh.coord_system != "spherical":
         raise ValueError(
             f"set_mask_from_joos_disk only supports spherical coordinates, got {mesh.coord_system}"
         )
-
-    r_c = mesh.centers("r")
-    theta_c = mesh.centers("theta")
-    phi_c = mesh.centers("phi")
-    r_e = mesh.edges("r")
-    theta_e = mesh.edges("theta")
-    phi_e = mesh.edges("phi")
-    if r_c is None or theta_c is None or phi_c is None:
-        raise ValueError("Mesh is missing one or more spherical center axes")
-    if r_e is None or theta_e is None or phi_e is None:
-        raise ValueError("Mesh is missing one or more spherical edge axes")
-
-    n_bins_native = len(theta_c)
-
+    r_c, theta_c, phi_c = (mesh.centers(axis) for axis in ("r", "theta", "phi"))
+    r_e, theta_e, phi_e = (mesh.edges(axis) for axis in ("r", "theta", "phi"))
+    if any(value is None for value in (r_c, theta_c, phi_c, r_e, theta_e, phi_e)):
+        raise ValueError("Mesh is missing spherical coordinate axes")
     r3 = (r_e[1:] ** 3 - r_e[:-1] ** 3) / 3.0
-    theta_e_rad = theta_e.to("radian").magnitude
-    dcos = np.cos(theta_e_rad[:-1]) - np.cos(theta_e_rad[1:])
-    phi_e_rad = phi_e.to("radian").magnitude
-    dphi = phi_e_rad[1:] - phi_e_rad[:-1]
+    dcos = np.cos(theta_e.to("radian").magnitude[:-1]) - np.cos(theta_e.to("radian").magnitude[1:])
+    dphi = np.diff(phi_e.to("radian").magnitude)
     dV = r3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
     rho = model.gas["density"].data.to_base_units()
     vr = model.gas["vr"].data.to_base_units()
     vphi = model.gas["vphi"].data.to_base_units()
     vtheta = model.gas["vtheta"].data.to_base_units()
-
     r_grid, theta_grid, phi_grid = spherical_grids(
-        r_c.to_base_units(),
-        theta_c.to("radian"),
-        phi_c.to("radian"),
+        r_c.to_base_units(), theta_c.to("radian"), phi_c.to("radian"),
     )
-
     k_hat = _compute_disk_orientation(
         model, rho, dV, r_grid, theta_grid, phi_grid,
-        vr, vphi, vtheta, rho_core_min, r_max_for_axis
+        vr, vphi, vtheta, rho_core_min, r_max_for_axis,
     )
-
     disk_frame = _transform_to_disk_frame(
-        mesh, r_grid, theta_grid, phi_grid, vr, vphi, vtheta, k_hat
+        mesh, r_grid, theta_grid, phi_grid, vr, vphi, vtheta, k_hat,
     )
-
-    Pth = _compute_thermal_pressure(model, rho)
-
-    r_edges, theta_edges, n_theta_bins = _setup_binning(
-        mesh, n_r_bins, n_theta_bins, n_bins_native, disk_frame, r_grid
+    r_edges, theta_edges, ntheta = _setup_binning(
+        mesh, n_r_bins, n_theta_bins, len(theta_c), disk_frame, r_grid,
     )
-    nR = len(r_edges) - 1
-
     r_bin = np.digitize(r_grid.to_base_units().magnitude, r_edges.magnitude) - 1
     t_bin = np.digitize(disk_frame.theta_from_midplane, theta_edges) - 1
-    valid = (r_bin >= 0) & (r_bin < nR) & (t_bin >= 0) & (t_bin < n_theta_bins)
-
+    valid = (r_bin >= 0) & (r_bin < len(r_edges)-1) & (t_bin >= 0) & (t_bin < ntheta)
+    weight_frame = _smooth_disk_frame_kinematics(rho, disk_frame, kinematic_smoothing_bins)
     criteria = _compute_joos_criterion_data(
-        rho,
-        disk_frame,
-        Pth,
-        valid,
-        rho_disk_min,
-        float(max_poloidal_mach),
-        float(rotational_support_factor),
+        rho, weight_frame, _compute_thermal_pressure(model, rho), valid,
+        float(max_poloidal_mach), float(rotational_support_factor),
     )
-
-    mask_vertical = _apply_hard_midplane_connectivity(
-        criteria.hard_pass,
-        disk_frame,
-        valid,
+    w_disk = _build_disk_weight(
+        criteria, weight_frame, soft_delta=soft_delta, weight_m0=weight_m0,
+        weight_floor=weight_floor, r_edges=r_edges, theta_edges=theta_edges,
     )
-    mask = _apply_radial_midplane_connectivity(
-        mask_vertical,
-        disk_frame,
-        valid,
-        seed_min=1.0,
-        floor=0.0,
-    ) > 0.5
-
-    mode = str(weight_mode).lower()
-    connected_mode = mode in {"soft-connected", "soft_connected"}
-    if rho_midplane_min is not None and not connected_mode:
-        raise ValueError(
-            "rho_midplane_min is only supported with weight_mode='soft_connected'"
-        )
-    if mode != "none":
-        weight_frame = disk_frame
-        weight_criteria = criteria
-        if connected_mode:
-            weight_frame = _smooth_disk_frame_kinematics(
-                rho,
-                disk_frame,
-                kinematic_smoothing_bins,
-            )
-            weight_criteria = _compute_joos_criterion_data(
-                rho,
-                weight_frame,
-                Pth,
-                valid,
-                rho_disk_min,
-                float(max_poloidal_mach),
-                float(rotational_support_factor),
-            )
-        midplane_density_cell_score = None
-        midplane_density_profile = None
-        midplane_density_score = None
-        if rho_midplane_min is not None:
-            (
-                midplane_density_cell_score,
-                midplane_density_profile,
-                midplane_density_score,
-            ) = _midplane_density_support(
-                rho,
-                weight_frame,
-                valid,
-                r_edges,
-                rho_midplane_min,
-                softness_dex=float(midplane_density_softness_dex),
-                smoothing_bins=float(midplane_density_smoothing_bins),
-                floor=float(weight_floor),
-            )
-        w_disk = _build_disk_weight(
-            mask,
-            weight_criteria,
-            weight_frame,
-            weight_mode=weight_mode,
-            soft_delta=soft_delta,
-            weight_m0=weight_m0,
-            weight_floor=weight_floor,
-            r_edges=r_edges,
-            theta_edges=theta_edges,
-            midplane_density_score=midplane_density_score,
-        )
-        if connected_mode:
-            mask = w_disk >= 0.5
-        if midplane_density_cell_score is not None:
-            model.gas_register(
-                "disk_midplane_density_support",
-                Field(
-                    data=Quantity(
-                        np.clip(midplane_density_cell_score, 0.0, 1.0),
-                        "dimensionless",
-                    ),
-                    quantity="mask",
-                    axis_order=mesh.axis_names(),
-                    attrs={
-                        "source": "disc_frame_midplane_density",
-                        "rho_midplane_min_g_cm3": float(
-                            rho_midplane_min.to("g/cm^3").magnitude
-                        ),
-                        "softness_dex": float(midplane_density_softness_dex),
-                        "smoothing_bins": float(midplane_density_smoothing_bins),
-                        "azimuthal_statistic": "median",
-                        "radial_profile_min_g_cm3": float(
-                            Quantity(midplane_density_profile, rho.units)
-                            .to("g/cm^3")
-                            .magnitude.min()
-                        ),
-                        "radial_profile_max_g_cm3": float(
-                            Quantity(midplane_density_profile, rho.units)
-                            .to("g/cm^3")
-                            .magnitude.max()
-                        ),
-                        "radial_centres_au": tuple(
-                            float(value)
-                            for value in (
-                                0.5 * (r_edges[:-1] + r_edges[1:])
-                            ).to("au").magnitude
-                        ),
-                        "radial_profile_g_cm3": tuple(
-                            float(value)
-                            for value in Quantity(
-                                midplane_density_profile,
-                                rho.units,
-                            ).to("g/cm^3").magnitude
-                        ),
-                        "radial_support_score": tuple(
-                            float(value) for value in midplane_density_score
-                        ),
-                    },
-                ),
-            )
-        w_field = Field(
-            data=Quantity(np.clip(w_disk, 0.0, 1.0), "dimensionless"),
-            quantity="mask",
-            axis_order=mesh.axis_names(),
-            attrs={
-                "source": "joos_disk",
-                "disk_axis_cartesian": tuple(float(value) for value in k_hat),
-                "r_max_for_axis_au": float(r_max_for_axis.to("au").magnitude),
-                "max_poloidal_mach": float(max_poloidal_mach),
-                "rotational_support_factor": float(rotational_support_factor),
-                "rho_disk_min_g_cm3": (
-                    None
-                    if rho_disk_min is None
-                    else float(rho_disk_min.to("g/cm^3").magnitude)
-                ),
-                "weight_mode": str(weight_mode),
-                "soft_delta": (
-                    dict(soft_delta)
-                    if isinstance(soft_delta, Mapping)
-                    else float(soft_delta)
-                ),
-                "weight_m0": float(weight_m0),
-                "weight_floor": float(weight_floor),
-                "kinematic_smoothing_bins": tuple(
-                    float(value) for value in kinematic_smoothing_bins
-                ),
-                "midplane_connectivity": "radial_weakest_link",
-                "azimuthal_coherence": "phi_mean_running_minimum",
-                "vertical_connectivity": "midplane_weakest_link",
-                "rho_midplane_min_g_cm3": (
-                    None
-                    if rho_midplane_min is None
-                    else float(rho_midplane_min.to("g/cm^3").magnitude)
-                ),
-                "midplane_density_softness_dex": float(
-                    midplane_density_softness_dex
-                ),
-                "midplane_density_smoothing_bins": float(
-                    midplane_density_smoothing_bins
-                ),
-            },
-        )
-        model.gas_register("disk_weight", w_field)
-
-    disk_region = model.set_mask_from_array(mask, is_a_disk=True)
-    disk_region.mask = Field(
-        data=disk_region.mask.data,
-        quantity=disk_region.mask.quantity,
-        axis_order=disk_region.mask.axis_order,
+    model.gas_register("disk_weight", Field(
+        data=Quantity(np.clip(w_disk, 0.0, 1.0), "dimensionless"),
+        quantity="mask", axis_order=mesh.axis_names(),
         attrs={
-            "source": "joos_disk",
+            "source": "joos_disk", "method": "saturating_connected",
             "disk_axis_cartesian": tuple(float(value) for value in k_hat),
+            "rho_core_min_g_cm3": float(rho_core_min.to("g/cm^3").magnitude),
+            "r_max_for_axis_au": float(r_max_for_axis.to("au").magnitude),
+            "max_poloidal_mach": float(max_poloidal_mach),
+            "rotational_support_factor": float(rotational_support_factor),
+            "soft_delta": dict(soft_delta) if isinstance(soft_delta, Mapping) else float(soft_delta),
+            "weight_m0": float(weight_m0), "weight_floor": float(weight_floor),
+            "kinematic_smoothing_bins": tuple(float(value) for value in kinematic_smoothing_bins),
+            "midplane_connectivity": "radial_weakest_link",
+            "azimuthal_coherence": "phi_mean_running_minimum",
+            "coherence_score": "smoothstep",
+            "connectivity_gate": "smoothstep_saturating_at_weight_m0",
+            "vertical_connectivity": "midplane_weakest_link",
         },
+    ))
+    disk_region = model.set_mask_from_array(w_disk >= 0.5, is_a_disk=True)
+    disk_region.mask = Field(
+        data=disk_region.mask.data, quantity=disk_region.mask.quantity,
+        axis_order=disk_region.mask.axis_order,
+        attrs={"source": "joos_disk", "disk_axis_cartesian": tuple(float(value) for value in k_hat)},
     )
     model.gas_register("disk_mask", disk_region.mask)
     return disk_region

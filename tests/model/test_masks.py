@@ -1,7 +1,7 @@
 """Tests for DiskBridge disk-mask weighting contracts.
 
 These tests use tiny synthetic models to check objective mask invariants such as
-soft-weight ranges, threshold behavior, monotonicity, and binary cell mode.
+soft-weight ranges, threshold behavior, monotonicity, and connectivity.
 """
 
 # db-keywords: disk-mask, validation, units, model, mesh, field
@@ -24,39 +24,11 @@ from diskbridge.model.masking import (
     _build_disk_weight,
     _compute_disk_orientation,
     _compute_joos_criterion_data,
-    _apply_radial_midplane_connectivity,
+    _connectivity_gate,
     _cylindrical_midplane_support,
-    _midplane_density_support,
     _soft_cut_from_ratio,
 )
 from diskbridge.model.mesh import Axis, Mesh
-
-
-def _criteria_fixture() -> JoosCriterionData:
-    valid = np.ones((1, 1, 2), dtype=bool)
-    q = np.ones_like(valid, dtype=float)
-    return JoosCriterionData(
-        valid=valid,
-        q_pol=q,
-        q_rot=q,
-        q_rho=q,
-        hard_pass=valid.copy(),
-    )
-
-
-def _disk_frame_fixture() -> DiskFrameData:
-    shape = (1, 1, 2)
-    zeros = np.zeros(shape, dtype=float)
-    velocity = Quantity(zeros, "cm/s")
-    return DiskFrameData(
-        k_hat=np.array([0.0, 0.0, 1.0], dtype=float),
-        R_d=zeros,
-        z_d=zeros,
-        vR_d=velocity,
-        vphi_d=velocity,
-        vz_d=velocity,
-        theta_from_midplane=zeros,
-    )
 
 
 def test_soft_cut_threshold_is_half():
@@ -86,6 +58,20 @@ def test_soft_cut_preserves_smooth_high_score_complement():
     assert np.allclose(complement, expected_complement, rtol=1.0e-11)
 
 
+def test_connectivity_gate_saturates_smoothly_without_rounding_local_scores():
+    """Saturation has no jump or slope discontinuity at the existing seed."""
+    scores = np.linspace(0.0, 1.0, 1001)
+    gate = _connectivity_gate(scores, 0.5)
+    assert np.all(np.diff(gate) >= 0)
+    assert np.all((gate >= 0) & (gate <= 1))
+    np.testing.assert_array_equal(gate[scores >= 0.5], 1.0)
+    assert gate[0] == 0.0
+    offsets = np.array([1e-3, 5e-4, 2.5e-4])
+    deficit = 1 - _connectivity_gate(0.5-offsets, 0.5)
+    # Quadratic approach gives a vanishing left derivative; right is flat.
+    np.testing.assert_allclose(deficit[:-1]/deficit[1:], 4.0, rtol=0.002)
+
+
 def test_poloidal_mach_uses_combined_radial_and_vertical_speed():
     """Two subsonic components may still form a supersonic poloidal flow."""
     shape = (1, 1, 1)
@@ -104,18 +90,17 @@ def test_poloidal_mach_uses_combined_radial_and_vertical_speed():
         frame,
         Quantity(np.full(shape, 0.01), "dyn/cm^2"),
         np.ones(shape, dtype=bool),
-        Quantity(0.1, "g/cm^3"),
         1.0,
         2.0,
     )
 
     assert np.isclose(criteria.q_pol.item(), 0.1 / np.hypot(0.08, 0.08))
-    assert not criteria.hard_pass.item()
+    assert criteria.q_pol.item() < 1.0
 
 
 @pytest.fixture
 def rotating_model():
-    """Diffuse, subsonic rotating gas isolates the optional density cut."""
+    """Diffuse, subsonic rotating gas with a well-defined angular-momentum axis."""
     model = Model()
     model.mesh = Mesh.spherical(
         r=Axis(edges=Quantity(np.array([1.0, 2.0]), "cm")),
@@ -140,80 +125,12 @@ def rotating_model():
     return model
 
 
-@pytest.mark.parametrize("mode", ["none", "cell", "soft", "soft_connected"])
-def test_local_density_criterion_is_opt_in(rotating_model, mode):
-    """Only an explicit local threshold excludes otherwise disk-like gas."""
-    model = rotating_model
-    common = dict(
-        rho_core_min=Quantity(5e-25, "g/cm^3"),
-        r_max_for_axis=Quantity(2.0, "cm"),
-        weight_mode=mode,
-        soft_delta={"mach": 0.2, "rot": 0.2},
-    )
-    region = model.set_mask_from_joos_disk(**common)
-    selected = region.mask.data.magnitude.copy()
-    assert np.any(selected)
-    axis = region.mask.attrs["disk_axis_cartesian"]
-    if mode != "none":
-        default_weight = model.gas["disk_weight"].data.magnitude.copy()
-        assert np.all(default_weight[selected] > 0.5)
-        assert model.gas["disk_weight"].attrs["rho_disk_min_g_cm3"] is None
-
-    common["soft_delta"] = {"mach": 0.2, "rot": 0.2, "rho": 0.3}
-    region = model.set_mask_from_joos_disk(
-        rho_disk_min=Quantity(1e-20, "kg/m^3"), **common
-    )
-    assert not np.any(region.mask.data.magnitude)
-    assert np.allclose(region.mask.attrs["disk_axis_cartesian"], axis)
-    if mode != "none":
-        enabled_weight = model.gas["disk_weight"].data.magnitude
-        assert np.all(enabled_weight <= default_weight)
-        assert np.any(enabled_weight < default_weight)
-        assert model.gas["disk_weight"].attrs["rho_disk_min_g_cm3"] == pytest.approx(1e-23)
-
-
-@pytest.mark.parametrize("threshold", [0.0, -1.0, np.nan, np.inf])
-def test_local_density_criterion_rejects_invalid_threshold(rotating_model, threshold):
-    with pytest.raises(ValueError, match="rho_disk_min.*positive finite"):
-        rotating_model.set_mask_from_joos_disk(
-            rho_disk_min=Quantity(threshold, "g/cm^3"),
-            rho_core_min=Quantity(5e-25, "g/cm^3"),
-            r_max_for_axis=Quantity(2.0, "cm"),
-        )
-
-
-def test_midplane_density_support_remains_independent(rotating_model):
-    """Disabling the local cut does not disable the column's density cap."""
-    model = rotating_model
-    model.set_mask_from_joos_disk(
-        rho_core_min=Quantity(5e-25, "g/cm^3"),
-        r_max_for_axis=Quantity(2.0, "cm"),
-        rho_midplane_min=Quantity(2e-24, "g/cm^3"),
-        soft_delta={"mach": 0.2, "rot": 0.2},
-    )
-    assert np.all(model.gas["disk_midplane_density_support"].data.magnitude < 0.5)
-    assert not np.any(model.gas["disk_mask"].data.magnitude)
-
-
 def test_axis_density_is_explicit(rotating_model):
     with pytest.raises(TypeError, match="rho_core_min"):
         rotating_model.set_mask_from_joos_disk(r_max_for_axis=Quantity(2.0, "cm"))
 
 
-def test_cell_mode_stays_binary():
-    w = _build_disk_weight(
-        hard_mask=np.array([[[False, True]]]),
-        criteria=_criteria_fixture(),
-        disk_frame=_disk_frame_fixture(),
-        weight_mode="cell",
-        soft_delta=0.20,
-        weight_m0=0.50,
-        weight_floor=1e-4,
-    )
-    assert set(np.unique(w)) <= {0.0, 1.0}
-
-
-def test_soft_connected_mode_produces_fractional_weight_on_tiny_model():
+def test_connected_mask_produces_fractional_weight_on_tiny_model():
     model = Model()
     model.mesh = Mesh.spherical(
         r=Axis(edges=Quantity(np.array([1.0, 2.0]), "cm")),
@@ -261,10 +178,9 @@ def test_soft_connected_mode_produces_fractional_weight_on_tiny_model():
     )
 
     model.set_mask_from_joos_disk(
-        rho_disk_min=Quantity(0.1, "g/cm^3"),
         rho_core_min=Quantity(0.1, "g/cm^3"),
         r_max_for_axis=Quantity(2.0, "cm"),
-        soft_delta={"mach": 0.20, "rot": 0.20, "rho": 0.30},
+        soft_delta={"mach": 0.20, "rot": 0.20},
         weight_m0=0.50,
         weight_floor=1e-4,
     )
@@ -277,22 +193,6 @@ def test_soft_connected_mode_produces_fractional_weight_on_tiny_model():
         model.gas["disk_weight"].attrs["disk_axis_cartesian"],
         model.gas["disk_mask"].attrs["disk_axis_cartesian"],
     )
-
-    model.set_mask_from_joos_disk(
-        rho_disk_min=Quantity(0.1, "g/cm^3"),
-        rho_core_min=Quantity(0.1, "g/cm^3"),
-        r_max_for_axis=Quantity(2.0, "cm"),
-        soft_delta={"mach": 0.20, "rot": 0.20, "rho": 0.30},
-        weight_m0=0.50,
-        weight_floor=1e-4,
-        rho_midplane_min=Quantity(0.2, "g/cm^3"),
-        midplane_density_softness_dex=0.30,
-        midplane_density_smoothing_bins=1.0,
-    )
-    support = model.gas["disk_midplane_density_support"]
-    assert support.data.shape == shape
-    assert support.attrs["rho_midplane_min_g_cm3"] == 0.2
-    assert support.attrs["azimuthal_statistic"] == "median"
 
 
 def test_transonic_poloidal_limit_rejects_fast_infall():
@@ -330,10 +230,8 @@ def test_transonic_poloidal_limit_rejects_fast_infall():
         model.gas_register(name, Field(name, Quantity(values, unit), axis_order))
 
     common = {
-        "rho_disk_min": Quantity(0.1, "g/cm^3"),
         "rho_core_min": Quantity(0.1, "g/cm^3"),
         "r_max_for_axis": Quantity(2.0, "cm"),
-        "weight_mode": "soft_connected",
         "weight_m0": 0.50,
         "weight_floor": 1.0e-4,
     }
@@ -382,10 +280,8 @@ def test_axis_support_radius_does_not_truncate_disk_weight():
         model.gas_register(name, Field(name, Quantity(values, unit), axis_order))
 
     model.set_mask_from_joos_disk(
-        rho_disk_min=Quantity(0.1, "g/cm^3"),
         rho_core_min=Quantity(0.1, "g/cm^3"),
         r_max_for_axis=Quantity(2.0, "cm"),
-        weight_mode="soft_connected",
         weight_m0=0.5,
     )
 
@@ -478,39 +374,6 @@ def test_axis_radial_support_excludes_massive_outer_stream():
         )
 
 
-def test_radial_connectivity_caps_outward_weight_and_rejects_reentry():
-    values = np.array([0.8, 0.6, 0.7, 0.9], dtype=float).reshape(4, 1, 1)
-    valid = np.ones_like(values, dtype=bool)
-    frame = DiskFrameData(
-        k_hat=np.array([0.0, 0.0, 1.0]),
-        R_d=np.arange(4, dtype=float).reshape(4, 1, 1),
-        z_d=np.zeros_like(values),
-        vR_d=Quantity(np.zeros_like(values), "cm/s"),
-        vphi_d=Quantity(np.zeros_like(values), "cm/s"),
-        vz_d=Quantity(np.zeros_like(values), "cm/s"),
-        theta_from_midplane=np.zeros_like(values),
-    )
-
-    connected = _apply_radial_midplane_connectivity(
-        values,
-        frame,
-        valid,
-        seed_min=0.5,
-        floor=0.0,
-    )
-    assert np.allclose(connected[:, 0, 0], [0.8, 0.6, 0.6, 0.6])
-
-    values[2, 0, 0] = 0.0
-    connected = _apply_radial_midplane_connectivity(
-        values,
-        frame,
-        valid,
-        seed_min=0.5,
-        floor=0.0,
-    )
-    assert np.allclose(connected[:, 0, 0], [0.8, 0.6, 0.0, 0.0])
-
-
 def test_cylindrical_support_uses_the_cells_midplane_footpoint():
     """An elevated outer-shell cell may connect to an inner cylindrical footpoint."""
     shape = (2, 3, 2)
@@ -543,106 +406,21 @@ def test_cylindrical_support_uses_the_cells_midplane_footpoint():
         phi_d=phi,
     )
 
-    connected, support = _cylindrical_midplane_support(
+    support = _cylindrical_midplane_support(
         local,
         frame,
         valid,
         Quantity(np.array([0.0, 1.0, 2.0]), "cm"),
-        seed_min=0.5,
     )
 
     assert np.allclose(support[0], 0.9)
-    assert np.allclose(connected[1, 2], 0.8)
-    assert np.all(connected[1, 1] == 0.0)
-
-
-def test_midplane_density_support_uses_robust_annular_profile_for_full_column():
-    """A dense midplane supports its atmosphere; one streamer cannot support an annulus."""
-    shape = (3, 3, 5)
-    density = np.full(shape, 1.0e-6, dtype=float)
-    density[:, 1, :] = np.array(
-        [
-            [100.0, 100.0, 100.0, 100.0, 1.0e8],
-            [10.0, 10.0, 10.0, 10.0, 1.0e8],
-            [1.0, 1.0, 1.0, 1.0, 1.0e8],
-        ]
+    assert np.allclose(support[1], 0.1)
+    _, radial, _, _, _ = _apply_connected_midplane_coherence(
+        _connectivity_gate(local, 0.5), support, frame, valid,
+        Quantity(np.array([0.0, 1.0, 2.0]), "cm"), seed_min=0.5, floor=1e-4,
     )
-    radius = np.broadcast_to(
-        (np.arange(3, dtype=float) + 0.5)[:, None, None],
-        shape,
-    )
-    theta = np.broadcast_to(
-        np.array([-0.2, 0.0, 0.2])[None, :, None],
-        shape,
-    )
-    phi = np.broadcast_to(
-        np.linspace(-np.pi, np.pi, shape[2], endpoint=False)[None, None, :],
-        shape,
-    )
-    zeros = np.zeros(shape, dtype=float)
-    frame = DiskFrameData(
-        k_hat=np.array([0.0, 0.0, 1.0]),
-        R_d=radius,
-        z_d=zeros,
-        vR_d=Quantity(zeros, "cm/s"),
-        vphi_d=Quantity(zeros, "cm/s"),
-        vz_d=Quantity(zeros, "cm/s"),
-        theta_from_midplane=theta,
-        phi_d=phi,
-    )
-
-    cell_score, profile, radial_score = _midplane_density_support(
-        Quantity(density, "g/cm^3"),
-        frame,
-        np.ones(shape, dtype=bool),
-        Quantity(np.arange(4, dtype=float), "cm"),
-        Quantity(10.0, "g/cm^3"),
-        softness_dex=0.30,
-        smoothing_bins=1.0e-6,
-        floor=0.0,
-    )
-
-    assert np.allclose(profile, [100.0, 10.0, 1.0])
-    assert np.isclose(radial_score[1], 0.5)
-    assert radial_score[0] > radial_score[1] > radial_score[2]
-    assert np.allclose(cell_score[:, 0, :], radial_score[:, None])
-    assert np.allclose(cell_score[:, 2, :], radial_score[:, None])
-
-
-def test_midplane_density_support_rejects_invalid_parameters():
-    shape = (1, 1, 1)
-    zeros = np.zeros(shape, dtype=float)
-    frame = DiskFrameData(
-        k_hat=np.array([0.0, 0.0, 1.0]),
-        R_d=np.full(shape, 0.5),
-        z_d=zeros,
-        vR_d=Quantity(zeros, "cm/s"),
-        vphi_d=Quantity(zeros, "cm/s"),
-        vz_d=Quantity(zeros, "cm/s"),
-        theta_from_midplane=zeros,
-    )
-    common = (
-        Quantity(np.ones(shape), "g/cm^3"),
-        frame,
-        np.ones(shape, dtype=bool),
-        Quantity(np.array([0.0, 1.0]), "cm"),
-        Quantity(0.1, "g/cm^3"),
-    )
-
-    with np.testing.assert_raises_regex(ValueError, "softness"):
-        _midplane_density_support(
-            *common,
-            softness_dex=0.0,
-            smoothing_bins=1.0,
-            floor=0.0,
-        )
-    with np.testing.assert_raises_regex(ValueError, "smoothing"):
-        _midplane_density_support(
-            *common,
-            softness_dex=0.3,
-            smoothing_bins=0.0,
-            floor=0.0,
-        )
+    assert np.allclose(np.minimum(local[1, 2], radial[1, 2]), 0.8)
+    assert np.all(radial[1, 1] < 0.5)
 
 
 def test_connected_coherence_rejects_narrow_streamer_and_detached_island():
@@ -678,24 +456,27 @@ def test_connected_coherence_rejects_narrow_streamer_and_detached_island():
             Quantity(np.arange(nr + 1, dtype=float), "cm"),
             seed_min=0.5,
             floor=1.0e-4,
-            soft_delta=0.2,
         )
     )
 
-    assert np.allclose(radial_support[:6], 0.9)
-    assert np.allclose(radial_support[6:, 0], 0.9)
+    assert np.allclose(radial_support[:6], 1.0)
+    assert np.allclose(radial_support[6:, 0], 1.0)
     assert np.all(radial_support[8:11, 1] == 0.0)
     assert np.all(radial[8:11, 0, 1] == 0.0)
-    assert np.allclose(coverage[-1], 0.09)
+    assert np.allclose(coverage[-1], 0.1)
+    assert np.all((coherence >= 0.0) & (coherence <= 1.0))
+    assert np.all(np.diff(coherence) <= 0.0)
     assert coherence[-1] < 0.5
     assert np.all(coherent[-1, 0] < 0.5)
 
 
-def test_connected_coherence_retains_a_full_coherent_annulus():
+@pytest.mark.parametrize("support_value", [0.0, 0.5, 0.8, 1.0])
+def test_connected_coherence_retains_a_full_coherent_annulus(support_value):
+    """Full support must admit pure disc without rounding up partial weights."""
     nr, nphi = 8, 6
     shape = (nr, 1, nphi)
-    values = np.full(shape, 0.8, dtype=float)
-    support = np.full((nr, nphi), 0.8, dtype=float)
+    values = np.full(shape, support_value, dtype=float)
+    support = np.full((nr, nphi), support_value, dtype=float)
     radius = np.broadcast_to(
         (np.arange(nr, dtype=float) + 0.5)[:, None, None],
         shape,
@@ -720,13 +501,67 @@ def test_connected_coherence_retains_a_full_coherent_annulus():
             Quantity(np.arange(nr + 1, dtype=float), "cm"),
             seed_min=0.5,
             floor=1.0e-4,
-            soft_delta=0.2,
         )
     )
 
-    assert np.allclose(coverage, 0.8)
-    assert np.all(coherence >= 0.8)
-    assert np.allclose(coherent, 0.8)
+    expected_gate = 0.0 if support_value == 0.0 else 1.0
+    assert np.allclose(coverage, expected_gate)
+    assert np.all((coherence >= support_value) & (coherence <= 1))
+    assert np.allclose(coherent, support_value)
+    np.testing.assert_allclose(coherence, expected_gate, rtol=0, atol=2*np.finfo(float).eps)
+
+
+def test_connected_mask_allows_nearly_pure_disc(rotating_model):
+    """Strong local support must not acquire a fixed ISM complement."""
+    rotating_model.set_mask_from_joos_disk(
+        rho_core_min=Quantity(5e-25, "g/cm^3"),
+        r_max_for_axis=Quantity(2.0, "cm"),
+    )
+    weight = rotating_model.gas["disk_weight"].data.magnitude
+    assert weight.max() > 0.999
+    assert np.all((weight >= 0) & (weight <= 1))
+
+
+@pytest.mark.parametrize("direction", ["radial", "vertical"])
+def test_connected_gates_preserve_passing_scores_and_taper_weak_links(direction):
+    """Passing links leave local fractions intact; failing links attenuate smoothly."""
+    shape = (12, 6, 8)
+    radius = np.broadcast_to((np.arange(12)+0.5)[:, None, None], shape)
+    angles = np.broadcast_to(np.linspace(-0.5, 0.5, 6)[None, :, None], shape)
+    zeros = np.zeros(shape)
+    frame = DiskFrameData(
+        k_hat=np.array([0.0, 0.0, 1.0]), R_d=radius, z_d=zeros,
+        vR_d=Quantity(zeros, "cm/s"), vphi_d=Quantity(zeros, "cm/s"),
+        vz_d=Quantity(zeros, "cm/s"), theta_from_midplane=angles,
+    )
+    target = (11, 3, 0) if direction == "radial" else (11, 5, 0)
+    sampled = []
+    for link_score in (0.0, 0.2, 0.3, 0.4, 0.5, 0.6):
+        local = np.full(shape, 0.95)
+        local[0] = 0.6  # This passing inner link must not cap the outer disc.
+        if direction == "radial":
+            local[5] = link_score
+        else:
+            local[:, 4] = link_score
+        q = (local/(1-local))**0.2
+        criteria = JoosCriterionData(
+            valid=np.ones(shape, dtype=bool), q_pol=q,
+            q_rot=np.full(shape, 1e6),
+        )
+        weight = _build_disk_weight(
+            criteria, frame,
+            soft_delta=0.2, weight_m0=0.5, weight_floor=1e-4,
+            r_edges=Quantity(np.arange(13), "cm"),
+            theta_edges=np.linspace(-0.6, 0.6, 7),
+        )
+        assert np.all(weight <= local+1e-12)
+        sampled.append(weight[target])
+        if link_score >= 0.5:
+            np.testing.assert_allclose(weight, local, rtol=1e-7, atol=1e-7)
+    assert sampled[0] == 0.0
+    assert np.all(np.diff(sampled) >= -1e-7)
+    assert 0.0 < sampled[1] < sampled[2] < sampled[3] < sampled[4]
+    assert sampled[-1] == pytest.approx(0.95)
 
 
 def test_vertical_connectivity_rejects_reentry_on_each_side():
@@ -793,6 +628,5 @@ def test_joos_axis_support_is_required():
 
     with np.testing.assert_raises_regex(TypeError, "r_max_for_axis"):
         model.set_mask_from_joos_disk(
-            rho_disk_min=Quantity(0.1, "g/cm^3"),
             rho_core_min=Quantity(0.1, "g/cm^3"),
         )
