@@ -44,6 +44,9 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Annular coherence in the connected disc classifier applies its smoothed
+  azimuthal cap separately at each radius after the first qualifying annulus.
+  Radial and vertical weakest-link connectivity are retained.
 - The disk-mask axis-selection density `rho_core_min` is now explicit and
   independent of the kinematic material criteria.
 - Saved chemistry loading can select an exact set of binary number-density

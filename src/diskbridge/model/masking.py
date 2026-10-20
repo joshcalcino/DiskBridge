@@ -466,9 +466,9 @@ def _apply_connected_midplane_coherence(
     detached island cannot re-enter after a failed column. The phi-mean of
     that connected gate support is smoothed and mapped to
     a coherence cap with ``C**2 * (3 - 2*C)``. This preserves zero, half, and
-    full support, including unity at full support. The cap is propagated
-    monotonically outward, suppressing narrow streamers. Both continuous
-    gates cap the supplied 3-D connectivity gates.
+    full support, including unity at full support. From the first qualifying
+    annulus onward, the cap is applied at each radius to suppress narrow
+    streamers. Both continuous gates cap the supplied 3-D connectivity gates.
     """
     if not 0.0 <= floor < seed_min <= 1.0:
         raise ValueError(
@@ -507,7 +507,7 @@ def _apply_connected_midplane_coherence(
     coherent_seeds = np.flatnonzero(coherence_score >= seed_min)
     if coherent_seeds.size:
         start = int(coherent_seeds[0])
-        coherence[start:] = np.minimum.accumulate(coherence_score[start:])
+        coherence[start:] = coherence_score[start:]
 
     coherent_support = np.minimum(radial_support, coherence[:, None])
     phi_bins = _disk_phi_bins(disk_frame, support.shape[1])
@@ -801,7 +801,7 @@ def set_mask_from_joos_disk(
             "weight_m0": float(weight_m0), "weight_floor": float(weight_floor),
             "kinematic_smoothing_bins": tuple(float(value) for value in kinematic_smoothing_bins),
             "midplane_connectivity": "radial_weakest_link",
-            "azimuthal_coherence": "phi_mean_running_minimum",
+            "azimuthal_coherence": "smoothed_phi_mean",
             "coherence_score": "smoothstep",
             "connectivity_gate": "smoothstep_saturating_at_weight_m0",
             "vertical_connectivity": "midplane_weakest_link",

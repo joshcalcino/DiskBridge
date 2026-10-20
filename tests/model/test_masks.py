@@ -511,6 +511,36 @@ def test_connected_coherence_retains_a_full_coherent_annulus(support_value):
     np.testing.assert_allclose(coherence, expected_gate, rtol=0, atol=2*np.finfo(float).eps)
 
 
+def test_annular_coherence_can_recover_without_reconnecting_radial_gaps():
+    """Late seeds can increase coherence while a failed radial path stays cut."""
+    nr, nphi = 64, 8
+    shape = (nr, 1, nphi)
+    support = np.full((nr, nphi), 0.9)
+    support[:32, 6:] = 0.0  # Two azimuths first acquire a seed farther out.
+    support[16, 0] = 0.0  # An established path fails and must not reconnect.
+    values = _connectivity_gate(support[:, None, :], 0.5)
+    radius = np.broadcast_to((np.arange(nr) + 0.5)[:, None, None], shape)
+    zeros = np.zeros(shape)
+    frame = DiskFrameData(
+        k_hat=np.array([0.0, 0.0, 1.0]), R_d=radius, z_d=zeros,
+        vR_d=Quantity(zeros, "cm/s"), vphi_d=Quantity(zeros, "cm/s"),
+        vz_d=Quantity(zeros, "cm/s"), theta_from_midplane=zeros,
+    )
+    args = (values, support, frame, np.ones(shape, dtype=bool),
+            Quantity(np.arange(nr + 1), "cm"))
+    coherent, radial, radial_support, coverage, cap = _apply_connected_midplane_coherence(
+        *args, seed_min=0.5, floor=1e-4,
+    )
+    np.testing.assert_allclose(coverage[24:32], 5/8)
+    np.testing.assert_allclose(coverage[-1], 7/8)
+    np.testing.assert_allclose(cap[-1], (7/8)**2 * (3 - 2*7/8))
+    assert cap[-1] > cap[24]
+    np.testing.assert_array_equal(radial_support[16:, 0], 0.0)
+    np.testing.assert_array_equal(radial[16:, 0, 0], 0.0)
+    np.testing.assert_array_equal(coherent[16:, 0, 0], 0.0)
+    np.testing.assert_array_equal(coherent[:32, 0, 6:], 0.0)
+
+
 def test_connected_mask_allows_nearly_pure_disc(rotating_model):
     """Strong local support must not acquire a fixed ISM complement."""
     rotating_model.set_mask_from_joos_disk(
