@@ -60,6 +60,40 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 - Documentation should describe current behavior only, not previous corrections or change history.
 - Ask for clarification when critical scientific or workflow information is missing.
 
+## Manuscript Authorship And Editing
+
+- The user is the paper's author. Preserve their existing wording, voice,
+  terminology, structure, and scope unless they explicitly request a rewrite.
+  This applies to suggestions in chat as well as edits to manuscript files.
+- Requests for feedback, context, flow, explanations, or missing material do
+  NOT authorize replacement paragraphs or rewritten passages. Work with the
+  text the user has already written.
+- Suggest only the smallest necessary addition or change, and identify its
+  exact insertion point. Do not reproduce the user's passage as a polished
+  replacement or substitute the agent's preferred phrasing.
+- If there is a factual inaccuracy, identify the specific claim, explain the
+  issue, and propose the smallest factual correction. Do not use that issue
+  to justify rewriting surrounding accurate text.
+- Provide a replacement paragraph or passage only when the user explicitly
+  asks for one, and restrict it to the requested passage. Never expand a
+  sentence- or paragraph-level request into a subsection rewrite.
+- Giving advice does not authorize editing the manuscript. Modify manuscript
+  files only when the user asks for those edits.
+
+## Mandatory Figure Output Formats
+
+- Paper and publication figures MUST be saved and delivered as PDF only.
+- Diagnostic, testing, validation, and exploratory plots MUST be saved and
+  delivered as PNG only.
+- NEVER export or retain both PDF and PNG versions of the same figure. Choose
+  the format by the figure's purpose, regardless of its directory. Do not add
+  alternate-format switches or duplicate preview exports.
+- Paper PDFs may be rendered to temporary PNGs for visual inspection. Keep
+  those renders in temporary storage outside project figure/output directories
+  and remove them after inspection; do not deliver them as companion figures.
+- When updating a plotter, replace any conflicting export path directly with
+  the required single format.
+
 ## Git History Safety
 
 - Never rewrite Git history unless the user explicitly authorizes the exact
