@@ -50,6 +50,7 @@ from diskbridge.chemistry.shielding.angular_uv_weights import (
     compute_uv_direction_weights_healpix,
 )
 from diskbridge.chemistry.shielding.columns_1d import is_effectively_1d
+from diskbridge.chemistry.shielding.healpix_utils import SHIELDING_RAY_GEOMETRY
 from diskbridge.chemistry.shielding.dust_uv_tau import (
     prepare_dust_density_fields,
     resolve_uv_tau_mode,
@@ -98,6 +99,7 @@ def _build_cache_key(
     RADMC-3D rerun).
     """
     return (
+        SHIELDING_RAY_GEOMETRY,
         int(nside),
         float(chi_ext0),
         float(star_uv_luminosity_erg_s),

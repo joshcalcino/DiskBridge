@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
+from diskbridge.chemistry.shielding.healpix_utils import SHIELDING_RAY_GEOMETRY
 from diskbridge.chemistry.io import (
     add_default_line_colliders_from_gow17,
     attach_chemistry_result_to_model,
@@ -135,6 +136,7 @@ def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
 
     return {
         "kind": "gow17",
+        "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
         "config_sha256": stable_json_hash(config),
         "params": {
             "nside": int(rad.params.nside),

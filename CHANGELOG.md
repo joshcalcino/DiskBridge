@@ -106,6 +106,11 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Spherical HEALPix shielding rays include material reached after crossing an
+  empty polar cutout or inner cavity, and use exact outer theta faces. Column,
+  directional-weight, chemistry-output, and checkpoint cache identities include
+  the boundary integration geometry.
+
 - Connected disk masks propagate smooth gates that saturate at the existing
   passing seed score, then cap the unchanged local kinematic weight. Passing
   radial and vertical links no longer impose an ISM complement. Annular

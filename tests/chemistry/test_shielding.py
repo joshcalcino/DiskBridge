@@ -9,8 +9,8 @@ Verifies:
 - W_rays=None in shielding functions equals isotropic mean
 - the exact Cartesian +x ray reduces to the 1D outer half-cell convention
 - spherical boundary and starward rays include the geometric source segment
-- spherical oblique rays stop at the first physical radial boundary even when
-  they cross opposite-azimuth planes and theta cones
+- spherical external rays cross transparent inner cavities and polar cutouts
+  and include any far-side material before reaching the outer sphere
 - Cartesian and spherical ray columns are independent of Numba thread count
 """
 
@@ -340,8 +340,8 @@ def test_spherical_radial_column_includes_source_to_face_segment():
     np.testing.assert_allclose(column[0, 0, 0], expected)
 
 
-def test_spherical_oblique_uniform_columns_match_first_radial_boundary():
-    """Angular crossings must not change a uniform sphere's path length."""
+def test_spherical_oblique_uniform_columns_match_outer_chord_minus_cavity():
+    """A uniform shell contributes the outer path minus its vacuum chord."""
 
     mesh = Mesh.spherical(
         r=Axis(edges=Quantity(np.arange(1.0, 6.0), "cm")),
@@ -386,14 +386,81 @@ def test_spherical_oblique_uniform_columns_match_first_radial_boundary():
             inner_discriminant = (
                 projection * projection + tracer.r_edges[0] ** 2 - radius2
             )
-            inner = np.inf
+            cavity_length = 0.0
             if inner_discriminant >= 0.0:
-                candidate = -projection - np.sqrt(inner_discriminant)
-                if candidate > 0.0:
-                    inner = candidate
-            expected[i, j] = min(inner, outer)
+                half_chord = np.sqrt(inner_discriminant)
+                cavity_entry = -projection - half_chord
+                if cavity_entry > 0.0:
+                    cavity_length = 2.0 * half_chord
+            expected[i, j] = outer - cavity_length
 
     np.testing.assert_allclose(actual, expected, rtol=2.0e-9, atol=2.0e-9)
+
+
+@pytest.mark.parametrize("z_sign", [-1.0, 1.0], ids=("south", "north"))
+@pytest.mark.parametrize(
+    "theta_edges,expected_paths",
+    [
+        pytest.param(
+            [np.pi / 4.0, np.pi / 2.0, 3.0 * np.pi / 4.0],
+            [np.sqrt(96.0) - 1.0, 1.0],
+            id="polar-cutout",
+        ),
+        pytest.param(
+            [0.0, np.pi / 2.0, np.pi],
+            [np.sqrt(96.0) + 3.0, np.sqrt(91.0) - 2.0],
+            id="full-sphere",
+        ),
+    ],
+)
+def test_spherical_polar_paths_include_material_after_vacuum(
+    z_sign, theta_edges, expected_paths,
+):
+    """A transverse ray returns from the polar void; a polar ray stays outside."""
+    mesh = Mesh.spherical(
+        r=Axis(edges=Quantity([1.0, 4.0, 10.0], "cm")),
+        theta=Axis(edges=Quantity(theta_edges, "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 5), "rad")),
+    )
+    tracer = SphericalHealpixRayTracer(mesh, nside=1)
+    root_two = np.sqrt(2.0)
+    centers = np.array([[3.0 / root_two, 3.0 / root_two, z_sign * 2.0]])
+    directions = np.array([
+        [-1.0 / root_two, -1.0 / root_two, 0.0],
+        [0.0, 0.0, z_sign],
+    ])
+    fields = np.ones((1, *mesh.shape), dtype=np.float64)
+
+    actual = integrate_rays_multi(tracer, centers, directions, fields)[0, :, 0]
+
+    # At |z|=2 the transverse path crosses a 4 cm vacuum interval between
+    # cylindrical coordinates +2 and -2. The second ray leaves the wedge
+    # after 1 cm and never returns. Full-sphere paths retain both intervals.
+    np.testing.assert_allclose(actual, expected_paths, rtol=2.0e-9, atol=2.0e-9)
+
+
+def test_spherical_cavity_reentry_uses_far_side_fields():
+    """Near and far shells contribute their own fields; the cavity adds none."""
+    mesh = Mesh.spherical(
+        r=Axis(edges=Quantity([1.0, 2.0, 3.0], "cm")),
+        theta=Axis(edges=Quantity([0.0, np.pi], "rad")),
+        phi=Axis(edges=Quantity(np.linspace(0.0, 2.0 * np.pi, 5), "rad")),
+    )
+    tracer = SphericalHealpixRayTracer(mesh, nside=1)
+    root_two = np.sqrt(2.0)
+    centers = np.array([[1.5 / root_two, 1.5 / root_two, 0.0]])
+    directions = np.array([[-1.0 / root_two, -1.0 / root_two, 0.0]])
+    density = np.zeros(mesh.shape, dtype=np.float64)
+    density[:, 0, 0] = [2.0, 3.0]
+    density[:, 0, 2] = [7.0, 11.0]
+    fields = np.stack((np.ones(mesh.shape), density, 3.0 * density))
+
+    actual = integrate_rays_multi(tracer, centers, directions, fields)[0, 0, :]
+
+    # Near-side dust: 0.5 cm; vacuum: 2 cm; far-side shells: 1 cm each.
+    # The nonuniform column is 0.5*2 + 1*7 + 1*11 = 19, with a second bin
+    # exactly proportional to it. The unit field gives the 2.5 cm dust path.
+    np.testing.assert_allclose(actual, [2.5, 19.0, 57.0], rtol=2.0e-9, atol=2.0e-9)
 
 
 @pytest.mark.parametrize(

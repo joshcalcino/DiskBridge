@@ -18,6 +18,7 @@ from numba import (
 
 
 _SPHERICAL_TBB_PACKETS_PER_WORKER = 128
+SHIELDING_RAY_GEOMETRY = "outer_sphere_vacuum_reentry"
 
 
 def _as_f64(name: str, x) -> np.ndarray:
@@ -440,6 +441,7 @@ def _integrate_all_rays_spherical_dda_multi(
     max_steps: int = 200000,
     n_workers: int = 1,
 ) -> np.ndarray:
+    """Integrate material segments to the outer sphere, crossing vacuum gaps."""
     n_cells = cell_centers.shape[0]
     n_dirs = directions.shape[0]
     n_fields = fields_stack.shape[0]
@@ -517,55 +519,65 @@ def _integrate_all_rays_spherical_dda_multi(
                 continue
 
             for _ in range(max_steps):
-                if ir < 0 or ir >= nr or it < 0 or it >= nt:
-                    break
-
-                r = np.sqrt(x * x + y * y + z * z)
-                if r <= rmin or r >= rmax:
-                    break
-
-                t_min = np.inf
-                t_r_lo = _t_to_radius_boundary(
-                    x, y, z, dx, dy, dz, r_edges[ir]
+                in_material = (
+                    0 <= ir < nr and 0 <= it < nt and 0 <= ip < nphi
                 )
-                if t_r_lo < t_min:
-                    t_min = t_r_lo
-                if ir < nr:
+                t_min = np.inf
+                if in_material:
+                    t_r_lo = _t_to_radius_boundary(
+                        x, y, z, dx, dy, dz, r_edges[ir]
+                    )
+                    if t_r_lo < t_min:
+                        t_min = t_r_lo
                     t_r_hi = _t_to_radius_boundary(
                         x, y, z, dx, dy, dz, r_edges[ir + 1]
                     )
                     if t_r_hi < t_min:
                         t_min = t_r_hi
-
-                if it > 0:
                     t_th_lo = _t_to_theta_boundary_from_cos(
                         x, y, z, dx, dy, dz, theta_cos[it]
                     )
                     if t_th_lo < t_min:
                         t_min = t_th_lo
-                if it < nt - 1:
                     t_th_hi = _t_to_theta_boundary_from_cos(
                         x, y, z, dx, dy, dz, theta_cos[it + 1]
                     )
                     if t_th_hi < t_min:
                         t_min = t_th_hi
-
-                t_phi_lo = _t_to_phi_boundary_from_trig(
-                    x, y, dx, dy, phi_cos[ip], phi_sin[ip]
-                )
-                if t_phi_lo < t_min:
-                    t_min = t_phi_lo
-
-                t_phi_hi = _t_to_phi_boundary_from_trig(
-                    x,
-                    y,
-                    dx,
-                    dy,
-                    phi_cos[ip + 1],
-                    phi_sin[ip + 1],
-                )
-                if t_phi_hi < t_min:
-                    t_min = t_phi_hi
+                    t_phi_lo = _t_to_phi_boundary_from_trig(
+                        x, y, dx, dy, phi_cos[ip], phi_sin[ip]
+                    )
+                    if t_phi_lo < t_min:
+                        t_min = t_phi_lo
+                    t_phi_hi = _t_to_phi_boundary_from_trig(
+                        x, y, dx, dy, phi_cos[ip + 1], phi_sin[ip + 1]
+                    )
+                    if t_phi_hi < t_min:
+                        t_min = t_phi_hi
+                else:
+                    # A ray may cross an empty polar cone or central cavity
+                    # and encounter material again. Only global domain faces
+                    # matter in vacuum; intervening grid cells add no column.
+                    t_min = _t_to_radius_boundary(
+                        x, y, z, dx, dy, dz, rmax
+                    )
+                    t_inner = _t_to_radius_boundary(
+                        x, y, z, dx, dy, dz, rmin
+                    )
+                    if t_inner < t_min:
+                        t_min = t_inner
+                    for theta_index in (0, nt):
+                        t_theta = _t_to_theta_boundary_from_cos(
+                            x, y, z, dx, dy, dz, theta_cos[theta_index]
+                        )
+                        if t_theta < t_min:
+                            t_min = t_theta
+                    for phi_index in (0, nphi):
+                        t_phi = _t_to_phi_boundary_from_trig(
+                            x, y, dx, dy, phi_cos[phi_index], phi_sin[phi_index]
+                        )
+                        if t_phi < t_min:
+                            t_min = t_phi
 
                 if (
                     not np.isfinite(t_min)
@@ -575,8 +587,9 @@ def _integrate_all_rays_spherical_dda_multi(
                     break
 
                 ds = t_min
-                for k in range(n_fields):
-                    N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
+                if in_material:
+                    for k in range(n_fields):
+                        N_all[i, j, k] += fields_stack[k, ir, it, ip] * ds
 
                 x += dx * t_min
                 y += dy * t_min
@@ -592,7 +605,7 @@ def _integrate_all_rays_spherical_dda_multi(
                 r_probe = np.sqrt(
                     x_probe * x_probe + y_probe * y_probe + z_probe * z_probe
                 )
-                if r_probe <= rmin or r_probe >= rmax:
+                if r_probe >= rmax:
                     break
                 theta_probe = np.arctan2(
                     np.sqrt(x_probe * x_probe + y_probe * y_probe), z_probe
@@ -862,6 +875,31 @@ def integrate_rays_multi(
     fields_stack: np.ndarray,
     max_steps: int = 10000,
 ) -> np.ndarray:
+    """Integrate multiple fields from each source to the outer mesh boundary.
+
+    Spherical rays cross the empty inner cavity and uncovered angular regions
+    with zero column, then resume accumulation wherever they re-enter the mesh.
+    They terminate at the outer sphere. Cartesian rays stop at the box boundary.
+
+    Parameters
+    ----------
+    tracer : SphericalHealpixRayTracer or CartesianHealpixRayTracer
+        Mesh geometry; positions and edge arrays must use the same length unit.
+    cell_centers : ndarray, shape (n_cells, 3)
+        Cartesian source positions within the mesh.
+    directions : ndarray, shape (n_dirs, 3)
+        Ray vectors; nonzero vectors are normalized internally.
+    fields_stack : ndarray, shape (n_fields, *mesh_shape)
+        Piecewise constant field values in native mesh-axis order.
+    max_steps : int, optional
+        Maximum number of cell or vacuum-boundary crossings per ray.
+
+    Returns
+    -------
+    ndarray, shape (n_cells, n_dirs, n_fields)
+        Columns in field units times the tracer's length unit. Vacuum segments
+        contribute zero, including when an all-ones field measures path length.
+    """
     kind = _tracer_kind(tracer)
     cell_centers = _as_f64("cell_centers", cell_centers)
     directions = _as_f64("directions", directions)

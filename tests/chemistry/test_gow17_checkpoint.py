@@ -19,6 +19,7 @@ from diskbridge.chemistry.models.gow17 import (
     _write_gow17_checkpoint,
 )
 from diskbridge.model.mesh import Axis, Mesh
+from diskbridge.radmc3d.cache import stable_json_hash
 
 
 def _rad_model(tmp_path, *, offset: float = 0.0):
@@ -178,6 +179,32 @@ def test_checkpoint_rejects_different_scientific_config(tmp_path):
             ncells=ncells,
             total_updates=3,
             enable_co_phase=True,
+        )
+
+
+def test_checkpoint_rejects_state_without_current_ray_geometry(tmp_path):
+    """A restart carrying first-boundary shielding must not bypass new columns."""
+    rad = _rad_model(tmp_path)
+    current = _gow17_checkpoint_config(
+        rad, {"checkpoint": {"enabled": True}}, nside=4,
+    )
+    previous = dict(
+        current, config_fingerprint=stable_json_hash({"config": {}, "nside": 4}),
+    )
+    shape = rad.model.mesh.shape
+    ncells = int(np.prod(shape))
+    _write_gow17_checkpoint(
+        rad, previous,
+        y=np.zeros((ncells, N_Y)),
+        theta_h2=np.ones(ncells), theta_co=np.ones(ncells), theta_c=np.ones(ncells),
+        status=np.zeros(ncells, dtype=np.int32),
+        completed_updates=1, total_updates=3, t_target_yr=None, histories={},
+    )
+
+    with pytest.raises(ValueError, match="scientific configuration"):
+        _load_gow17_checkpoint(
+            rad, current, shape=shape, ncells=ncells,
+            total_updates=3, enable_co_phase=True,
         )
 
 

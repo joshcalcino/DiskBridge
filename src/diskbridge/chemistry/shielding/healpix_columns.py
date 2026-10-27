@@ -40,6 +40,7 @@ from diskbridge._logging import logger
 from diskbridge.chemistry.shielding._array_utils import _as_f64
 from diskbridge.chemistry.shielding.visser_shielding import N_SHIELD_MIN, VisserShielding
 from diskbridge.chemistry.shielding.healpix_utils import (
+    SHIELDING_RAY_GEOMETRY,
     _c_shielding_cells_parallel,
     _c_shielding_rays_parallel,
     _effective_b_cells_inplace_parallel,
@@ -574,6 +575,7 @@ def _compute_healpix_column_cache_key(
     mesh_info = _mesh_cache_info(mesh, n_field_cgs.shape)
 
     params = {
+        "ray_geometry": SHIELDING_RAY_GEOMETRY,
         "mesh": mesh_info,
         "nside": int(nside),
         "field": str(field_name),

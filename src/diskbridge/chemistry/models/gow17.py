@@ -47,6 +47,7 @@ from diskbridge.chemistry.shielding.columns_1d import (
     is_effectively_1d,
 )
 from diskbridge.chemistry.shielding.healpix_utils import (
+    SHIELDING_RAY_GEOMETRY,
     integrate_rays_with_pathlength,
 )
 from diskbridge.chemistry.shielding.visser_shielding import VisserShielding
@@ -600,7 +601,11 @@ def _gow17_checkpoint_config(
         "path": path,
         "every": every,
         "config_fingerprint": stable_json_hash(
-            {"config": scientific_config, "nside": nside}
+            {
+                "config": scientific_config,
+                "nside": nside,
+                "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
+            }
         ),
     }
 

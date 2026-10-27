@@ -96,6 +96,10 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 
 ## Git History Safety
 
+- NEVER create a Git commit without the user's explicit permission to commit.
+  Requests to implement changes, work on a branch, merge changes, or update
+  the main branch do not grant permission to commit. Leave changes uncommitted
+  unless the user explicitly authorizes a commit.
 - Never rewrite Git history unless the user explicitly authorizes the exact
   history-rewriting operation in the current request.
 - By default, do not amend commits, rebase, move branch tips with reset,
@@ -103,8 +107,9 @@ DiskBridge is a scientific astrophysics codebase for post-processing hydrodynami
 - Do not infer permission to rewrite history from a cleanup request, a request
   to remove files, or a general Git request. If rewriting appears necessary,
   stop and ask first.
-- Use additive commits and normal non-force pushes unless the user explicitly
-  directs otherwise.
+- When a commit is explicitly authorized, use an additive commit unless the
+  user separately authorizes history rewriting. Use normal non-force pushes
+  unless the user explicitly directs otherwise.
 
 ## Project Notes
 
