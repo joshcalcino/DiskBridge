@@ -45,6 +45,7 @@ from diskbridge._logging import logger
 from diskbridge._config import get_config
 from diskbridge._units import units
 from diskbridge.chemistry.shielding.angular_uv_weights import (
+    SHIELDING_ANGULAR_WEIGHTING,
     _chunk_size_from_memory_budget,
     compute_star_uv_source_strength,
     compute_uv_direction_weights_healpix,
@@ -69,8 +70,6 @@ def _build_cache_key(
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
     star_inner_radius_cm: float,
-    isotropic_outside_r_au: float | None,
-    outer_weight_mode: str | None,
     uv_product: str = "chi",
     uv_product_fingerprint: tuple | None = None,
 ) -> tuple:
@@ -100,12 +99,11 @@ def _build_cache_key(
     """
     return (
         SHIELDING_RAY_GEOMETRY,
+        SHIELDING_ANGULAR_WEIGHTING,
         int(nside),
         float(chi_ext0),
         float(star_uv_luminosity_erg_s),
         float(star_inner_radius_cm),
-        None if isotropic_outside_r_au is None else float(isotropic_outside_r_au),
-        None if outer_weight_mode is None else str(outer_weight_mode),
         str(uv_product),
         uv_product_fingerprint,
     )
@@ -194,7 +192,7 @@ def _estimate_w_rays_memory_bytes(
 
     retained_debug_ray_map_count = 5 if keep_debug_arrays else 0
     retained_debug_cell_scalar_count = 7 if keep_debug_arrays else 0
-    retained_closure_cell_scalar_count = 15 if keep_closure_diagnostics else 0
+    retained_closure_cell_scalar_count = 14 if keep_closure_diagnostics else 0
     retained_diagnostics_bytes = (
         retained_debug_ray_map_count * ray_map_bytes
         + retained_debug_cell_scalar_count * cell_scalar_bytes
@@ -325,8 +323,6 @@ def ensure_W_rays(
     chi_ext0: float,
     star_uv_luminosity_erg_s: float,
     cache_dir: str | None = None,
-    isotropic_outside_r_au: float | None = None,
-    outer_weight_mode: str | None = None,
     uv_product: str = "chi",
     chunk_size: int | None = None,
     memory_budget_gib: float | None = None,
@@ -390,8 +386,6 @@ def ensure_W_rays(
         chi_ext0,
         star_uv_luminosity_erg_s,
         star_inner_radius_cm,
-        isotropic_outside_r_au,
-        outer_weight_mode,
         uv_product,
         uv_product_fingerprint,
     )
@@ -506,12 +500,6 @@ def ensure_W_rays(
             memory_budget_gib=memory_budget_gib,
             keep_debug_arrays=keep_debug_arrays,
             keep_closure_diagnostics=keep_closure_diagnostics,
-            isotropic_outside_r_cm=(
-                None
-                if isotropic_outside_r_au is None
-                else float(isotropic_outside_r_au) * units("au").to("cm").magnitude
-            ),
-            outer_weight_mode="tau" if outer_weight_mode is None else str(outer_weight_mode),
             cache_dir=cache_dir,
         )
     )
@@ -642,15 +630,6 @@ def maybe_ensure_W_rays(
         weighting=uv_weighting,
     )
 
-    isotropic_outside_r_au = getattr(
-        rad,
-        "isotropic_weight_outside_r_au",
-        getattr(rad.model, "segmented_isotropic_weight_outside_r_au", None),
-    )
-    outer_weight_mode = str(
-        getattr(params, "segmented_outer_weight_mode", "tau")
-    ).strip().lower()
-
     # 6. Delegate to ensure_W_rays (handles caching + memory check)
     return ensure_W_rays(
         rad,
@@ -659,7 +638,5 @@ def maybe_ensure_W_rays(
         kext_uv=kext_uv,
         chi_ext0=chi_ext0,
         star_uv_luminosity_erg_s=star_uv_lum,
-        isotropic_outside_r_au=isotropic_outside_r_au,
-        outer_weight_mode=outer_weight_mode,
         uv_product=uv_product,
     )

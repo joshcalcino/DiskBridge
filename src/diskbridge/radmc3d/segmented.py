@@ -56,7 +56,6 @@ _SEGMENTED_PARAM_KEYS = (
     "segmented_nphot_ratio",
     "segmented_final_nphot_multiplier",
     "segmented_full_nphot_retry",
-    "segmented_outer_weight_mode",
 )
 
 _SEGMENTED_RT_INPUT_NAMES = (

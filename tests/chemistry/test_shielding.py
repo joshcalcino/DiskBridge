@@ -12,12 +12,15 @@ Verifies:
 - spherical external rays cross transparent inner cavities and polar cutouts
   and include any far-side material before reaching the outer sphere
 - Cartesian and spherical ray columns are independent of Numba thread count
+- fixed physical inputs give identical weights regardless of RT segmentation
 """
 
 # db-keywords: shielding, co-shielding, healpix-columns, uv-products, gow17, validation, units, radmc3d, chemistry, model, mesh
 # db-role: validation
 # db-scope: test
 # db-purpose: Tests for angular UV direction weights and W_rays-based shielding.
+
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -30,6 +33,7 @@ from numba import (
 )
 
 import diskbridge.chemistry.shielding.healpix_utils as healpix_utils_module
+import diskbridge.chemistry.shielding.w_rays_cache as w_rays_cache_module
 from diskbridge._units import Quantity
 from diskbridge._constants import U_DRAINE, C_LIGHT, H_PLANCK, K_B
 from diskbridge.model.mesh import Mesh, Axis
@@ -1089,8 +1093,8 @@ def test_w_rays_memory_estimate_counts_one_chunk_ray_map():
     )
 
 
-def test_zero_source_and_outer_weight_rows_are_fully_initialized():
-    """Every np.empty-backed W row must be written on exceptional branches."""
+def test_zero_source_weight_rows_are_uniform():
+    """Every candidate row must be initialized when all UV sources vanish."""
     mesh = _make_uniform_cartesian_mesh(ncells=3, L_cm=3.0)
     shape = mesh.shape
     dust = 1.0e-2 * (
@@ -1110,22 +1114,98 @@ def test_zero_source_and_outer_weight_rows_are_fully_initialized():
     W_zero, *_ = compute_uv_direction_weights_healpix(**common)
     np.testing.assert_allclose(W_zero, 1.0 / 12.0, rtol=0.0, atol=0.0)
 
-    W_uniform, *_ = compute_uv_direction_weights_healpix(
-        **common,
-        isotropic_outside_r_cm=0.0,
-        outer_weight_mode="uniform",
-    )
-    np.testing.assert_allclose(W_uniform, 1.0 / 12.0, rtol=0.0, atol=0.0)
 
-    W_tau, *_ = compute_uv_direction_weights_healpix(
-        **common,
-        isotropic_outside_r_cm=0.0,
-        outer_weight_mode="tau",
+@pytest.mark.parametrize("metadata_owner", ("model", "rad"))
+def test_weight_inputs_are_independent_of_rt_segmentation(
+    monkeypatch, tmp_path, metadata_owner
+):
+    """Split metadata cannot discard stellar or residual UV at any radius."""
+    mesh = _make_small_spherical_mesh()
+    shape = mesh.shape
+    chi = np.full(shape, 2.0, dtype=np.float64)
+    dust = 0.05 * (
+        1.0 + np.arange(np.prod(shape), dtype=np.float64).reshape(shape) / chi.size
     )
-    assert np.all(np.isfinite(W_tau))
-    assert np.all(W_tau >= 0.0)
-    np.testing.assert_allclose(W_tau.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-12)
-    assert np.any(np.ptp(W_tau, axis=1) > 1.0e-6)
+    kext_uv = np.array([1.0])
+    params = SimpleNamespace(
+        species="dust",
+        external_uv=True,
+        external_uv_chi=0.7,
+        rstar=Quantity(0.1, "cm"),
+        uv_min=Quantity(0.0912, "um"),
+        uv_max=Quantity(0.24, "um"),
+        w_rays_chunk_size=7,
+        w_rays_keep_closure_diagnostics=True,
+    )
+    monkeypatch.setattr(w_rays_cache_module.diskbridge, "params", params)
+    monkeypatch.setattr(
+        w_rays_cache_module,
+        "resolve_uv_tau_mode",
+        lambda *args, **kwargs: ("dustkappa", kext_uv),
+    )
+    monkeypatch.setattr(
+        w_rays_cache_module, "prepare_dust_density_fields", lambda model: [dust]
+    )
+    reference = w_rays_cache_module._uv_product_draine_reference("chi", "energy")
+    source_strength = 4.0 * np.pi * C_LIGHT * reference
+    monkeypatch.setattr(
+        w_rays_cache_module,
+        "compute_star_uv_source_strength",
+        lambda *args, **kwargs: source_strength,
+    )
+
+    def make_rad():
+        return SimpleNamespace(
+            model=SimpleNamespace(mesh=mesh),
+            inputs_dir=tmp_path,
+            ensure_chi=lambda: Quantity(chi, "dimensionless"),
+        )
+
+    ordinary = make_rad()
+    segmented = make_rad()
+    # These previously changed the prescription outside the selected radius.
+    if metadata_owner == "model":
+        segmented.model.segmented_isotropic_weight_outside_r_au = 0.0
+    else:
+        segmented.isotropic_weight_outside_r_au = 0.0
+    ordinary_weights = w_rays_cache_module.maybe_ensure_W_rays(
+        ordinary, nside=1, uv_product="chi"
+    )
+    segmented_weights = w_rays_cache_module.maybe_ensure_W_rays(
+        segmented, nside=1, uv_product="chi"
+    )
+
+    np.testing.assert_array_equal(segmented_weights, ordinary_weights)
+    assert segmented.W_rays_key == ordinary.W_rays_key
+    stellar = segmented.W_rays_stellar_metadata
+    assert np.all(stellar["valid_star"])
+    assert np.all(stellar["w_star"] > 0.0)
+    np.testing.assert_array_equal(
+        stellar["w_star"], ordinary.W_rays_stellar_metadata["w_star"]
+    )
+
+    closure = segmented.W_rays_closure_diagnostics["fields"]
+    assert np.all(closure["chi_iso"] > 0.0)
+    np.testing.assert_allclose(
+        stellar["w_star"], closure["chi_star_dir_att"] / chi.ravel()
+    )
+    _, _, columns = compute_column_rays_healpix(
+        mesh,
+        {"dust": dust},
+        nside=1,
+        candidate_mask=np.ones(shape, dtype=bool),
+    )
+    external_contribution = params.external_uv_chi * np.exp(-columns["dust"])
+    expected = external_contribution + closure["chi_iso"][:, None]
+    expected[np.arange(chi.size), stellar["k_star"]] += (
+        12.0 * closure["chi_star_dir_att"]
+    )
+    expected /= expected.sum(axis=1, keepdims=True)
+    np.testing.assert_allclose(segmented_weights, expected, rtol=0.0, atol=1.0e-14)
+    external_only = external_contribution / external_contribution.sum(
+        axis=1, keepdims=True
+    )
+    assert np.max(np.abs(segmented_weights - external_only)) > 1.0e-3
 
 
 def test_chunked_weights_match_single_chunk():

@@ -88,6 +88,7 @@ from diskbridge.chemistry.shielding.healpix_utils import (
 
 
 DEFAULT_W_RAYS_MEMORY_BUDGET_GIB = 64.0
+SHIELDING_ANGULAR_WEIGHTING = "external_stellar_residual"
 
 
 def _chunk_size_from_memory_budget(
@@ -215,8 +216,6 @@ def _integrate_extinction_rays(
 def _attenuation_and_external_mean_inplace_parallel(
     tau_or_attenuation: np.ndarray,
     chi_ext0: float,
-    outer_mask: np.ndarray,
-    outer_tau_mode: bool,
 ) -> np.ndarray:
     """Replace optical depth by attenuation and return mean external strength."""
     n_cells, npix = tau_or_attenuation.shape
@@ -227,11 +226,7 @@ def _attenuation_and_external_mean_inplace_parallel(
             tau = tau_or_attenuation[i, j]
             attenuation = np.exp(-tau)
             attenuation_sum += attenuation
-            if outer_tau_mode and outer_mask[i]:
-                clipped_tau = min(max(tau, 0.0), 700.0)
-                tau_or_attenuation[i, j] = np.exp(-clipped_tau)
-            else:
-                tau_or_attenuation[i, j] = attenuation
+            tau_or_attenuation[i, j] = attenuation
         chi_ext_dir[i] = chi_ext0 * attenuation_sum / float(npix)
     return chi_ext_dir
 
@@ -246,8 +241,6 @@ def _fill_uv_weights_parallel(
     chi_star_dir_att: np.ndarray,
     valid_star: np.ndarray,
     k_star: np.ndarray,
-    outer_mask: np.ndarray,
-    outer_mode_code: int,
     w_star_chunk: np.ndarray,
 ) -> None:
     """Fill every W-ray element once without advanced-indexing temporaries."""
@@ -255,22 +248,6 @@ def _fill_uv_weights_parallel(
     uniform = 1.0 / float(npix)
     for i in prange(n_cells):
         w_star_chunk[i] = 0.0
-        if outer_mask[i]:
-            if outer_mode_code == 1:
-                for j in range(npix):
-                    W_chunk[i, j] = uniform
-            else:
-                attenuation_sum = 0.0
-                for j in range(npix):
-                    attenuation_sum += attenuation_rays[i, j]
-                if attenuation_sum > 0.0:
-                    for j in range(npix):
-                        W_chunk[i, j] = attenuation_rays[i, j] / attenuation_sum
-                else:
-                    for j in range(npix):
-                        W_chunk[i, j] = uniform
-            continue
-
         sum_uv_contrib = float(npix) * (
             chi_ext_dir[i] + chi_iso[i] + chi_star_dir_att[i]
         )
@@ -504,8 +481,6 @@ def compute_uv_direction_weights_healpix(
     memory_budget_gib: float | None = None,
     keep_debug_arrays: bool | None = None,
     keep_closure_diagnostics: bool | None = None,
-    isotropic_outside_r_cm: float | None = None,
-    outer_weight_mode: str = "tau",
     cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Compute per-direction UV weights for HEALPix shielding averages.
@@ -513,7 +488,8 @@ def compute_uv_direction_weights_healpix(
     Builds a HEALPix map of relative UV contributions per direction for each
     candidate cell, combining external direct, stellar direct, and isotropic
     (RADMC residual) components.  Returns normalised weights that can be used
-    to average *any* per-ray shielding factor.
+    to average *any* per-ray shielding factor. The same component prescription
+    applies at every radius and depends only on the supplied physical fields.
 
     Parameters
     ----------
@@ -560,10 +536,6 @@ def compute_uv_direction_weights_healpix(
         Keep scalar per-cell UV closure diagnostics in the returned debug dict.
         This is much smaller than ``keep_debug_arrays`` and is disabled by
         default.
-    isotropic_outside_r_cm : float or None, optional
-        If set, replace weights outside this radius using ``outer_weight_mode``.
-    outer_weight_mode : {"tau", "uniform"}, optional
-        Outer-radius weighting mode.
     cache_dir : Path or str or None, optional
         Directory for caching HEALPix geometry and column results.
 
@@ -665,19 +637,6 @@ def compute_uv_direction_weights_healpix(
         star_w_all = np.zeros(n_candidates, dtype=np.float64)
         star_valid_all = np.zeros(n_candidates, dtype=bool)
 
-    outer_mode_code = 0
-    if isotropic_outside_r_cm is not None:
-        mode = str(outer_weight_mode).strip().lower()
-        if mode == "uniform":
-            outer_mode_code = 1
-        elif mode == "tau":
-            outer_mode_code = 2
-        else:
-            raise ValueError(
-                "segmented_outer_weight_mode must be 'tau' or 'uniform', "
-                f"got {mode!r}"
-            )
-
     debug_chunks: dict[str, list[np.ndarray]] = {}
     if keep_debug_arrays:
         for name in (
@@ -713,7 +672,6 @@ def compute_uv_direction_weights_healpix(
             "f_iso",
             "tau_star",
             "chi_star_unatt",
-            "outer_weight_overridden",
         ):
             closure_chunks[name] = []
 
@@ -754,17 +712,9 @@ def compute_uv_direction_weights_healpix(
         )
         tau_ext_debug = attenuation_rays.copy() if keep_debug_arrays else None
 
-        if isotropic_outside_r_cm is None:
-            outer_mask = np.zeros(n_chunk, dtype=bool)
-        else:
-            radii_cm = np.sqrt(np.sum(cell_centers_chunk**2, axis=1))
-            outer_mask = radii_cm >= float(isotropic_outside_r_cm)
-
         chi_ext_dir = _attenuation_and_external_mean_inplace_parallel(
             attenuation_rays,
             float(chi_ext0),
-            outer_mask,
-            outer_mode_code == 2,
         )
 
         chi_star_dir_att = np.zeros(n_chunk, dtype=np.float64)
@@ -834,7 +784,6 @@ def compute_uv_direction_weights_healpix(
             f_ext = chi_ext_dir / component_total
             f_star = chi_star_dir_att / component_total
             f_iso = chi_iso / component_total
-            outer_weight_overridden = outer_mask.astype(np.float64)
 
             closure_chunks["chi_radmc"].append(chi_cand.copy())
             closure_chunks["chi_ext_dir"].append(chi_ext_dir.copy())
@@ -850,7 +799,6 @@ def compute_uv_direction_weights_healpix(
             closure_chunks["f_iso"].append(f_iso.copy())
             closure_chunks["tau_star"].append(tau_star.copy())
             closure_chunks["chi_star_unatt"].append(chi_star_unatt.copy())
-            closure_chunks["outer_weight_overridden"].append(outer_weight_overridden)
 
         w_star_chunk = np.empty(n_chunk, dtype=np.float64)
         W_chunk = W_rays[start:end]
@@ -863,8 +811,6 @@ def compute_uv_direction_weights_healpix(
             chi_star_dir_att,
             valid_star,
             k_star,
-            outer_mask,
-            outer_mode_code,
             w_star_chunk,
         )
 
@@ -941,12 +887,6 @@ def compute_uv_direction_weights_healpix(
                 "nside": int(nside),
                 "npix": int(npix),
                 "uv_product_weighting": str(star_uv_weighting).lower(),
-                "outer_weight_mode": str(outer_weight_mode),
-                "isotropic_outside_r_cm": (
-                    None
-                    if isotropic_outside_r_cm is None
-                    else float(isotropic_outside_r_cm)
-                ),
                 "fields": closure,
                 "summary": {
                     "max_direct_excess": float(np.nanmax(closure["direct_excess"])),
@@ -957,9 +897,6 @@ def compute_uv_direction_weights_healpix(
                     "median_f_ext": float(np.nanmedian(closure["f_ext"])),
                     "median_f_star": float(np.nanmedian(closure["f_star"])),
                     "median_f_iso": float(np.nanmedian(closure["f_iso"])),
-                    "outer_weight_overridden_fraction": float(
-                        np.nanmean(closure["outer_weight_overridden"])
-                    ),
                 },
             }
 

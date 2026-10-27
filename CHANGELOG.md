@@ -44,6 +44,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Directional HEALPix shielding uses the external, stellar, and isotropic
+  residual contributions at every radius, independently of RT segmentation.
+  Removed the split-radius weighting override and `segmented_outer_weight_mode`.
+  Chemistry cache and checkpoint identities include the angular prescription.
 - Annular coherence in the connected disc classifier applies its smoothed
   azimuthal cap separately at each radius after the first qualifying annulus.
   Radial and vertical weakest-link connectivity are retained.

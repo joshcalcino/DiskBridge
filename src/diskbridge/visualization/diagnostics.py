@@ -251,7 +251,6 @@ def _register_uv_closure_diagnostics(rad: "RadModel") -> list[str]:
         "f_iso": "fraction of reconstructed UV from isotropic residual component",
         "tau_star": "dust UV optical depth along the starward ray",
         "chi_star_unatt": "unattenuated direct stellar UV contribution",
-        "outer_weight_overridden": "1 where segmented outer weighting replaced the normal weights",
     }
 
     for name, values in fields.items():
@@ -269,8 +268,6 @@ def _register_uv_closure_diagnostics(rad: "RadModel") -> list[str]:
                 "description": descriptions.get(str(name), str(name)),
                 "nside": diagnostics.get("nside"),
                 "npix": diagnostics.get("npix"),
-                "outer_weight_mode": diagnostics.get("outer_weight_mode"),
-                "isotropic_outside_r_cm": diagnostics.get("isotropic_outside_r_cm"),
             },
         )
         registered.append(field_name)
@@ -1097,8 +1094,6 @@ def _write_summary(
             "shape": list(closure.get("shape", [])),
             "nside": closure.get("nside"),
             "npix": closure.get("npix"),
-            "outer_weight_mode": closure.get("outer_weight_mode"),
-            "isotropic_outside_r_cm": closure.get("isotropic_outside_r_cm"),
             "summary": jsonable(closure.get("summary", {})),
         }
     if segmented_result is not None:
@@ -1216,7 +1211,6 @@ def make_chemistry_diagnostic_plots(
         ("chem_uv_closure_f_star", False, "plasma", None),
         ("chem_uv_closure_f_ext", False, "viridis", None),
         ("chem_uv_closure_f_iso", False, "cividis", None),
-        ("chem_uv_closure_outer_weight_overridden", False, "gray", None),
         ("abundance_h2", True, "viridis", 8.0),
         ("abundance_h", True, "viridis", 8.0),
         ("abundance_co", True, "viridis", 10.0),

@@ -75,7 +75,6 @@ segmented_stop_factor       = 0.9  # stop when a child removes less than 10% in 
 segmented_nphot_ratio       = 1.0  # intermediate thermal and paired-scout budget ratio
 segmented_final_nphot_multiplier = 1.0 # multiplier for the terminal segment only
 segmented_full_nphot_retry  = F    # retry a failed scout with one independent final-budget mcmono run
-segmented_outer_weight_mode = tau   # outer segmented W_rays: tau|uniform
 
 # Star 
 rstar       = 2.0                 # Radius of the star in solar radii

@@ -18,6 +18,8 @@ from diskbridge.chemistry.models.gow17 import (
     _load_gow17_checkpoint,
     _write_gow17_checkpoint,
 )
+from diskbridge.chemistry.shielding.angular_uv_weights import SHIELDING_ANGULAR_WEIGHTING
+from diskbridge.chemistry.shielding.healpix_utils import SHIELDING_RAY_GEOMETRY
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.cache import stable_json_hash
 
@@ -182,15 +184,24 @@ def test_checkpoint_rejects_different_scientific_config(tmp_path):
         )
 
 
-def test_checkpoint_rejects_state_without_current_ray_geometry(tmp_path):
-    """A restart carrying first-boundary shielding must not bypass new columns."""
+@pytest.mark.parametrize(
+    "missing_identity", ["shielding_ray_geometry", "shielding_angular_weighting"],
+)
+def test_checkpoint_requires_current_shielding_prescription(tmp_path, missing_identity):
+    """Resume cannot restore shielding from obsolete columns or angular weights."""
     rad = _rad_model(tmp_path)
     current = _gow17_checkpoint_config(
         rad, {"checkpoint": {"enabled": True}}, nside=4,
     )
-    previous = dict(
-        current, config_fingerprint=stable_json_hash({"config": {}, "nside": 4}),
-    )
+    scientific_context = {
+        "config": {},
+        "nside": 4,
+        "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
+        "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
+    }
+    assert current["config_fingerprint"] == stable_json_hash(scientific_context)
+    scientific_context.pop(missing_identity)
+    previous = dict(current, config_fingerprint=stable_json_hash(scientific_context))
     shape = rad.model.mesh.shape
     ncells = int(np.prod(shape))
     _write_gow17_checkpoint(

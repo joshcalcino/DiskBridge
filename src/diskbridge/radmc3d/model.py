@@ -1616,11 +1616,6 @@ class RadModel:
             self.radiation_mode = "local_uv_products"
         elif self.chi is not None:
             self.radiation_mode = "local_chi"
-        split_radii = list(out.get('split_radii_au', []))
-        isotropic_outside = float(split_radii[-1]) if split_radii else None
-        self.isotropic_weight_outside_r_au = isotropic_outside
-        self.model.segmented_isotropic_weight_outside_r_au = isotropic_outside
-        out['isotropic_weight_outside_r_au'] = isotropic_outside
         return out
 
     def load_segmented_rt_outputs(
@@ -1661,11 +1656,6 @@ class RadModel:
             self.radiation_mode = "local_uv_products"
         elif self.chi is not None:
             self.radiation_mode = "local_chi"
-        split_radii = list(out.get("split_radii_au", []))
-        isotropic_outside = float(split_radii[-1]) if split_radii else None
-        self.isotropic_weight_outside_r_au = isotropic_outside
-        self.model.segmented_isotropic_weight_outside_r_au = isotropic_outside
-        out["isotropic_weight_outside_r_au"] = isotropic_outside
         return out
 
     def ensure_dust_temperature(self, force: bool = False) -> Quantity:

@@ -35,6 +35,7 @@ from diskbridge.model.kinematics import (
     symmetric_velocity_gradient_s1,
 )
 from diskbridge.chemistry.types import ChemistryResult
+from diskbridge.chemistry.shielding.angular_uv_weights import SHIELDING_ANGULAR_WEIGHTING
 from diskbridge.chemistry.shielding.healpix_columns import (
     _chunk_size_from_memory_budget,
     _prepare_healpix_geometry,
@@ -605,6 +606,7 @@ def _gow17_checkpoint_config(
                 "config": scientific_config,
                 "nside": nside,
                 "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
+                "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
             }
         ),
     }
