@@ -13,6 +13,7 @@ What is stored
 * Dust components (if present): multi-component configuration created via
   `model.dust.add_component_from_mask(...)`, including each component's
   distribution, parameters, and mask/weight field.
+* Realized per-bin dust temperatures in `model.dust._dust_fields`.
 
 Notes
 -----
@@ -206,6 +207,11 @@ def _write_dust(group: "h5py.Group", model: Any) -> None:
         if comp.mask is not None:
             _write_field(cg, "mask", comp.mask)
 
+    temperatures_g = dg.create_group("temperatures")
+    for name, field in dust._dust_fields.items():
+        if name.startswith("temperature_bin_"):
+            _write_field(temperatures_g, name, field)
+
 
 def _read_dust(group: "h5py.Group", model: Any) -> None:
     if "dust" not in group:
@@ -295,6 +301,11 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
                 density_material=comp.grain_density,
             )
             global_bin_idx += 1
+
+    temperatures_g = dg.get("temperatures")
+    if temperatures_g is not None:
+        for name in temperatures_g:
+            dust.register(str(name), _read_field(temperatures_g, str(name)))
 
 
 # -----------------------------------------------------------------------------

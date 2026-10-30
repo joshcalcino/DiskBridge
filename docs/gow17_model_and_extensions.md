@@ -123,9 +123,10 @@ At the start of a run, `E` is initialized from a temperature guess:
 E_initial = T_initial * CvCold(x_H2, x_He, x_e)
 ```
 
-In computed-temperature mode, `T_initial` usually comes from an existing
-`rad.gas_temperature`; if that is absent, DiskBridge falls back to the dust
-temperature. If the model is then initialized in equilibrium, the solver
+In computed-temperature mode, `temperature.initial = "dust"` uses the local
+projected-area-weighted temperature of all ordinary grain bins.
+`temperature.initial = "gas_temperature"` instead requires an existing gas
+temperature field. If the model is then initialized in equilibrium, the solver
 evolves `E` until heating and cooling are approximately equal for that initial
 environment. After that, during time-dependent evolution, `E` is carried
 forward from the previous step and continues to evolve according to
@@ -451,9 +452,12 @@ If `T_gas > T_dust`, collisions transfer energy from gas to dust, so this acts
 as gas cooling. If `T_gas < T_dust`, the same term becomes negative cooling,
 which means dust heats the gas.
 
-The original local code had a default dust temperature stored in the native
-object. DiskBridge adds `SetTdust(Tdust)` and passes the local RADMC-3D dust
-temperature into each cell before solving. In the C++ code this value is used in
+DiskBridge passes the local projected-area-weighted temperature of all ordinary
+grain bins through `SetTdust(Tdust)` before solving each cell. Each bin retains
+its own RADMC-3D temperature and contributes in proportion to
+`3*rho_d/(4*a*rho_s)`. Zero-density bins contribute no weight; dust-free cells
+have zero exchange and a 10 K numerical temperature placeholder. In the C++
+code this temperature is used in
 `Thermo::CoolingDustTd(Zd_, nH_, Tgas, Tdust_)` inside `dEdt_()`.
 
 This matters for disk/envelope post-processing because the dust temperature can

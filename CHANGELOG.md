@@ -110,6 +110,12 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Dust-based gas-temperature initialization and gas–dust thermal exchange use
+  the local projected-area-weighted temperature of all ordinary grain bins.
+  Individual species temperatures are retained through binary reading,
+  segmented transfer, saved-output loading, and writing; absent bins contribute
+  zero weight. Chemistry cache and checkpoint identities include this
+  temperature prescription.
 - Spherical HEALPix shielding rays include material reached after crossing an
   empty polar cutout or inner cavity, and use exact outer theta faces. Column,
   directional-weight, chemistry-output, and checkpoint cache identities include

@@ -1202,7 +1202,8 @@ class RadWriter:
         Parameters
         ----------
         temperature : Quantity
-            Dust temperature field in K, shape (nx, ny, nz)
+            Dust temperatures in K, shape ``(nspec, *model.mesh.shape)``.
+            A mesh-shaped array is accepted only for a single species.
         output_dir : str or Path, optional
             Directory to write file (default: '.')
         nspec : int, optional
@@ -1230,6 +1231,13 @@ class RadWriter:
         if temp.ndim not in (3, 4):
             raise ValueError(
                 f"dust_temperature must be 3D (single species) or 4D (nspec, ...), got shape={temp.shape}"
+            )
+
+        if temp.ndim == 3 and nspec_i != 1:
+            raise ValueError("Multiple dust species require a separate temperature array for each bin")
+        if temp.shape[-3:] != tuple(mesh.shape):
+            raise ValueError(
+                f"Dust temperature spatial shape {temp.shape[-3:]} does not match mesh {mesh.shape}"
             )
 
         if temp.ndim == 4 and int(temp.shape[0]) != nspec_i:
@@ -1293,9 +1301,7 @@ class RadWriter:
             if temp.ndim == 3:
                 if temp_flat is None:
                     raise ValueError('Internal error: missing flattened temperature array')
-                # Write same temperature for all species
-                for _ in range(nspec_i):
-                    temp_flat.astype(np.float64).tofile(f)
+                temp_flat.astype(np.float64).tofile(f)
             else:
                 # Write each species separately
                 for ispec in range(nspec_i):

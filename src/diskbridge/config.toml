@@ -207,6 +207,7 @@ method = "legacy_scalar"
 
 [chemistry.gow17.temperature]
 mode = "computed"
+# Local projected-area-weighted temperature over all ordinary grain bins.
 initial = "dust"
 Tgas_floor = "2.7 K"
 Tgas_ceiling = "1.0e5 K"

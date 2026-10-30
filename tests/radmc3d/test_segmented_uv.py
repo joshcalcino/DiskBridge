@@ -15,7 +15,9 @@ import pytest
 
 from diskbridge._units import Quantity
 from diskbridge._params import DEFAULT_PARAMS_FILE
-from diskbridge.model.core import Model
+from diskbridge.model.core import Model, SubModel
+from diskbridge.model.dust import Dust
+from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.model.profiles import (
     find_noise_aware_split,
@@ -312,11 +314,16 @@ def test_boundary_calibration_clips_parent_temperature_to_child_prefix() -> None
 
     parent = spherical_model(np.array([1.0, 2.0, 3.0, 4.0]))
     child = spherical_model(np.array([1.0, 2.0, 3.0]))
-    temperature = Quantity(np.array([[[10.0]], [[20.0]], [[30.0]]]), "K")
+    temperature = Quantity(
+        np.array([[[[10.0]], [[20.0]], [[30.0]]], [[[40.0]], [[50.0]], [[60.0]]]]),
+        "K",
+    )
 
     clipped = _clip_parent_temperature_to_child(temperature, parent, child)
 
-    np.testing.assert_array_equal(clipped.magnitude[:, 0, 0], [10.0, 20.0])
+    np.testing.assert_array_equal(
+        clipped.magnitude[:, :, 0, 0], [[10.0, 20.0], [40.0, 50.0]]
+    )
 
 
 def test_noise_aware_split_returns_explicit_one_shell_join_indices() -> None:
@@ -427,7 +434,24 @@ def _completed_segment_fixture(tmp_path: Path) -> tuple[SegmentedRadRunner, dict
         phi=Axis(edges=Quantity(np.array([0.0, 2.0 * np.pi]), "radian")),
     )
     model.coord_system = "spherical"
-    model.dust = SimpleNamespace(nbin=2)
+    model.gas = SubModel(model)
+    model.gas_register(
+        "density",
+        Field(
+            "density",
+            Quantity(np.full(model.mesh.shape, 1.0e-18), "g/cm^3"),
+            model.mesh.axis_names(),
+        ),
+    )
+    model.dust = Dust(model)
+    model.dust.set_distribution(
+        amin=Quantity(0.1, "um"),
+        amax=Quantity(10.0, "um"),
+        nbin=2,
+        power_index=3.5,
+        grain_density=Quantity(2.7, "g/cm^3"),
+        dust_to_gas_ratio=0.01,
+    )
 
     base_dir = tmp_path / "run"
     segment_dir = base_dir / "segments" / "segment_00_full"
@@ -481,6 +505,7 @@ def _completed_segment_fixture(tmp_path: Path) -> tuple[SegmentedRadRunner, dict
 
     expected = {
         "mode": "noise_aware_inherited_uv",
+        "dust_temperature_transfer": "per_bin",
         "mcmono_wavelength_source": "uv",
         "segmented_final_nphot_multiplier": 1.0,
         "segmented_tol": 0.01,
@@ -510,6 +535,83 @@ def _completed_segment_fixture(tmp_path: Path) -> tuple[SegmentedRadRunner, dict
     return SegmentedRadRunner(model, base_dir), expected, wavelengths, specs
 
 
+def test_saved_segments_preserve_distinct_dust_bin_temperatures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inner segments replace every species while the public mean stays mesh-shaped."""
+    runner, _, _, _ = _completed_segment_fixture(tmp_path)
+    model = runner.base_model
+    outer_dir = runner.base_model_dir / "segments" / "segment_00_full"
+    outer_temperatures = Quantity(
+        np.array([[[[10.0]], [[20.0]]], [[[40.0]], [[80.0]]]]), "K"
+    )
+    RadModel(model, runner.base_model_dir).writer.write_dust_temperature(
+        Quantity(np.full((2,) + model.mesh.shape, 25.0), "K"),
+        output_dir=runner.base_model_dir / "radmc3d_outputs",
+        nspec=2,
+    )
+    RadModel(model, outer_dir).writer.write_dust_temperature(
+        outer_temperatures,
+        output_dir=outer_dir / "radmc3d_outputs" / "temperature",
+        nspec=2,
+    )
+    child_model = model.clip_mesh(r_max=Quantity(2.0, "au"))
+    child_dir = runner.base_model_dir / "segments" / "segment_01_rmax_2au"
+    child_temperatures = Quantity(np.array([[[[30.0]]], [[[90.0]]]]), "K")
+    RadModel(child_model, child_dir).writer.write_dust_temperature(
+        child_temperatures,
+        output_dir=child_dir / "radmc3d_outputs" / "temperature",
+        nspec=2,
+    )
+    _write_mean_intensity(
+        child_dir / "radmc3d_outputs" / "mcmono" / "mean_intensity.bout",
+        np.ones((1, 1)),
+        frequencies=np.array([1.0e15]),
+    )
+    summary_path = runner.base_model_dir / "segments" / "segmented_rt_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary.pop("dust_temperature_transfer")
+    summary["segments"][0]["is_final"] = False
+    summary["segments"].append(
+        {"level": 1, "work_dir": str(child_dir), "is_final": True}
+    )
+    summary_path.write_text(json.dumps(summary))
+    monkeypatch.setattr(
+        "diskbridge.radmc3d.segmented.validate_uv_chemistry_config",
+        lambda *args, **kwargs: SimpleNamespace(products_enabled=False),
+    )
+
+    def postprocess_chi(rad, *args, **kwargs):
+        rad.chi = Quantity(np.ones(rad.model.mesh.shape), "dimensionless")
+
+    monkeypatch.setattr(RadModel, "_postprocess_chi", postprocess_chi)
+
+    result = runner.load_segmented_rt_outputs()
+
+    restored = RadModel(model, runner.base_model_dir)
+    expected_bins = outer_temperatures.magnitude.copy()
+    expected_bins[:, :1] = child_temperatures.magnitude
+    np.testing.assert_array_equal(restored.dust_temperature_bins.magnitude, expected_bins)
+    np.testing.assert_array_equal(
+        restored.data.readDustTemp(
+            fname=runner.base_model_dir / "radmc3d_outputs" / "dust_temperature.bdat"
+        ).magnitude,
+        expected_bins,
+    )
+    weights = np.array(
+        [
+            model.dust[f"bin_{i}"].mass_fraction
+            / model.dust[f"bin_{i}"].size.to("cm").magnitude
+            for i in range(2)
+        ]
+    )
+    expected_mean = np.average(expected_bins, axis=0, weights=weights)
+    assert result["temperature"].shape == model.mesh.shape
+    np.testing.assert_allclose(result["temperature"].magnitude, expected_mean)
+    np.testing.assert_allclose(restored.dust_temperature.magnitude, expected_mean)
+
+
 def test_completed_terminal_products_are_accepted_before_scout_budget(tmp_path: Path) -> None:
     runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
 
@@ -520,6 +622,30 @@ def test_completed_terminal_products_are_accepted_before_scout_budget(tmp_path: 
     )
 
     assert compatible, reason
+
+
+@pytest.mark.parametrize("saved_transfer", [None, "species_zero"])
+def test_completed_terminal_products_reject_old_dust_temperature_transfer(
+    tmp_path: Path,
+    saved_transfer: str | None,
+) -> None:
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+    summary_path = runner.base_model_dir / "segments" / "segmented_rt_summary.json"
+    summary = json.loads(summary_path.read_text())
+    if saved_transfer is None:
+        summary.pop("dust_temperature_transfer")
+    else:
+        summary["dust_temperature_transfer"] = saved_transfer
+    summary_path.write_text(json.dumps(summary))
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert not compatible
+    assert "dust_temperature_transfer" in reason
 
 
 def test_completed_terminal_products_reject_changed_final_budget(tmp_path: Path) -> None:
@@ -693,6 +819,7 @@ def test_full_nphot_retry_option_is_part_of_restart_identity(
     runner.run_segmented_rt(segmented_full_nphot_retry=True)
 
     assert captured["segmented_full_nphot_retry"] is True
+    assert captured["dust_temperature_transfer"] == "per_bin"
 
 
 def test_binary_restart_validation_checks_exact_payload_sizes(tmp_path: Path) -> None:

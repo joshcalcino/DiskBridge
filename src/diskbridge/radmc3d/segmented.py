@@ -48,6 +48,8 @@ from .wavelengths import build_mcmono_wavelengths
 from .data import combine_mean_intensity_files, radial_shell_mean_intensity
 
 
+_DUST_TEMPERATURE_TRANSFER = "per_bin"
+
 _SEGMENTED_PARAM_KEYS = (
     "segmented_tol",
     "segmented_r_clip_min",
@@ -729,7 +731,9 @@ class SegmentedRadRunner:
         Returns
         -------
         dict
-            Segmented-run metadata and merged ``temperature``/``chi`` fields.
+            Segmented-run metadata, the mesh-shaped area-weighted dust
+            ``temperature``, and merged ``chi``. Individual bin temperatures
+            are retained as canonical dust fields on the base model.
 
         Raises
         ------
@@ -875,10 +879,6 @@ class SegmentedRadRunner:
             raise ValueError("Segmented RT saved outputs produced no merged fields")
 
         self.base_model.gas_register(
-            "dust_temperature",
-            Field(quantity="dust_temperature", data=merged_T, axis_order=axis_order),
-        )
-        self.base_model.gas_register(
             "chi",
             Field(quantity="chi", data=merged_chi, axis_order=axis_order),
         )
@@ -905,7 +905,12 @@ class SegmentedRadRunner:
         self.base_model.validate_canonical_axis_orders(include_dust=False)
 
         base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
-        base_rad.dust_temperature = merged_T
+        base_rad.set_dust_temperatures(merged_T)
+        base_rad.writer.write_dust_temperature(
+            merged_T,
+            output_dir=base_rad.outputs_dir,
+            nspec=int(self.base_model.dust.nbin),
+        )
         base_rad.chi = merged_chi
         if merged_uv_products is not None:
             base_rad.uv_products = merged_uv_products
@@ -919,7 +924,7 @@ class SegmentedRadRunner:
             "segments": segments,
             "scout_runs": summary.get("scout_runs", []),
             "joins": summary.get("joins", []),
-            "temperature": merged_T,
+            "temperature": base_rad.dust_temperature,
             "chi": merged_chi,
             "uv_products": merged_uv_products,
             "mode": summary_mode,
@@ -1049,10 +1054,8 @@ class SegmentedRadRunner:
                 uv_min,
                 uv_max,
             )
-            if parent_rad.dust_temperature is None:
-                raise RuntimeError("Parent segment has no temperature for UV calibration")
             calibration_temperature = _clip_parent_temperature_to_child(
-                parent_rad.dust_temperature,
+                parent_rad.dust_temperature_bins,
                 parent_rad.model,
                 calibration_rad.model,
             )
@@ -1734,15 +1737,15 @@ class SegmentedRadRunner:
         axis_order: Tuple[str, ...],
     ) -> tuple[Quantity, Quantity]:
         if merged_T is None or merged_chi is None:
-            return rad.dust_temperature, rad.chi
+            return rad.dust_temperature_bins, rad.chi
 
         if indexer is None:
-            return rad.dust_temperature, rad.chi
+            return rad.dust_temperature_bins, rad.chi
 
         return (
             self._merge_field(
                 merged=merged_T,
-                child=rad.dust_temperature,
+                child=rad.dust_temperature_bins,
                 indexer=indexer,
                 axis_order=axis_order,
             ),
@@ -2085,6 +2088,7 @@ class SegmentedRadRunner:
 
         expected_completed_summary = {
             "mode": "noise_aware_inherited_uv",
+            "dust_temperature_transfer": _DUST_TEMPERATURE_TRANSFER,
             "mcmono_wavelength_source": "uv",
             "segmented_final_nphot_multiplier": final_multiplier,
             "segmented_full_nphot_retry": full_nphot_retry,
@@ -2471,10 +2475,6 @@ class SegmentedRadRunner:
         if merged_temperature is None or merged_chi is None:
             raise RuntimeError("Segmented RT produced no merged fields")
         self.base_model.gas_register(
-            "dust_temperature",
-            Field("dust_temperature", merged_temperature, axis_order=axis_order),
-        )
-        self.base_model.gas_register(
             "chi", Field("chi", merged_chi, axis_order=axis_order)
         )
         if runtime_mode.products_enabled:
@@ -2496,7 +2496,7 @@ class SegmentedRadRunner:
         self.base_model.validate_canonical_axis_orders(include_dust=False)
 
         base_rad = RadModel(self.base_model, model_dir=self.base_model_dir)
-        base_rad.dust_temperature = merged_temperature
+        base_rad.set_dust_temperatures(merged_temperature)
         base_rad.chi = merged_uv_products["chi_broad"] if merged_uv_products else merged_chi
         base_rad.uv_products = merged_uv_products or {"chi_broad": merged_chi}
         base_rad.radiation_mode = (
@@ -2513,6 +2513,7 @@ class SegmentedRadRunner:
 
         result = {
             "mode": "noise_aware_inherited_uv",
+            "dust_temperature_transfer": _DUST_TEMPERATURE_TRANSFER,
             "mcmono_wavelength_source": "uv",
             "segmented_final_nphot_multiplier": final_multiplier,
             "segmented_full_nphot_retry": full_nphot_retry,
@@ -2534,7 +2535,7 @@ class SegmentedRadRunner:
                 **photon_packages,
                 "total": int(sum(photon_packages.values())),
             },
-            "temperature": merged_temperature,
+            "temperature": base_rad.dust_temperature,
             "chi": base_rad.chi,
             "uv_products": merged_uv_products,
             "uv_product_mode": "all_segments_measured",

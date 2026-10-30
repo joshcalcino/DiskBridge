@@ -62,6 +62,7 @@ from diskbridge._constants import (
 
 U_DRAINE = Quantity(9.0e-14, 'erg/cm^3')
 RADMC_PHOTON_COUNT_MAX = int(np.iinfo(np.int32).max)
+DUST_TEMPERATURE_WEIGHTING = "all_grain_projected_area"
 
 
 def _validate_radmc_photon_count(value: int, *, name: str) -> int:
@@ -658,44 +659,91 @@ class RadModel:
         )
         return microturbulence
     
-    def read_dust_temperature(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
-        """Read dust temperature from RADMC-3D output using radmc3dData.
-        
+    def read_dust_temperature(self, fname: Optional[str | Path] = None) -> Quantity:
+        """Read all dust temperatures and return their local area-weighted mean.
+
         Parameters
         ----------
         fname : str or Path, optional
-            Path to temperature file (if None, uses default in model_dir)
-        ispec : int, optional
-            Dust species index to read (default: 0)
-            
+            Binary ``dust_temperature.bdat`` path. Defaults to the file in
+            ``model_dir``.
+
         Returns
         -------
         Quantity
-            Temperature field in Kelvin
-        """
-        self.dust_temperature = self.data.readDustTemp(fname=fname, ispec=ispec)
+            Projected-area-weighted temperature in K, with the model mesh
+            shape and native axis order. Dust-free cells use a 10 K seed.
 
-        axis_order = self.model.mesh.axis_names()
-        self.model.gas_register(
-            'dust_temperature',
-            Field(
-                quantity='dust_temperature',
-                data=self.dust_temperature,
-                axis_order=axis_order,
-            ),
+        Notes
+        -----
+        Individual temperatures are retained as canonical dust fields
+        ``temperature_bin_i`` and exposed by ``dust_temperature_bins``.
+        """
+        return self.set_dust_temperatures(self.data.readDustTemp(fname=fname))
+
+    @property
+    def dust_temperature_bins(self) -> Quantity:
+        """Per-bin temperatures in K, shaped ``(nbin, *model.mesh.shape)``."""
+        dust = self.model.dust
+        if dust is None or int(dust.nbin) < 1:
+            raise ValueError("Per-bin temperatures require a dust distribution")
+        target = self.model.mesh.axis_names()
+        return Quantity(
+            np.stack([
+                field_data_as_order(dust[f"temperature_bin_{i}"], target).to('K').magnitude
+                for i in range(int(dust.nbin))
+            ]),
+            'K',
         )
-        
-        return self.dust_temperature
-    
-    def read_temperature(self, source: str = 'auto', ispec: int = 0) -> Quantity:
+
+    def set_dust_temperatures(self, temperature: Quantity) -> Quantity:
+        """Store every bin temperature and derive the area-weighted mean.
+
+        Parameters
+        ----------
+        temperature : Quantity
+            Temperatures in K, shaped ``(nbin, *model.mesh.shape)`` in native
+            spatial axis order. Every dust bin must be supplied separately.
+
+        Returns
+        -------
+        Quantity
+            Mesh-shaped projected-area-weighted temperature in K. Dust-free
+            cells use a 10 K numerical seed and have zero thermal coupling.
+
+        Raises
+        ------
+        ValueError
+            If bin counts or shapes differ, or a populated bin has an invalid
+            temperature.
+        """
+        dust = self.model.dust
+        if dust is None or int(dust.nbin) < 1:
+            raise ValueError("Dust temperatures require a dust distribution")
+        values = np.array(temperature.to('K').magnitude, dtype=np.float64, copy=True)
+        expected = (int(dust.nbin),) + tuple(self.model.mesh.shape)
+        if values.shape != expected:
+            raise ValueError(f"Dust temperature shape {values.shape}; expected {expected}")
+        _, effective = self._reduce_dust_temperatures(values)
+        target = self.model.mesh.axis_names()
+        for i in range(int(dust.nbin)):
+            dust.register(
+                f"temperature_bin_{i}",
+                Field('dust_temperature', Quantity(values[i], 'K'), target),
+            )
+        self.dust_temperature = effective
+        self.model.gas_register(
+            'dust_temperature', Field('dust_temperature', effective, target),
+        )
+        return effective
+
+    def read_temperature(self, source: str = 'auto') -> Quantity:
         """Read temperature from RADMC-3D output.
         
         Parameters
         ----------
         source : str, optional
             Temperature source: 'auto', 'gas', or 'dust' (default: 'auto')
-        ispec : int, optional
-            Dust species for dust temperature (default: 0)
             
         Returns
         -------
@@ -706,11 +754,11 @@ class RadModel:
             if (self.model_dir / 'gas_temperature.inp').exists():
                 return self.read_gas_temperature()
             else:
-                return self.read_dust_temperature(ispec=ispec)
+                return self.read_dust_temperature()
         elif source == 'gas':
             return self.read_gas_temperature()
         elif source == 'dust':
-            return self.read_dust_temperature(ispec=ispec)
+            return self.read_dust_temperature()
         else:
             raise ValueError(f"Invalid temperature source: {source}")
     
@@ -786,89 +834,94 @@ class RadModel:
         )
         return sigma_q
 
-    def _dust_temperature_bins_for_coupling(self, target: Tuple[str, ...], nbin: int) -> np.ndarray:
-        """Return dust temperatures as ``(nbin, *mesh_shape)`` in K."""
-        if self.dust_temperature is not None:
-            temp = np.asarray(self.dust_temperature.to('K').magnitude, dtype=np.float64)
-            if temp.shape == tuple(np.asarray(self.ensure_nH().magnitude).shape):
-                return np.broadcast_to(temp, (nbin,) + temp.shape).copy()
-            if temp.ndim == len(target) + 1 and temp.shape[0] >= nbin:
-                return np.ascontiguousarray(temp[:nbin], dtype=np.float64)
-
-        try:
-            fpath = self.data._resolve_data_file(
-                fname=None,
-                basename='dust_temperature',
-                missing_message="No dust_temperature file found",
-            )
-        except FileNotFoundError:
-            temp_q = self.ensure_dust_temperature()
-            temp = np.asarray(temp_q.to('K').magnitude, dtype=np.float64)
-            if temp.shape != tuple(np.asarray(self.ensure_nH().magnitude).shape):
-                raise
-            return np.broadcast_to(temp, (nbin,) + temp.shape).copy()
-
-        raw = self.data._read_scalar_data(fpath)
-        if raw.ndim == 1:
-            temps = [self.data._reshape_scalar_to_mesh(raw)]
-        elif raw.ndim == 2:
-            temps = [self.data._reshape_scalar_to_mesh(raw[i, :]) for i in range(raw.shape[0])]
-        else:
-            raise ValueError(f"Unexpected dust temperature data shape: {raw.shape}")
-        temp_arr = np.asarray(temps, dtype=np.float64)
-        if temp_arr.shape[0] == 1:
-            return np.broadcast_to(temp_arr[0], (nbin,) + temp_arr.shape[1:]).copy()
-        if temp_arr.shape[0] < nbin:
-            raise ValueError(
-                f"dust_temperature has {temp_arr.shape[0]} species, but dust model has {nbin} bins"
-            )
-        return np.ascontiguousarray(temp_arr[:nbin], dtype=np.float64)
-
+    # db-keywords: dust-gas-coupling, gas-temperature, dust, radmc3d
+    # db-role: canonical
     def compute_gas_dust_surface_area_coupling(self) -> tuple[Quantity, Quantity]:
-        """Compute total projected dust area per H and surface-area-weighted Tdust."""
-        if self.model.dust is None:
-            raise RuntimeError("Model has no dust submodel; cannot compute gas-dust coupling")
+        """Compute projected area per H and the all-grain effective temperature.
 
+        Returns
+        -------
+        tuple of Quantity
+            Total projected grain area per H in cm2 and the area-weighted dust
+            temperature in K, both with native mesh shape and axis order.
+            The temperature is also registered as ``dust_temperature``.
+
+        Raises
+        ------
+        ValueError
+            If a bin has invalid grain properties or density, or a populated
+            bin has a non-finite or non-positive temperature.
+
+        Notes
+        -----
+        Each bin is weighted by ``3*rho_d/(4*a*rho_s)``. Bins absent from a
+        cell contribute nothing. Cells without any dust use a 10 K numerical
+        temperature seed and have zero gas--dust thermal exchange.
+        """
+        dust = self.model.dust
+        if dust is None or int(dust.nbin) < 1:
+            raise ValueError("Gas-dust coupling requires a dust distribution")
+        nbin = int(dust.nbin)
+        if not all(f"temperature_bin_{i}" in dust for i in range(nbin)):
+            self.read_dust_temperature()
+
+        target = self._chem_axis_order()
+        temperatures = [
+            field_data_as_order(dust[f"temperature_bin_{i}"], target).to('K').magnitude
+            for i in range(nbin)
+        ]
+        sigma_total, effective = self._reduce_dust_temperatures(temperatures)
+        self.dust_temperature = effective
+        self.model.gas_register(
+            'dust_temperature', Field('dust_temperature', effective, target),
+        )
+        return sigma_total, effective
+
+    def _reduce_dust_temperatures(
+        self, temperatures: Sequence[np.ndarray],
+    ) -> tuple[Quantity, Quantity]:
+        """Validate bin temperatures and reduce them without changing RT fields."""
+        dust = self.model.dust
         target = self._chem_axis_order()
         nH = self.ensure_nH().to('cm^-3')
         nH_cm3 = np.asarray(nH.magnitude, dtype=np.float64)
-        nbin = int(self.model.dust.nbin)
-        temp_bins = self._dust_temperature_bins_for_coupling(target, nbin)
-
-        sigma_total = np.zeros_like(nH_cm3, dtype=np.float64)
+        area_total = np.zeros_like(nH_cm3, dtype=np.float64)
         weighted_temp = np.zeros_like(nH_cm3, dtype=np.float64)
 
-        for i in range(nbin):
-            bin_obj = self.model.dust[f'bin_{i}']
+        for i in range(int(dust.nbin)):
+            bin_obj = dust[f'bin_{i}']
             dust_density_field = bin_obj['density']
             rho_d_i = field_data_as_order(dust_density_field, target).to('g/cm^3')
             a_i = bin_obj.size.to('cm').magnitude
             rho_s = bin_obj.density_material.to('g/cm^3').magnitude
 
-            if float(a_i) <= 0.0:
+            if not np.isfinite(a_i) or float(a_i) <= 0.0:
                 raise ValueError(f"Dust bin {i} has non-positive grain size a={a_i}")
-            if float(rho_s) <= 0.0:
+            if not np.isfinite(rho_s) or float(rho_s) <= 0.0:
                 raise ValueError(f"Dust bin {i} has non-positive material density rho_s={rho_s}")
 
             rho = np.asarray(rho_d_i.magnitude, dtype=np.float64)
+            if np.any(~np.isfinite(rho) | (rho < 0.0)):
+                raise ValueError(f"Dust bin {i} has invalid density")
             area_density = (3.0 * rho) / (4.0 * float(a_i) * float(rho_s))
-            sigma_i = np.divide(
-                area_density,
-                nH_cm3,
-                out=np.zeros_like(area_density, dtype=np.float64),
-                where=(nH_cm3 > 0.0),
+            temperature = np.asarray(temperatures[i], dtype=np.float64)
+            populated = area_density > 0.0
+            if np.any(populated & (~np.isfinite(temperature) | (temperature <= 0.0))):
+                raise ValueError(f"Dust bin {i} has invalid temperature where its density is positive")
+            area_total += area_density
+            weighted_temp += np.multiply(
+                area_density, temperature, out=np.zeros_like(area_density), where=populated,
             )
-            sigma_i = np.where(np.isfinite(sigma_i) & (sigma_i > 0.0), sigma_i, 0.0)
-            sigma_total += sigma_i
-            weighted_temp += sigma_i * temp_bins[i]
 
+        sigma_total = np.divide(
+            area_total, nH_cm3, out=np.zeros_like(area_total), where=(nH_cm3 > 0.0),
+        )
         Tdust_gd = np.divide(
             weighted_temp,
-            sigma_total,
+            area_total,
             out=np.full_like(weighted_temp, 10.0, dtype=np.float64),
-            where=(sigma_total > 0.0),
+            where=(area_total > 0.0),
         )
-        Tdust_gd = np.where(np.isfinite(Tdust_gd), Tdust_gd, 10.0)
         return Quantity(sigma_total, 'cm^2'), Quantity(Tdust_gd, 'K')
 
     def compute_h2_formation_surface_area(self) -> Quantity:
@@ -1676,12 +1729,16 @@ class RadModel:
         RuntimeError
             If dust temperature cannot be obtained
         """
-        if self.dust_temperature is not None and not force:
+        dust = self.model.dust
+        if dust is not None and int(dust.nbin) > 0 and not force:
+            if all(f"temperature_bin_{i}" in dust for i in range(int(dust.nbin))):
+                return self.compute_gas_dust_surface_area_coupling()[1]
+        elif self.dust_temperature is not None and not force:
             return self.dust_temperature
         
         try:
             self.read_dust_temperature()
-        except Exception:
+        except FileNotFoundError:
             self.compute_temperature(force=force)
         
         if self.dust_temperature is None:

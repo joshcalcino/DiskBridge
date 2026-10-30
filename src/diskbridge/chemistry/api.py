@@ -28,6 +28,7 @@ from diskbridge.chemistry.io import (
 )
 from diskbridge.model.microturbulence import ensure_microturbulence_field
 from diskbridge.radmc3d.cache import should_use_cache, stable_json_hash, write_cache_context
+from diskbridge.radmc3d.model import DUST_TEMPERATURE_WEIGHTING
 from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES
 from diskbridge.serialization import jsonable
 from diskbridge.utils import sha256_file
@@ -111,6 +112,9 @@ def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
                 "mass_fraction": float(dust_bin.mass_fraction),
                 "density_material": jsonable(dust_bin.density_material),
                 "density": _field_context(dust_bin["density"], unit="g/cm^3"),
+                "temperature": _field_context(
+                    model.dust[f"temperature_{bin_name}"], unit="K",
+                ),
             }
         dust_context.update(
             {
@@ -139,6 +143,7 @@ def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
         "kind": "gow17",
         "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
         "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
+        "dust_temperature_weighting": DUST_TEMPERATURE_WEIGHTING,
         "config_sha256": stable_json_hash(config),
         "params": {
             "nside": int(rad.params.nside),
@@ -368,6 +373,9 @@ def run_chemistry(
     cache_context = None
     loaded_from_cache = False
 
+    if model_lower == "gow17" and write and not load_existing:
+        rad.ensure_dust_temperature()
+
     if load_existing:
         result = load_chemistry_outputs(rad, output_path)
     else:
@@ -427,7 +435,7 @@ def run_chemistry(
 
     if write:
         output_path.mkdir(parents=True, exist_ok=True)
-        if cache_context is None and model_lower == "gow17":
+        if cache_context is None and model_lower == "gow17" and not load_existing:
             cache_context = _gow17_cache_context(rad, config)
         if cache_context is not None and not load_existing:
             write_cache_context(output_path, cache_context)

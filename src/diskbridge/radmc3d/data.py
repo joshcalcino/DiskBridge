@@ -266,8 +266,6 @@ class RadData:
         Directory containing RADMC-3D files
     rhodust : Quantity or None
         Dust density in g/cm^3
-    dusttemp : Quantity or None
-        Dust temperature in K
     rhogas : Quantity or None
         Gas density in g/cm^3
     gastemp : Quantity or None
@@ -314,7 +312,6 @@ class RadData:
         
         # Storage for RADMC-3D output data
         self.rhodust: Optional[Quantity] = None
-        self.dusttemp: Optional[Quantity] = None
         self.rhogas: Optional[Quantity] = None
         self.gastemp: Optional[Quantity] = None
         self.gasvel: Optional[Quantity] = None
@@ -453,22 +450,20 @@ class RadData:
             return data
         raise ValueError(f"Unexpected {field_name} data shape: {data.shape}")
     
-    def readDustTemp(self, fname: Optional[str | Path] = None, ispec: int = 0) -> Quantity:
-        """Read dust temperature from RADMC-3D output.
-        
-        Tries binary format first (.bdat), then ASCII format (.dat).
+    def readDustTemp(self, fname: Optional[str | Path] = None) -> Quantity:
+        """Read every dust species from binary RADMC-3D output.
         
         Parameters
         ----------
         fname : str or Path, optional
-            Filename to read (default: auto-detect dust_temperature)
-        ispec : int, optional
-            Dust species index (default: 0)
+            Path to ``dust_temperature.bdat``. Defaults to the file in
+            ``model_dir``.
             
         Returns
         -------
         Quantity
-            Dust temperature in Kelvin
+            Temperatures in K with shape ``(nspec, *model.mesh.shape)`` and
+            spatial axes in the model's native order.
             
         Raises
         ------
@@ -480,21 +475,16 @@ class RadData:
             basename='dust_temperature',
             missing_message="No dust_temperature file found",
         )
-
+        if fpath.suffix != '.bdat':
+            raise ValueError("Dust temperatures require binary dust_temperature.bdat")
         data = self._read_scalar_data(fpath)
-        
-        # Extract the requested species
-        logger.debug(f"Dust temperature data shape: {data.shape}, dtype: {data.dtype}, ispec: {ispec}, type(ispec): {type(ispec)}")
-        
-        temp_1d = self._select_dust_species(data, ispec=ispec, field_name='dust temperature')
-        temp = self._reshape_scalar_to_mesh(temp_1d)
-        
-        self.dusttemp = Quantity(temp, 'K')
-        
-        logger.info(f"Read dust temperature from {fpath}: shape={temp.shape}, "
-                   f"T_min={np.min(temp):.2f} K, T_max={np.max(temp):.2f} K")
-        
-        return self.dusttemp
+        if data.ndim == 1:
+            data = data[None, :]
+        if data.ndim != 2:
+            raise ValueError(f"Unexpected dust temperature data shape: {data.shape}")
+        temp = np.stack([self._reshape_scalar_to_mesh(species) for species in data])
+        logger.info(f"Read all dust temperatures from {fpath}: shape={temp.shape}")
+        return Quantity(temp, 'K')
     
     def readGasTemp(self, fname: Optional[str | Path] = None) -> Quantity:
         """Read gas temperature from RADMC-3D output or input.

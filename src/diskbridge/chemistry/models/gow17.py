@@ -65,6 +65,8 @@ from diskbridge.radmc3d.uv_products import (
     uv_product_specs_from_config,
 )
 from diskbridge.radmc3d.cache import build_mesh_cache_context, stable_json_hash
+from diskbridge.radmc3d.model import DUST_TEMPERATURE_WEIGHTING
+from diskbridge.utils import sha256_array
 from diskbridge.radmc3d.line_transfer.escape_healpix import (
     compute_velocity_coherent_columns_healpix,
 )
@@ -595,6 +597,18 @@ def _gow17_checkpoint_config(
         for key, value in cfg.items()
         if key not in {"checkpoint", "_output_dir"}
     }
+    dust = getattr(rad.model, "dust", None)
+    dust_temperatures = {}
+    if dust is not None:
+        for index in range(dust.nbin):
+            name = f"temperature_bin_{index}"
+            field = dust[name]
+            values = np.ascontiguousarray(field.data.to("K").magnitude, dtype=np.float64)
+            dust_temperatures[name] = {
+                "shape": list(values.shape),
+                "axis_order": list(field.axis_order),
+                "sha256": sha256_array(values),
+            }
 
     return {
         "enabled": bool(cp.get("enabled", False)),
@@ -607,6 +621,8 @@ def _gow17_checkpoint_config(
                 "nside": nside,
                 "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
                 "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
+                "dust_temperature_weighting": DUST_TEMPERATURE_WEIGHTING,
+                "dust_temperatures": dust_temperatures,
             }
         ),
     }
@@ -1984,7 +2000,6 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
             f"{sorted(valid_co_cooling_methods)}, got {co_cooling_method!r}"
         )
     nside = int(diskbridge.params.nside)
-    checkpoint_cfg = _gow17_checkpoint_config(rad, cfg, nside=nside)
     ion_rate_s = Quantity(cfg["ion_rate"]).to("1/s").magnitude
 
     Zg = float(cfg["Zg"])
@@ -2071,6 +2086,7 @@ def run_gow17(rad: "RadModel", config: dict) -> ChemistryResult:
         )
 
     Tdust = rad.ensure_dust_temperature()
+    checkpoint_cfg = _gow17_checkpoint_config(rad, cfg, nside=nside)
     nH = rad.ensure_nH()
     radiation_mode = _infer_gow17_radiation_mode(rad)
     if temperature_mode == "dust":
