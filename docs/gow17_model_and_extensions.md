@@ -18,11 +18,17 @@ and DiskBridge's Python and pybind11 integration:
 
 - `other_codes/pdr/`: local copy of the original GOW17-style C++ code.
 - `external/pdr/`: DiskBridge's modified C++ PDR core.
-- `src/diskbridge/_gow17.cpp`: pybind11 bindings and batch solvers.
-- `src/diskbridge/chemistry/models/gow17.py`: equilibrium and coupled
+- `src/diskbridge/chemistry/models/gow17/_gow17.cpp`: pybind11 bindings and batch solvers.
+- `src/diskbridge/chemistry/models/gow17/model.py`: equilibrium and coupled
   shielding/chemistry driver.
-- `src/diskbridge/chemistry/models/gow17_timestep.py`: persistent
+- `src/diskbridge/chemistry/models/gow17/slab.py`: one-dimensional slab
+  equilibrium driver.
+- `src/diskbridge/chemistry/models/gow17/timestep.py`: persistent
   time-dependent stepper.
+- `src/diskbridge/chemistry/models/gow17/cache.py`: chemistry cache context.
+- `src/diskbridge/chemistry/models/gow17/io.py`: line-transfer collider fields.
+- `src/diskbridge/chemistry/models/gow17/validation.py`: state-budget projection
+  and diagnostics.
 - `src/diskbridge/radmc3d/uv_products.py`: process-specific UV products from
   RADMC-3D mean intensities.
 - `src/diskbridge/chemistry/shielding/`: 1D and 3D shielding machinery.
@@ -225,7 +231,7 @@ radiation fields, and external timesteps.
 ### 2. Persistent Time-Dependent Solver
 
 DiskBridge adds `Gow17TimeStepper` in
-`src/diskbridge/chemistry/models/gow17_timestep.py`.
+`src/diskbridge/chemistry/models/gow17/timestep.py`.
 
 This class stores the current GOW17 state on the `RadModel`, refreshes
 shielding and UV fields from the current abundances, and advances the native
@@ -486,130 +492,80 @@ The dust opacities are not part of the original GOW17 chemistry network. They
 are a DiskBridge/RADMC-3D input needed to compute the continuum radiation field,
 the dust temperature, and the dust optical depths used in UV shielding.
 
-For each dust size bin, DiskBridge writes a RADMC-3D opacity file
-`dustkappa_<species><bin>.inp`. The input material properties come from a
-`.lnk` optical-constants file, for example
-`data/opac/mix_2species_60silicates_40carbons.lnk`. Each row gives:
-
-```text
-lambda   n(lambda)   k(lambda)
-```
-
-where `lambda` is wavelength in microns, `n(lambda)` is the real part of the
-refractive index, and `k(lambda)` is the imaginary part. Together they define
-the complex refractive index
+Each dust component carries a `diskbridge.DustOpacity` specification. It
+selects a registered material preset, an optool built-in material or
+mass-fraction mixture, or a custom optical-constants file with an intrinsic
+material density. An optical-constants table supplies wavelength-dependent
+`n(lambda)` and `k(lambda)`, defining the complex refractive index
 
 ```text
 m(lambda) = n(lambda) + i k(lambda)
 ```
 
-The real part controls how the electromagnetic wave is refracted by the grain;
-the imaginary part controls absorption. DiskBridge interpolates these optical
-constants onto the RADMC-3D wavelength grid, using logarithmic interpolation in
-wavelength.
+The real part controls refraction and the imaginary part controls absorption.
+Registered mixed-composition tables already contain their effective-medium
+mixing. For a mapping of optool materials, optool constructs the mixture from
+the supplied material mass fractions. The same physical specification stays
+attached to the component and its bins.
 
-Composition enters through this optical-constants file. The runtime Mie
-calculation does not separately track "silicate molecules", "ice molecules",
-or "carbon grains" inside one dust grain. Instead, the selected `species`
-chooses one effective refractive-index table.
+The default method is compact-sphere Mie theory. `method="dhs"` explicitly
+selects a distribution of hollow spheres, with `fmax=0.8` by default for that
+method. DHS describes a grain-shape distribution; its `fmax` does not reduce
+the material density. The independent `porosity` setting is a bulk vacuum
+volume fraction and reduces the resolved density by `(1 - porosity)`.
+This density is resolved before settling and used consistently for grain
+dynamics, projected-area diagnostics, chemistry, and opacity normalization.
 
-We use a single ice-free refractory dust composition for both the disk and
-background dust components, based on mixed silicate and amorphous carbon
-optical constants. The disk and background components differ only in their
-grain-size distributions and spatial distributions. Opacities are computed
-for each grain-size bin using the geometric bin-centre radius.
-
-With the current parameter files,
-`species = mix_2species_60silicates_40carbons` selects
-`data/opac/mix_2species_60silicates_40carbons.lnk`. Other bundled choices
-include `mix_2species_ice70.lnk` and `mix_2species_porous_ice70.lnk`. The
-composition and any effective-medium mixing used to build those tables have
-already been folded into their `n(lambda)` and `k(lambda)` values before
-DiskBridge reads them.
-
-The other composition-dependent number is the material density
-`rho_grain`. This affects both the Stokes number used for settling and the
-conversion from geometric cross section to mass opacity: for the same optical
-efficiency `Q`, a lower-density or more porous grain gives a larger opacity
-per gram because the same grain radius contains less mass. For known opacity
-species, DiskBridge treats the species registry as authoritative and uses the
-registered intrinsic density consistently for settling, grain-area diagnostics,
-and Mie opacity normalization. `grain_density` is only an override for custom
-species that are not in the registry.
-
-The dust size distribution is split into logarithmic bins between `amin` and
-`amax`. The bin mass fractions are computed from the configured power law
+The dust size distribution supplies logarithmic bins between `amin` and
+`amax`, with number distribution
 
 ```text
 n(a) da proportional to a^(-p) da
 ```
 
-where `a` is grain radius and `p` is `pindex`. For a power-law size
-distribution, the mass in a bin is proportional to the integral of
-`a^3 n(a) da`, so the code uses
+For `p != 4`, the mass fraction in a bin is
 
 ```text
 f_bin = [a_max,bin^(4-p) - a_min,bin^(4-p)]
         / [a_max^(4-p) - a_min^(4-p)]
 ```
 
-where `f_bin` is the fraction of the total dust mass assigned to that bin.
-This is the same power-law size-bin logic used by fargo2radmc3d, and the
-`p = 3.5` case corresponds to the standard MRN interstellar-grain slope
-(Mathis et al. 1977), although DiskBridge lets `p` vary.
+The logarithmic integral is used at `p = 4`; `p = 3.5` is the MRN slope.
+The existing representative radius of each bin is used for opacity generation.
+`DustOpacity.size_width` and `size_samples` specify a small size average around
+that radius. They do not replace the distribution or its bin mass fractions.
+The wavelength grid comes from the model's existing wavelength settings.
 
-For the opacity of each bin, the current writer passes the lower radius edge of
-the bin, `a_min,bin`, as the representative grain size. The opacity calculator
-then applies a small logarithmic smoothing around that radius by default
-(`logawidth = 0.05`, `na = 20`). This avoids perfectly sharp single-size Mie
-features while still treating each bin as one RADMC-3D dust species.
+`RadWriter.compute_and_write_dust_opacities` invokes the standalone
+[optool executable](https://github.com/cdominik/optool) for each bin and keeps
+its native RADMC-3D output. No separate in-memory matrix representation or
+DiskBridge table serializer is part of this generation path. The executable
+is selected explicitly, through `OPTOOL_EXECUTABLE`, or from `PATH`.
 
-At each wavelength, the Mie calculation uses the size parameter
-
-```text
-x = 2 pi a / lambda
-```
-
-where `a` is the grain radius and `lambda` is the wavelength. Using
-`x` and `m(lambda)`, the Bohren-Huffman Mie routine computes dimensionless
-efficiencies:
-
-- `Q_abs`: absorption efficiency
-- `Q_sca`: scattering efficiency
-- `Q_ext = Q_abs + Q_sca`: total extinction efficiency
-- `g`: scattering asymmetry parameter, equal to `<cos(theta)>`
-
-These `Q` values are dimensionless cross sections in units of the geometric
-area of the grain. DiskBridge converts them into mass opacities, in
-`cm^2 g^-1` of dust, using
-
-```text
-kappa_abs(lambda) = Q_abs(lambda) * pi a^2 / m_grain
-kappa_sca(lambda) = Q_sca(lambda) * pi a^2 / m_grain
-m_grain = (4 pi / 3) rho_grain a^3
-```
-
-Here `rho_grain` is the material density of the grain. Therefore, for a single
-grain size,
+The generated absorption and scattering opacities are per gram of dust in
+that bin, in `cm^2 g^-1`. They are not opacities per gram of gas. For a single
+compact spherical grain, their relation to the dimensionless Mie efficiency
+is
 
 ```text
 kappa_abs = 3 Q_abs / (4 rho_grain a)
 kappa_sca = 3 Q_sca / (4 rho_grain a)
 ```
 
-The opacities are per gram of dust in that bin, not per gram of gas. The dust
-density field tells RADMC-3D how many grams of dust are present in each cell.
-
-The scalar RADMC-3D opacity file stores:
+The density field supplies the dust mass present in each cell. Scalar
+`dustkappa_<species>.inp` tables contain
 
 ```text
 lambda[micron]   kappa_abs[cm^2/g]   kappa_sca[cm^2/g]   g
 ```
 
-If full scattering matrices are requested, DiskBridge can also write
-`dustkapscatmat_*` files. In the usual workflow here, `scat_mode = 2`, so the
-code writes scalar `dustkappa_*` opacity files with absorption, scattering, and
-`g`, not full angle-dependent scattering matrices.
+Scattering modes of three or greater select native
+`dustkapscatmat_<species>.inp` tables, including the six angle-dependent
+matrix elements. `dustopac.inp` preserves the configured bin/species order.
+These native tables are the authoritative opacity products; the density,
+temperature, and image payloads retain the binary RADMC-3D representation.
+See the [dust guide](guides/dust.md) for Python configuration and material
+choices.
 
 The same opacity files are reused later when estimating UV dust attenuation for
 shielding. DiskBridge reads `kappa_abs + kappa_sca` from each bin and computes a
@@ -901,7 +857,7 @@ Several important pieces remain inherited from GOW17:
 | Geometry | Native 1D slab model | 1D slab plus batch cell solver on DiskBridge grids |
 | State vector | 14 variables including `E` | 15 variables: adds `CO_ice` |
 | UV field | Single Draine-normalized field in native slab logic | Process-specific Draine-normalized UV products from RADMC-3D |
-| Dust opacity | Not part of native GOW17 chemistry | Mie opacities per dust-size bin written for RADMC-3D and reused for UV dust attenuation |
+| Dust opacity | Not part of native GOW17 chemistry | Optool opacities per dust-size bin, with component-specific material and shape, written for RADMC-3D and reused for UV dust attenuation |
 | CO photodesorption | Not present | Physical photon-flux driven CO photodesorption |
 | Freeze-out/desorption | Not present | CO freeze-out, thermal desorption, photodesorption, optional CR desorption |
 | Dust temperature | Limited/native fixed behavior | Per-cell `Tdust` from RADMC-3D |

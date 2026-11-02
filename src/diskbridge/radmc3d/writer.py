@@ -28,13 +28,8 @@ from diskbridge._constants import (
     SIGMA_SB as SIGMA_SB_CGS,
     T_CMB,
 )
-from diskbridge.dust_species import (
-    normalize_species_name,
-    resolve_species_grain_density,
-    species_optconst_path,
-)
 import diskbridge
-from .opacities import DustOpacityCalculator
+from .opacities import write_dust_opacity
 from diskbridge.model.utils import transpose_to_axis_order
 from diskbridge.model.microturbulence import MICROTURBULENCE_FIELD, ensure_microturbulence_field
 from diskbridge.utils import sha256_radmc3d_vector_binp
@@ -70,7 +65,6 @@ class RadWriter:
         """
         self.model = model
         self.params = diskbridge.params  # Reference to global params (updated dynamically)
-        self.opacity_calculator = DustOpacityCalculator()
         self.organize_files = organize_files
         
         # Define single input directory for all radmc3d input files
@@ -632,13 +626,13 @@ class RadWriter:
         self,
         output_dir: str | Path = '.',
         species_names: Optional[List[str]] = None,
-        scattering_mode: int = 0,
+        scattering_mode: Optional[int] = None,
     ) -> None:
         """Write dustopac.inp file.
         
         Args:
             output_dir: Directory to write the file
-            species_names: List of species names (default: bin_0, bin_1, ...)
+            species_names: One name per bin, defaulting to each bin opacity species
             scattering_mode: Scattering mode (0=no scat, >=3=full matrix)
         """
         base_dir = Path(output_dir)
@@ -650,12 +644,12 @@ class RadWriter:
         
         nbin = self.model.dust.nbin
         if species_names is None:
-            base_species = getattr(self.params, 'species', None)
-            if base_species is not None:
-                species_names = [f"{base_species}{i}" for i in range(nbin)]
-            else:
-                species_names = [f"bin_{i}" for i in range(nbin)]
-        
+            species_names = [self.model.dust.bins[f"bin_{i}"].opacity_species for i in range(nbin)]
+        if len(species_names) != nbin or len(set(species_names)) != nbin:
+            raise ValueError("dustopac species must contain one unique name per dust bin")
+        if scattering_mode is None:
+            scattering_mode = self.params.scat_mode
+
         # Determine input style based on scattering mode
         inputstyle = 10 if scattering_mode >= 3 else 1
         
@@ -676,141 +670,85 @@ class RadWriter:
     def compute_and_write_dust_opacities(
         self,
         output_dir: str | Path = '.',
-        optconst_file: Optional[str | Path] = None,
-        grain_density: Optional[float] = None,
-        ntheta: int = 181,
+        *,
         scattering_mode: Optional[int] = None,
-        logawidth: float = 0.05,
-        na: int = 20,
-    ) -> None:
-        """Compute and write dust opacity files for all dust bins.
-        
-        Uses Mie theory with parameters matching fargo2radmc3d defaults:
-        - logawidth = 0.05 (5% grain size smearing)
-        - na = 20 (number of size samples)
-        - chopforward = 1.0 degree (forward scattering removal)
-        
-        Args:
-            output_dir: Directory to write files
-            optconst_file: Path to optical constants file (.lnk format)
-            grain_density: Grain material density override for custom species in g/cm^3
-            ntheta: Number of scattering angles
-            scattering_mode: Scattering mode (>=3 for full matrix)
-            logawidth: Width parameter for size distribution smoothing (default: 0.05)
-            na: Number of size samples for smoothing (default: 20)
+        executable: Optional[str | Path] = None,
+        threads: Optional[int] = None,
+    ) -> list[Path]:
+        """Generate native Optool opacity tables for every dust bin.
+
+        Parameters
+        ----------
+        output_dir : str or pathlib.Path, optional
+            Base output directory, using the writer's input layout.
+        scattering_mode : int, optional
+            RADMC-3D mode; modes at least three select full scattering matrices.
+            Defaults to the configured scattering mode.
+        executable : str or pathlib.Path, optional
+            Optool executable; otherwise use OPTOOL_EXECUTABLE or PATH.
+        threads : int, optional
+            OpenMP threads per Optool process. Defaults to ``params.nbcores``.
+
+        Returns
+        -------
+        list of pathlib.Path
+            Native opacity tables in the same order as the dust-density bins.
+
+        Notes
+        -----
+        Each bin uses its component's DustOpacity configuration and resolved
+        material density. Wavelengths follow the model wavelength parameters.
         """
         if self.model.dust is None:
             raise ValueError("Model has no dust data")
-
-        # Derive optical constants file from global parameters if not provided
-        if optconst_file is None:
-            species = normalize_species_name(self.params.species)
-            optconst_file = species_optconst_path(species, self.params.opacity_dir)
-        else:
-            # Extract species name from optconst_file for density lookup
-            species = normalize_species_name(optconst_file)
-
-        # Default scattering mode from global parameters if not provided
         if scattering_mode is None:
             scattering_mode = self.params.scat_mode
-        
-        base_dir = Path(output_dir)
-        output_dir = self._get_output_dir(base_dir, 'opacity')
-        
-        species_base = species
-        
-        # Get wavelength parameters from params
-        wmin_micron = self.params.lambda_min.to('micron').magnitude
-        wmax_micron = self.params.lambda_max.to('micron').magnitude
-        nwav = self.params.n_lambda
-        
-        # Create wavelength grid in cm
-        Pw = (wmax_micron / wmin_micron) ** (1.0 / (nwav - 1))
-        waves_micron = wmin_micron * Pw ** np.arange(nwav)
-        waves_micron[0] = wmin_micron
-        waves_micron[-1] = wmax_micron
-        waves_cm = waves_micron * 1e-4
-        
-        # Create angular grid for scattering.
-        # To match fargo2radmc3d's makedustopac.py, always use a full theta grid
-        # (0..180 degrees, ntheta points) and apply a small forward-scattering
-        # chop when computing opacities. RADMC-3D will still only use the full
-        # scattering matrix if scattering_mode>=3.
-        theta = np.linspace(0., 180., ntheta)
-        
-        # Compute opacity for each dust bin
+        if threads is None:
+            threads = int(self.params.nbcores)
+        output_dir = self._get_output_dir(Path(output_dir), 'opacity')
+        wavelengths = Quantity(np.geomspace(
+            self.params.lambda_min.to('micron').magnitude,
+            self.params.lambda_max.to('micron').magnitude,
+            self.params.n_lambda,
+        ), 'micron')
+        paths = []
         for ibin in range(self.model.dust.nbin):
-            bin_data = self.model.dust.bins[f"bin_{ibin}"]
-            
-            # Get grain size in CGS
-            grain_size_cgs = bin_data.size.to_base_units().magnitude
-            bin_grain_density = getattr(
-                bin_data,
-                "species_grain_density",
-                getattr(bin_data, "density_material", None),
+            dust_bin = self.model.dust.bins[f"bin_{ibin}"]
+            path = write_dust_opacity(
+                dust_bin.opacity,
+                dust_bin.size,
+                wavelengths,
+                output_dir,
+                species_name=dust_bin.opacity_species,
+                scattering_mode=scattering_mode,
+                threads=threads,
+                executable=executable,
+                opacity_dir=self.params.opacity_dir,
+                bulk_density=dust_bin.density_material,
             )
-            grain_density_cgs = resolve_species_grain_density(
-                species,
-                grain_density if grain_density is not None else bin_grain_density,
-            ).to("g/cm^3").magnitude
-            
-            logger.debug(f"Computing opacity for bin {ibin}: "
-                         f"size = {grain_size_cgs:.6e} cm, "
-                         f"rho_s = {grain_density_cgs:.6e} g/cm^3")
-            
-            # Compute opacity
-            opac = self.opacity_calculator.compute_opacity(
-                optconst_file=optconst_file,
-                grain_density=grain_density_cgs,
-                grain_size=grain_size_cgs,
-                wavelengths=waves_cm,
-                theta=theta,
-                logawidth=logawidth,
-                na=na,
-                chopforward=1.0,
-                extrapolate=True,
-            )
-            
-            # Write to file
-            species_name = f"{species_base}{ibin}"
-            output_path = output_dir / species_name
-            self.opacity_calculator.write_radmc3d_opacity_file(
-                opacity_data=opac,
-                output_path=output_path,
-                scattering_matrix=(scattering_mode >= 3),
-            )
-            
-            # Track the opacity file
-            opacity_file = f"dustkappa_{species_name}.inp"
-            self.written_files[opacity_file] = output_dir / opacity_file
-        
-        logger.info(f"Wrote {self.model.dust.nbin} opacity files")
-    
+            opposite = "dustkappa" if scattering_mode >= 3 else "dustkapscatmat"
+            self.written_files.pop(f"{opposite}_{dust_bin.opacity_species}.inp", None)
+            self.written_files[path.name] = path
+            paths.append(path)
+        logger.info("Wrote %d Optool opacity files", len(paths))
+        return paths
+
     def write_all_input_files(
         self,
         output_dir: str | Path = '.',
-        optconst_file: Optional[str | Path] = None,
-        grain_density: Optional[float] = None,
         scattering_mode: Optional[int] = None,
         nphot: Optional[int] = None,
         nphot_scat: Optional[int] = None,
         setthreads: Optional[int] = None,
-        **kwargs,
     ) -> None:
-        """Write all RADMC-3D input files in one call.
+        """Write the grid, sources, dust density and RADMC-3D controls.
         
         Args:
             output_dir: Directory to write all files
-            optconst_file: Path to optical constants file
-            grain_density: Grain material density override for custom species in g/cm^3
-            rstar: Stellar radius in solar radii
-            tstar: Stellar temperature in K
-            mstar: Stellar mass in solar masses
             scattering_mode: Scattering mode (0=none, >=3=full matrix)
             nphot: Number of photons for Monte Carlo
             nphot_scat: Number of photons for scattering Monte Carlo
             setthreads: Number of OpenMP threads
-            **kwargs: Additional arguments passed to individual writers
         """
         logger.info(f"Writing all RADMC-3D input files to {output_dir}")
 
@@ -836,17 +774,6 @@ class RadWriter:
             self.write_dust_density(output_dir)
             self.write_dustopac(output_dir, scattering_mode=scattering_mode)
             
-            if optconst_file is not None:
-                op_kwargs = {k: v for k, v in kwargs.items() 
-                             if k in ['ntheta', 'logawidth', 'na']}
-                self.compute_and_write_dust_opacities(
-                    output_dir,
-                    optconst_file=optconst_file,
-                    grain_density=grain_density,
-                    scattering_mode=scattering_mode,
-                    **op_kwargs,
-                )
-
         ensure_microturbulence_field(self.model, self.params)
         if self.model.gas is not None and MICROTURBULENCE_FIELD in self.model.gas:
             self.write_microturbulence(output_dir)
@@ -869,9 +796,28 @@ class RadWriter:
         compute_opacities: bool = True,
         include_gas_velocity: bool = True,
         include_external_source: Optional[bool] = None,
+        executable: Optional[str | Path] = None,
         **kwargs,
     ) -> None:
-        """Write the complete RADMC-3D input set for the active model."""
+        """Write model inputs and generate the configured Optool opacities.
+
+        Parameters
+        ----------
+        output_dir : str or pathlib.Path, optional
+            Base directory using the writer's input layout.
+        compute_opacities : bool, optional
+            Generate native opacity tables, by default True.
+        include_gas_velocity : bool, optional
+            Write the gas velocity field, by default True.
+        include_external_source : bool, optional
+            Write the configured external radiation source. Defaults to the
+            external-UV parameter.
+        executable : str or pathlib.Path, optional
+            Optool executable; otherwise use OPTOOL_EXECUTABLE or PATH.
+        **kwargs
+            Control options accepted by ``write_all_input_files``. The same
+            scattering mode and thread count are used for opacity generation.
+        """
         self.write_all_input_files(output_dir, **kwargs)
 
         if include_gas_velocity:
@@ -883,7 +829,12 @@ class RadWriter:
             self.write_external_source(output_dir)
 
         if compute_opacities and self.model.dust is not None and self.model.dust.nbin > 0:
-            self.compute_and_write_dust_opacities(output_dir)
+            self.compute_and_write_dust_opacities(
+                output_dir,
+                scattering_mode=kwargs.get("scattering_mode"),
+                threads=kwargs.get("setthreads"),
+                executable=executable,
+            )
     
     def _ensure_isrf_file(self, path: Path) -> Path:
         if path.is_file():

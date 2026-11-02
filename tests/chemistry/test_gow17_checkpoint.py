@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from diskbridge._units import Quantity
-from diskbridge.chemistry.models.gow17 import (
+from diskbridge.chemistry.models.gow17.model import (
     I_CO_ICE,
     N_Y,
     _gow17_checkpoint_config,

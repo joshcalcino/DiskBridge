@@ -11,6 +11,7 @@ import shutil
 
 import numpy as np
 from diskbridge.utils import sha256_file
+from diskbridge.radmc3d.dustkappa_reader import read_dust_opacity_paths
 
 from .config import NonLTELineTransferConfig, SpeciesLineConfig
 from .lines_inp import normalize_collider_name, write_lines_inp
@@ -201,7 +202,8 @@ def prepare_nonlte_line_run(
             )
             staged["gas_temperature.binp"] = str(work_inputs / "gas_temperature.binp")
 
-    for opac in sorted(source_inputs.glob("dustkappa_*.inp")):
+    for opac in (read_dust_opacity_paths(source_inputs)
+                 if (source_inputs / "dustopac.inp").is_file() else []):
         staged[opac.name] = str(_link_or_copy(opac, work_inputs / opac.name, copy_mode=copy_mode))
 
     dust_temp = _first_existing(
@@ -369,7 +371,8 @@ def prepare_external_population_line_run(
             copy_mode=copy_mode,
         )
     )
-    for opac in sorted(source_inputs.glob("dustkappa_*.inp")):
+    for opac in (read_dust_opacity_paths(source_inputs)
+                 if (source_inputs / "dustopac.inp").is_file() else []):
         staged[opac.name] = str(
             _link_or_copy(opac, work_inputs / opac.name, copy_mode=copy_mode)
         )

@@ -43,7 +43,7 @@ from .mesh import Mesh, Axis
 from .field import Field
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _as_str(x: Any) -> str:
@@ -186,7 +186,7 @@ def _write_dust(group: "h5py.Group", model: Any) -> None:
                 "alpha": comp.alpha,
                 "delta": comp.delta,
                 "mean_molecular_weight": float(comp.mean_molecular_weight),
-                "species_base": str(comp.species_base),
+                "opacity": comp.opacity.to_dict(),
                 "component_index": int(comp.component_index),
             }
         )
@@ -218,6 +218,7 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
         return
 
     from .dust import Dust, DustDistribution, DustComponent, DustBin
+    from diskbridge.model.dust_opacity import DustOpacity
 
     dg = group["dust"]
 
@@ -240,7 +241,7 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
         alpha = comp_meta.get("alpha", None)
         delta = comp_meta.get("delta", None)
         mmw = float(comp_meta.get("mean_molecular_weight", 2.3))
-        species_base = str(comp_meta.get("species_base", "dust"))
+        opacity = DustOpacity.from_dict(comp_meta["opacity"])
         component_index = int(comp_meta.get("component_index", 0))
 
         dist_g = cg["distribution"]
@@ -274,7 +275,7 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
             alpha=alpha,
             delta=delta,
             mean_molecular_weight=mmw,
-            species_base=species_base,
+            opacity=opacity,
             component_index=component_index,
         )
         comps.append(comp)
@@ -299,6 +300,7 @@ def _read_dust(group: "h5py.Group", model: Any) -> None:
                 size_max=dist.bin_edges[local_idx + 1],
                 mass_fraction=float(dist.mass_fractions[local_idx]),
                 density_material=comp.grain_density,
+                opacity=comp.opacity,
             )
             global_bin_idx += 1
 

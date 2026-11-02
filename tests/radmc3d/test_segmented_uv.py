@@ -6,6 +6,7 @@
 # db-purpose: Protect paired UV estimator, split, and inherited-source contracts.
 
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 import hashlib
 import json
@@ -409,7 +410,7 @@ def test_segment_setup_does_not_overwrite_existing_external_source(
 
     monkeypatch.setattr("diskbridge.radmc3d.model.RadModel", DummyRadModel)
     monkeypatch.setattr(
-        "diskbridge.radmc3d.utils.link_dustkappa_opacities",
+        "diskbridge.radmc3d.utils.link_dust_opacities",
         lambda source, target: None,
     )
 
@@ -518,6 +519,7 @@ def _completed_segment_fixture(tmp_path: Path) -> tuple[SegmentedRadRunner, dict
     }
     manifest = {
         **expected,
+        "rt_input_fingerprints": SegmentedRadRunner(model, base_dir)._rt_input_fingerprints(),
         "segments": [
             {
                 "level": 0,
@@ -684,17 +686,36 @@ def test_completed_terminal_products_reject_truncated_binary(tmp_path: Path) -> 
     assert "Incomplete mean-intensity payload" in reason
 
 
-def test_completed_terminal_products_reject_changed_physical_input(tmp_path: Path) -> None:
+@pytest.mark.parametrize('changed_input', ['dust_density.binp', 'dustkapscatmat_mixed0.inp'])
+def test_completed_terminal_products_reject_changed_physical_input(tmp_path: Path, changed_input: str) -> None:
     runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
     inputs_dir = runner.base_model_dir / "radmc3d_inputs"
     inputs_dir.mkdir()
-    density_path = inputs_dir / "dust_density.binp"
-    density_path.write_bytes(b"original density")
+    physical_input = inputs_dir / changed_input
+    physical_input.write_bytes(b"original physical input")
+    if changed_input.startswith('dustkapscatmat_'):
+        (inputs_dir / 'dustopac.inp').write_text('2\n1\n10\n0\nmixed0\n')
     summary_path = runner.base_model_dir / "segments" / "segmented_rt_summary.json"
     summary = json.loads(summary_path.read_text())
     summary["rt_input_fingerprints"] = runner._rt_input_fingerprints()
     summary_path.write_text(json.dumps(summary))
-    density_path.write_bytes(b"changed density")
+    physical_input.write_bytes(b"changed physical input")
+
+    compatible, reason = runner._validate_completed_segmented_rt(
+        expected_summary=expected,
+        wavelengths_um=wavelengths,
+        product_specs=specs,
+    )
+
+    assert not compatible
+    assert reason == "continuum RT input fingerprints changed"
+
+
+def test_completed_terminal_products_reject_changed_opacity_configuration(tmp_path: Path) -> None:
+    """Changing grain shape invalidates reuse even when existing tables are untouched."""
+    runner, expected, wavelengths, specs = _completed_segment_fixture(tmp_path)
+    dust_bin = runner.base_model.dust.bins['bin_0']
+    dust_bin.opacity = replace(dust_bin.opacity, method='dhs', fmax=.8)
 
     compatible, reason = runner._validate_completed_segmented_rt(
         expected_summary=expected,
@@ -748,6 +769,10 @@ def test_force_is_the_only_way_to_bypass_completed_product_reuse(
 
     assert runner.run_segmented_rt(force=False) == {"loaded_existing": True}
 
+    monkeypatch.setattr(
+        "diskbridge.radmc3d.writer.RadWriter.write_dustopac",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(
         "diskbridge.radmc3d.writer.RadWriter.compute_and_write_dust_opacities",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("recompute entered")),

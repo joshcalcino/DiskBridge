@@ -67,7 +67,12 @@ Keep units, shapes, axis order, and binary filename policy explicit and tested.
 A feature is complete when:
 
 1. The implementation is wired into the intended public path.
-2. A fast pytest test exists if the behavior is deterministic.
+2. Eligible deterministic production-package behavior has a focused fast test
+   when needed. NEVER add pytest tests of example, problem, project, campaign or
+   validation pipelines, including configs/defaults, plotting/cluster scripts,
+   source/AST checks or workflow glue; mocks and tiny inputs are no exception.
+   Delete such tests instead of relocating or replacing them, and do not move
+   problem-only helpers into src merely to evade this ban.
 3. A validation case is proposed if the feature changes physical interpretation.
 4. Relevant docs or project notes are updated.
 5. The final response states what was tested and what still needs scientific validation.

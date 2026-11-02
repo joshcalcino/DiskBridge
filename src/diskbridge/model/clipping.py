@@ -186,12 +186,12 @@ def clip_model(
                 DustComponent(
                     distribution=comp0.distribution,
                     dust_to_gas_ratio=comp0.dust_to_gas_ratio,
+                    opacity=comp0.opacity,
                     mode=comp0.mode,
                     mask=comp_mask,
                     alpha=comp0.alpha,
                     delta=comp0.delta,
                     mean_molecular_weight=comp0.mean_molecular_weight,
-                    species_base=comp0.species_base,
                     component_index=comp0.component_index,
                 )
             )
@@ -212,6 +212,7 @@ def clip_model(
                     size_max=comp.distribution.bin_edges[local_idx + 1],
                     mass_fraction=comp.distribution.mass_fractions[local_idx],
                     density_material=comp.grain_density,
+                    opacity=comp.opacity,
                 )
 
         new_dust._dust_fields = {}

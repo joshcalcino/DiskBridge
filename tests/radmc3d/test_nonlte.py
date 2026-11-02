@@ -379,6 +379,11 @@ def test_prepare_nonlte_line_run_stages_co_h2_smoke(
     tmp_path: Path,
 ) -> None:
     source_inputs = _write_base_inputs(tmp_path / "source", include_gas_temperature=True)
+    # The inventory, rather than filename globs, controls native matrix staging.
+    (source_inputs / "dustopac.inp").write_text("2\n1\n----------\n10\n0\nmixed0\n----------\n")
+    matrix = source_inputs / "dustkapscatmat_mixed0.inp"
+    matrix.write_text("1\n1\n5\n1 2 3 .1\n0\n45\n90\n135\n180\n" + "1 0 1 1 0 1\n" * 5)
+    (source_inputs / "dustkappa_unused.inp").write_text("1\n1\n1 2\n")
     work = tmp_path / "line_rt" / "co_J3_h2_lvg"
     species = SpeciesLineConfig(
         species="co",
@@ -398,6 +403,8 @@ def test_prepare_nonlte_line_run_stages_co_h2_smoke(
     inputs = work / "radmc3d_inputs"
     assert (inputs / "radmc3d.inp").read_text().find("tgas_eq_tdust = 0") >= 0
     assert (inputs / "lines.inp").read_text() == "2\n1\nco    leiden    0    0    2\np-h2\no-h2\n"
+    assert (inputs / matrix.name).read_bytes() == matrix.read_bytes()
+    assert not (inputs / "dustkappa_unused.inp").exists()
     manifest = json.loads((work / "line_rt_manifest.json").read_text())
     assert manifest["species"] == "co"
     assert manifest["colliders"] == ["p-h2", "o-h2"]

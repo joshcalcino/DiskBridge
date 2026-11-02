@@ -1,5 +1,12 @@
 # DiskBridge Testing Notes
 
+Pytest coverage of example, problem, project, campaign or validation pipelines is
+prohibited, including their drivers, configurations/defaults, plotting and
+cluster scripts, source/AST assertions and workflow glue. Mocks and tiny inputs
+do not create an exception. Delete these tests rather than renaming, relocating
+or recreating them. Test reusable package behavior or core tooling directly;
+standalone scientific validations remain outside pytest.
+
 This directory documents the reasoning behind DiskBridge's pytest tests.
 
 Use it for human-readable explanations of analytic toy cases, benchmark assumptions, literature references, and recurring testing conventions. Keep executable tests in `tests/`, machine-readable pytest data in `tests/reference/`, and larger scientific validation workflows in `validation/`.

@@ -18,7 +18,7 @@ from diskbridge._units import Quantity
 from diskbridge.model.field import Field
 from diskbridge.model.profiles import compute_volume_weighted_mean_radial_profile
 from diskbridge.model.utils import field_data_as_order
-from diskbridge.serialization import jsonable
+from diskbridge.utils.serialization import jsonable
 from diskbridge.visualization.profiles import plot_midplane_xy_map, plot_phi_avg_rz_slice
 
 if TYPE_CHECKING:

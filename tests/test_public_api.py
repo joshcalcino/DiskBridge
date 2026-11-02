@@ -12,9 +12,10 @@ object construction. They are not a private-module import census.
 from __future__ import annotations
 
 import diskbridge
-from diskbridge import Model, Quantity, read_params, units
+from diskbridge import DustOpacity, Model, Quantity, read_params, units
 from diskbridge.chemistry import ChemistryResult, load_chemistry_outputs, run_chemistry
 from diskbridge.model import (
+    DustOpacity as ModelDustOpacity,
     Field,
     Mesh,
     RadialGasBackground,
@@ -30,6 +31,8 @@ def test_public_package_exports_are_available():
     """The curated top-level public API should import without side effects."""
     assert diskbridge.__version__
     assert Model is diskbridge.Model
+    assert DustOpacity is diskbridge.DustOpacity
+    assert DustOpacity('mix_2species_60silicates_40carbons').method == 'mie'
     assert callable(read_params)
     assert units("cm") is not None
     assert Quantity(1.0, "cm").to("cm").magnitude == 1.0
@@ -38,6 +41,7 @@ def test_public_package_exports_are_available():
 def test_public_subpackage_exports_are_available():
     """Core public exports from main subpackages should remain reachable."""
     assert Field is not None
+    assert ModelDustOpacity is DustOpacity
     assert Mesh is not None
     assert set_mask_from_joos_disk is not None
     assert RadialGasBackground is not None

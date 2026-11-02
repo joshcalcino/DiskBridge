@@ -19,7 +19,7 @@ from diskbridge._logging import logger
 from diskbridge.model.field import Field
 from diskbridge.model.disk import scale_height, keplerian_frequency
 from diskbridge._params import canonicalize_dust_params
-from diskbridge.dust_species import resolve_species_grain_density
+from diskbridge.model.dust_opacity import DustOpacity
 
 if TYPE_CHECKING:
     from .core import Model
@@ -101,7 +101,7 @@ class DustBin:
     Attributes:
         name: Bin identifier (e.g., 'bin_0')
         size: Grain size (geometric mean for this bin)
-        density_material: Material density of dust grains (e.g., 2.7 g/cm^3)
+        density_material: Bulk grain density, including material porosity
         mass_fraction: Fraction of total dust mass in this bin
         size_min: Minimum size of this bin
         size_max: Maximum size of this bin
@@ -116,17 +116,24 @@ class DustBin:
         size_max: Quantity,
         mass_fraction: float,
         density_material: Quantity,
+        opacity: DustOpacity,
     ):
-        """Initialize a DustBin.
-        
-        Args:
-            parent_dust: Parent Dust SubModel
-            bin_index: Index of this bin
-            size: Grain size (geometric mean)
-            size_min: Minimum size in this bin
-            size_max: Maximum size in this bin
-            mass_fraction: Fraction of total dust mass
-            density_material: Material density of grains
+        """Initialize a grain bin with resolved material properties.
+
+        Parameters
+        ----------
+        parent_dust : Dust
+            Owning dust submodel.
+        bin_index : int
+            Global bin index across all components.
+        size, size_min, size_max : Quantity
+            Representative, minimum and maximum grain radii.
+        mass_fraction : float
+            Bin mass fraction within its component.
+        density_material : Quantity
+            Resolved bulk grain density, including porosity.
+        opacity : DustOpacity
+            Material, shape and porosity specification shared by the component.
         """
         self.parent_dust = parent_dust
         self.bin_index = bin_index
@@ -137,6 +144,8 @@ class DustBin:
         self.mass_fraction = mass_fraction
         self.density_material = density_material
         self.species_grain_density = density_material
+        self.opacity = opacity
+        self.opacity_species = f"{opacity.species_name}{bin_index}"
         self._stored_fields: Dict[str, Field] = {}
         
     def __getitem__(self, key: str) -> Field:
@@ -256,6 +265,7 @@ class DustComponent:
         delta: Turbulent diffusion parameter (for settling mode)
         mean_molecular_weight: Mean molecular weight for gas
         species_base: Base name for dust species (for opacity files)
+        opacity: Material, grain-shape and porosity specification
         component_index: Index of this component in the parent Dust
     """
     
@@ -263,32 +273,40 @@ class DustComponent:
         self,
         distribution: DustDistribution,
         dust_to_gas_ratio: float,
+        opacity: DustOpacity,
         mode: Literal['proportional', 'settling'] = 'proportional',
         mask: Optional[Field] = None,
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
         mean_molecular_weight: float = 2.3,
-        species_base: str = "dust",
         component_index: int = 0,
     ):
-        """Initialize a dust component.
-        
-        Args:
-            distribution: DustDistribution instance
-            dust_to_gas_ratio: Dust-to-gas mass ratio
-            mode: 'proportional' or 'settling'
-            mask: Optional mask Field (True = included)
-            alpha: Turbulent viscosity parameter
-            delta: Turbulent diffusion parameter
-            mean_molecular_weight: Mean molecular weight
-            species_base: Base name for opacity files
-            component_index: Component index (for naming)
+        """Initialize a component from a resolved grain distribution.
+
+        Parameters
+        ----------
+        distribution : DustDistribution
+            Size distribution with its resolved bulk grain density.
+        dust_to_gas_ratio : float
+            Component dust-to-gas mass ratio.
+        opacity : DustOpacity
+            Material, shape and porosity specification.
+        mode : {"proportional", "settling"}
+            Spatial distribution relative to the gas.
+        mask : Field, optional
+            Dimensionless spatial weight for this component.
+        alpha, delta : float, optional
+            Turbulent viscosity and diffusion parameters.
+        mean_molecular_weight : float, optional
+            Gas molecular weight in hydrogen-mass units.
+        component_index : int, optional
+            Index in the owning dust submodel.
+
+        Notes
+        -----
+        The supplied distribution already contains the resolved density.
+        Constructing a component does not query material files or executables.
         """
-        resolved_grain_density = resolve_species_grain_density(
-            species_base,
-            distribution.grain_density,
-        )
-        distribution.grain_density = resolved_grain_density
         self.distribution = distribution
         self.dust_to_gas_ratio = dust_to_gas_ratio
         self.mode = mode
@@ -296,9 +314,10 @@ class DustComponent:
         self.alpha = alpha
         self.delta = delta if delta is not None else alpha
         self.mean_molecular_weight = mean_molecular_weight
-        self.species_base = species_base
-        self.grain_density = resolved_grain_density
-        self.species_grain_density = resolved_grain_density
+        self.opacity = opacity
+        self.species_base = opacity.species_name
+        self.grain_density = distribution.grain_density
+        self.species_grain_density = distribution.grain_density
         self.component_index = component_index
         
     def __repr__(self) -> str:
@@ -369,22 +388,41 @@ class Dust(SubModel):
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
         mean_molecular_weight: float = 2.3,
+        opacity: DustOpacity | None = None,
     ) -> None:
-        """Set dust grain size distribution.
-        
-        All parameters are optional and will be pulled from diskbridge.params if not provided.
-        
-        Args:
-            amin: Minimum grain size (default: from params)
-            amax: Maximum grain size (default: from params)
-            nbin: Number of size bins (default: from params)
-            power_index: Power-law exponent (default: from params, typically 3.5 for MRN)
-            grain_density: Material density of grains (default: from params)
-            dust_to_gas_ratio: Global dust-to-gas mass ratio (default: from params)
-            mode: Distribution mode ('proportional' or 'settling')
-            alpha: Turbulent viscosity parameter (required for 'settling' mode)
-            delta: Turbulent diffusion parameter (default: = alpha, assumes Sc ~ 1)
-            mean_molecular_weight: Mean molecular weight for gas (default: 2.3 for H2)
+        """Set the global grain distribution and its material properties.
+
+        Parameters
+        ----------
+        amin, amax : Quantity, optional
+            Minimum and maximum grain radii. Defaults come from the first
+            component of ``diskbridge.params``.
+        nbin : int, optional
+            Number of logarithmically spaced size bins.
+        power_index : float, optional
+            Number-distribution exponent in ``dn/da proportional to a**(-p)``.
+        grain_density : Quantity, optional
+            Compact material density when ``opacity`` is omitted. With an
+            explicit specification, set its ``density`` instead.
+        dust_to_gas_ratio : float, optional
+            Dust-to-gas mass ratio.
+        mode : {"proportional", "settling"}
+            Spatial distribution of dust relative to gas.
+        alpha, delta : float, optional
+            Turbulent viscosity and diffusion parameters for settling.
+            ``delta`` defaults to ``alpha``.
+        mean_molecular_weight : float, optional
+            Gas molecular weight in hydrogen-mass units.
+        opacity : DustOpacity, optional
+            Material, shape and porosity settings. If omitted, construct a Mie
+            specification from the first component's species and grain density.
+            The resolved bulk density is used by settling and surface areas.
+
+        Raises
+        ------
+        ValueError
+            If region dust is already configured, settling lacks turbulence
+            parameters, or both ``opacity`` and ``grain_density`` are supplied.
         """
         if getattr(self, "_has_region_components", False) and self._components:
             raise ValueError(
@@ -408,18 +446,15 @@ class Dust(SubModel):
         if dust_to_gas_ratio is None:
             dust_to_gas_ratio = float(_select_component_value(current_params.dust_to_gas_ratio))
 
-        # Get species base name from params
-        species_base = (
-            current_params.species
-            if isinstance(current_params.species, str)
-            else current_params.species[0]
-        )
-        user_grain_density = (
-            grain_density
-            if grain_density is not None
-            else _select_component_value(current_params.grain_density)
-        )
-        grain_density = resolve_species_grain_density(species_base, user_grain_density)
+        if opacity is None:
+            opacity = DustOpacity(
+                material=_select_component_value(current_params.species),
+                density=(grain_density if grain_density is not None else
+                         _select_component_value(current_params.grain_density)),
+            )
+        elif grain_density is not None:
+            raise ValueError("Set density on opacity instead of supplying grain_density with opacity")
+        _, grain_density = opacity.resolve_material(opacity_dir=current_params.opacity_dir)
         
         distribution = DustDistribution(
             amin=amin,
@@ -446,12 +481,12 @@ class Dust(SubModel):
         component = DustComponent(
             distribution=distribution,
             dust_to_gas_ratio=dust_to_gas_ratio,
+            opacity=opacity,
             mode=mode,
             mask=self.mask,  # Use dust-level mask if set
             alpha=alpha,
             delta=delta,
             mean_molecular_weight=mean_molecular_weight,
-            species_base=species_base,
             component_index=0,
         )
         
@@ -475,6 +510,7 @@ class Dust(SubModel):
                 size_max=distribution.bin_edges[i + 1],
                 mass_fraction=distribution.mass_fractions[i],
                 density_material=component.grain_density,
+                opacity=component.opacity,
             )
             self._bins[f"bin_{global_bin_idx}"] = dust_bin
             global_bin_idx += 1
@@ -541,24 +577,44 @@ class Dust(SubModel):
         alpha: Optional[float] = None,
         delta: Optional[float] = None,
         mean_molecular_weight: float = 2.3,
+        opacity: DustOpacity | None = None,
     ) -> None:
-        """Add a new dust component with specific mask and mode.
-        
-        This allows multiple dust distributions in different spatial regions.
-        
-        Args:
-            mask: Field or gas field name defining where this component exists.
-            mode: 'proportional' or 'settling'
-            complement: If True, use 1 - mask after clipping mask values to [0, 1].
-            amin: Minimum grain size (default: from canonicalized params)
-            amax: Maximum grain size (default: from canonicalized params)
-            nbin: Number of size bins (default: from canonicalized params)
-            power_index: Power-law exponent (default: from canonicalized params)
-            grain_density: Material density of grains (default: from canonicalized params)
-            dust_to_gas_ratio: Dust-to-gas mass ratio (default: from canonicalized params)
-            alpha: Turbulent viscosity parameter (for settling)
-            delta: Turbulent diffusion parameter (default: = alpha)
-            mean_molecular_weight: Mean molecular weight (default: 2.3)
+        """Add a masked grain distribution with its own material properties.
+
+        Parameters
+        ----------
+        mask : Field or str
+            Dimensionless gas weight field, clipped to the range [0, 1].
+        mode : {"proportional", "settling"}
+            Spatial distribution of dust relative to gas.
+        complement : bool, optional
+            Use one minus the clipped weight.
+        amin, amax : Quantity, optional
+            Minimum and maximum grain radii.
+        nbin : int, optional
+            Number of logarithmically spaced size bins.
+        power_index : float, optional
+            Number-distribution exponent in ``dn/da proportional to a**(-p)``.
+        grain_density : Quantity, optional
+            Compact material density when ``opacity`` is omitted. With an
+            explicit specification, set its ``density`` instead.
+        dust_to_gas_ratio : float, optional
+            Dust-to-gas mass ratio for this component.
+        alpha, delta : float, optional
+            Turbulent viscosity and diffusion parameters for settling.
+            ``delta`` defaults to ``alpha``.
+        mean_molecular_weight : float, optional
+            Gas molecular weight in hydrogen-mass units.
+        opacity : DustOpacity, optional
+            Material, shape and porosity settings. Defaults use this component's
+            species and density from ``diskbridge.params``. Resolve bulk density
+            before constructing the distribution or computing settling.
+
+        Raises
+        ------
+        ValueError
+            If component defaults or settling parameters are missing, or both
+            ``opacity`` and ``grain_density`` are supplied.
         """
         mask = self._resolve_mask_field(mask, complement=complement)
 
@@ -605,15 +661,15 @@ class Dust(SubModel):
             delta = delta if delta is not None else alpha
             logger.info(f"Settling mode component: alpha={alpha}, delta={delta}")
         
-        # Get species base name for this component
-        canon_species = canon['species']
-        if isinstance(canon_species, list):
-            species_base = canon_species[param_index]
-        else:
-            species_base = str(canon_species)
-
-        user_grain_density = grain_density if grain_density is not None else canon['grain_density'][param_index]
-        grain_density = resolve_species_grain_density(species_base, user_grain_density)
+        if opacity is None:
+            opacity = DustOpacity(
+                material=canon['species'][param_index],
+                density=(grain_density if grain_density is not None else
+                         canon['grain_density'][param_index]),
+            )
+        elif grain_density is not None:
+            raise ValueError("Set density on opacity instead of supplying grain_density with opacity")
+        _, grain_density = opacity.resolve_material(opacity_dir=_current_params().opacity_dir)
 
         # Create distribution for this component
         distribution = DustDistribution(
@@ -628,12 +684,12 @@ class Dust(SubModel):
         component = DustComponent(
             distribution=distribution,
             dust_to_gas_ratio=dust_to_gas_ratio,
+            opacity=opacity,
             mode=mode,
             mask=mask,
             alpha=alpha,
             delta=delta,
             mean_molecular_weight=mean_molecular_weight,
-            species_base=species_base,
             component_index=component_index,
         )
         
@@ -656,6 +712,7 @@ class Dust(SubModel):
                 size_max=distribution.bin_edges[local_idx + 1],
                 mass_fraction=distribution.mass_fractions[local_idx],
                 density_material=component.grain_density,
+                opacity=component.opacity,
             )
             self._bins[bin_name] = dust_bin
         
@@ -672,8 +729,33 @@ class Dust(SubModel):
         include_ism: bool = True,
         alpha: Optional[float] = None,
         mask_field: Optional[str] = None,
+        opacity: DustOpacity | None = None,
+        ism_opacity: DustOpacity | None = None,
     ) -> None:
-        """Add the canonical disk dust component and, by default, ISM dust."""
+        """Add disk dust and optionally an independent ISM dust component.
+
+        Parameters
+        ----------
+        mode : {"proportional", "settling"}, optional
+            Disk distribution mode; defaults to ``params.disk_dust_mode``.
+        include_ism : bool, optional
+            Add proportional dust on the complementary gas weight.
+        alpha : float, optional
+            Turbulent viscosity parameter for disk settling.
+        mask_field : str, optional
+            Gas weight field. Prefer ``disk_weight`` when available.
+        opacity : DustOpacity, optional
+            Disk material, shape and porosity settings.
+        ism_opacity : DustOpacity, optional
+            ISM material, shape and porosity settings. Requires ``include_ism``.
+
+        Notes
+        -----
+        Omitted specifications use the corresponding component's parameter
+        defaults; each component retains its own resolved bulk grain density.
+        """
+        if ism_opacity is not None and not include_ism:
+            raise ValueError("ism_opacity requires include_ism=True")
         if self.parent.gas is None:
             raise KeyError("Model has no gas submodel")
         if mask_field is None:
@@ -694,6 +776,7 @@ class Dust(SubModel):
             mask=mask_field,
             mode=disk_mode,
             alpha=disk_alpha,
+            opacity=opacity,
         )
 
         if include_ism:
@@ -701,6 +784,7 @@ class Dust(SubModel):
                 mask=mask_field,
                 complement=True,
                 mode="proportional",
+                opacity=ism_opacity,
             )
 
     def add_pah_to_disk(

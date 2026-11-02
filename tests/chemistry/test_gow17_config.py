@@ -18,11 +18,11 @@ from types import SimpleNamespace
 from diskbridge._config import resolve_model_config
 from diskbridge._constants import M_H
 from diskbridge._units import Quantity
-from diskbridge.chemistry.validation import (
+from diskbridge.chemistry.models.gow17.validation import (
     gow17_budget_diagnostics,
     project_gow17_state_to_budgets,
 )
-from diskbridge.chemistry.models.gow17 import (
+from diskbridge.chemistry.models.gow17.model import (
     I_CHX,
     I_CO,
     I_CO_ICE,
@@ -64,9 +64,9 @@ from diskbridge.chemistry.models.gow17 import (
     _summarize_equilibrium_solver_diagnostics,
     run_gow17,
 )
-from diskbridge.chemistry.models.gow17_slab import _native_slab_boundary_G0
-import diskbridge.chemistry.models.gow17_timestep as gow17_timestep_module
-from diskbridge.chemistry.models.gow17_timestep import Gow17TimeStepper
+from diskbridge.chemistry.models.gow17.slab import _native_slab_boundary_G0
+import diskbridge.chemistry.models.gow17.timestep as gow17_timestep_module
+from diskbridge.chemistry.models.gow17.timestep import Gow17TimeStepper
 from diskbridge.chemistry.registry import available_models, get_model_callable
 from diskbridge.chemistry.shielding.columns_1d import compute_pdr_shielding_1d
 from diskbridge.model.core import Model, SubModel
@@ -111,7 +111,7 @@ def test_visser_linewidth_info_logging_can_be_suppressed(monkeypatch):
         calls.append((args, kwargs))
 
     monkeypatch.setattr(
-        "diskbridge.chemistry.models.gow17.logger.info",
+        "diskbridge.chemistry.models.gow17.model.logger.info",
         record_info,
     )
 
@@ -628,7 +628,7 @@ def test_actual_solver_uv_fields_include_local_factor_and_shielding():
 
 
 def test_co_phase_disabled_zeroes_phase_rates_and_keeps_photodissociation_diagnostic():
-    from diskbridge.chemistry.models.gow17 import _resolve_co_phase_runtime_params
+    from diskbridge.chemistry.models.gow17.model import _resolve_co_phase_runtime_params
 
     cfg = resolve_model_config(("chemistry", "gow17"), overrides={})
     y = np.zeros((1, N_Y), dtype=np.float64)
@@ -1290,7 +1290,7 @@ def test_skip_shielding_uses_unity_factors_without_column_solve(monkeypatch):
 
 
 def test_co_pdes_diagnostics_use_photon_flux_plus_cruv():
-    from diskbridge.chemistry.models.gow17 import _resolve_co_phase_runtime_params
+    from diskbridge.chemistry.models.gow17.model import _resolve_co_phase_runtime_params
 
     cfg = resolve_model_config(("chemistry", "gow17"), overrides={})
     params = _resolve_co_phase_runtime_params(cfg)

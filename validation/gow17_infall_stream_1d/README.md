@@ -262,7 +262,7 @@ Interpretation:
 
 ## Chemistry And Thermal Evolution
 
-Chemistry is evolved with `diskbridge.chemistry.models.gow17_timestep.Gow17TimeStepper`, which uses the reduced network implemented in `diskbridge._gow17`.
+Chemistry is evolved with `diskbridge.chemistry.models.gow17.timestep.Gow17TimeStepper`, which uses the reduced network implemented in `diskbridge.chemistry.models.gow17._gow17`.
 
 Every recorded snapshot archives the complete ordered GOW17 state, not a
 selected species subset. The component inventory is `He+`, `OHx`, `CHx`, `CO`,

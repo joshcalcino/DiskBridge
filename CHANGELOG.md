@@ -44,6 +44,16 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- GOW17 chemistry drivers, native bindings, cache context, collider setup, and
+  state diagnostics live together in `diskbridge.chemistry.models.gow17`.
+- Removed the unused generic run-manifest module and its public exports.
+
+- Dust opacity generation uses the standalone optool executable and native
+  RADMC-3D tables. `diskbridge.DustOpacity` attaches material, Mie/DHS, and bulk
+  porosity settings to each dust component; its resolved density is shared by
+  settling, chemistry, and opacity normalization. Grain bins and wavelength
+  settings remain model-owned. The internal Mie generator and its table
+  serializers are removed.
 - Directional HEALPix shielding uses the external, stellar, and isotropic
   residual contributions at every radius, independently of RT segmentation.
   Removed the split-radius weighting override and `segmented_outer_weight_mode`.
@@ -109,6 +119,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 - Brought the public `diskbridge.chemistry.shielding` docstrings (HEALPix and 1-D shielding, the Draine & Bertoldi H2 function, and the Visser table loader) to the NumPy-style + References standard.
 
 ### Fixed
+
+- Full-matrix dust opacity files now follow the native RADMC-3D table layout
+  and are tracked under their emitted `dustkapscatmat` filenames. Requests
+  without scattering-matrix data raise an error.
 
 - Dust-based gas-temperature initialization and gas–dust thermal exchange use
   the local projected-area-weighted temperature of all ordinary grain bins.

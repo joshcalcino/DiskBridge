@@ -5,9 +5,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 from pathlib import Path
-import hashlib
 import json
 
 import numpy as np
@@ -18,147 +17,16 @@ if TYPE_CHECKING:
 from diskbridge._logging import logger
 from diskbridge.chemistry.types import ChemistryResult
 from diskbridge.chemistry.registry import available_models, get_model_callable
-from diskbridge.chemistry.shielding.angular_uv_weights import SHIELDING_ANGULAR_WEIGHTING
-from diskbridge.chemistry.shielding.healpix_utils import SHIELDING_RAY_GEOMETRY
+from diskbridge.chemistry.models.gow17.cache import _gow17_cache_context
+from diskbridge.chemistry.models.gow17.io import add_default_line_colliders_from_gow17
+from diskbridge.chemistry.models.gow17.validation import _gow17_validation_summary
 from diskbridge.chemistry.io import (
-    add_default_line_colliders_from_gow17,
     attach_chemistry_result_to_model,
     write_gas_temperature,
     write_many,
 )
-from diskbridge.model.microturbulence import ensure_microturbulence_field
-from diskbridge.radmc3d.cache import should_use_cache, stable_json_hash, write_cache_context
-from diskbridge.radmc3d.model import DUST_TEMPERATURE_WEIGHTING
-from diskbridge.radmc3d.uv_products import UV_PRODUCT_MERGED_FIELD_NAMES
-from diskbridge.serialization import jsonable
-from diskbridge.utils import sha256_file
-
-
-def _quantity_context(q, unit: str | None = None) -> dict[str, Any]:
-    data = q.to(unit) if unit is not None else q
-    arr = np.ascontiguousarray(np.asarray(data.magnitude, dtype=np.float64))
-    return {
-        "unit": str(data.units),
-        "shape": list(arr.shape),
-        "sha256": hashlib.sha256(arr.tobytes()).hexdigest(),
-    }
-
-
-def _field_context(field: Field, unit: str | None = None) -> dict[str, Any]:
-    out = _quantity_context(field.data, unit=unit)
-    out["axis_order"] = list(field.axis_order)
-    return out
-
-
-def _file_hashes(root: Path, patterns: tuple[str, ...]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for pattern in patterns:
-        for path in sorted(root.rglob(pattern)):
-            if path.is_file():
-                out[str(path.relative_to(root))] = sha256_file(path)
-    return out
-
-
-def _gow17_cache_context(rad: "RadModel", config: dict) -> dict[str, Any]:
-    """Build the explicit dependency context for GOW17 chemistry."""
-    config = {
-        key: value
-        for key, value in dict(config).items()
-        if key not in {"checkpoint", "_output_dir"}
-    }
-    model = rad.model
-    if model.gas is None:
-        raise ValueError("GOW17 cache context requires model.gas")
-
-    ensure_microturbulence_field(model, rad.params)
-
-    gas_units = {
-        "density": "g/cm^3",
-        "dust_temperature": "K",
-        "microturbulence": "km/s",
-        "chi": "dimensionless",
-        "chi_broad": "dimensionless",
-        "chi_h2": "dimensionless",
-        "chi_co": "dimensionless",
-        "chi_c": "dimensionless",
-        "G_CO_pdes": "dimensionless",
-        "F_CO_pdes_photon": "1/(cm^2 s)",
-        "F_CO_pdes_photon_bands": "1/(cm^2 s)",
-        "uv_product_measured_mask": "dimensionless",
-        "segment_id": "dimensionless",
-    }
-    gas_fields: dict[str, Any] = {}
-    required = ("density", "dust_temperature", "microturbulence")
-    optional = (
-        "chi",
-        "uv_product_measured_mask",
-        "segment_id",
-        *UV_PRODUCT_MERGED_FIELD_NAMES,
-    )
-    for name in (*required, *optional):
-        if name in model.gas:
-            gas_fields[name] = _field_context(model.gas[name], unit=gas_units.get(name))
-        elif name in required:
-            raise KeyError(f"GOW17 cache context requires gas field {name!r}")
-
-    dust_context: dict[str, Any] = {"present": model.dust is not None}
-    if model.dust is not None:
-        bins: dict[str, Any] = {}
-        for bin_name, dust_bin in sorted(model.dust.bins.items()):
-            bins[bin_name] = {
-                "size": jsonable(dust_bin.size),
-                "size_min": jsonable(dust_bin.size_min),
-                "size_max": jsonable(dust_bin.size_max),
-                "mass_fraction": float(dust_bin.mass_fraction),
-                "density_material": jsonable(dust_bin.density_material),
-                "density": _field_context(dust_bin["density"], unit="g/cm^3"),
-                "temperature": _field_context(
-                    model.dust[f"temperature_{bin_name}"], unit="K",
-                ),
-            }
-        dust_context.update(
-            {
-                "nbin": int(model.dust.nbin),
-                "bins": bins,
-            }
-        )
-
-    model_dir = Path(rad.model_dir)
-    upstream_contexts = _file_hashes(
-        model_dir,
-        (
-            "radmc3d_outputs/**/cache_context.json",
-            "segments/**/cache_context.json",
-        ),
-    )
-    opacity_inputs = _file_hashes(
-        Path(rad.inputs_dir),
-        (
-            "dustopac.inp",
-            "dustkappa_*.inp",
-        ),
-    )
-
-    return {
-        "kind": "gow17",
-        "shielding_ray_geometry": SHIELDING_RAY_GEOMETRY,
-        "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
-        "dust_temperature_weighting": DUST_TEMPERATURE_WEIGHTING,
-        "config_sha256": stable_json_hash(config),
-        "params": {
-            "nside": int(rad.params.nside),
-        },
-        "model": {
-            "mesh_shape": list(model.mesh.shape) if model.mesh is not None else None,
-            "mesh_axes": list(model.mesh.axis_names()) if model.mesh is not None else None,
-            "gas_fields": gas_fields,
-            "dust": dust_context,
-        },
-        "radmc": {
-            "upstream_cache_contexts": upstream_contexts,
-            "opacity_inputs": opacity_inputs,
-        },
-    }
+from diskbridge.radmc3d.cache import should_use_cache, write_cache_context
+from diskbridge.utils.serialization import jsonable
 
 
 def load_chemistry_outputs(
@@ -266,39 +134,6 @@ def load_chemistry_outputs(
 
 def _attach_chemistry_result_to_model(rad: 'RadModel', result: ChemistryResult) -> None:
     attach_chemistry_result_to_model(rad, result)
-
-
-def _gow17_validation_summary(meta: dict) -> dict:
-    """Return a compact summary for GOW17 validation runs."""
-    diag = meta.get("gow17_diagnostics", {})
-    time_cvode_failure_cells_total = int(sum(diag.get("time_cvode_failure_cells_hist", [])))
-    time_exception_failure_cells_total = int(sum(diag.get("time_exception_failure_cells_hist", [])))
-    time_negative_abundance_corrections_total = int(
-        sum(diag.get("time_negative_abundance_corrections_hist", []))
-    )
-    return {
-        "n_fail": int(meta.get("n_fail", -1)),
-        "max_status": int(meta.get("max_status", 0)),
-        "temperature_mode": meta.get("temperature_mode"),
-        "enable_co_phase": bool(meta.get("enable_co_phase", False)),
-        "b_CO_requested_scalar_kms": diag.get("b_CO_requested_scalar_kms"),
-        "b_CO_table_kms": diag.get("b_CO_table_kms"),
-        "b_CO_scalar_approximation": bool(diag.get("b_CO_scalar_approximation", False)),
-        "rhs_status": int(diag.get("gow17_rhs_status", 0)),
-        "rhs_residual_max_global": float(diag.get("gow17_rhs_residual_max_global", float("nan"))),
-        "thermal_balance_residual_max_abs": float(
-            diag.get("thermal_balance_residual_max_abs", float("nan"))
-        ),
-        "tevol_max_cells_total": int(diag.get("tevol_max_cells_total", 0)),
-        "negative_abundance_corrections_total": int(
-            diag.get("negative_abundance_corrections_total", 0)
-        ),
-        "cvode_failure_cells_total": int(diag.get("cvode_failure_cells_total", 0)),
-        "exception_failure_cells_total": int(diag.get("exception_failure_cells_total", 0)),
-        "time_cvode_failure_cells_total": time_cvode_failure_cells_total,
-        "time_exception_failure_cells_total": time_exception_failure_cells_total,
-        "time_negative_abundance_corrections_total": time_negative_abundance_corrections_total,
-    }
 
 
 def run_chemistry(

@@ -1044,11 +1044,6 @@ def prepare_only(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = CubeTestConfig()
-    diskbridge.write_run_manifest(
-        out_dir / "inputs.json",
-        config=cfg.__dict__,
-        extra={"job": "cube_test", "mode": "prepare_only"},
-    )
     for stale_path in (out_dir / f"{network}_summary.json", out_dir / "error.png"):
         if stale_path.exists():
             stale_path.unlink()
@@ -1277,9 +1272,6 @@ def run(out_dir: Path) -> None:
         err_path.unlink()
 
     cfg = CubeTestConfig()
-    diskbridge.write_run_manifest(
-        out_dir / "inputs.json", config=cfg.__dict__, extra={"job": "cube_test"}
-    )
     _clean_plot_artifacts(out_dir)
 
     error: str | None = None

@@ -22,7 +22,7 @@ from diskbridge._units import units, Quantity
 from diskbridge.model import Model
 from diskbridge.model.field import Field
 from diskbridge.model.clipping import ClipIndexer, compute_clip_indexer
-from diskbridge.serialization import jsonable
+from diskbridge.utils.serialization import jsonable
 from diskbridge.utils import sha256_file
 
 from diskbridge.model.profiles import (
@@ -43,9 +43,10 @@ from diskbridge.radmc3d.uv_products import (
     uv_product_specs_from_config,
     validate_uv_chemistry_config,
 )
-from diskbridge.radmc3d.cache import build_mesh_cache_context
+from diskbridge.radmc3d.cache import build_dust_opacity_cache_context, build_mesh_cache_context
 from .wavelengths import build_mcmono_wavelengths
 from .data import combine_mean_intensity_files, radial_shell_mean_intensity
+from .dustkappa_reader import read_dust_opacity_paths
 
 
 _DUST_TEMPERATURE_TRANSFER = "per_bin"
@@ -322,8 +323,9 @@ class SegmentedRadRunner:
         """Return exact fingerprints of continuum RT inputs that define a run."""
         inputs_dir = self.base_model_dir / "radmc3d_inputs"
         paths = [inputs_dir / name for name in _SEGMENTED_RT_INPUT_NAMES]
-        paths.extend(sorted(inputs_dir.glob("dustkappa_*.inp")))
-        return {
+        if (inputs_dir / "dustopac.inp").is_file():
+            paths.extend(read_dust_opacity_paths(inputs_dir))
+        fingerprints = {
             path.name: {
                 "size_bytes": int(path.stat().st_size),
                 "sha256": sha256_file(path),
@@ -331,6 +333,8 @@ class SegmentedRadRunner:
             for path in paths
             if path.is_file()
         }
+        fingerprints.update(build_dust_opacity_cache_context(self.base_model, inputs_dir))
+        return fingerprints
 
     @staticmethod
     def _read_cache_context(path: Path) -> dict[str, Any]:
@@ -416,10 +420,11 @@ class SegmentedRadRunner:
                 return False, "terminal segment has no completion reason"
 
             saved_fingerprints = summary.get("rt_input_fingerprints")
-            if saved_fingerprints is not None:
-                current_fingerprints = self._rt_input_fingerprints()
-                if current_fingerprints != saved_fingerprints:
-                    return False, "continuum RT input fingerprints changed"
+            if saved_fingerprints is None:
+                return False, "segmented RT manifest has no continuum RT input fingerprints"
+            current_fingerprints = self._rt_input_fingerprints()
+            if current_fingerprints != saved_fingerprints:
+                return False, "continuum RT input fingerprints changed"
 
             current_params = self.base_model_dir / "params.txt"
             param_keys = (
@@ -966,7 +971,7 @@ class SegmentedRadRunner:
     ) -> 'RadModel':
         """Setup segment: create RadModel, write inputs, link opacities."""
         from diskbridge.radmc3d.model import RadModel
-        from diskbridge.radmc3d.utils import link_dustkappa_opacities
+        from diskbridge.radmc3d.utils import link_dust_opacities
 
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -979,7 +984,7 @@ class SegmentedRadRunner:
 
         rad = RadModel(seg_model, model_dir=work_dir)
         rad.writer.write_all_input_files(work_dir)
-        link_dustkappa_opacities(base_opacity_dir, rad.inputs_dir)
+        link_dust_opacities(base_opacity_dir, rad.inputs_dir)
         return rad
 
     @staticmethod
@@ -2133,12 +2138,10 @@ class SegmentedRadRunner:
 
         base_opacity_dir = self.base_model_dir / "radmc3d_inputs"
         base_opacity_dir.mkdir(parents=True, exist_ok=True)
-        if not list(base_opacity_dir.glob("dustkappa_*.inp")):
-            RadWriter(self.base_model, organize_files=True).compute_and_write_dust_opacities(
-                self.base_model_dir
-            )
-        if not list(base_opacity_dir.glob("dustkappa_*.inp")):
-            raise RuntimeError(f"No dustkappa_*.inp files found in {base_opacity_dir}")
+        writer = RadWriter(self.base_model, organize_files=True)
+        writer.write_dustopac(self.base_model_dir)
+        writer.compute_and_write_dust_opacities(self.base_model_dir)
+        read_dust_opacity_paths(base_opacity_dir)
         rt_input_fingerprints = self._rt_input_fingerprints()
 
         merged_temperature: Optional[Quantity] = None

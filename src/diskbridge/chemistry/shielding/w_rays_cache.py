@@ -576,17 +576,12 @@ def maybe_ensure_W_rays(
         return getattr(rad, "W_rays", None)
 
     # 2. Resolve dust opacity mode
-    species_base = params.species
-    if isinstance(species_base, list):
-        species_base = species_base[0]
-
     uv_min_um, uv_max_um = _uv_product_band_um(uv_product)
     uv_weighting = _uv_product_weighting(uv_product)
 
     mode, kext_uv = resolve_uv_tau_mode(
         rad.model,
         radmc_inputs_dir=rad.inputs_dir,
-        species_base=species_base,
         uv_min_um=uv_min_um,
         uv_max_um=uv_max_um,
         weighting=uv_weighting,

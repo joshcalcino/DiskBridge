@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import diskbridge._gow17 as _gow17
+import diskbridge.chemistry.models.gow17._gow17 as _gow17
 from diskbridge._constants import E_BIND_CO, F_DRAINE, N_LAY, N_SURF, NU0_CO, Y_CO
 
 

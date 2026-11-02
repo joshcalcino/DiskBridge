@@ -1,8 +1,8 @@
 """
-Reader and UV-band averaging for RADMC-3D dustkappa opacity files.
+Reader and UV-band averaging for native RADMC-3D opacity tables.
 
-This module reads ``dustkappa_*.inp`` files written by
-DiskBridge's :class:`DustOpacityCalculator` and computes band-averaged
+This module reads scalar ``dustkappa_*.inp`` and matrix
+``dustkapscatmat_*.inp`` tables and computes band-averaged
 extinction opacities for use in LOS UV optical depth calculations.
 
 The band-averaged extinction opacity is defined as:
@@ -25,7 +25,9 @@ References
 Functions
 ---------
 read_dustkappa
-    Parse a single ``dustkappa_*.inp`` file.
+    Read the opacity columns of one native scalar or matrix table.
+read_dust_opacity_paths
+    Resolve native table paths in the species order of ``dustopac.inp``.
 band_average_kext
     Compute band-averaged extinction opacity over a UV wavelength range.
 load_kext_uv_for_bins
@@ -35,7 +37,7 @@ load_kext_uv_for_bins
 # db-keywords: uv-products, config, units, radmc3d, io, serialization, paths
 # db-role: canonical
 # db-scope: package
-# db-purpose: Reader and UV-band averaging for RADMC-3D dustkappa opacity files.
+# db-purpose: Native scalar/matrix opacity inventory and UV-band extinction.
 
 from __future__ import annotations
 
@@ -55,117 +57,120 @@ from diskbridge.radmc3d.uv_products import C_CGS, H_CGS, default_isrf_path, load
 _KEXT_CACHE: dict[Tuple[str, float, float, float, str, str], float] = {}
 
 
-def read_dustkappa(
-    path: str | Path,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Parse a RADMC-3D ``dustkappa_*.inp`` file.
+def _opacity_lines(path: Path):
+    """Yield native data rows, skipping RADMC comment and separator lines."""
+    with path.open() as stream:
+        for line in stream:
+            value = line.strip()
+            if value and not value.startswith(("#", ";", "!", "=", "-")):
+                yield value
 
-    The file format written by DiskBridge is::
 
-        # comment lines
-        3                          <-- format number
-        N                          <-- number of wavelength points
-        lambda[um]  kabs  kscat  g <-- N data rows
+def read_dust_opacity_paths(radmc_inputs_dir: str | Path) -> list[Path]:
+    """Return native opacity tables in the order declared by ``dustopac.inp``.
 
     Parameters
     ----------
-    path : str or Path
-        Path to the ``dustkappa_*.inp`` file.
+    radmc_inputs_dir : str or pathlib.Path
+        Directory containing ``dustopac.inp`` and its referenced native tables.
 
     Returns
     -------
-    lam_um : ndarray, shape (N,)
-        Wavelengths in microns.
-    kabs : ndarray, shape (N,)
-        Absorption opacity in cm^2/g (per gram of dust).
-    kscat : ndarray, shape (N,)
-        Scattering opacity in cm^2/g.
-    g : ndarray, shape (N,)
-        Asymmetry parameter (Henyey-Greenstein g).
+    list of pathlib.Path
+        One path per dust species, preserving the inventory order. Input style
+        one selects a scalar table; style ten selects a scattering-matrix table.
 
     Raises
     ------
     FileNotFoundError
-        If *path* does not exist.
+        If the inventory or any referenced table is missing.
     ValueError
-        If the format number is unsupported or the file is malformed.
+        If the inventory format, species names, or input styles are invalid.
+    """
+    directory = Path(radmc_inputs_dir)
+    inventory = directory / "dustopac.inp"
+    # RADMC's list-directed inventory rows permit explanatory text after
+    # their first value (as used by its official problem_setup examples).
+    lines = [line.split()[0] for line in _opacity_lines(inventory)]
+    try:
+        fmt, nspecies = int(lines[0]), int(lines[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"Malformed opacity inventory: {inventory}") from exc
+    if fmt != 2 or nspecies < 1 or len(lines) != 2 + 3 * nspecies:
+        raise ValueError(f"Expected format-2 dust opacity inventory: {inventory}")
+    paths = []
+    for index in range(nspecies):
+        style, thermal, name = lines[2+3*index:5+3*index]
+        if style not in {"1", "10"} or thermal not in {"0", "1"}:
+            raise ValueError(f"Unsupported dust opacity entry in {inventory}: {style}, {thermal}")
+        if Path(name).name != name or name in {".", ".."}:
+            raise ValueError(f"Invalid dust species name in {inventory}: {name!r}")
+        prefix = "dustkappa" if style == "1" else "dustkapscatmat"
+        path = directory / f"{prefix}_{name}.inp"
+        if not path.is_file():
+            raise FileNotFoundError(f"Referenced dust opacity table is missing: {path}")
+        paths.append(path)
+    return paths
+
+
+def read_dustkappa(
+    path: str | Path,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read opacity columns from a native RADMC-3D scalar or matrix table.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        ``dustkappa_*.inp`` (native formats one, two, or three), or
+        ``dustkapscatmat_*.inp`` (native format one). Matrix-table filenames
+        identify their layout; only their wavelength/opacity columns are read.
+
+    Returns
+    -------
+    lam_um, kabs, kscat, g : tuple of ndarray, each shape (N,)
+        Wavelength in microns, absorption and scattering opacity in cm^2/g of
+        dust, and asymmetry parameter. Missing scalar scattering columns are
+        zero for absorption-only or isotropic native tables.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the table is missing.
+    ValueError
+        If its native header, column count, or opacity values are invalid.
     """
     path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"dustkappa file not found: {path}")
-
-    with open(path, "r") as f:
-        # Skip comment lines, read format number
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            fmt = int(stripped)
-            break
+    rows = iter(_opacity_lines(path))
+    try:
+        fmt = int(next(rows).split()[0])
+        nlam = int(next(rows).split()[0])
+        matrix = path.name.startswith("dustkapscatmat_")
+        if matrix:
+            nang = int(next(rows).split()[0])
+            if fmt != 1 or nang < 5:
+                raise ValueError("Matrix opacity requires format one and at least five angles")
+            ncolumns = 4
         else:
-            raise ValueError(f"Empty or comment-only dustkappa file: {path}")
-
-        if fmt not in (1, 2, 3):
-            raise ValueError(
-                f"Only dustkappa formats 1, 2, and 3 are supported, got {fmt} in {path}"
-            )
-
-        # Read number of wavelengths
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            nlam = int(stripped)
-            break
-        else:
-            raise ValueError(f"Could not read nlam from {path}")
-
-        # Read data rows
-        lam_um = np.empty(nlam, dtype=np.float64)
-        kabs = np.empty(nlam, dtype=np.float64)
-        kscat = np.empty(nlam, dtype=np.float64)
-        g = np.empty(nlam, dtype=np.float64)
-
-        count = 0
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            parts = stripped.split()
-            min_cols = {1: 2, 2: 3, 3: 4}[fmt]
-            if len(parts) < min_cols:
-                raise ValueError(
-                    f"Expected at least {min_cols} columns in dustkappa data row, got {len(parts)} "
-                    f"at line: {stripped!r}"
-                )
-            lam_um[count] = float(parts[0])
-            kabs[count] = float(parts[1])
-            if fmt == 1:
-                # Legacy DiskBridge files incorrectly used format 1 with four
-                # columns.  Preserve parsing of those files for diagnostics,
-                # but standard RADMC-3D format-1 files are absorption-only.
-                kscat[count] = float(parts[2]) if len(parts) >= 3 else 0.0
-                g[count] = float(parts[3]) if len(parts) >= 4 else 0.0
-            elif fmt == 2:
-                kscat[count] = float(parts[2])
-                g[count] = 0.0
-            else:
-                kscat[count] = float(parts[2])
-                g[count] = float(parts[3])
-            count += 1
-            if count >= nlam:
-                break
-
-        if count < nlam:
-            raise ValueError(
-                f"Expected {nlam} data rows but only found {count} in {path}"
-            )
-
-    logger.debug(
-        "Read dustkappa file %s: %d wavelengths, %.3g-%.3g um",
-        path.name, nlam, lam_um[0], lam_um[-1],
-    )
-    return lam_um, kabs, kscat, g
+            if fmt not in (1, 2, 3):
+                raise ValueError("Scalar opacity requires formats 1, 2, and 3")
+            ncolumns = fmt + 1
+        if nlam < 1:
+            raise ValueError("Opacity wavelength count must be positive")
+        table = np.zeros((nlam, 4), dtype=np.float64)
+        for index in range(nlam):
+            values = next(rows).split()
+            if len(values) != ncolumns:
+                raise ValueError(f"Expected exactly {ncolumns} opacity columns, got {len(values)}")
+            table[index, :ncolumns] = [float(value) for value in values]
+        if not matrix and next(rows, None) is not None:
+            raise ValueError("Unexpected data beyond the declared scalar wavelength count")
+    except (StopIteration, ValueError) as exc:
+        raise ValueError(f"Malformed native opacity table {path}: {exc}") from exc
+    if (not np.all(np.isfinite(table)) or np.any(table[:, 0] <= 0)
+            or np.any(np.diff(table[:, 0]) <= 0) or np.any(table[:, 1:3] < 0)
+            or np.any(np.abs(table[:, 3]) > 1)):
+        raise ValueError(f"Invalid wavelength, opacity, or asymmetry values in {path}")
+    return tuple(table[:, index] for index in range(4))
 
 
 def band_average_kext(
@@ -195,13 +200,13 @@ def band_average_kext(
     Parameters
     ----------
     dustkappa_path : str or Path
-        Path to the ``dustkappa_*.inp`` file.
+        Path to a native scalar or scattering-matrix opacity table.
     uv_min_um : float
         Minimum UV wavelength in microns (e.g. 0.0912 for Lyman limit).
     uv_max_um : float
         Maximum UV wavelength in microns (e.g. 0.2 for FUV band).
     weighting : {"log", "energy", "photon"}, optional
-        Averaging weight. ``"log"`` preserves the historical flat-in-log
+        Averaging weight. ``"log"`` uses a flat-in-log
         wavelength average. ``"energy"`` and ``"photon"`` require
         ``reference_spectrum="draine"``.
     reference_spectrum : {"draine", None}, optional
@@ -297,7 +302,6 @@ def band_average_kext(
 
 def load_kext_uv_for_bins(
     radmc_inputs_dir: str | Path,
-    species_base: str,
     nbin: int,
     uv_min_um: float,
     uv_max_um: float,
@@ -307,16 +311,13 @@ def load_kext_uv_for_bins(
 ) -> Optional[np.ndarray]:
     """Load band-averaged UV extinction opacity for each dust bin.
 
-    Looks for files named ``dustkappa_{species_base}{ibin}.inp`` for
-    ``ibin`` in ``range(nbin)`` in the given directory.
+    Read the ordered scalar/matrix inventory from ``dustopac.inp``; its
+    species order must match the dust-density bin order.
 
     Parameters
     ----------
     radmc_inputs_dir : str or Path
-        Directory containing the dustkappa files.
-    species_base : str
-        Species base name (e.g. ``"silicate"``), matching the naming convention
-        used by :meth:`RadWriter.compute_and_write_dust_opacities`.
+        Directory containing the native opacity inventory and tables.
     nbin : int
         Number of dust bins.
     uv_min_um : float
@@ -335,24 +336,18 @@ def load_kext_uv_for_bins(
         any required file is missing.
     """
     radmc_inputs_dir = Path(radmc_inputs_dir)
-    kext_uv = np.empty(nbin, dtype=np.float64)
-
-    for ibin in range(nbin):
-        fname = f"dustkappa_{species_base}{ibin}.inp"
-        fpath = radmc_inputs_dir / fname
-        if not fpath.exists():
-            logger.debug(
-                "dustkappa file missing for bin %d: %s -- cannot use dustkappa mode",
-                ibin, fpath,
-            )
-            return None
-        kext_uv[ibin] = band_average_kext(
-            fpath,
-            uv_min_um,
-            uv_max_um,
-            weighting=weighting,
-            reference_spectrum=reference_spectrum,
-        )
+    try:
+        paths = read_dust_opacity_paths(radmc_inputs_dir)
+    except FileNotFoundError:
+        logger.debug("Required native opacity inventory/table missing in %s", radmc_inputs_dir)
+        return None
+    if len(paths) != nbin:
+        raise ValueError(f"Opacity inventory has {len(paths)} species, expected {nbin} dust bins")
+    kext_uv = np.asarray([
+        band_average_kext(path, uv_min_um, uv_max_um,
+                          weighting=weighting, reference_spectrum=reference_spectrum)
+        for path in paths
+    ], dtype=np.float64)
 
     logger.info(
         "Loaded kext_uv for %d bins from %s: %s cm^2/g",

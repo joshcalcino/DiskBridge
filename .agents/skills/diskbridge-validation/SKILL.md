@@ -52,10 +52,19 @@ It should answer questions like:
 
 ## Tests Versus Validations
 
-Tests go in `tests/` and use pytest for production code behavior and small objective physics invariants. Do not add pytest files for validation-specific drivers, configs, plotting helpers, or workflow glue. Do not create `tests/validation/`; that name is reserved for the repo-level `validation/` workflow tree.
+Tests go in tests/ for reusable production code, core tooling and small objective physics invariants.
+
+NEVER add or retain pytest tests of example, problem, project, campaign or
+validation pipelines. This includes their drivers, configuration/defaults,
+plotting scripts, cluster scripts, CLI wrappers, source-text/AST assertions and
+workflow glue, even with mocks, tiny inputs or fast execution. Delete prohibited
+tests; do not rename, relocate, hide from collection, replace or recreate them.
+Never create tests/validation/. Test reusable production-package behavior, core
+repository tooling and objective physics/reference cases directly. Do not move
+problem-only helpers into src merely to evade this ban.
 
 Validations go in the repository-level `validation/` directory and must not use
-pytest as their main driver. Comparisons to papers or other codes, controlled
+pytest. Comparisons to papers or other codes, controlled
 physics comparisons, and end-to-end expectation checks are typical examples.
 Slow pipelines, archived outputs, diagnostic plots, and human judgment are not
 sufficient unless the validation gate is also satisfied.
@@ -78,9 +87,10 @@ validation/<validation_name>/
 
 Follow existing validation layout when updating an established validation.
 Never place validation workflows under `tests/` or create a `tests/validation/`
-directory. Do not create pytest coverage for validation-specific helper logic;
-the validation's own run summaries, metadata, plots, and reports are the review
-surface.
+directory. Never create pytest coverage for validation drivers, configurations,
+plotting scripts or helper glue. The validation's own run summaries, metadata,
+plots and reports are its review surface; example/problem pipeline tests are
+also prohibited.
 
 ## Required Validation README
 

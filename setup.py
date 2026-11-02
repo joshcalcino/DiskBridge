@@ -62,7 +62,7 @@ def _gow17_extension() -> Extension:
         runtime_library_dirs = [str(sundials_lib)]
 
     sources = [
-        "src/diskbridge/_gow17.cpp",
+        "src/diskbridge/chemistry/models/gow17/_gow17.cpp",
         "external/pdr/cvodeDense.cpp",
         "external/pdr/gow17.cpp",
         "external/pdr/interp.cpp",
@@ -75,7 +75,7 @@ def _gow17_extension() -> Extension:
     ]
 
     return Extension(
-        name="diskbridge._gow17",
+        name="diskbridge.chemistry.models.gow17._gow17",
         sources=sources,
         include_dirs=include_dirs,
         library_dirs=library_dirs,

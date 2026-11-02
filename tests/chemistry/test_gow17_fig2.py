@@ -18,7 +18,7 @@ from pathlib import Path
 
 import diskbridge
 from diskbridge.chemistry.api import run_chemistry
-import diskbridge._gow17 as _gow17
+import diskbridge.chemistry.models.gow17._gow17 as _gow17
 
 I_HEP = _gow17.I_HEP
 I_OHX = _gow17.I_OHX

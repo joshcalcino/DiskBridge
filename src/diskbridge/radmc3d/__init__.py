@@ -17,7 +17,7 @@ Architecture:
 - RadModel: High-level wrapper for molecular RT workflows
 - RadMolecule: Molecular data from molecule_*.inp files
 - RadImage: Reads images and writes FITS files
-- DustOpacityCalculator: Dust opacity computations
+- write_dust_opacity: Native Optool dust opacity generation
 
 This separation ensures clean interfaces:
 - Input (writer) vs Output (data, image)
@@ -35,9 +35,10 @@ from .data import RadData
 from .model import RadModel
 from .molecule import RadMolecule
 from .image import RadImage
-from .opacities import DustOpacityCalculator
+from .opacities import write_dust_opacity
 from .dustkappa_reader import (
     read_dustkappa,
+    read_dust_opacity_paths,
     band_average_kext,
     load_kext_uv_for_bins,
 )
@@ -48,8 +49,9 @@ __all__ = [
     'RadModel',
     'RadMolecule',
     'RadImage',
-    'DustOpacityCalculator',
+    'write_dust_opacity',
     'read_dustkappa',
+    'read_dust_opacity_paths',
     'band_average_kext',
     'load_kext_uv_for_bins',
 ]

@@ -73,11 +73,11 @@ Check whether tests are fast, deterministic, pytest-based, focused on behavior o
 
 Import/API smoke coverage should normally be one curated public API test, not many repeated import-only tests.
 
-Test files should have concise names, a module docstring explaining the protected behavior, and short function docstrings or comments for non-obvious invariants, regressions, analytic limits, or literature-based expectations. Check that machine-readable reference data lives in `tests/reference/` and human-readable reference explanations live in `docs/testing/`. Flag any `tests/validation/` path as wrong. Also flag pytest files that exist only to test validation-specific drivers, configs, plotting helpers, or workflow glue.
+Test files should have concise names, a module docstring explaining the protected behavior, and short function docstrings or comments for non-obvious invariants, regressions, analytic limits, or literature-based expectations. Check that machine-readable reference data lives in `tests/reference/` and human-readable reference explanations live in `docs/testing/`. Flag any `tests/validation/` path as wrong. Reject every pytest test of an example, problem, project, campaign or validation pipeline, including drivers, configurations/defaults, plotting/cluster scripts, CLI wrappers, source-text/AST checks and workflow glue. Mocks, small inputs and short runtime do not create an exception. Require deletion rather than renaming, relocation, collection exclusions or replacements. Do not extract problem-only helpers into src to evade this ban.
 
 ## Validation Review
 
-Check whether validations live under the repo-level `validation/` directory, have a scientific question, define expected behavior, produce plots, summaries, and reports, require human interpretation when appropriate, and are not simple objective checks that should run in pytest instead. Reject validation workflows placed under `tests/`, and reject pytest coverage added only for validation-specific helpers.
+Check whether validations live under the repo-level `validation/` directory, have a scientific question, define expected behavior, produce plots, summaries, and reports, require human interpretation when appropriate, and are not simple objective checks that should run in pytest instead. Reject validation workflows placed under `tests/`, and reject pytest coverage of validation-specific drivers or helpers and of example/problem/project pipelines, regardless of mocks or runtime.
 
 ## Documentation Review
 

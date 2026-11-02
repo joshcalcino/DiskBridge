@@ -20,7 +20,7 @@ preflights, and production; stale scripts and project notes are not exceptions.
 - Editable installs rebuild native extensions in the shared source checkout.
   They can affect the existing production environment even when invoked from
   a different environment. Before an authorized rebuild, identify the binary
-  and all consumers. Test `diskbridge._gow17` directly and run a tiny
+  and all consumers. Test `diskbridge.chemistry.models.gow17._gow17` directly and run a tiny
   chemistry solve on the intended NT compute architecture before production
   submission; `import diskbridge` alone does not test the chemistry binary.
 - Correct forbidden endpoints in scripts before using them. Never reproduce
@@ -169,7 +169,23 @@ For non-trivial changes, do not skip planning unless the user explicitly says to
 
 ## Tests Versus Validations
 
-Tests belong in `tests/` and should be fast, deterministic, and runnable with pytest on ordinary development changes. Tests should protect meaningful behavior such as public workflows, regression cases, shape/order guarantees, units, config resolution, file I/O smoke paths, expected errors, and simple objective physics invariants.
+### Mandatory Ban On Example, Problem And Validation Pipeline Tests
+
+- NEVER add or retain pytest tests of example, problem, project, campaign or
+  validation pipelines. This ban applies throughout the repository.
+- This includes their drivers, configuration/defaults, plotting scripts, cluster
+  submission scripts, CLI wrappers, source-text/AST assertions and workflow glue.
+  Fast execution, synthetic/tiny inputs, mocks and regression labels do not make
+  these tests acceptable.
+- Delete prohibited tests. Do not rename, relocate, hide from collection, replace
+  or recreate them, and never create `tests/validation/`.
+- Test reusable production-package behavior in `src/diskbridge/`, core repository
+  tooling and objective physics invariants/reference cases directly. Do not move
+  problem-specific helpers into `src/` merely to evade this ban.
+- Standalone scientific validation workflows may remain under `validation/`;
+  they must not be pytest tests or receive pytest wrappers for their drivers.
+
+Tests belong in `tests/` and should be fast, deterministic, and runnable with pytest on ordinary development changes. Tests should protect meaningful behavior such as public package APIs, regression cases, shape/order guarantees, units, config resolution, file I/O smoke paths, expected errors, and simple objective physics invariants.
 
 Keep import/API smoke coverage curated. Prefer one public API smoke test over many repeated import-only tests. Use it to check that the public package surface imports cleanly and that key public objects are reachable or can be constructed with tiny inputs.
 

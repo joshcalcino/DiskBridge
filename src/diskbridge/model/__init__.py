@@ -5,6 +5,7 @@
 
 from pathlib import Path
 from typing import Mapping, Optional, Union
+from .dust_opacity import DustOpacity
 
 from .mesh import Mesh
 from .field import Field
@@ -82,6 +83,7 @@ __all__ = [
     "Mesh",
     "Field",
     "Model",
+    "DustOpacity",
     "ClipIndexer",
     "compute_clip_indexer",
     "downsample_model",

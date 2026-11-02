@@ -1,4 +1,4 @@
-"""Tests for dustkappa reader, band-averaged kext, and dust UV tau computation.
+"""Protect native scalar/matrix opacity inventory and synthetic UV attenuation.
 
 Tests cover:
 1. read_dustkappa: parsing dustkappa files
@@ -22,6 +22,7 @@ from diskbridge.radmc3d.dustkappa_reader import (
     read_dustkappa,
     band_average_kext,
     load_kext_uv_for_bins,
+    read_dust_opacity_paths,
 )
 from diskbridge.chemistry.shielding.dust_uv_tau import (
     compute_tau_uv_from_dust_columns,
@@ -43,11 +44,44 @@ def _write_dustkappa_file(path: Path, lam_um, kabs, kscat, g):
                     f"{kscat[i]:13.6e}  {g[i]:13.6e}\n")
 
 
+def _write_inventory(directory: Path, entries):
+    lines = ['2 Format number', f'{len(entries)} Number of species', '------------------']
+    for style, name in entries:
+        lines.extend([f'{style} Input style', '0 Thermal grain', f'{name} Species extension', '------------------'])
+    (directory / 'dustopac.inp').write_text('\n'.join(lines) + '\n')
+
+
+def _write_matrix_file(path: Path, lam, kabs, kscat, g):
+    """Use the native wavelength table, angle list, then wavelength-major Z rows."""
+    lines = ['1', str(len(lam)), '5']
+    lines.extend(f'{a} {b} {c} {d}' for a, b, c, d in zip(lam, kabs, kscat, g))
+    lines.extend(['0', '45', '90', '135', '180'])
+    lines.extend(['1 0 1 1 0 1'] * (5 * len(lam)))
+    path.write_text('\n'.join(lines) + '\n')
+
+
 # ---------------------------------------------------------------------------
 # Tests: read_dustkappa
 # ---------------------------------------------------------------------------
 
 class TestReadDustkappa:
+    @pytest.mark.parametrize('fmt, row, expected', [
+        (1, '0.1 12', (12, 0, 0)),
+        (2, '0.1 12 4', (12, 4, 0)),
+        (3, '0.1 12 4 .5', (12, 4, .5)),
+    ])
+    def test_native_scalar_formats(self, tmp_path, fmt, row, expected):
+        path = tmp_path / 'dustkappa_grain.inp'
+        path.write_text(f'{fmt}\n1\n{row}\n')
+        arrays = read_dustkappa(path)
+        np.testing.assert_allclose([a[0] for a in arrays], [.1, *expected])
+
+    def test_absorption_format_rejects_extra_columns(self, tmp_path):
+        path = tmp_path / 'dustkappa_grain.inp'
+        path.write_text('1\n1\n0.1 12 4 .5\n')
+        with pytest.raises(ValueError, match='exactly 2 opacity columns'):
+            read_dustkappa(path)
+
     def test_basic_read(self, tmp_path):
         lam = np.array([0.1, 0.2, 0.5, 1.0, 10.0])
         kabs = np.array([100.0, 80.0, 40.0, 20.0, 2.0])
@@ -171,7 +205,8 @@ class TestLoadKextUvForBins:
             fpath = tmp_path / f"dustkappa_sil{ibin}.inp"
             _write_dustkappa_file(fpath, lam, kabs, kscat, g)
 
-        kext = load_kext_uv_for_bins(tmp_path, "sil", 2, 0.1, 0.2)
+        _write_inventory(tmp_path, [(1, 'sil0'), (1, 'sil1')])
+        kext = load_kext_uv_for_bins(tmp_path, 2, 0.1, 0.2)
         assert kext is not None
         assert kext.shape == (2,)
         np.testing.assert_allclose(kext[0], 70.0, rtol=1e-3)
@@ -186,8 +221,48 @@ class TestLoadKextUvForBins:
         fpath = tmp_path / "dustkappa_sil0.inp"
         _write_dustkappa_file(fpath, lam, kabs, kscat, g)
 
-        result = load_kext_uv_for_bins(tmp_path, "sil", 2, 0.1, 0.2)
+        _write_inventory(tmp_path, [(1, 'sil0'), (1, 'sil1')])
+        result = load_kext_uv_for_bins(tmp_path, 2, 0.1, 0.2)
         assert result is None
+
+    def test_component_materials_and_matrix_order_drive_uv_extinction(self, tmp_path):
+        """Dust-density order follows inventory, independent of filenames/materials."""
+        lam = np.array([.1, .15, .2])
+        _write_dustkappa_file(tmp_path / 'dustkappa_carbon1.inp', lam,
+                             np.full(3, 20.), np.full(3, 10.), np.zeros(3))
+        _write_matrix_file(tmp_path / 'dustkapscatmat_ice0.inp', lam,
+                           np.full(3, 100.), np.full(3, 50.), np.full(3, .7))
+        _write_inventory(tmp_path, [(10, 'ice0'), (1, 'carbon1')])
+        paths = read_dust_opacity_paths(tmp_path)
+        assert [p.name for p in paths] == ['dustkapscatmat_ice0.inp', 'dustkappa_carbon1.inp']
+        np.testing.assert_allclose(load_kext_uv_for_bins(tmp_path, 2, .1, .2), [150, 30])
+        with pytest.raises(ValueError, match='expected 3 dust bins'):
+            load_kext_uv_for_bins(tmp_path, 3, .1, .2)
+
+    def test_missing_inventory_returns_none(self, tmp_path):
+        assert load_kext_uv_for_bins(tmp_path, 1, .1, .2) is None
+
+    def test_opacity_links_use_inventory_and_ignore_unreferenced_tables(self, tmp_path):
+        """Runtime links include matrices and retain the matching species inventory."""
+        from diskbridge.radmc3d.utils import create_radmc3d_symlinks, link_dust_opacities
+        source = tmp_path / 'source'
+        source.mkdir()
+        _write_matrix_file(source / 'dustkapscatmat_ice0.inp', [.1, .2], [1, 1], [2, 2], [0, 0])
+        (source / 'dustkappa_unreferenced.inp').write_text('obsolete table')
+        _write_inventory(source, [(10, 'ice0')])
+        target = tmp_path / 'target'
+        link_dust_opacities(source, target)
+        assert {p.name for p in target.iterdir()} == {'dustopac.inp', 'dustkapscatmat_ice0.inp'}
+        run = tmp_path / 'run'
+        run.mkdir()
+        links = []
+        create_radmc3d_symlinks(run, target, ['dustopac.inp'], links)
+        assert {p.name for p in run.iterdir()} == {'dustopac.inp', 'dustkapscatmat_ice0.inp'}
+
+    def test_invalid_inventory_rejected(self, tmp_path):
+        _write_inventory(tmp_path, [(10, '../outside')])
+        with pytest.raises(ValueError, match='species name'):
+            read_dust_opacity_paths(tmp_path)
 
 
 # ---------------------------------------------------------------------------

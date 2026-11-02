@@ -201,7 +201,7 @@ def _param_value_to_jsonable(name: str, value):
 
     if value is None:
         return None
-    # Duck-type Pint quantities (matches diskbridge.serialization.jsonable).
+    # Duck-type Pint quantities (matches diskbridge.utils.serialization.jsonable).
     if hasattr(value, "magnitude") and hasattr(value, "units"):
         return _quantity_to_jsonable(name, value)
     if isinstance(value, (list, tuple)):

@@ -97,7 +97,7 @@ find . \( -name '.DS_Store' -o -name '._*' \) -print | while IFS= read -r target
   remove_path "$target"
 done
 
-find src -maxdepth 2 -type f \( -name '_gow17*.so' -o -name '*.so' -o -name '*.dylib' -o -name '*.pyd' \) -print |
+find src -type f \( -name '_gow17*.so' -o -name '*.so' -o -name '*.dylib' -o -name '*.pyd' \) -print |
 while IFS= read -r target; do
   [ -n "$target" ] || continue
   remove_path "$target"

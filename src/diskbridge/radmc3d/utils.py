@@ -15,6 +15,7 @@ import numpy as np
 
 from diskbridge._logging import logger
 from diskbridge._units import Quantity
+from diskbridge.radmc3d.dustkappa_reader import read_dust_opacity_paths
 from diskbridge._params import (
     Params,
     DEFAULT_PARAMS_FILE,
@@ -88,17 +89,26 @@ def create_radmc3d_symlinks(
     if outputs_dir is not None and output_files is not None:
         file_map[outputs_dir] = list(output_files)
 
-    if inputs_dir.exists():
-        opacity_files = list(inputs_dir.glob('dustkappa_*.inp'))
-        for opac_file in opacity_files:
+    if (inputs_dir / 'dustopac.inp').is_file():
+        for opac_file in read_dust_opacity_paths(inputs_dir):
             file_map[inputs_dir].append(opac_file.name)
 
     create_symlinks_for_file_map(model_dir, file_map, active_symlinks)
 
 
-def link_dustkappa_opacities(src_inputs_dir: Path, dest_inputs_dir: Path) -> None:
+def link_dust_opacities(src_inputs_dir: Path, dest_inputs_dir: Path) -> None:
+    """Link the native opacity inventory and its ordered scalar/matrix tables.
+
+    Parameters
+    ----------
+    src_inputs_dir, dest_inputs_dir : pathlib.Path
+        Source and destination RADMC-3D input directories.
+    """
+    paths = read_dust_opacity_paths(src_inputs_dir)
     dest_inputs_dir.mkdir(parents=True, exist_ok=True)
-    file_map: Dict[Path, List[str]] = {src_inputs_dir: ['dustkappa_*.inp']}
+    file_map: Dict[Path, List[str]] = {
+        src_inputs_dir: ['dustopac.inp', *(path.name for path in paths)]
+    }
     create_symlinks_for_file_map(dest_inputs_dir, file_map, [])
 
 

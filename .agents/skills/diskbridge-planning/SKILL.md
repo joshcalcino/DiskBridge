@@ -43,7 +43,9 @@ For a new plan, start from `.agents/skills/diskbridge-planning/assets/plan_templ
    shapes after the change. Do not assume superseded interfaces must remain
    accepted.
 9. Define implementation steps.
-10. Define fast pytest tests, including simple objective physics invariants when appropriate.
+10. Define fast pytest tests only for eligible reusable package/tooling behavior
+    and simple objective physics invariants. Never plan tests of example,
+    problem, project, campaign or validation pipelines.
 11. Classify evidence work before choosing a directory. Use
     `validation/<case>/` only when the plan states (a) the scientific claim or
     code behavior being tested, (b) its reference, benchmark, invariant,
@@ -105,8 +107,14 @@ The plan's capability map review must state:
 - Do not move simple objective physics invariants out of pytest only because they are physics-based.
 - Do not place descriptive or exploratory analysis in `validation/` without a
   tested claim, an evidentiary expectation, and a stated interpretation rule.
-- Do not create `tests/validation/`. Use `validation/<case>/` for validation
-  workflows. Do not add pytest files for validation-specific helpers.
+- NEVER add or retain pytest tests of example, problem, project, campaign or
+  validation pipelines. This includes their drivers, configuration/defaults,
+  plotting scripts, cluster scripts, CLI wrappers, source-text/AST assertions and
+  workflow glue, even with mocks, tiny inputs or fast execution. Delete prohibited
+  tests; do not rename, relocate, hide from collection, replace or recreate them.
+  Never create tests/validation/. Test reusable production-package behavior, core
+  repository tooling and objective physics/reference cases directly. Do not move
+  problem-only helpers into src merely to evade this ban.
 - If a plan replaces another plan, mark the old plan as superseded and move it to `projects/superseded/`.
 - If the task is completed, move the plan to `projects/completed/` and update `projects/index.md`.
 - Keep the plan concise and current. Remove stale details instead of accumulating contradictory history.

@@ -1,469 +1,196 @@
-"""Dust opacity calculations using Mie scattering theory.
+"""Generate native RADMC-3D opacity files with the standalone optool executable."""
 
-This module provides dust opacity calculations using the Bohren & Huffman
-Mie scattering code, adapted from the fargo2radmc3d package.
-"""
-
-# db-keywords: config, units, radmc3d, model, coordinates, serialization
+# db-keywords: dust, opacity, radmc3d, units, io, serialization
 # db-role: canonical
 # db-scope: package
-# db-purpose: Dust opacity calculations using Mie scattering theory.
+# db-purpose: File-native optool execution for existing dust bins and wavelengths.
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Tuple, Dict
+
+import hashlib
+import json
 from pathlib import Path
+import re
+import tempfile
+
 import numpy as np
-import math
-from scipy.interpolate import interp1d
+
+from diskbridge._units import Quantity
+from diskbridge.model.dust_opacity import DustOpacity, _run_optool, resolve_optool_executable
 
 
-from numba import njit 
+def _density_material_file(source: Path, destination: Path, density: float) -> Path:
+    """Set only a private optical-input density header, preserving every n,k row."""
+    lines = source.read_text().splitlines()
+    first = next(i for i, line in enumerate(lines)
+                 if line.strip() and not line.lstrip().startswith(("#", "!", "*")))
+    # A native porous blend may round its density to zero. Its two-column
+    # count/density line is still a header and is replaced with model density.
+    has_header = len(lines[first].split()) == 2
+    data_start = first + int(has_header)
+    count = sum(bool(line.strip()) and not line.lstrip().startswith(("#", "!", "*"))
+                for line in lines[data_start:])
+    content = lines[:first] + [f"{count} {density:.17g}"] + lines[data_start:]
+    destination.write_text("\n".join(content) + "\n")
+    return destination
 
-if TYPE_CHECKING:
-    from diskbridge.model.dust import DustBin
 
-from diskbridge._units import units
-from diskbridge._logging import logger
+def write_dust_opacity(
+    opacity: DustOpacity,
+    grain_size: Quantity,
+    wavelengths: Quantity,
+    output_dir: str | Path,
+    *,
+    species_name: str,
+    scattering_mode: int,
+    threads: int = 1,
+    executable: str | Path | None = None,
+    opacity_dir: str | Path | None = None,
+    bulk_density: Quantity | None = None,
+) -> Path:
+    """Write one existing grain bin's native optool RADMC opacity table.
 
+    Parameters
+    ----------
+    opacity : diskbridge.DustOpacity
+        Physical material, shape and numerical sampling specification.
+    grain_size : pint.Quantity
+        Positive representative radius, convertible to microns.
+    wavelengths : pint.Quantity
+        Positive strictly increasing wavelength vector with at least two values.
+    output_dir : str or pathlib.Path
+        Directory receiving the native table, log and provenance JSON.
+    species_name : str
+        Safe RADMC species basename, including any bin index.
+    scattering_mode : int
+        RADMC mode from 0 through 5; modes at least 3 write full matrix tables.
+    threads : int, optional
+        Positive OpenMP thread count, by default 1.
+    executable : str or pathlib.Path, optional
+        Standalone optool executable; otherwise OPTOOL_EXECUTABLE or PATH.
+    opacity_dir : str or pathlib.Path, optional
+        Optical-constants directory for registered species.
+    bulk_density : pint.Quantity, optional
+        Authoritative stored grain density, including porosity. The model's
+        writer supplies its bin density so opacity, settling and chemistry
+        retain one grain-mass normalization across saved-model reuse.
 
-@njit(cache=True)
-def bhmie_numba(x: float, refrel: complex, theta: np.ndarray) -> Tuple[np.ndarray, ...]:
-    """Numba-optimized Bohren and Huffman Mie scattering calculation.
-    
-    This is a JIT-compiled version of the bhmie function for improved performance.
-    
-    Args:
-        x: Size parameter (2*pi*radius_grain/lambda)
-        refrel: Complex index of refraction (e.g., 1.5 + 0.01j)
-        theta: Array of scattering angles between 0 and 180 degrees
-        
-    Returns:
-        Tuple of (S1, S2, Qext, Qabs, Qsca, Qback, gsca)
+    Returns
+    -------
+    pathlib.Path
+        Native dustkappa_<species>.inp or dustkapscatmat_<species>.inp path.
+
+    Notes
+    -----
+    Per-mass Gaussian opacity weights map to grain-number weights proportional
+    to weight/radius**3. Optool owns scattering, angular conversion and native
+    table serialization. Scalar output uses optool's 180-angle default;
+    DustOpacity.n_angles controls full-matrix output only.
     """
-    # Check theta array orientation
-    nang = len(theta)
-    if theta[0] == 0.0:
-        iang0 = 0
-        iang180 = nang - 1
+    if not isinstance(opacity, DustOpacity):
+        raise TypeError("opacity must be a DustOpacity specification")
+    if not isinstance(grain_size, Quantity) or not isinstance(wavelengths, Quantity):
+        raise TypeError("grain_size and wavelengths must be Pint quantities")
+    radius = np.asarray(grain_size.to("micron").magnitude, dtype=float)
+    waves = np.asarray(wavelengths.to("micron").magnitude, dtype=float)
+    if radius.ndim or not np.isfinite(radius) or radius <= 0:
+        raise ValueError("grain_size must be a positive finite scalar")
+    if (waves.ndim != 1 or waves.size < 2 or not np.all(np.isfinite(waves))
+            or np.any(waves <= 0) or np.any(np.diff(waves) <= 0)):
+        raise ValueError("wavelengths must be a positive increasing vector with at least two values")
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", species_name):
+        raise ValueError("species_name must be a safe RADMC basename")
+    if len(species_name) > 50:
+        raise ValueError("species_name exceeds optool's 50-character label limit")
+    if isinstance(threads, bool) or int(threads) != threads or threads < 1:
+        raise ValueError("threads must be a positive integer")
+    if isinstance(scattering_mode, bool) or int(scattering_mode) != scattering_mode or not 0 <= scattering_mode <= 5:
+        raise ValueError("scattering_mode must be an integer from zero to five")
+    if bulk_density is not None:
+        if not isinstance(bulk_density, Quantity):
+            raise TypeError("bulk_density must be a Pint quantity")
+        bulk = np.asarray(bulk_density.to("g/cm^3").magnitude, dtype=float)
+        if bulk.ndim or not np.isfinite(bulk) or bulk <= 0:
+            raise ValueError("bulk_density must be a positive finite scalar")
+        bulk_density = float(bulk)
+    binary = resolve_optool_executable(executable)
+    material, resolved_density, material_files = opacity._material_arguments(opacity_dir)
+    directory = Path(output_dir).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = "dustkapscatmat" if scattering_mode >= 3 else "dustkappa"
+    output = directory / f"{prefix}_{species_name}.inp"
+    log_path = directory / f"optool_{species_name}.log"
+    if opacity.size_width:
+        radii = np.exp(np.linspace(np.log(float(radius)) - 3 * opacity.size_width,
+                                  np.log(float(radius)) + 3 * opacity.size_width,
+                                  int(opacity.size_samples)))
+        weights = np.exp(-0.5 * (np.log(radii / float(radius)) / opacity.size_width)**2)
+        weights /= weights.sum()
     else:
-        iang0 = nang - 1
-        iang180 = 0
-    
-    # Allocate complex phase functions
-    S1 = np.zeros(nang, dtype=np.complex128)
-    S2 = np.zeros(nang, dtype=np.complex128)
-    
-    # Initialize arrays for series expansion
-    pi = np.zeros(nang, dtype=np.float64)
-    pi0 = np.zeros(nang, dtype=np.float64)
-    pi1 = np.zeros(nang, dtype=np.float64)
-    pi1[:] = 1.0
-    tau = np.zeros(nang, dtype=np.float64)
-    
-    # Compute alternative to x
-    y = x * refrel
-    
-    # Determine termination point for series expansion
-    xstop = x + 4 * x**0.3333 + 2.0
-    nstop = int(math.floor(xstop))
-    
-    # Start of logarithmic derivatives iteration
-    nmx = int(math.floor(max(xstop, abs(y))) + 15)
-    
-    # Compute mu = cos(theta)
-    mu = np.cos(theta * math.pi / 180.)
-    
-    # Calculate logarithmic derivative by downward recurrence
-    dlog = np.zeros(nmx, dtype=np.complex128)
-    for n in range(nmx - 1):
-        en = float(nmx - n)
-        dlog[nmx - n - 2] = en / y - 1.0 / (dlog[nmx - n - 1] + en / y)
-    
-    # Prepare for series expansion
-    psi0 = math.cos(x)
-    psi1 = math.sin(x)
-    chi0 = -math.sin(x)
-    chi1 = math.cos(x)
-    xi1 = psi1 - chi1 * 1j
-    p = -1.0
-    Qsca = 0.0
-    gsca = 0.0
-    an = 0j
-    bn = 0j
-    
-    # Riccati-Bessel functions - series expansion
-    for n in range(nstop):
-        en = float(n + 1)
-        fn = (2 * en + 1.0) / (en * (en + 1.0))
-        psi = (2 * en - 1.0) * psi1 / x - psi0
-        chi = (2 * en - 1.0) * chi1 / x - chi0
-        xi = psi - chi * 1j
-        an1 = an
-        bn1 = bn
-        dum = dlog[n] / refrel + en / x
-        an = (dum * psi - psi1) / (dum * xi - xi1)
-        dum = dlog[n] * refrel + en / x
-        bn = (dum * psi - psi1) / (dum * xi - xi1)
-        
-        # Add contributions to Qsca and gsca
-        Qsca += (2 * en + 1.0) * (abs(an)**2 + abs(bn)**2)
-        dum = (2 * en + 1.0) / (en * (en + 1.0))
-        gsca += dum * (an.real * bn.real + an.imag * bn.imag)
-        dum = (en - 1.0) * (en + 1.0) / en
-        gsca += dum * (an1.real * an.real + an1.imag * an.imag +
-                       bn1.real * bn.real + bn1.imag * bn.imag)
-        
-        # Contribute to scattering intensity pattern
-        pi[:] = pi1[:]
-        tau[:] = en * np.abs(mu[:]) * pi[:] - (en + 1.0) * pi0[:]
-        
-        # For mu >= 0
-        for idx in range(nang):
-            if mu[idx] >= 0:
-                S1[idx] += fn * (an * pi[idx] + bn * tau[idx])
-                S2[idx] += fn * (an * tau[idx] + bn * pi[idx])
-        
-        # For mu < 0
-        p = -p
-        for idx in range(nang):
-            if mu[idx] < 0:
-                S1[idx] += fn * p * (an * pi[idx] - bn * tau[idx])
-                S2[idx] += fn * p * (bn * pi[idx] - an * tau[idx])
-        
-        # Prepare for next iteration
-        psi0 = psi1
-        psi1 = psi
-        chi0 = chi1
-        chi1 = chi
-        xi1 = psi1 - chi1 * 1j
-        pi1[:] = ((2 * en + 1.0) * np.abs(mu[:]) * pi[:] - (en + 1.0) * pi0[:]) / en
-        pi0[:] = pi[:]
-    
-    # Final calculations
-    gsca = 2 * gsca / Qsca
-    Qsca = (2.0 / (x * x)) * Qsca
-    Qext = (4.0 / (x * x)) * S1[iang0].real
-    Qback = (abs(S1[iang180]) / x)**2 / math.pi
-    Qabs = Qext - Qsca
-    
-    return S1, S2, Qext, Qabs, Qsca, Qback, gsca
-
-
-
-class DustOpacityCalculator:
-    """Calculate dust opacities using Mie scattering theory.
-    
-    This class computes dust absorption and scattering opacities from
-    optical constants files using Mie theory.
-    
-    Example:
-        calc = DustOpacityCalculator()
-        opac = calc.compute_opacity(
-            optconst_file='silicate.lnk',
-            grain_density=2.7,  # g/cm^3
-            grain_size=1e-5,    # cm
-            wavelengths=lamcm,  # wavelengths in cm
-        )
-    """
-    
-    def __init__(self, use_numba: bool = True):
-        """Initialize the opacity calculator.
-        
-        Args:
-            use_numba: If True and numba is available, use JIT-compiled functions
-        """
-        self.verbose = False
-
-    def compute_opacity(
-        self,
-        optconst_file: str | Path,
-        grain_density: float,
-        grain_size: float,
-        wavelengths: np.ndarray,
-        theta: Optional[np.ndarray] = None,
-        logawidth: Optional[float] = None,
-        wfact: float = 3.0,
-        na: int = 20,
-        chopforward: float = 0.0,
-        errtol: float = 0.01,
-        extrapolate: bool = False,
-    ) -> Dict[str, np.ndarray]:
-        """Compute dust opacity using Mie theory.
-        
-        Args:
-            optconst_file: Path to optical constants file (wavelength[um], n, k)
-            grain_density: Material density in g/cm^3
-            grain_size: Grain radius in cm
-            wavelengths: Wavelength grid in cm
-            theta: Optional angular grid (0-180 degrees) for scattering matrix
-            logawidth: Optional width for size distribution smoothing
-            wfact: Grid width in units of logawidth
-            na: Number of size sampling points if logawidth is set
-            chopforward: Angle (degrees) within which to remove forward scattering
-            errtol: Tolerance for kscat vs integral check
-            extrapolate: Whether to extrapolate optical constants
-            
-        Returns:
-            Dictionary containing:
-                'kabs': Absorption opacity [cm^2/g]
-                'kscat': Scattering opacity [cm^2/g]
-                'gscat': Asymmetry parameter <cos(theta)>
-                'wav': Wavelength grid [cm]
-                Optional (if theta provided):
-                    'zscat': Scattering matrix elements
-                    'theta': Scattering angles
-        """
-        # Load optical constants
-        data = np.loadtxt(optconst_file)
-        wavmic, ncoef, kcoef = data.T
-        
-        # Extrapolate if needed
-        if extrapolate:
-            wmin = np.min(wavelengths) * 1e4 * 0.999
-            wmax = np.max(wavelengths) * 1e4 * 1.001
-            
-            if wmin < np.min(wavmic):
-                if wavmic[0] < wavmic[1]:
-                    ncoef = np.append([ncoef[0]], ncoef)
-                    kcoef = np.append([kcoef[0]], kcoef)
-                    wavmic = np.append([wmin], wavmic)
-                else:
-                    ncoef = np.append(ncoef, [ncoef[-1]])
-                    kcoef = np.append(kcoef, [kcoef[-1]])
-                    wavmic = np.append(wavmic, [wmin])
-                    
-            if wmax > np.max(wavmic):
-                if wavmic[0] < wavmic[1]:
-                    ncoef = np.append(ncoef, [ncoef[-1] * math.exp(
-                        (math.log(wmax) - math.log(wavmic[-1])) *
-                        (math.log(ncoef[-1]) - math.log(ncoef[-2])) /
-                        (math.log(wavmic[-1]) - math.log(wavmic[-2])))])
-                    kcoef = np.append(kcoef, [kcoef[-1] * math.exp(
-                        (math.log(wmax) - math.log(wavmic[-1])) *
-                        (math.log(kcoef[-1]) - math.log(kcoef[-2])) /
-                        (math.log(wavmic[-1]) - math.log(wavmic[-2])))])
-                    wavmic = np.append(wavmic, [wmax])
-                else:
-                    ncoef = np.append([ncoef[0] * math.exp(
-                        (math.log(wmax) - math.log(wavmic[0])) *
-                        (math.log(ncoef[0]) - math.log(ncoef[1])) /
-                        (math.log(wavmic[0]) - math.log(wavmic[1])))], ncoef)
-                    kcoef = np.append([kcoef[0] * math.exp(
-                        (math.log(wmax) - math.log(wavmic[0])) *
-                        (math.log(kcoef[0]) - math.log(kcoef[1])) /
-                        (math.log(wavmic[0]) - math.log(wavmic[1])))], kcoef)
-                    wavmic = np.append([wmax], wavmic)
-        
-        # Interpolate to wavelength grid
-        f = interp1d(np.log(wavmic * 1e-4), np.log(ncoef))
-        ncoefi = np.exp(f(np.log(wavelengths)))
-        f = interp1d(np.log(wavmic * 1e-4), np.log(kcoef))
-        kcoefi = np.exp(f(np.log(wavelengths)))
-        
-        # Complex index of refraction
-        refidx = ncoefi + kcoefi * 1j
-        
-        # Angular grid
-        if theta is None:
-            angles = np.array([0., 90., 180.])
+        radii, weights = np.array([float(radius)]), np.array([1.0])
+    number_weights = weights / radii**3
+    number_weights /= number_weights.sum()
+    with tempfile.TemporaryDirectory(prefix="diskbridge_opacity_", dir=directory) as temporary:
+        work = Path(temporary)
+        wave_file, size_file = work / "wavelengths.inp", work / "sizes.inp"
+        np.savetxt(wave_file, waves, fmt="%.17g", header=str(len(waves)), comments="")
+        np.savetxt(size_file, np.column_stack((radii, number_weights)), fmt="%.17g",
+                   header=str(len(radii)), comments="")
+        porosity, blend_log = opacity.porosity, ""
+        needs_blend = resolved_density is None or len(material_files) != 1
+        if needs_blend:
+            if bulk_density is None:
+                bulk_density = (resolved_density if resolved_density is not None else
+                                float(opacity.resolve_material(opacity_dir, binary)[1].to("g/cm^3").magnitude))
+            blend, _, blending = opacity._blend_material(material, wave_file, work, binary,
+                                                          require_density=False)
+            corrected = _density_material_file(blend, work / "resolved_material.lnk", bulk_density)
+            material = ["-c", corrected.name, "1", repr(bulk_density)]
+            porosity = 0.0  # The blended index and density already include vacuum.
+            blend_log = blending.stdout + blending.stderr
         else:
-            angles = theta
-        nang = angles.size
-        
-        # Size distribution
-        if logawidth is None:
-            agr = np.array([grain_size])
-            wgt = np.array([1.0])
-        else:
-            agr = np.exp(np.linspace(
-                math.log(grain_size) - wfact * logawidth,
-                math.log(grain_size) + wfact * logawidth,
-                na
-            ))
-            wgt = np.exp(-0.5 * ((np.log(agr / grain_size)) / logawidth)**2)
-            wgt = wgt / wgt.sum()
-        
-        nagr = agr.size
-        siggeom = math.pi * agr * agr
-        mgrain = (4 * math.pi / 3.0) * grain_density * agr * agr * agr
-        
-        # Prepare output arrays
-        nlam = wavelengths.size
-        kabs = np.zeros(nlam)
-        kscat = np.zeros(nlam)
-        gscat = np.zeros(nlam)
-        
-        if theta is not None:
-            zscat = np.zeros((nlam, nang, 6))
-            S11 = np.zeros(nang)
-            S12 = np.zeros(nang)
-            S33 = np.zeros(nang)
-            S34 = np.zeros(nang)
-        
-        # Loop over wavelengths
-        for i in range(nlam):
-            if self.verbose:
-                logger.info(f"Computing opacity at wavelength {wavelengths[i]:.6e} cm")
-            
-            # Loop over grain sizes
-            for l in range(nagr):
-                x = 2 * math.pi * agr[l] / wavelengths[i]
-                S1, S2, Qext, Qabs, Qsca, Qback, gsca = bhmie_numba(x, refidx[i], angles)
-                
-                # Average over size distribution
-                kabs[i] += wgt[l] * Qabs * siggeom[l] / mgrain[l]
-                kscat[i] += wgt[l] * Qsca * siggeom[l] / mgrain[l]
-                gscat[i] += wgt[l] * gsca
-                
-                # Compute scattering matrix if theta provided
-                if theta is not None:
-                    factor = (wavelengths[i] / (2 * math.pi))**2 / mgrain[l]
-                    S11[:] = 0.5 * (np.abs(S2[:])**2 + np.abs(S1[:])**2)
-                    S12[:] = 0.5 * (np.abs(S2[:])**2 - np.abs(S1[:])**2)
-                    S33[:] = (S2[:] * np.conj(S1[:])).real
-                    S34[:] = (S2[:] * np.conj(S1[:])).imag
-                    
-                    zscat[i, :, 0] += wgt[l] * S11[:] * factor
-                    zscat[i, :, 1] += wgt[l] * S12[:] * factor
-                    zscat[i, :, 2] += wgt[l] * S11[:] * factor  # Z22 = Z11 for spheres
-                    zscat[i, :, 3] += wgt[l] * S33[:] * factor
-                    zscat[i, :, 4] += wgt[l] * S34[:] * factor
-                    zscat[i, :, 5] += wgt[l] * S33[:] * factor  # Z44 = Z33 for spheres
-
-        # If we have an angular grid, enforce consistency between kscat
-        # and the angular integral of Z11, and optionally apply a
-        # forward-scattering chop (chopforward) following
-        # fargo2radmc3d's compute_opac_mie.
-        if theta is not None:
-            mu = np.cos(angles * math.pi / 180.0)
-            dmu = np.abs(mu[1:] - mu[:-1])
-            kscat_from_z11 = np.zeros(nlam)
-            error = False
-            errmax = 0.0
-
-            # Consistency check between kscat and integral over Z11
-            for i in range(nlam):
-                zav = 0.5 * (zscat[i, 1:, 0] + zscat[i, :-1, 0])
-                dum = 0.5 * zav * dmu
-                integral = dum.sum() * 4.0 * math.pi
-                kscat_from_z11[i] = integral
-                if kscat[i] > 0.0:
-                    rel_err = abs(integral / kscat[i] - 1.0)
-                    if rel_err > errtol:
-                        error = True
-                        errmax = max(errmax, rel_err)
-
-            # Apply forward-scattering chop if requested
-            if chopforward > 0.0:
-                for i in range(nlam):
-                    iang = np.where(angles < chopforward)[0]
-                    if iang.size == 0:
-                        continue
-                    if angles[0] == 0.0:
-                        iiang = int(np.max(iang) + 1)
-                        if iiang >= nang:
-                            iiang = nang - 1
-                    else:
-                        iiang = int(np.min(iang) - 1)
-                        if iiang < 0:
-                            iiang = 0
-                    # Replace Z elements for chopped angles
-                    for k in range(6):
-                        zscat[i, iang, k] = zscat[i, iiang, k]
-                    # Recompute kscat from chopped Z11
-                    zav = 0.5 * (zscat[i, 1:, 0] + zscat[i, :-1, 0])
-                    dum = 0.5 * zav * dmu
-                    kscat[i] = dum.sum() * 4.0 * math.pi
-
-            if error and self.verbose:
-                logger.warning(
-                    "Angular integral of Z11 is not equal to kscat at all wavelengths. "
-                    f"Maximum relative error = {errmax:.6e}"
-                )
-
-        # Build output dictionary
-        result = {
-            'kabs': kabs,
-            'kscat': kscat,
-            'gscat': gscat,
-            'wav': wavelengths,
-        }
-        
-        if theta is not None:
-            result['zscat'] = zscat
-            result['theta'] = angles
-        
-        return result
-    
-    def write_radmc3d_opacity_file(
-        self,
-        opacity_data: Dict[str, np.ndarray],
-        output_path: str | Path,
-        scattering_matrix: bool = False,
-    ) -> None:
-        """Write opacity data to RADMC-3D format files.
-        
-        Args:
-            opacity_data: Dictionary from compute_opacity()
-            output_path: Base path for output file (without extension)
-            scattering_matrix: If True, write full scattering matrix
-        """
-        output_path = Path(output_path)
-        
-        if scattering_matrix and 'zscat' in opacity_data:
-            # Write dustkapscatmat file
-            filename = f"dustkapscatmat_{output_path.name}.inp"
-            self._write_scatmat_file(opacity_data, output_path.parent / filename)
-        else:
-            # Write dustkappa file
-            filename = f"dustkappa_{output_path.name}.inp"
-            self._write_kappa_file(opacity_data, output_path.parent / filename)
-    
-    def _write_kappa_file(self, opac: Dict, filename: Path) -> None:
-        """Write dustkappa_*.inp file."""
-        with open(filename, 'w') as f:
-            # Header
-            f.write("# Opacity file for RADMC-3D\n")
-            f.write("# Columns: lambda[micron]  kabs[cm^2/g]  kscat[cm^2/g]  g\n")
-            f.write("3\n")  # Format 3: lambda, kabs, kscat, Henyey-Greenstein g
-            f.write(f"{len(opac['wav'])}\n")  # Number of wavelengths
-            
-            # Data
-            for i, lam in enumerate(opac['wav']):
-                lam_micron = lam * 1e4  # cm to micron
-                f.write(f"{lam_micron:13.6e}  {opac['kabs'][i]:13.6e}  "
-                       f"{opac['kscat'][i]:13.6e}  {opac['gscat'][i]:13.6e}\n")
-        
-        logger.debug(f"Wrote opacity file: {filename}")
-    
-    def _write_scatmat_file(self, opac: Dict, filename: Path) -> None:
-        """Write dustkapscatmat_*.inp file."""
-        nlam = len(opac['wav'])
-        nang = len(opac['theta'])
-        
-        with open(filename, 'w') as f:
-            # Header
-            f.write("# Opacity and scattering matrix file for RADMC-3D\n")
-            f.write("1\n")  # Format number
-            f.write(f"{nlam}\n")  # Number of wavelengths
-            f.write(f"{nang}\n")  # Number of angles
-            
-            # Wavelengths
-            for lam in opac['wav']:
-                f.write(f"{lam * 1e4:13.6e}\n")  # cm to micron
-            
-            # Angles
-            for ang in opac['theta']:
-                f.write(f"{ang:13.6e}\n")
-            
-            # Opacity and scattering matrix data
-            for i in range(nlam):
-                f.write(f"{opac['kabs'][i]:13.6e}  {opac['kscat'][i]:13.6e}\n")
-                
-                # Write scattering matrix elements
-                for j in range(nang):
-                    z = opac['zscat'][i, j, :]
-                    f.write(f"{z[0]:13.6e}  {z[1]:13.6e}  {z[2]:13.6e}  "
-                           f"{z[3]:13.6e}  {z[4]:13.6e}  {z[5]:13.6e}\n")
-        
-        logger.info(f"Wrote scattering matrix file: {filename}")
+            if bulk_density is None:
+                bulk_density = resolved_density
+            intrinsic = bulk_density / (1 - opacity.porosity)
+            corrected = _density_material_file(material_files[0], work / "resolved_material.lnk", intrinsic)
+            material = ["-c", corrected.name, "1", repr(intrinsic)]
+        command = [str(binary), "-err", *material, "-p", str(porosity)]
+        command += ["-mie"] if opacity.method == "mie" else ["-dhs", str(opacity.fmax)]
+        command += ["-a", size_file.name, "-l", wave_file.name, "-chop", str(opacity.chop_angle),
+                    "-radmc", species_name, "-o", ".", "-q"]
+        if scattering_mode >= 3:
+            command += ["-s", str(opacity.n_angles)]
+        try:
+            result = _run_optool(command, cwd=work, threads=int(threads), log_path=log_path)
+        finally:
+            if blend_log:
+                log_path.write_text(blend_log + (log_path.read_text() if log_path.exists() else ""))
+        native = work / output.name
+        if not native.is_file() or not native.stat().st_size:
+            raise RuntimeError(f"Optool did not produce {output.name}; see {log_path}: {result.stdout}{result.stderr}")
+        with native.open() as stream:
+            data_lines = (line.strip() for line in stream if line.strip() and not line.lstrip().startswith(("#", "!", "*")))
+            try:
+                header = [int(next(data_lines)) for _ in range(3 if scattering_mode >= 3 else 2)]
+            except (ValueError, StopIteration) as error:
+                raise RuntimeError(f"Optool produced an incomplete native opacity table: {native}") from error
+        expected = [1, len(waves), opacity.n_angles + 1] if scattering_mode >= 3 else [3, len(waves)]
+        if header != expected:
+            raise RuntimeError(f"Unexpected optool native opacity header {header}; expected {expected}")
+        version_result = _run_optool([str(binary), "-version"], cwd=work)
+        version = (version_result.stdout or version_result.stderr).strip()
+        if not version:
+            raise RuntimeError("Optool did not report its version")
+        native.replace(output)
+    provenance = dict(opacity=opacity.to_dict(), grain_radius_um=float(radius),
+                      bulk_density_g_cm3=bulk_density, wavelengths_um=waves.tolist(),
+                      smoothing_radii_um=radii.tolist(), per_mass_weights=weights.tolist(),
+                      command=command, threads=int(threads),
+                      executable=dict(path=str(binary), version=version,
+                                      sha256=hashlib.sha256(binary.read_bytes()).hexdigest()),
+                      optical_constants=[dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                                         for path in material_files])
+    (directory / f"optool_{species_name}.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    opposite = "dustkappa" if scattering_mode >= 3 else "dustkapscatmat"
+    (directory / f"{opposite}_{species_name}.inp").unlink(missing_ok=True)
+    return output

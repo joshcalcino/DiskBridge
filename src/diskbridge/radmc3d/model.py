@@ -34,7 +34,8 @@ from diskbridge.model.field import Field
 from diskbridge._config import get_config
 from diskbridge.model.utils import field_data_as_order
 from .data import RadData
-from .cache import build_mesh_cache_context, should_use_cache, find_cached_output
+from .cache import (build_mesh_cache_context, build_dust_opacity_cache_context,
+                    should_use_cache, find_cached_output)
 from .run import SymlinkContext, run_radmc3d, organize_outputs, ensure_temperature_symlink
 from .wavelengths import build_mcmono_wavelengths, write_wavelength_file, validate_wavelength_array, check_wavelength_range
 from .uv_products import (
@@ -1049,6 +1050,7 @@ class RadModel:
             'nphot': int(nphot),
         }
         cache_context.update(build_mesh_cache_context(self.model.mesh))
+        cache_context.update(build_dust_opacity_cache_context(self.model, self.inputs_dir))
         cache_context.update(
             _external_source_cache_context(self.params, external_source_path)
         )
@@ -1505,6 +1507,7 @@ class RadModel:
             'wavelengths_max_um': float(np.max(mcmono_lam_um)),
         }
         cache_context.update(build_mesh_cache_context(self.model.mesh))
+        cache_context.update(build_dust_opacity_cache_context(self.model, self.inputs_dir))
         if iseed is not None:
             iseed = int(iseed)
             if iseed <= 0:

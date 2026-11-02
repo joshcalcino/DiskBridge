@@ -29,7 +29,7 @@ from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.model import RadModel
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_luminosity
 from diskbridge.chemistry.shielding.angular_uv_weights import compute_star_uv_source_strength
-from diskbridge.chemistry.models.gow17_timestep import Gow17TimeStepper
+from diskbridge.chemistry.models.gow17.timestep import Gow17TimeStepper
 from diskbridge.radmc3d.uv_products import (
     DEFAULT_UV_PRODUCT_SPECS,
     draine_references_for_product_partitions,
@@ -37,7 +37,7 @@ from diskbridge.radmc3d.uv_products import (
     partitions_for_product,
 )
 import diskbridge
-import diskbridge._gow17 as _gow17
+import diskbridge.chemistry.models.gow17._gow17 as _gow17
 from _common import write_json
 from _common import setup_matplotlib as _setup_matplotlib
 
@@ -1609,11 +1609,6 @@ def _run_one_density(cfg: InfallStream1DConfig, *, nH_cm3: float, out_dir: Path)
 def run(out_root: Path, cfg: InfallStream1DConfig) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
-    diskbridge.write_run_manifest(
-        out_root / "inputs.json",
-        config=cfg.__dict__,
-        extra={"job": "gow17_infall_stream_1d"},
-    )
 
     scan_rows = []
     for nH in cfg.nH_list_cm3:

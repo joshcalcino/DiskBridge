@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Sequence, Optional, Any
 import numpy as np
 
 from diskbridge._logging import logger
-from diskbridge.serialization import jsonable
-from diskbridge.utils import sha256_array
+from diskbridge.utils.serialization import jsonable
+from diskbridge.utils import sha256_array, sha256_file
 from .utils import _read_params_snapshot, _params_signature
 
 if TYPE_CHECKING:
@@ -34,6 +34,40 @@ def stable_json_hash(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def build_dust_opacity_cache_context(model: Any, inputs_dir: Path | str) -> dict[str, Any]:
+    """Return component settings and native input hashes for RT cache identity.
+
+    Parameters
+    ----------
+    model : diskbridge.Model
+        Model whose dust components supply the physical opacity settings.
+    inputs_dir : str or pathlib.Path
+        Directory containing the native opacity and dust-density inputs.
+
+    Returns
+    -------
+    dict
+        Bin settings, material density and content hashes of opacity inputs.
+    """
+    bins = {}
+    if model.dust is not None:
+        for name, dust_bin in model.dust.bins.items():
+            bins[name] = {
+                "opacity": dust_bin.opacity.to_dict(),
+                "species": dust_bin.opacity_species,
+                "size": jsonable(dust_bin.size),
+                "density_material": jsonable(dust_bin.density_material),
+            }
+    root = Path(inputs_dir)
+    files = {}
+    for pattern in ("dustopac.inp", "dustkappa_*.inp", "dustkapscatmat_*.inp",
+                    "optool_*.json", "dust_density.binp"):
+        for path in sorted(root.glob(pattern)):
+            if path.is_file():
+                files[path.name] = sha256_file(path)
+    return {"dust_opacity": {"bins": bins, "input_sha256": files}}
 
 
 def build_mesh_cache_context(mesh: "Mesh") -> dict[str, Any]:

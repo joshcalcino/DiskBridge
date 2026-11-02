@@ -21,6 +21,7 @@ from .coords import spherical_grids, cylindrical_from_spherical
 
 if TYPE_CHECKING:
     from .core import Model
+    from diskbridge.model.dust_opacity import DustOpacity
 
 
 def aspect_ratio(R: Quantity, h0: Quantity, r0: Quantity, flaring: Quantity) -> Quantity:
@@ -147,7 +148,20 @@ class _RegionDustConfigurator:
         self._mask = mask
         self._is_disk_region = is_disk_region
 
-    def set_distribution(self, mode: str = "proportional", **kwargs):
+    def set_distribution(
+        self, mode: str = "proportional", *, opacity: DustOpacity | None = None, **kwargs,
+    ):
+        """Configure dust on this region using its material specification.
+
+        Parameters
+        ----------
+        mode : {"proportional", "settling"}
+            Spatial dust distribution. Settling requires a disk region.
+        opacity : DustOpacity, optional
+            Material, grain-shape and porosity specification.
+        **kwargs
+            Distribution parameters accepted by ``Dust.add_component_from_mask``.
+        """
         if self._mask is None:
             raise ValueError(
                 "Region has no mask defined; call set_mask_from_geometry first"
@@ -162,6 +176,7 @@ class _RegionDustConfigurator:
         self._dust.add_component_from_mask(
             mask=self._mask,
             mode=mode,
+            opacity=opacity,
             **kwargs,
         )
 

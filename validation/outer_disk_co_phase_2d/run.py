@@ -14,7 +14,7 @@ import diskbridge
 from diskbridge._params import read_params
 from diskbridge._units import Quantity
 from diskbridge.chemistry.io import attach_chemistry_result_to_model
-from diskbridge.chemistry.models.gow17 import run_gow17
+from diskbridge.chemistry.models.gow17.model import run_gow17
 from diskbridge.model.field import Field
 from diskbridge.model.utils import field_data_as_order
 from diskbridge.radmc3d.model import RadModel

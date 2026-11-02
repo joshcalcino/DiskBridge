@@ -31,11 +31,18 @@ Tests can include simple physics checks when they are cheap, deterministic, obje
 
 Put persistent tests in `tests/` and use pytest. Do not put long physical workflows in `tests/`.
 
-Do not create `tests/validation/`. In DiskBridge, validation workflows live in
-the repository-level `validation/` directory. Do not add pytest files for
-validation-specific drivers, configs, plotting helpers, or workflow glue. If
-reusable production code is extracted from a validation into `src/diskbridge/`,
-test that production code in the normal subsystem path.
+### Mandatory Pipeline-Test Ban
+
+NEVER add or retain pytest tests of example, problem, project, campaign or
+validation pipelines. This includes their drivers, configuration/defaults,
+plotting scripts, cluster scripts, CLI wrappers, source-text/AST assertions and
+workflow glue, even with mocks, tiny inputs or fast execution. Delete prohibited
+tests; do not rename, relocate, hide from collection, replace or recreate them.
+Never create tests/validation/. Test reusable production-package behavior, core
+repository tooling and objective physics/reference cases directly. Do not move
+problem-only helpers into src merely to evade this ban.
+
+Standalone scientific validations live under validation/ and do not use pytest.
 
 Use one curated public API smoke test, normally `tests/test_public_api.py`, for import and public-surface checks. Do not spread many import-only tests across the suite unless they exercise meaningfully different optional dependency behavior.
 
@@ -167,7 +174,10 @@ When cleaning or reviewing tests, classify each test as:
 - Merge: duplicates another test contract.
 - Rename: useful test with unclear or overly long naming.
 - Document: useful test whose intent, reference, or analytic expectation is not clear.
-- Move to validation: slow, data-heavy, plot-based, full-pipeline, or human-interpreted.
+- Move to standalone validation: scientific checks requiring large data, plots
+  or human interpretation; do not retain pytest wrappers.
+- Delete: every example/problem/project/validation pipeline test, regardless of
+  runtime or mocking; never relocate it as another pytest test.
 - Delete: brittle private-helper-only test or import-only noise with no distinct value.
 
 ## After Adding Tests

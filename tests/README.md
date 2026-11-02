@@ -4,6 +4,20 @@ This directory contains fast pytest tests that should be runnable during ordinar
 
 Tests protect code contracts, regression cases, shape/order guarantees, units, config resolution, file I/O smoke paths, expected errors, and simple objective physics invariants. Larger, slower, data-heavy, plot-based, or human-interpreted scientific checks belong in `validation/`.
 
+## Banned Tests
+
+Never add or retain tests of example, problem, project, campaign or validation
+pipelines. This includes their drivers, configuration/defaults, plotting scripts,
+cluster scripts, CLI wrappers, source/AST assertions and workflow glue. The ban
+applies even with mocks, tiny inputs or fast execution. Delete such tests; do not
+rename, relocate, exclude, replace or recreate them. Never create
+`tests/validation/`.
+
+Test reusable `src/diskbridge/` behavior, core repository tooling and objective
+physics/reference cases directly. Do not promote problem-only helpers into the
+package solely to bypass this rule. Standalone scientific validations are not
+pytest tests and must not receive pytest wrappers.
+
 ## Current Layout
 
 ```text
@@ -21,7 +35,8 @@ tests/
 - `radmc3d/`: RADMC-3D writer/reader, UV product, dust, radiation, and line-transfer tests.
 - `reference/`: machine-readable data consumed by pytest.
 
-Do not keep pytest tests only to test validation-driver helper code. If validation helper logic becomes important enough for commit-time tests, first move the reusable logic into `src/` and then test it under the relevant subsystem.
+Reusable production code belongs in `src/diskbridge/` and may have direct
+package tests. Example/problem/validation orchestration remains outside pytest.
 
 ## Import And API Smoke Tests
 
@@ -71,5 +86,8 @@ When reviewing the suite, classify tests as:
 - Merge: duplicates another test contract.
 - Rename: useful test with unclear or overly long naming.
 - Document: useful test whose intent, reference, or analytic expectation is unclear.
-- Move to validation: slow, data-heavy, plot-based, full-pipeline, or human-interpreted.
+- Move to standalone validation: scientific checks requiring large data, plots or
+  human interpretation; do not retain pytest wrappers.
+- Delete: every example/problem/project/validation pipeline test, regardless of
+  size or runtime; never relocate it as another pytest test.
 - Delete: brittle private-helper-only test or import-only noise with no distinct value.

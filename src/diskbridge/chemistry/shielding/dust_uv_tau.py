@@ -10,8 +10,8 @@ This module provides:
 - **prepare_dust_density_fields**: extract per-bin dust density arrays from
   a DiskBridge model for ray integration.
 
-The dustkappa-based mode uses the *actual* absorption + scattering opacities
-written to ``dustkappa_*.inp`` files by DiskBridge, giving:
+The dustkappa mode uses the absorption + scattering opacities in the native
+scalar or scattering-matrix tables declared by ``dustopac.inp``, giving:
 
 .. math::
 
@@ -21,7 +21,7 @@ written to ``dustkappa_*.inp`` files by DiskBridge, giving:
 where :math:`\\Sigma^{(b)}_{\\rm dust}(k) = \\int \\rho^{(b)}_{\\rm dust}\\,ds`
 is the dust mass column along ray direction *k* for bin *b*, and
 :math:`\\kappa^{(b)}_{\\rm ext,UV}` is the band-averaged extinction opacity
-from the dustkappa file.
+from the native opacity table.
 
 References
 ----------
@@ -57,7 +57,6 @@ from diskbridge.radmc3d.dustkappa_reader import load_kext_uv_for_bins
 def resolve_uv_tau_mode(
     model,
     radmc_inputs_dir: Optional[str | Path],
-    species_base: str,
     uv_min_um: float,
     uv_max_um: float,
     *,
@@ -68,24 +67,24 @@ def resolve_uv_tau_mode(
 
     Uses dustkappa mode only if **all** of the following are true:
 
-    1. ``radmc_inputs_dir`` exists and contains ``dustkappa_{species_base}{ibin}.inp``
-       for every dust bin.
+    1. ``radmc_inputs_dir`` contains ``dustopac.inp`` and the scalar/matrix
+       opacity table it declares for every dust bin.
     2. ``model.dust`` is not None with ``nbin > 0`` and densities available.
-    3. The dustkappa file set matches the bin naming convention DiskBridge writes.
+    3. The opacity species inventory matches the dust-density bin order.
 
-    If any condition fails, returns the sentinel mode ``"sigma_dust"``; the
+    If the dust fields, inventory, or a table is absent, returns the sentinel
+    mode ``"sigma_dust"``; the
     caller (``maybe_ensure_W_rays``) treats this as "no W_rays available" and
-    falls back to isotropic shielding averaging.
+    falls back to isotropic shielding averaging. Invalid inventories and bin
+    counts raise an error instead of silently changing the shielding method.
 
     Parameters
     ----------
     model : diskbridge.model.Model
         DiskBridge model instance.
     radmc_inputs_dir : str, Path, or None
-        Directory containing ``dustkappa_*.inp`` files. If None, always
+        Directory containing the native opacity inventory and tables. If None, always
         falls back to sigma_dust mode.
-    species_base : str
-        Species base name used in dustkappa file naming (e.g. ``"silicate"``).
     uv_min_um : float
         Minimum UV wavelength in microns.
     uv_max_um : float
@@ -126,10 +125,9 @@ def resolve_uv_tau_mode(
         logger.info("UV tau mode: sigma_dust (model has 0 dust bins)")
         return "sigma_dust", None
 
-    # Condition 3: all dustkappa files must exist and be readable
+    # Condition 3: every native table must exist in inventory order.
     kext_uv = load_kext_uv_for_bins(
         radmc_inputs_dir,
-        species_base,
         nbin,
         uv_min_um,
         uv_max_um,
@@ -138,14 +136,12 @@ def resolve_uv_tau_mode(
     )
     if kext_uv is None:
         logger.info(
-            "UV tau mode: sigma_dust (missing dustkappa files for species=%s, nbin=%d)",
-            species_base, nbin,
+            "UV tau mode: sigma_dust (missing native opacity tables, nbin=%d)", nbin,
         )
         return "sigma_dust", None
 
     logger.info(
-        "UV tau mode: dustkappa (nbin=%d, species=%s, kext_uv=%s cm^2/g)",
-        nbin, species_base, kext_uv,
+        "UV tau mode: dustkappa (nbin=%d, kext_uv=%s cm^2/g)", nbin, kext_uv,
     )
     return "dustkappa", kext_uv
 

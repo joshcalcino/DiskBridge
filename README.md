@@ -10,6 +10,8 @@ synthetic observations.
   units on a common mesh
 - Builds gas and dust structure, including vertical puffing and grain
   size bins
+- Generates per-bin Mie or DHS dust opacities with the standalone optool
+  executable, using material settings attached to each dust component
 - Writes a complete set of RADMC-3D input files: grid, dust density,
   dust opacities, stellar source, control file, and optional gas
   temperature/velocity and molecular number densities
@@ -20,22 +22,21 @@ synthetic observations.
   reduced network, including CO self-shielding computed per cell from
   HEALPix ray tracing and the Visser et al. 2009 shielding tables
 - Converts RADMC-3D outputs into FITS images and data cubes
-- Writes a run-provenance manifest recording the full active parameter
-  set, DiskBridge version, and git commit for a run
 
 ## Typical workflow
 
 In a typical use case you:
 
-1. Prepare a plain-text parameter file `params.txt` that defines
-   opacities, stellar properties, Monte Carlo settings, and chemistry
+1. Prepare a plain-text parameter file `params.txt` that defines the
+   default dust material, stellar properties, Monte Carlo settings, and chemistry
    switches.
 2. Load a hydro snapshot or a saved model into `diskbridge.model.Model`
    using `diskbridge.load_model`.
 3. Configure the dust distribution with `model.dust` helpers
-   (e.g. proportional to gas density, grain size range, number of bins).
+   (e.g. proportional to gas density, grain size range, number of bins),
+   attaching `diskbridge.DustOpacity` for material, Mie/DHS, and porosity choices.
 4. Use `diskbridge.radmc3d.RadWriter` to write RADMC-3D input files and
-   (optionally) compute dust opacities for each dust bin. (this will be updated to be automatic)
+   generate native optool opacity tables for each dust bin.
 5. Use `diskbridge.radmc3d.RadModel` to run RADMC-3D and compute dust
    temperatures.
 6. Use `diskbridge.chemistry.run_chemistry` to compute molecular
@@ -49,6 +50,9 @@ In a typical use case you:
   load simulations, rescale units, store gas and dust fields on a mesh.
 - `model.dust`:
   set dust size distribution and dust-to-gas coupling.
+- `diskbridge.DustOpacity`:
+  specify component material and grain shape, sharing the resolved material
+  density between settling and opacity generation.
 - `diskbridge.radmc3d.RadWriter`:
   write grid, dust density, opacity, and control files for RADMC-3D.
 - `diskbridge.radmc3d.RadModel`:
@@ -59,9 +63,6 @@ In a typical use case you:
   HEALPix shielding).
 - `diskbridge.radmc3d.RadImage`:
   read RADMC-3D images and write FITS files with WCS information.
-- `diskbridge.provenance.write_run_manifest`:
-  record a reproducible, human-readable manifest of a run's parameters,
-  version, and git commit.
 
 ## Installation
 
@@ -80,6 +81,10 @@ This installs the `diskbridge` Python package.
   numpy, scipy, astropy, pint, numba, healpy
 - A working `radmc3d` executable on your PATH to run radiative
   transfer
+- The standalone [optool executable](https://github.com/cdominik/optool)
+  for opacity generation, on PATH or selected with `OPTOOL_EXECUTABLE`.
+  DiskBridge invokes it directly; no optool Python wrapper or DiskMINT
+  dependency is required.
 - Hydro simulation outputs in a supported format (for example
   FARGO-3D snapshots, others can be added easily)
 
@@ -132,6 +137,6 @@ from the following public code bases:
   still in nanometers.
 - Pint quantities are used throughout the core of the `radmc3d`
   submodule (`model.py`, `segmented.py`, `data.py`, `uv_products.py`,
-  `writer.py`, `wavelengths.py`), but `opacities.py`, `image.py`,
+  `writer.py`, `wavelengths.py`, and the public opacity interface), but `image.py`,
   `run.py`, `colliders.py`, `cache.py`, and `dustkappa_reader.py` still
   use plain floats/arrays.

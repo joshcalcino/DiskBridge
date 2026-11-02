@@ -10,7 +10,7 @@ dist/
 *.egg-info/
 docs/_build/
 .venv-docs/
-src/diskbridge/_gow17*.so
+src/diskbridge/chemistry/models/gow17/_gow17*.so
 dependencies/sundials/install/
 data/moldata/*.dat
 !data/moldata/hco+.dat

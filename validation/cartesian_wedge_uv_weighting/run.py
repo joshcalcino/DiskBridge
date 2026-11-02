@@ -27,7 +27,7 @@ from diskbridge.model.dust import Dust
 from diskbridge.model.field import Field
 from diskbridge.model.mesh import Axis, Mesh
 from diskbridge.radmc3d.model import RadModel
-from diskbridge.serialization import jsonable
+from diskbridge.utils.serialization import jsonable
 from diskbridge.visualization.scales import log10_display_limits, log10_display_values
 
 
