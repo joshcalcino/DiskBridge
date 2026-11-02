@@ -58,6 +58,7 @@ from diskbridge.chemistry.models.gow17.validation import (
     gow17_budget_diagnostics,
     project_gow17_state_to_budgets,
 )
+from diskbridge.chemistry.models.gow17.cache import _field_context, _quantity_context
 from diskbridge.model.utils import field_data_as_order
 from diskbridge.radmc3d.uv_products import (
     UV_PRODUCT_MERGED_FIELD_NAMES,
@@ -66,7 +67,6 @@ from diskbridge.radmc3d.uv_products import (
 )
 from diskbridge.radmc3d.cache import build_mesh_cache_context, stable_json_hash
 from diskbridge.radmc3d.model import DUST_TEMPERATURE_WEIGHTING
-from diskbridge.utils import sha256_array
 from diskbridge.radmc3d.line_transfer.escape_healpix import (
     compute_velocity_coherent_columns_healpix,
 )
@@ -599,15 +599,22 @@ def _gow17_checkpoint_config(
     }
     dust = getattr(rad.model, "dust", None)
     dust_temperatures = {}
+    dust_bins = {}
     if dust is not None:
         for index in range(dust.nbin):
             name = f"temperature_bin_{index}"
-            field = dust[name]
-            values = np.ascontiguousarray(field.data.to("K").magnitude, dtype=np.float64)
-            dust_temperatures[name] = {
-                "shape": list(values.shape),
-                "axis_order": list(field.axis_order),
-                "sha256": sha256_array(values),
+            dust_temperatures[name] = _field_context(dust[name], unit="K")
+        for name, dust_bin in sorted(dust.bins.items()):
+            dust_bins[name] = {
+                "opacity": dust_bin.opacity.to_dict(),
+                "size": _quantity_context(dust_bin.size, unit="cm"),
+                "size_min": _quantity_context(dust_bin.size_min, unit="cm"),
+                "size_max": _quantity_context(dust_bin.size_max, unit="cm"),
+                "density_material": _quantity_context(
+                    dust_bin.density_material, unit="g/cm^3",
+                ),
+                "mass_fraction": float(dust_bin.mass_fraction),
+                "density": _field_context(dust_bin["density"], unit="g/cm^3"),
             }
 
     return {
@@ -623,6 +630,7 @@ def _gow17_checkpoint_config(
                 "shielding_angular_weighting": SHIELDING_ANGULAR_WEIGHTING,
                 "dust_temperature_weighting": DUST_TEMPERATURE_WEIGHTING,
                 "dust_temperatures": dust_temperatures,
+                "dust_bins": dust_bins,
             }
         ),
     }
@@ -822,11 +830,24 @@ def _load_gow17_checkpoint(
         if saved_fingerprint != active_fingerprint:
             raise ValueError("gow17 checkpoint mesh coordinates do not match active model")
         saved_config_fingerprint = str(handle.attrs["config_fingerprint"])
-        if saved_config_fingerprint != cp_cfg["config_fingerprint"]:
-            raise ValueError(
-                "gow17 checkpoint scientific configuration does not match active config"
-            )
         saved_total = int(handle.attrs["total_updates"])
+        if handle["y"].shape != (ncells, N_Y):
+            raise ValueError(
+                f"gow17 checkpoint y has shape {handle['y'].shape}, expected {(ncells, N_Y)}"
+            )
+        for name in ("theta_h2", "theta_co", "theta_c", "status"):
+            if handle[name].shape != (ncells,):
+                raise ValueError(
+                    f"gow17 checkpoint {name} has shape {handle[name].shape}, expected {(ncells,)}"
+                )
+        completed_updates = int(handle.attrs["completed_updates"])
+        histories = json.loads(handle["histories_json"].asstr()[()])
+        if saved_config_fingerprint != cp_cfg["config_fingerprint"]:
+            logger.info(
+                "gow17 checkpoint: scientific inputs changed; starting a fresh solve instead of %s",
+                snapshot,
+            )
+            return None
         if saved_total != int(total_updates):
             raise ValueError(
                 "gow17 checkpoint total_updates does not match active config: "
@@ -837,23 +858,6 @@ def _load_gow17_checkpoint(
         theta_co = np.asarray(handle["theta_co"], dtype=np.float64)
         theta_c = np.asarray(handle["theta_c"], dtype=np.float64)
         status = np.asarray(handle["status"], dtype=np.int32)
-        completed_updates = int(handle.attrs["completed_updates"])
-        histories = json.loads(handle["histories_json"].asstr()[()])
-
-    if y.shape != (ncells, N_Y):
-        raise ValueError(
-            f"gow17 checkpoint y has shape {y.shape}, expected {(ncells, N_Y)}"
-        )
-    for name, values in (
-        ("theta_h2", theta_h2),
-        ("theta_co", theta_co),
-        ("theta_c", theta_c),
-        ("status", status),
-    ):
-        if values.shape != (ncells,):
-            raise ValueError(
-                f"gow17 checkpoint {name} has shape {values.shape}, expected {(ncells,)}"
-            )
     if not enable_co_phase:
         y[:, I_CO_ICE] = 0.0
     logger.info(

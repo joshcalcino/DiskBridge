@@ -120,6 +120,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- GOW17 restart identity includes dust composition, porosity, grain radii,
+  bulk density, mass fractions and realized density fields as well as bin
+  temperatures. Changed scientific inputs start a fresh solve automatically;
+  incompatible meshes and malformed checkpoints remain errors.
 - Full-matrix dust opacity files now follow the native RADMC-3D table layout
   and are tracked under their emitted `dustkapscatmat` filenames. Requests
   without scattering-matrix data raise an error.
