@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -910,8 +911,15 @@ def _reconstruct_cylindrical_density(
     *,
     seed_min: float,
     weight_floor: float,
+    settling_profile: Callable[[], tuple[Quantity, np.ndarray]] | None = None,
 ) -> Quantity:
-    """Realize target annular masses without amplifying soft-weight tails."""
+    """Realize target masses using the same grain's coherent vertical profile.
+
+    A zero target needs no dust template. If a positive target has no sampled
+    coherent mass, request the analytic settling factors only then and normalize
+    them in log space. This retains the same grain scale height without density
+    floors or substitution of another population's vertical distribution.
+    """
     initial = np.asarray(initial_density.to("g/cm^3").magnitude, dtype=float)
     initial_sigma = np.asarray(
         initial_surface_density.to("g/cm^2").magnitude,
@@ -927,23 +935,59 @@ def _reconstruct_cylindrical_density(
     if not 0.0 <= weight_floor < seed_min <= 1.0:
         raise ValueError("mask metadata must satisfy 0 <= weight_floor < weight_m0 <= 1")
     coherent = np.clip((weight - weight_floor) / (seed_min - weight_floor), 0.0, 1.0)
+    analytic_profile = None
 
     for radial_index in np.flatnonzero(active_annuli):
         cells = geometry.valid & (geometry.radial_bin == radial_index)
         mass0 = float(initial_mass[radial_index])
         mass1 = float(target_mass[radial_index])
-        if mass0 <= 0.0:
+        if mass1 == 0.0:
+            transported[cells] = 0.0
+            continue
+        if mass0 <= 0.0 and settling_profile is None:
             raise ValueError(f"active cylindrical annulus {radial_index} has no dust mass")
-        if mass1 <= mass0:
+        if mass0 > 0.0 and mass1 <= mass0:
             transported[cells] *= mass1 / mass0
             continue
 
         template_mass = initial[cells] * coherent[cells] * geometry.volume_cm3[cells]
         template_total = float(np.sum(template_mass))
         if template_total <= 0.0:
-            raise ValueError(
-                f"active cylindrical annulus {radial_index} has no coherent reconstruction template"
+            if settling_profile is None:
+                raise ValueError(
+                    f"active cylindrical annulus {radial_index} has no coherent reconstruction template"
+                )
+            if analytic_profile is None:
+                prefactor, exponent = settling_profile()
+                analytic_profile = (
+                    np.asarray(prefactor.to("g/cm^3").magnitude, dtype=float),
+                    np.asarray(exponent, dtype=float),
+                )
+            prefactor, exponent = (values[cells] for values in analytic_profile)
+            supported = (
+                np.isfinite(prefactor) & (prefactor > 0.0)
+                & np.isfinite(exponent) & (weight[cells] > 0.0)
+                & (coherent[cells] > 0.0)
             )
+            if not np.any(supported):
+                raise ValueError(
+                    f"active cylindrical annulus {radial_index} has no coherent reconstruction template"
+                )
+            # Remove the large common exponent before adding smaller amplitude
+            # and mask terms, preserving their ratios even far below exp's range.
+            log_mass = exponent[supported] - np.max(exponent[supported])
+            log_mass += (
+                np.log(prefactor[supported])
+                + np.log(weight[cells][supported])
+                + np.log(coherent[cells][supported])
+                + np.log(geometry.volume_cm3[cells][supported])
+            )
+            log_mass -= np.max(log_mass)
+            template_mass = np.zeros_like(template_mass)
+            template_mass[supported] = np.exp(log_mass)
+            template_total = float(np.sum(template_mass))
+        if mass0 <= 0.0:
+            transported[cells] = 0.0
         transported[cells] += (
             (mass1 - mass0)
             * template_mass
@@ -1205,6 +1249,7 @@ def apply_radial_amax(
 
     bin_results: list[RadialAmaxDustBin] = []
     for position, bin_index in enumerate(global_bin_indices):
+        _, local_bin_index = model.dust._global_bins[f"bin_{bin_index}"]
         initial_column = initial_columns[position]
         final_values = np.asarray(
             initial_column.to("g/cm^2").magnitude,
@@ -1224,6 +1269,11 @@ def apply_radial_amax(
             active_annuli,
             seed_min=seed_min,
             weight_floor=weight_floor,
+            settling_profile=(
+                lambda local_bin_index=local_bin_index: model.dust._settling_density_profile(
+                    component, local_bin_index, model.gas["density"],
+                )
+            ) if component.mode == "settling" else None,
         )
         model.dust.register(
             f"density_bin_{bin_index}",
@@ -1457,6 +1507,7 @@ def apply_radial_dust_transport(
     bin_results: list[RadialDustBinTransport] = []
     for bin_index in global_bin_indices:
         dust_bin = model.dust[f"bin_{bin_index}"]
+        _, local_bin_index = model.dust._global_bins[f"bin_{bin_index}"]
         initial_field = dust_bin["density"]
         initial_density = field_data_as_order(initial_field, target_order).to("g/cm^3")
         initial_columns = _cylindrical_surface_density(
@@ -1525,6 +1576,11 @@ def apply_radial_dust_transport(
             active_annuli,
             seed_min=seed_min,
             weight_floor=weight_floor,
+            settling_profile=(
+                lambda local_bin_index=local_bin_index: model.dust._settling_density_profile(
+                    component, local_bin_index, model.gas["density"],
+                )
+            ) if component.mode == "settling" else None,
         )
         model.dust.register(
             f"density_bin_{bin_index}",

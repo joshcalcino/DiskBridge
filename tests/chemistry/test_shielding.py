@@ -13,6 +13,7 @@ Verifies:
   and include any far-side material before reaching the outer sphere
 - Cartesian and spherical ray columns are independent of Numba thread count
 - fixed physical inputs give identical weights regardless of RT segmentation
+- bundled Visser reference tables load offline with both linewidth families
 """
 
 # db-keywords: shielding, co-shielding, healpix-columns, uv-products, gow17, validation, units, radmc3d, chemistry, model, mesh
@@ -21,6 +22,7 @@ Verifies:
 # db-purpose: Tests for angular UV direction weights and W_rays-based shielding.
 
 from types import SimpleNamespace
+from importlib.resources import files
 
 import numpy as np
 import pytest
@@ -34,6 +36,7 @@ from numba import (
 
 import diskbridge.chemistry.shielding.healpix_utils as healpix_utils_module
 import diskbridge.chemistry.shielding.w_rays_cache as w_rays_cache_module
+import diskbridge.chemistry.shielding.visser_shielding as visser_module
 from diskbridge._units import Quantity
 from diskbridge._constants import U_DRAINE, C_LIGHT, H_PLANCK, K_B
 from diskbridge.model.mesh import Mesh, Axis
@@ -575,6 +578,30 @@ def _star_shielding_test_fields(*, nside):
         w_star=1.0,
     )
     return mesh, shape, target, nH, chi, nH2, nC, W, metadata
+
+
+def test_visser_bundled_tables_load_offline(monkeypatch):
+    """Shipped reference data supply both CO linewidths without bootstrap I/O."""
+    def unavailable(*args, **kwargs):
+        pytest.fail("Bundled Visser tables must not download or populate a directory")
+
+    monkeypatch.setattr(visser_module.urllib.request, "urlopen", unavailable)
+    monkeypatch.setattr(visser_module, "ensure_visser_tables", unavailable)
+    visser = VisserShielding()
+    assert str(visser.data_dir) == str(files("diskbridge") / "data" / "visser")
+    assert visser.filepath.name == "shield.03.5.69-557-36.dat"
+    assert set(visser.available_files()) == {
+        f"shield.{width}.{temperature}.{ratio}-557-36.dat"
+        for width in ("03", "30")
+        for temperature in (5, 20, 50, 100)
+        for ratio in (35, 69)
+    }
+
+    # Exact native grid nodes from the original 5 K, carbon-ratio-69 tables.
+    for width, b_kms, expected in (("03", 0.3, 0.8983), ("30", 3.0, 0.8524)):
+        table = VisserShielding(filename=f"shield.{width}.5.69-557-36.dat")
+        assert table.b_kms == b_kms
+        assert float(table.theta("co", 1.0e10, 1.0e15)) == pytest.approx(expected)
 
 
 def test_visser_parser_transposes_h2_major_theta_blocks(tmp_path):

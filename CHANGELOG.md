@@ -120,6 +120,13 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
+- Radial dust reconstruction conserves positive annular budgets when a grain's
+  sampled settling profile underflows, using the same analytic profile in log
+  space. Zero-target annuli remain empty without density floors.
+- Visser CO shielding reference tables ship with the package and load offline
+  by default, including on compute nodes without network access.
+- Multi-angle FITS images and line cubes declare `Jy/pixel`, matching their
+  flux-density conversion and stored data.
 - GOW17 restart identity includes dust composition, porosity, grain radii,
   bulk density, mass fractions and realized density fields as well as bin
   temperatures. Changed scientific inputs start a fresh solve automatically;

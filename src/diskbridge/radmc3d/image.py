@@ -1051,7 +1051,7 @@ class RadImage:
         object_name: str = '',
         nu0: float = 0.0,
     ) -> None:
-        """Write multi-angle 6D FITS file.
+        """Write multi-angle FITS flux densities in Jy/pixel.
         
         Parameters
         ----------
@@ -1147,7 +1147,7 @@ class RadImage:
             hdu.header[f'PHI_{i}'] = phi
         
         # Additional metadata
-        hdu.header['BUNIT'] = 'W.m-2.pixel-1'  # Match MCFOST
+        hdu.header['BUNIT'] = 'Jy/pixel'
         hdu.header['DISTANCE'] = (distance, 'Distance (pc)')
         if object_name:
             hdu.header['OBJECT'] = object_name

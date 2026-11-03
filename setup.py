@@ -105,6 +105,8 @@ def main() -> None:
                 "params.txt",
                 "data/*",
                 "data/moldata/*.dat",
+                "data/visser/*.dat",
+                "data/visser/README.md",
                 "templates/*",
             ]
         },

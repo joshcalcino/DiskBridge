@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from scipy.special import erfc
 
+from diskbridge import DustOpacity
 from diskbridge._units import Quantity, units
 from diskbridge.model.core import Model, SubModel
 from diskbridge.model.dust import Dust
@@ -587,6 +588,178 @@ def test_radial_amax_sets_total_column_through_connected_soft_tail():
         assert field.attrs["reference_radius_au"] == 25.0
         assert field.attrs["radial_exponent"] == 2.0
         assert field.attrs["transition_width_dex"] == 0.25
+
+
+def _underresolved_settling_model(
+    monkeypatch, *, outer_density, soft_weight, theta_offsets=(-0.04, -0.01, 0.02),
+):
+    """Construct a 16-cell cold disc with unresolved outer dust scale heights."""
+    opacity = DustOpacity(
+        {"pyr-mg70": 0.87, "c-z": 0.13},
+        method="dhs", fmax=0.8, porosity=0.25,
+    )
+    # Material resolution has separate executable-backed coverage. This case
+    # isolates spatial reconstruction at the mixture's resolved bulk density.
+    monkeypatch.setattr(
+        DustOpacity, "resolve_material",
+        lambda self, opacity_dir=None, executable=None: (
+            [], Quantity(2.0775, "g/cm^3"),
+        ),
+    )
+    model = Model()
+    model.mesh = Mesh.spherical(
+        r=Axis(edges=Quantity([10.0, 20.0, 30.0, 40.0, 50.0], "au")),
+        theta=Axis(edges=Quantity(
+            np.pi / 2.0 + np.asarray(theta_offsets), "radian",
+        )),
+        phi=Axis(edges=Quantity([0.0, np.pi, 2.0 * np.pi], "radian")),
+    )
+    model.coord_system = model.mesh.coord_system
+    model.gas = SubModel(model)
+    model.dust = Dust(model)
+    model.variables["mstar"] = Quantity(2.0, "solar_mass")
+    shape, axes = model.mesh.shape, model.mesh.axis_names()
+    density = np.broadcast_to(
+        np.array([1.0e-12, 1.0e-12, outer_density, outer_density])[:, None, None],
+        shape,
+    )
+    for name, values in (
+        ("density", Quantity(density, "g/cm^3")),
+        ("temperature", Quantity(np.full(shape, 10.0), "K")),
+    ):
+        model.gas_register(name, Field(name, values, axes))
+    model.gas_register("disk_weight", Field(
+        "disk_weight",
+        Quantity(np.broadcast_to(np.array([1.0, soft_weight]), shape), "dimensionless"),
+        axes,
+        attrs={
+            "disk_axis_cartesian": (0.0, 0.0, 1.0),
+            "weight_m0": 0.5, "weight_floor": 1.0e-4,
+        },
+    ))
+    model.dust.add_component_from_mask(
+        "disk_weight", mode="settling",
+        amin=Quantity(10.0, "um"), amax=Quantity(1_000.0, "um"),
+        nbin=2, power_index=3.0, dust_to_gas_ratio=0.01,
+        alpha=0.01, mean_molecular_weight=2.35, opacity=opacity,
+    )
+    return model
+
+
+@pytest.mark.parametrize("soft_weight", [0.2, 1.0e-4])
+def test_radial_amax_recovers_underflowed_same_grain_templates(monkeypatch, soft_weight):
+    """Positive annular budgets retain grain settling and coherent mask ratios."""
+    model = _underresolved_settling_model(
+        monkeypatch, outer_density=1.0e-22, soft_weight=soft_weight,
+    )
+    for index in range(2):
+        initial = model.dust[f"bin_{index}"]["density"].data.to("g/cm^3").magnitude
+        assert np.all(initial[2:] == 0.0)
+
+    result = apply_radial_amax(
+        model, reference_amax=Quantity(100.0, "um"),
+        reference_radius=Quantity(25.0, "au"),
+    )
+    radial_edges = model.mesh.edges("r").to("cm").magnitude
+    theta_edges = model.mesh.edges("theta").to("radian").magnitude
+    phi_edges = model.mesh.edges("phi").to("radian").magnitude
+    volume = (
+        np.diff(radial_edges**3)[:, None, None] / 3.0
+        * (np.cos(theta_edges[:-1]) - np.cos(theta_edges[1:]))[None, :, None]
+        * np.diff(phi_edges)[None, None, :]
+    )
+    annular_area = np.pi * np.diff(radial_edges**2)
+    weight_ratio = soft_weight * (soft_weight - 1.0e-4) / (0.5 - 1.0e-4)
+    total = np.zeros(4)
+    for index, bin_result in enumerate(result.bins):
+        density = model.dust[f"bin_{index}"]["density"].data.to("g/cm^3").magnitude
+        # These cell centres lie in their same-index cylindrical annulus.
+        realized = np.sum(density * volume, axis=(1, 2)) / annular_area
+        np.testing.assert_allclose(
+            realized, bin_result.final_surface_density.to("g/cm^2").magnitude,
+            rtol=2.0e-14, atol=0.0,
+        )
+        total += realized
+        assert np.all(density[2:, 1, 0] > 0.0)
+        # The farther vertical cell remains excluded by the same narrow Gaussian;
+        # a gas-shaped replacement would instead put positive mass there.
+        assert np.all(density[2:, 0] == 0.0)
+        np.testing.assert_allclose(
+            density[2:, 1, 1] / density[2:, 1, 0], weight_ratio,
+            rtol=2.0e-14, atol=0.0,
+        )
+        assert np.all(np.isfinite(density)) and np.all(density >= 0.0)
+    np.testing.assert_allclose(
+        total, 0.01 * result.disc_gas_surface_density.to("g/cm^2").magnitude,
+        rtol=2.0e-14, atol=0.0,
+    )
+
+
+def test_radial_amax_leaves_empty_zero_target_annuli_empty(monkeypatch):
+    """A vacuum annulus needs no normalization or manufactured dust support."""
+    model = _underresolved_settling_model(
+        monkeypatch, outer_density=0.0, soft_weight=0.2,
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = apply_radial_amax(
+            model, reference_amax=Quantity(100.0, "um"),
+            reference_radius=Quantity(25.0, "au"),
+        )
+    for index, bin_result in enumerate(result.bins):
+        assert np.all(bin_result.final_surface_density.magnitude[2:] == 0.0)
+        assert np.all(model.dust[f"bin_{index}"]["density"].data.magnitude[2:] == 0.0)
+
+
+def test_radial_amax_underflow_reconstruction_uses_each_grains_scale_height(monkeypatch):
+    """Two vanished bins retain distinct analytic Gaussian vertical ratios."""
+    model = _underresolved_settling_model(
+        monkeypatch, outer_density=2.0e-18, soft_weight=0.2,
+        theta_offsets=(-0.02, 1.0e-5, 0.02),
+    )
+    for index in range(2):
+        assert np.all(model.dust[f"bin_{index}"]["density"].data.magnitude[2:] == 0.0)
+    apply_radial_amax(
+        model, reference_amax=Quantity(100.0, "um"),
+        reference_radius=Quantity(25.0, "au"),
+    )
+    radius = model.mesh.centers("r").to("cm")
+    omega = (units("G") * model.variables["mstar"] / radius**3)**0.5
+    sound_speed = (units("k_B") * Quantity(10.0, "K") / (2.35 * units("m_H")))**0.5
+    gas_height = sound_speed / omega
+    theta = model.mesh.centers("theta").to("radian").magnitude
+    height_squared_difference = radius**2 * (np.cos(theta[1])**2 - np.cos(theta[0])**2)
+    expected_ratios = []
+    for index in range(2):
+        grain = model.dust[f"bin_{index}"]
+        stokes = (
+            grain.density_material * grain.size * omega
+            / (model.gas["density"].data[:, 0, 0] * sound_speed)
+        ).to("dimensionless").magnitude
+        dust_height = gas_height * np.sqrt(0.01 / (stokes + 0.01))
+        expected = np.exp(
+            (-height_squared_difference / (2.0 * dust_height**2)).to("dimensionless").magnitude,
+        )
+        density = grain["density"].data.magnitude
+        np.testing.assert_allclose(
+            density[2:, 1, 0] / density[2:, 0, 0], expected[2:],
+            rtol=2.0e-10, atol=0.0,
+        )
+        expected_ratios.append(expected[2:])
+    assert not np.allclose(expected_ratios[0], expected_ratios[1], rtol=0.1, atol=0.0)
+
+
+def test_radial_amax_rejects_truly_absent_coherent_template(monkeypatch):
+    """Positive dust targets cannot populate a component supported only at its floor."""
+    model = _underresolved_settling_model(
+        monkeypatch, outer_density=1.0e-22, soft_weight=1.0e-4,
+    )
+    mask = model.dust._components[0].mask
+    mask.data.magnitude[...] = 1.0e-4
+    with pytest.raises(ValueError, match="no coherent reconstruction template"):
+        apply_radial_amax(
+            model, reference_amax=Quantity(100.0, "um"),
+            reference_radius=Quantity(25.0, "au"),
+        )
 
 
 def test_diffusion_remains_positive_across_sharp_gas_edge():

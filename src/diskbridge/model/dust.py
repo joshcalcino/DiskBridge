@@ -1078,25 +1078,64 @@ class Dust(SubModel):
     
     
     def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute dust density using an analytic settling profile in spherical coordinates.
+        """Compute the unnormalized analytic settling density on spherical cells.
 
-        This routine builds a simple settling-diffusion equilibrium scaling using midplane
-        gas properties to compute H_g and H_d, and applies a Gaussian profile
-        exp(-z^2 / (2 H_d^2)).
+        Parameters
+        ----------
+        component : DustComponent
+            Grain distribution, settling parameters and optional spatial mask.
+        local_bin_idx : int
+            Grain index within the component.
+        gas_density : Field
+            Native spherical gas density.
 
-        Note:
-            This routine does not renormalize columns to enforce exact mass conservation.
+        Returns
+        -------
+        Field
+            Masked Gaussian settling density without column renormalization.
+        """
+        prefactor, expo = self._settling_density_profile(component, local_bin_idx, gas_density)
+        vertical_profile = np.exp(expo)
+        dust_density_data = prefactor * vertical_profile
 
-        If component.mask is set, the resulting density is multiplied by the mask field.
-        The mask may be boolean or float weights; values are clipped to [0, 1].
+        if component.mask is not None:
+            w = np.asarray(component.mask.data.to("dimensionless").magnitude, dtype=float)
+            w = np.clip(w, 0.0, 1.0)
+            dust_density_data = dust_density_data * w
 
-        Args:
-            component: DustComponent instance.
-            local_bin_idx: Dust bin index within component.
-            gas_density: Gas density field in spherical coordinates.
+        dust_density_data = np.where(np.isfinite(dust_density_data), dust_density_data, 0.0)
+        dust_density_data = np.where(dust_density_data >= 0.0, dust_density_data, 0.0)
+        return Field(
+            data=dust_density_data,
+            quantity=gas_density.quantity,
+            axis_order=gas_density.axis_order,
+        )
 
-        Returns:
-            Dust density field with vertical settling profile.
+    def _settling_density_profile(
+        self, component: DustComponent, local_bin_idx: int, gas_density: Field,
+    ) -> tuple[Quantity, np.ndarray]:
+        """Return one grain's unmasked density prefactor and Gaussian exponent.
+
+        Keeping these factors separate permits annular normalization in log
+        space when the sampled exponential underflows. Ordinary density
+        evaluation retains the same multiplication and Gaussian profile.
+        No column renormalization or density floor is applied here.
+
+        Parameters
+        ----------
+        component : DustComponent
+            Grain distribution and settling parameters.
+        local_bin_idx : int
+            Grain index within the component.
+        gas_density : Field
+            Native spherical gas density supplying midplane properties.
+
+        Returns
+        -------
+        prefactor : Quantity
+            Unmasked density multiplying the Gaussian, on native cells.
+        exponent : ndarray
+            Dimensionless ``-z**2 / (2 H_d**2)`` for this grain.
         """
         mesh = self.parent.mesh
         grain_size = component.distribution.bin_centers[local_bin_idx]
@@ -1176,9 +1215,8 @@ class Dust(SubModel):
         n_phi = len(phi)
         H_d = np.broadcast_to(H_d0[:, None, :], (H_d0.shape[0], n_theta, n_phi))
         
-        # Compute vertical profile: exp(-z^2 / (2 * H_d^2))
+        # Keep the exponent available before conversion to a sampled density.
         expo = (-(z_cyl**2) / (2 * H_d**2)).to("dimensionless").magnitude
-        vertical_profile = np.exp(expo)
         
         # Compute dust density directly from analytic settling profile, without
         # additional column renormalization. This makes the dust density a
@@ -1187,32 +1225,7 @@ class Dust(SubModel):
 
         dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
         prefactor = dust_to_gas_local * (H_g0[:, None, :] / H_d)
-        dust_density_data = rho_g0[:, None, :] * prefactor * vertical_profile
-
-        # Apply mask if set
-        if component.mask is not None:
-            w = np.asarray(component.mask.data.to("dimensionless").magnitude, dtype=float)
-            w = np.clip(w, 0.0, 1.0)
-            dust_density_data = dust_density_data * w
-
-        # Ensure numerical stability
-        dust_density_data = np.where(np.isfinite(dust_density_data), dust_density_data, 0.0)
-        dust_density_data = np.where(dust_density_data >= 0.0, dust_density_data, 0.0)
-        
-        axis_order = gas_density.axis_order
-        
-        dust_field = Field(
-            data=dust_density_data,
-            quantity=gas_density.quantity,
-            axis_order=axis_order,
-        )
-        
-        logger.debug(
-            f"Dust settling (direct spherical) completed for component {component.component_index} "
-            f"bin {local_bin_idx}"
-        )
-        
-        return dust_field
+        return rho_g0[:, None, :] * prefactor, expo
         
     def _get_total_dust_density(self) -> Field:
         """Get total dust density summed over all size bins.

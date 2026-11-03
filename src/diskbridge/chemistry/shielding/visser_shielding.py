@@ -1,8 +1,8 @@
 """
-Visser+2009 CO shielding functions with auto-download.
+Visser+2009 CO shielding functions with bundled reference tables.
 
-- Downloads Leiden CO shielding archive if not present.
-- Extracts shield.A.B.C-D-E.dat files.
+- Loads the bundled Leiden CO shielding tables without network access.
+- Can populate an explicitly supplied custom data directory from the archive.
 - Parses a selected file into shielding grids for isotopologues.
 - Provides interpolated theta(Nco, Nh2, b) factors.
 
@@ -19,7 +19,7 @@ References:
 # db-keywords: shielding, co-shielding, chemistry, mesh, coordinates, io, interpolation, files
 # db-role: helper
 # db-scope: package
-# db-purpose: Visser+2009 CO shielding functions with auto-download.
+# db-purpose: Visser+2009 CO shielding functions with bundled reference tables.
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -35,8 +35,7 @@ from numba import njit, prange
 from scipy.interpolate import RegularGridInterpolator
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-REPO_ROOT = PACKAGE_ROOT.parent.parent
-DEFAULT_VISSER_DATA_DIR = REPO_ROOT / "data" / "visser"
+DEFAULT_VISSER_DATA_DIR = PACKAGE_ROOT / "data" / "visser"
 
 
 # Leiden archive URL (public)
@@ -231,9 +230,21 @@ class ShieldingGrid2D:
 class VisserShielding:
     """Loader and interpolator for the Visser CO shielding tables.
 
-    Downloads and parses the Leiden CO shielding archive and evaluates the
-    interpolated shielding factor for an isotopologue as a function of the CO
-    and H2 column densities at a given Doppler parameter.
+    Loads the bundled Leiden reference tables without network access and
+    evaluates the shielding factor for an isotopologue as a function of CO
+    and H2 column densities and Doppler parameter.
+
+    Parameters
+    ----------
+    data_dir : str or pathlib.Path, optional
+        Custom table directory. The default is the read-only bundled dataset.
+    filename : str, optional
+        Specific table filename; otherwise select the nearest Doppler parameter.
+    b_kms : float, optional
+        Requested CO Doppler parameter in km/s, by default 0.3.
+    auto_download : bool, optional
+        Populate an explicit custom directory from the Leiden archive when
+        tables are absent, by default True. Bundled tables never download.
 
     Examples
     --------
@@ -256,9 +267,8 @@ class VisserShielding:
             self.data_dir = DEFAULT_VISSER_DATA_DIR
         else:
             self.data_dir = Path(data_dir)
-
-        if auto_download:
-            ensure_visser_tables(self.data_dir)
+            if auto_download:
+                ensure_visser_tables(self.data_dir)
 
         if filename is None:
             filename = self._select_nearest_b_file(b_kms)
