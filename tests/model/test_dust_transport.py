@@ -7,7 +7,8 @@
 
 import numpy as np
 import pytest
-from scipy.special import erfc
+from scipy.integrate import quad
+from scipy.special import erfc, ndtr
 
 from diskbridge import DustOpacity
 from diskbridge._units import Quantity, units
@@ -333,35 +334,25 @@ def test_apply_radial_transport_registers_cylindrical_settled_density():
     model.dust.add_component_from_mask(
         "disk_weight",
         mode="settling",
-        amin=Quantity(90.0, "um"),
-        amax=Quantity(110.0, "um"),
-        nbin=1,
+        amin=Quantity(10.0, "um"),
+        amax=Quantity(1_000.0, "um"),
+        nbin=2,
         dust_to_gas_ratio=0.01,
         alpha=0.01,
         delta=0.01,
         mean_molecular_weight=2.35,
     )
-    initial = model.dust["bin_0"]["density"].data.to("g/cm^3").magnitude.copy()
+    initial = np.array([
+        model.dust[f"bin_{index}"]["density"].data.to("g/cm^3").magnitude.copy()
+        for index in range(2)
+    ])
 
     result = apply_radial_dust_transport(
         model,
         Quantity(50_000.0, "yr"),
         smoothing_bins=1,
     )
-    transported_field = model.dust["bin_0"]["density"]
-    transported = transported_field.data.to("g/cm^3").magnitude
-
-    assert len(result.bins) == 1
-    assert transported_field.attrs["radial_transport"] is True
-    assert transported_field.attrs["transport_time_yr"] == 50_000.0
-    assert transported_field.attrs["transport_coordinate"] == "disc_cylindrical_radius"
-    assert (
-        result.bins[0].final_mean_radius.to("au").magnitude
-        < result.bins[0].initial_mean_radius.to("au").magnitude
-    )
-    assert np.all(np.isfinite(transported))
-    assert np.all(transported >= 0.0)
-    assert np.max(np.abs(transported - initial)) > 1.0e-6 * np.max(initial)
+    assert len(result.bins) == 2
 
     radial_edges = model.mesh.edges("r").to("cm").magnitude
     radius_grid, theta_grid, phi_grid = np.meshgrid(
@@ -384,23 +375,33 @@ def test_apply_radial_transport_registers_cylindrical_settled_density():
     dphi = np.diff(model.mesh.edges("phi").to("radian").magnitude)
     volume = dr3[:, None, None] * dcos[None, :, None] * dphi[None, None, :]
     valid = (radial_bin >= 0) & (radial_bin < radial_edges.size - 1)
-    mass = np.bincount(
-        radial_bin[valid],
-        weights=transported[valid] * volume[valid],
-        minlength=radial_edges.size - 1,
-    )
-    realized = mass / (np.pi * np.diff(radial_edges**2))
-    assert np.allclose(
-        realized,
-        result.bins[0].final_surface_density.to("g/cm^2").magnitude,
-    )
-    diagnostics = result.bins[0].diagnostics
-    accounted = (
-        diagnostics.final_mass
-        + diagnostics.inner_mass_lost
-        + diagnostics.outer_mass_lost
-    ).to("g").magnitude
-    assert np.isclose(accounted, diagnostics.initial_mass.to("g").magnitude)
+    for index, bin_result in enumerate(result.bins):
+        transported_field = model.dust[f"bin_{index}"]["density"]
+        transported = transported_field.data.to("g/cm^3").magnitude
+        assert transported_field.attrs["radial_transport"] is True
+        assert transported_field.attrs["transport_time_yr"] == 50_000.0
+        assert transported_field.attrs["transport_coordinate"] == "disc_cylindrical_radius"
+        assert bin_result.final_mean_radius < bin_result.initial_mean_radius
+        assert np.all(np.isfinite(transported))
+        assert np.all(transported >= 0.0)
+        assert np.max(np.abs(transported - initial[index])) > 1.0e-6 * np.max(initial[index])
+        mass = np.bincount(
+            radial_bin[valid],
+            weights=transported[valid] * volume[valid],
+            minlength=radial_edges.size - 1,
+        )
+        realized = mass / (np.pi * np.diff(radial_edges**2))
+        np.testing.assert_allclose(
+            realized, bin_result.final_surface_density.to("g/cm^2").magnitude,
+            rtol=2.0e-14, atol=0.0,
+        )
+        diagnostics = bin_result.diagnostics
+        accounted = (
+            diagnostics.final_mass
+            + diagnostics.inner_mass_lost
+            + diagnostics.outer_mass_lost
+        ).to("g").magnitude
+        assert np.isclose(accounted, diagnostics.initial_mass.to("g").magnitude)
 
 
 def test_transport_does_not_amplify_unsupported_soft_weight_blob():
@@ -591,21 +592,11 @@ def test_radial_amax_sets_total_column_through_connected_soft_tail():
 
 
 def _underresolved_settling_model(
-    monkeypatch, *, outer_density, soft_weight, theta_offsets=(-0.04, -0.01, 0.02),
+    *, outer_density, soft_weight, theta_offsets=(-0.04, -0.01, 0.02),
+    theta_weight=None,
 ):
-    """Construct a 16-cell cold disc with unresolved outer dust scale heights."""
-    opacity = DustOpacity(
-        {"pyr-mg70": 0.87, "c-z": 0.13},
-        method="dhs", fmax=0.8, porosity=0.25,
-    )
-    # Material resolution has separate executable-backed coverage. This case
-    # isolates spatial reconstruction at the mixture's resolved bulk density.
-    monkeypatch.setattr(
-        DustOpacity, "resolve_material",
-        lambda self, opacity_dir=None, executable=None: (
-            [], Quantity(2.0775, "g/cm^3"),
-        ),
-    )
+    """Construct a tiny cold disc with unresolved outer dust scale heights."""
+    opacity = DustOpacity("mix_2species_60silicates_40carbons")
     model = Model()
     model.mesh = Mesh.spherical(
         r=Axis(edges=Quantity([10.0, 20.0, 30.0, 40.0, 50.0], "au")),
@@ -628,9 +619,12 @@ def _underresolved_settling_model(
         ("temperature", Quantity(np.full(shape, 10.0), "K")),
     ):
         model.gas_register(name, Field(name, values, axes))
+    weight = np.broadcast_to(np.array([1.0, soft_weight]), shape).copy()
+    if theta_weight is not None:
+        weight *= np.asarray(theta_weight)[None, :, None]
     model.gas_register("disk_weight", Field(
         "disk_weight",
-        Quantity(np.broadcast_to(np.array([1.0, soft_weight]), shape), "dimensionless"),
+        Quantity(weight, "dimensionless"),
         axes,
         attrs={
             "disk_axis_cartesian": (0.0, 0.0, 1.0),
@@ -647,10 +641,11 @@ def _underresolved_settling_model(
 
 
 @pytest.mark.parametrize("soft_weight", [0.2, 1.0e-4])
-def test_radial_amax_recovers_underflowed_same_grain_templates(monkeypatch, soft_weight):
-    """Positive annular budgets retain grain settling and coherent mask ratios."""
+def test_radial_amax_normalizes_underflowed_integrated_tails(soft_weight):
+    """Positive targets normalize integrated tails even beyond float density range."""
     model = _underresolved_settling_model(
-        monkeypatch, outer_density=1.0e-22, soft_weight=soft_weight,
+        outer_density=1.0e-22, soft_weight=soft_weight,
+        theta_offsets=(0.01, 0.02, 0.04),
     )
     for index in range(2):
         initial = model.dust[f"bin_{index}"]["density"].data.to("g/cm^3").magnitude
@@ -680,12 +675,12 @@ def test_radial_amax_recovers_underflowed_same_grain_templates(monkeypatch, soft
             rtol=2.0e-14, atol=0.0,
         )
         total += realized
-        assert np.all(density[2:, 1, 0] > 0.0)
-        # The farther vertical cell remains excluded by the same narrow Gaussian;
-        # a gas-shaped replacement would instead put positive mass there.
-        assert np.all(density[2:, 0] == 0.0)
+        assert np.all(density[2:, 0, 0] > 0.0)
+        # Both cells lie above the layer; its nearest cell boundary dominates
+        # the integrated tail instead of an unrelated population supplying mass.
+        assert np.all(density[2:, 1] == 0.0)
         np.testing.assert_allclose(
-            density[2:, 1, 1] / density[2:, 1, 0], weight_ratio,
+            density[2:, 0, 1] / density[2:, 0, 0], weight_ratio,
             rtol=2.0e-14, atol=0.0,
         )
         assert np.all(np.isfinite(density)) and np.all(density >= 0.0)
@@ -695,10 +690,10 @@ def test_radial_amax_recovers_underflowed_same_grain_templates(monkeypatch, soft
     )
 
 
-def test_radial_amax_leaves_empty_zero_target_annuli_empty(monkeypatch):
+def test_radial_amax_leaves_empty_zero_target_annuli_empty():
     """A vacuum annulus needs no normalization or manufactured dust support."""
     model = _underresolved_settling_model(
-        monkeypatch, outer_density=0.0, soft_weight=0.2,
+        outer_density=0.0, soft_weight=0.2,
     )
     with np.errstate(divide="ignore", invalid="ignore"):
         result = apply_radial_amax(
@@ -710,14 +705,43 @@ def test_radial_amax_leaves_empty_zero_target_annuli_empty(monkeypatch):
         assert np.all(model.dust[f"bin_{index}"]["density"].data.magnitude[2:] == 0.0)
 
 
-def test_radial_amax_underflow_reconstruction_uses_each_grains_scale_height(monkeypatch):
-    """Two vanished bins retain distinct analytic Gaussian vertical ratios."""
+def test_radial_amax_assigns_equal_mass_to_symmetric_underflowed_cell_tails():
+    """Equal inner boundaries retain equal tail mass despite unequal cell centres."""
     model = _underresolved_settling_model(
-        monkeypatch, outer_density=2.0e-18, soft_weight=0.2,
-        theta_offsets=(-0.02, 1.0e-5, 0.02),
+        outer_density=2.0e-18, soft_weight=1.0,
+        theta_offsets=(-0.03, -0.01, 0.01, 0.04), theta_weight=(1.0, 0.0, 1.0),
     )
     for index in range(2):
         assert np.all(model.dust[f"bin_{index}"]["density"].data.magnitude[2:] == 0.0)
+    result = apply_radial_amax(
+        model, reference_amax=Quantity(100.0, "um"),
+        reference_radius=Quantity(25.0, "au"),
+    )
+    radius = model.mesh.edges("r").to("cm").magnitude
+    theta = model.mesh.edges("theta").magnitude
+    volume = (
+        np.diff(radius**3)[:, None, None] / 3.0
+        * (np.cos(theta[:-1]) - np.cos(theta[1:]))[None, :, None]
+        * np.diff(model.mesh.edges("phi").magnitude)[None, None, :]
+    )
+    for index, bin_result in enumerate(result.bins):
+        density = model.dust[f"bin_{index}"]["density"].data.to("g/cm^3").magnitude
+        cell_mass = density * volume
+        assert np.all(density[:, 1, :] == 0.0)
+        np.testing.assert_allclose(cell_mass[2:, 0, :], cell_mass[2:, 2, :], rtol=2.0e-10, atol=0.0)
+        np.testing.assert_allclose(
+            np.sum(cell_mass, axis=(1, 2)) / (np.pi * np.diff(radius**2)),
+            bin_result.final_surface_density.to("g/cm^2").magnitude,
+            rtol=2.0e-14, atol=0.0,
+        )
+
+
+def test_radial_amax_retains_each_grains_integrated_vertical_profile():
+    """Each annular normalization preserves the grain's own cell-integral ratios."""
+    model = _underresolved_settling_model(
+        outer_density=2.0e-18, soft_weight=1.0,
+        theta_offsets=(-0.02, 1.0e-5, 0.02),
+    )
     apply_radial_amax(
         model, reference_amax=Quantity(100.0, "um"),
         reference_radius=Quantity(25.0, "au"),
@@ -726,8 +750,8 @@ def test_radial_amax_underflow_reconstruction_uses_each_grains_scale_height(monk
     omega = (units("G") * model.variables["mstar"] / radius**3)**0.5
     sound_speed = (units("k_B") * Quantity(10.0, "K") / (2.35 * units("m_H")))**0.5
     gas_height = sound_speed / omega
-    theta = model.mesh.centers("theta").to("radian").magnitude
-    height_squared_difference = radius**2 * (np.cos(theta[1])**2 - np.cos(theta[0])**2)
+    theta_edges = model.mesh.edges("theta").to("radian").magnitude
+    radial_edges = model.mesh.edges("r").to("au").magnitude
     expected_ratios = []
     for index in range(2):
         grain = model.dust[f"bin_{index}"]
@@ -736,22 +760,35 @@ def test_radial_amax_underflow_reconstruction_uses_each_grains_scale_height(monk
             / (model.gas["density"].data[:, 0, 0] * sound_speed)
         ).to("dimensionless").magnitude
         dust_height = gas_height * np.sqrt(0.01 / (stokes + 0.01))
-        expected = np.exp(
-            (-height_squared_difference / (2.0 * dust_height**2)).to("dimensionless").magnitude,
-        )
+        height_au = dust_height.to("au").magnitude
+        expected = np.empty(4)
+        for radial_index in range(4):
+            cell_weights = []
+            for theta_index in range(2):
+                mu_lower = np.cos(theta_edges[theta_index + 1])
+                mu_upper = np.cos(theta_edges[theta_index])
+                height = height_au[radial_index]
+                integral = quad(
+                    lambda r: r * (
+                        ndtr(r * mu_upper / height) - ndtr(r * mu_lower / height)
+                    ), radial_edges[radial_index], radial_edges[radial_index + 1],
+                    epsabs=1.0e-12, epsrel=1.0e-12,
+                )[0]
+                cell_weights.append(integral / (mu_upper - mu_lower))
+            expected[radial_index] = cell_weights[1] / cell_weights[0]
         density = grain["density"].data.magnitude
         np.testing.assert_allclose(
             density[2:, 1, 0] / density[2:, 0, 0], expected[2:],
-            rtol=2.0e-10, atol=0.0,
+            rtol=2.0e-9, atol=0.0,
         )
         expected_ratios.append(expected[2:])
     assert not np.allclose(expected_ratios[0], expected_ratios[1], rtol=0.1, atol=0.0)
 
 
-def test_radial_amax_rejects_truly_absent_coherent_template(monkeypatch):
+def test_radial_amax_rejects_truly_absent_coherent_template():
     """Positive dust targets cannot populate a component supported only at its floor."""
     model = _underresolved_settling_model(
-        monkeypatch, outer_density=1.0e-22, soft_weight=1.0e-4,
+        outer_density=1.0e-22, soft_weight=1.0e-4,
     )
     mask = model.dust._components[0].mask
     mask.data.magnitude[...] = 1.0e-4

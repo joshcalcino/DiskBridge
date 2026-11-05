@@ -4,7 +4,7 @@ This module provides dust grain distribution modeling with power-law size distri
 memory-efficient storage for gas-proportional dust, and integration with radmc3d.
 """
 
-# db-keywords: gas-temperature, config, units, radmc3d, model, field, coordinates
+# db-keywords: dust, gas-temperature, config, units, radmc3d, model, field, coordinates, mesh
 # db-role: helper
 # db-scope: package
 # db-purpose: Dust grain submodel for DiskBridge.
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Optional, Callable, List, Literal, Union
 import numpy as np
+from scipy.special import erfcx
 
 from diskbridge._units import Quantity, units
 from diskbridge._logging import logger
@@ -38,6 +39,283 @@ AMU_G = 1.66053906660e-24
 PAH_MASS_G_DEFAULT = (
     PAH_N_C_DEFAULT * 12.011 + PAH_N_H_DEFAULT * 1.008
 ) * AMU_G
+
+
+_EPS = np.finfo(np.float64).eps
+_LOG_TWO = np.log(2.0)
+_SQRT_PI = np.sqrt(np.pi)
+_GAUSS_NODES, _GAUSS_WEIGHTS = np.polynomial.legendre.leggauss(8)
+_GAUSS_NODES = (_GAUSS_NODES + 1.0) / 2.0
+_GAUSS_WEIGHTS = _GAUSS_WEIGHTS / 2.0
+_WIDE_GAUSS_NODES, _WIDE_GAUSS_WEIGHTS = np.polynomial.legendre.leggauss(16)
+_WIDE_GAUSS_NODES = (_WIDE_GAUSS_NODES + 1.0) / 2.0
+_WIDE_GAUSS_WEIGHTS = _WIDE_GAUSS_WEIGHTS / 2.0
+
+
+def _local_wedge_log_average(
+    q: float, xa: np.ndarray, dx: np.ndarray, *, wider: bool = False,
+) -> np.ndarray:
+    """Integrate a smooth, small-exponent-spread wedge without cap differences."""
+    base = q * xa
+    integral = np.zeros_like(xa)
+    nodes, weights = (
+        (_WIDE_GAUSS_NODES, _WIDE_GAUSS_WEIGHTS)
+        if wider else (_GAUSS_NODES, _GAUSS_WEIGHTS)
+    )
+    for radial_node, radial_weight in zip(nodes, weights):
+        radial_offset = (1.0 - q) * radial_node
+        radial = q + radial_offset
+        for polar_node, polar_weight in zip(nodes, weights):
+            polar_offset = dx * polar_node
+            x = xa + polar_offset
+            difference = radial_offset * x + q * polar_offset
+            exponent = difference * (2.0 * base + difference)
+            integral += radial_weight * polar_weight * radial * radial * np.exp(-exponent)
+    return -(base * base) + np.log(integral / ((1.0 + q + q * q) / 3.0))
+
+
+def _local_cap_correction(q: float, x: np.ndarray) -> np.ndarray:
+    """Integrate a radially thin cap before its two boundary values cancel."""
+    integral = np.zeros_like(x)
+    for node, weight in zip(_GAUSS_NODES, _GAUSS_WEIGHTS):
+        offset = (1.0 - q) * node
+        radial = q + offset
+        exponent = x * x * offset * (2.0 * q + offset)
+        integral += weight * radial * erfcx(x * radial) * np.exp(-exponent)
+    return np.log(integral / ((1.0 + q) / 2.0))
+
+
+def _one_minus_power(q: float, power: int) -> float:
+    if q == 0.0:
+        return 1.0
+    return -np.expm1(power * np.log(q))
+
+
+def _log_j_scaled(x: np.ndarray) -> np.ndarray:
+    """Return log(exp(x**2) j(x)) for the Gaussian cap primitive.
+
+    j(x) = (1/4 - x**2/2) erfc(x) + x exp(-x**2)/(2 sqrt(pi)).
+    A scaled asymptotic series avoids subtraction of large terms in the tail.
+    """
+    x = np.asarray(x, dtype=float)
+    out = np.empty_like(x)
+    ordinary = x < 12.0
+    xo = x[ordinary]
+    scaled = (0.25 - 0.5 * xo * xo) * erfcx(xo) + xo / (2.0 * _SQRT_PI)
+    out[ordinary] = np.log(scaled)
+    xt = x[~ordinary]
+    if xt.size:
+        inv_square = (1.0 / xt) ** 2
+        term = np.ones_like(xt)
+        total = term.copy()
+        for k in range(1, 64):
+            term *= -(k + 1.0) * (2.0 * k - 1.0) / (2.0 * k) * inv_square
+            total += term
+            if np.all(np.abs(term) <= _EPS * np.abs(total)):
+                break
+        out[~ordinary] = -np.log(2.0 * _SQRT_PI) - np.log(xt) + np.log(total)
+    return out
+
+
+def _small_cap_log_ratio(x: np.ndarray, q: float) -> np.ndarray:
+    """Return log(T(mu)/T(0)) using its convergent erfc series."""
+    dq2 = _one_minus_power(q, 2)
+    power = x.copy()
+    correction = np.zeros_like(x)
+    for n in range(32):
+        term = (
+            4.0 / _SQRT_PI * power
+            * _one_minus_power(q, 2 * n + 3)
+            / (dq2 * (2 * n + 1) * (2 * n + 3))
+        )
+        correction += term
+        if np.all((term == 0.0) | (np.abs(term) <= _EPS * np.abs(correction))):
+            break
+        power *= -(x * x) / (n + 1.0)
+    return np.log1p(-correction)
+
+
+def _cap_parts(x: np.ndarray, log_x: np.ndarray, q: float) -> tuple[np.ndarray, np.ndarray]:
+    """Represent log(T(mu)/T(0)) as -(q*x)**2 + a small correction."""
+    base = np.zeros_like(x)
+    correction = np.zeros_like(x)
+    small = x < 0.5
+    xs = x[small]
+    base[small] = -(q * xs) ** 2
+    correction[small] = _small_cap_log_ratio(xs, q) - base[small]
+    large = ~small
+    xl = x[large]
+    if xl.size:
+        xlo = q * xl if q != 0.0 else np.zeros_like(xl)
+        log_scaled_lo = _log_j_scaled(xlo)
+        log_scaled_hi = _log_j_scaled(xl)
+        dq2 = _one_minus_power(q, 2)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            delta = -(xl * xl) * dq2 + log_scaled_hi - log_scaled_lo
+            log_difference = np.log(-np.expm1(delta))
+            base[large] = -(xlo * xlo)
+            correction[large] = (
+                log_scaled_lo + log_difference - 2.0 * log_x[large]
+                - np.log(dq2 / 2.0)
+            )
+    local = large & (1.0 - q < 1.0e-3) & (x * x * _one_minus_power(q, 2) <= 1.0)
+    if np.any(local):
+        base[local] = -(q * x[local]) ** 2
+        correction[local] = _local_cap_correction(q, x[local])
+    return base, correction
+
+
+def _central_log_average(xhi: np.ndarray, mu_ratio: np.ndarray, q: float) -> np.ndarray:
+    """Convergent exp moment series, avoiding subtraction of central caps."""
+    angular_gap = 1.0 - mu_ratio
+    with np.errstate(divide="ignore"):
+        log_ratio = np.log(mu_ratio)
+    power = np.ones_like(xhi)
+    total = np.ones_like(xhi)
+    dq3 = _one_minus_power(q, 3)
+    for n in range(1, 32):
+        power *= -(xhi * xhi) / n
+        radial_moment = 3.0 * _one_minus_power(q, 2 * n + 3) / ((2 * n + 3) * dq3)
+        angular_moment = -np.expm1((2 * n + 1) * log_ratio) / (
+            (2 * n + 1) * angular_gap
+        )
+        term = power * radial_moment * angular_moment
+        total += term
+        if np.all(np.abs(term) <= _EPS * np.abs(total)):
+            break
+    return np.log(total)
+
+
+def _positive_wedge_log_integral(
+    q: float, log_h: np.ndarray, mu_lo: np.ndarray, mu_hi: np.ndarray,
+) -> np.ndarray:
+    """Integrate a positive-z wedge in units of r_hi**3 per unit azimuth.
+
+    With mu = cos(theta), q = r_lo/r_hi and h = H/r_hi, subtract
+    Gaussian caps T(mu) = integral_q^1 s**2 integral_mu^infinity
+    exp[-s**2 u**2/(2 h**2)] du ds. Caps use the exact radial primitive
+    j; convergent series or bounded Gauss integrals regularize cancellation.
+    """
+    log_h, mu_lo, mu_hi = np.broadcast_arrays(log_h, mu_lo, mu_hi)
+    shape = log_h.shape
+    log_h = log_h.ravel()
+    mu_lo = mu_lo.ravel()
+    mu_hi = mu_hi.ravel()
+    out = np.full(log_h.size, -np.inf)
+    valid = (mu_hi > mu_lo) & (mu_lo >= 0.0)
+    if not np.any(valid):
+        return out.reshape(shape)
+    h = log_h[valid]
+    a, b = mu_lo[valid], mu_hi[valid]
+    with np.errstate(divide="ignore", over="ignore", under="ignore"):
+        log_xa = np.log(a) - 0.5 * _LOG_TWO - h
+        log_xb = np.log(b) - 0.5 * _LOG_TWO - h
+        xa, xb = np.exp(log_xa), np.exp(log_xb)
+    values = np.full(h.size, -np.inf)
+    central = xb < 0.5
+    log_volume = np.log(_one_minus_power(q, 3) / 3.0) + np.log(b - a)
+    if np.any(central):
+        values[central] = log_volume[central] + _central_log_average(
+            xb[central], a[central] / b[central], q,
+        )
+    # Two successive cap subtractions lose digits for a thin wedge. Integrate
+    # the bounded, factored integrand directly with 8 or 16 Gauss nodes when
+    # its exponent spread is small enough for that quadrature.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        dx = np.exp(np.log(b - a) - 0.5 * _LOG_TWO - h)
+        product_difference = (1.0 - q) * xb + q * dx
+        spread = product_difference * (xb + q * xa)
+    local = (~central) & (spread <= 16.0) & ((1.0 - q) * (b - a) / b < 1.0e-4)
+    if np.any(local):
+        values[local] = log_volume[local] + _local_wedge_log_average(
+            q, xa[local], dx[local], wider=bool(np.any(spread[local] > 1.0)),
+        )
+    # Infinite xa means the log tail itself lies beyond float64's range.
+    remaining = ~central & ~local & np.isfinite(xa)
+    if np.any(remaining):
+        aa, bb = xa[remaining], xb[remaining]
+        base_a, corr_a = _cap_parts(aa, log_xa[remaining], q)
+        base_b, corr_b = _cap_parts(bb, log_xb[remaining], q)
+        if q == 0.0:
+            base_delta = np.zeros_like(aa)
+        else:
+            # Form the exponent difference before subtracting large logs.
+            with np.errstate(over="ignore", invalid="ignore"):
+                delta_x = np.exp(np.log(b[remaining] - a[remaining]) - 0.5 * _LOG_TWO - h[remaining])
+                base_delta = -(q * delta_x) * (q * (bb + aa))
+        delta = base_delta + corr_b - corr_a
+        if q == 0.0:
+            regular = aa >= 0.5
+            if np.any(regular):
+                ja = np.exp(_log_j_scaled(aa[regular]) - aa[regular] ** 2)
+                jb = np.exp(_log_j_scaled(bb[regular]) - bb[regular] ** 2)
+                # The dominant mu**-2 term must use the actual edge gap,
+                # rather than subtraction of two independently rounded logs.
+                delta[regular] = (
+                    -2.0 * np.log1p((b[remaining][regular] - a[remaining][regular]) / a[remaining][regular])
+                    + np.log1p(-4.0 * jb) - np.log1p(-4.0 * ja)
+                )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_difference = np.log(-np.expm1(delta))
+        log_t0 = h[remaining] + 0.5 * np.log(np.pi / 2.0) + np.log(_one_minus_power(q, 2) / 2.0)
+        values[remaining] = log_t0 + base_a + corr_a + log_difference
+    out[valid] = values
+    return out.reshape(shape)
+
+
+def _spherical_gaussian_log_average(
+    radial_edges_cm: np.ndarray,
+    theta_edges_rad: np.ndarray,
+    scale_height_cm: np.ndarray,
+) -> np.ndarray:
+    """Return log spherical-cell volume averages of exp(-z**2/(2 H**2)).
+
+    H is held fixed within each native radial/azimuthal column cell. The
+    polar and radial integrals use the actual spherical volume element;
+    azimuthal width cancels from the average. Nonpositive/nonfinite H gives
+    log zero. The returned shape is (nr, ntheta, nphi).
+    """
+    radial = np.asarray(radial_edges_cm, dtype=float)
+    theta = np.asarray(theta_edges_rad, dtype=float)
+    heights = np.asarray(scale_height_cm, dtype=float)
+    if (
+        radial.ndim != 1 or radial.size < 2
+        or np.any(~np.isfinite(radial)) or np.any(radial < 0.0)
+        or np.any(np.diff(radial) <= 0.0)
+    ):
+        raise ValueError("radial edges must be finite, increasing and nonnegative")
+    if (
+        theta.ndim != 1 or theta.size < 2
+        or np.any(~np.isfinite(theta)) or np.any(np.diff(theta) <= 0.0)
+        or theta[0] < 0.0 or theta[-1] > np.pi
+    ):
+        raise ValueError("theta edges must increase within [0, pi]")
+    if heights.ndim != 2 or heights.shape[0] != radial.size - 1:
+        raise ValueError("scale heights must have shape (nr, nphi)")
+    # Algebraically cos(theta), with an exactly zero global-midplane face.
+    mu = -np.sin(theta - np.pi / 2.0)
+    low, high = mu[1:], mu[:-1]
+    positive_lo = np.maximum(low, 0.0)
+    positive_hi = np.maximum(high, 0.0)
+    negative_lo = np.maximum(-high, 0.0)
+    negative_hi = np.maximum(-low, 0.0)
+    result = np.full((heights.shape[0], theta.size - 1, heights.shape[1]), -np.inf)
+    for index, (rlo, rhi) in enumerate(zip(radial[:-1], radial[1:])):
+        valid = np.isfinite(heights[index]) & (heights[index] > 0.0)
+        if not np.any(valid):
+            continue
+        log_h = np.log(heights[index, valid]) - np.log(rhi)
+        q = rlo / rhi
+        log_positive = _positive_wedge_log_integral(
+            q, log_h[None, :], positive_lo[:, None], positive_hi[:, None],
+        )
+        log_negative = _positive_wedge_log_integral(
+            q, log_h[None, :], negative_lo[:, None], negative_hi[:, None],
+        )
+        log_volume = np.log(_one_minus_power(q, 3) / 3.0) + np.log(high - low)
+        averaged = np.logaddexp(log_positive, log_negative) - log_volume[:, None]
+        result[index][:, valid] = np.minimum(averaged, 0.0)
+    return result
 
 
 def _current_params():
@@ -1078,7 +1356,7 @@ class Dust(SubModel):
     
     
     def _compute_settling_density(self, component: DustComponent, local_bin_idx: int, gas_density: Field) -> Field:
-        """Compute the unnormalized analytic settling density on spherical cells.
+        """Compute masked, volume-averaged settling density on spherical cells.
 
         Parameters
         ----------
@@ -1092,11 +1370,16 @@ class Dust(SubModel):
         Returns
         -------
         Field
-            Masked Gaussian settling density without column renormalization.
+            Masked cell-average density without column renormalization.
         """
-        prefactor, expo = self._settling_density_profile(component, local_bin_idx, gas_density)
-        vertical_profile = np.exp(expo)
-        dust_density_data = prefactor * vertical_profile
+        prefactor, log_average = self._settling_cell_profile(
+            component, local_bin_idx, gas_density,
+        )
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            dust_density_data = Quantity(
+                np.exp(np.log(prefactor.to("g/cm^3").magnitude) + log_average),
+                "g/cm^3",
+            )
 
         if component.mask is not None:
             w = np.asarray(component.mask.data.to("dimensionless").magnitude, dtype=float)
@@ -1111,15 +1394,15 @@ class Dust(SubModel):
             axis_order=gas_density.axis_order,
         )
 
-    def _settling_density_profile(
+    def _settling_cell_profile(
         self, component: DustComponent, local_bin_idx: int, gas_density: Field,
     ) -> tuple[Quantity, np.ndarray]:
-        """Return one grain's unmasked density prefactor and Gaussian exponent.
+        """Return a grain's amplitude and log cell-averaged Gaussian.
 
-        Keeping these factors separate permits annular normalization in log
-        space when the sampled exponential underflows. Ordinary density
-        evaluation retains the same multiplication and Gaussian profile.
-        No column renormalization or density floor is applied here.
+        The Gaussian is integrated over spherical cell volumes, with amplitude
+        and scale height fixed within each native radial/azimuthal column cell.
+        Separate factors retain tiny integrated tails for annular normalization.
+        The component mask is cell-wise and is applied by the caller.
 
         Parameters
         ----------
@@ -1133,9 +1416,32 @@ class Dust(SubModel):
         Returns
         -------
         prefactor : Quantity
-            Unmasked density multiplying the Gaussian, on native cells.
-        exponent : ndarray
-            Dimensionless ``-z**2 / (2 H_d**2)`` for this grain.
+            Unmasked midplane density [mass / volume], broadcast to native cells.
+        log_average : ndarray
+            Logarithm of the dimensionless Gaussian volume average, on native
+            spherical cells in ``(r, theta, phi)`` order.
+        """
+        prefactor, dust_height = self._settling_column_properties(
+            component, local_bin_idx, gas_density,
+        )
+        log_average = _spherical_gaussian_log_average(
+            self.parent.mesh.edges("r").to("cm").magnitude,
+            self.parent.mesh.edges("theta").to("radian").magnitude,
+            dust_height.to("cm").magnitude,
+        )
+        return Quantity(
+            np.broadcast_to(prefactor.to("g/cm^3").magnitude[:, None, :], log_average.shape),
+            "g/cm^3",
+        ), log_average
+
+    def _settling_column_properties(
+        self, component: DustComponent, local_bin_idx: int, gas_density: Field,
+    ) -> tuple[Quantity, Quantity]:
+        """Return grain midplane density and scale height on native columns.
+
+        Both arrays have shape ``(nr, nphi)``. The global midplane, gas
+        reference and Epstein settling prescription define the continuous
+        profile before its integration over cells.
         """
         mesh = self.parent.mesh
         grain_size = component.distribution.bin_centers[local_bin_idx]
@@ -1153,19 +1459,8 @@ class Dust(SubModel):
             f"component {component.component_index} bin {local_bin_idx} (mass-conserving)"
         )
         
-        # Get spherical grid coordinates
-        r = mesh.centers('r')
+        # Midplane properties are constant through each native theta column.
         theta = mesh.centers('theta')
-        phi = mesh.centers('phi')
-        
-        r_edges = mesh.edges('r')
-        theta_edges = mesh.edges('theta')
-        
-        # Create 3D grids
-        r_grid, theta_grid, phi_grid = np.meshgrid(r, theta, phi, indexing='ij')
-        
-        # Compute cylindrical coordinates for each spherical cell
-        z_cyl = r_grid * np.cos(theta_grid)
         
         # Find midplane index (theta closest to pi/2)
         theta_mid_idx = np.argmin(np.abs(theta.to("radian") - np.pi/2))
@@ -1210,22 +1505,10 @@ class Dust(SubModel):
         delta = component.delta
         H_d0 = H_g0 * np.sqrt(delta / (St0 + delta))
         
-        # Expand to 3D (midplane values expanded over theta)
-        n_theta = len(theta)
-        n_phi = len(phi)
-        H_d = np.broadcast_to(H_d0[:, None, :], (H_d0.shape[0], n_theta, n_phi))
-        
-        # Keep the exponent available before conversion to a sampled density.
-        expo = (-(z_cyl**2) / (2 * H_d**2)).to("dimensionless").magnitude
-        
-        # Compute dust density directly from analytic settling profile, without
-        # additional column renormalization. This makes the dust density a
-        # simple function of local gas density, dtg, and the vertical settling
-        # profile, and is useful for inspecting the raw behaviour.
-
         dust_to_gas_local = component.dust_to_gas_ratio * mass_fraction
-        prefactor = dust_to_gas_local * (H_g0[:, None, :] / H_d)
-        return rho_g0[:, None, :] * prefactor, expo
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prefactor = rho_g0 * dust_to_gas_local * (H_g0 / H_d0)
+        return prefactor, H_d0
         
     def _get_total_dust_density(self) -> Field:
         """Get total dust density summed over all size bins.

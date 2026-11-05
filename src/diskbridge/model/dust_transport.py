@@ -913,12 +913,12 @@ def _reconstruct_cylindrical_density(
     weight_floor: float,
     settling_profile: Callable[[], tuple[Quantity, np.ndarray]] | None = None,
 ) -> Quantity:
-    """Realize target masses using the same grain's coherent vertical profile.
+    """Realize target masses using the same grain's integrated cell profile.
 
     A zero target needs no dust template. If a positive target has no sampled
-    coherent mass, request the analytic settling factors only then and normalize
-    them in log space. This retains the same grain scale height without density
-    floors or substitution of another population's vertical distribution.
+    coherent mass, normalize the integrated Gaussian factors in log space.
+    This retains the same grain scale height and spherical-volume geometry
+    without density floors or another population's vertical distribution.
     """
     initial = np.asarray(initial_density.to("g/cm^3").magnitude, dtype=float)
     initial_sigma = np.asarray(
@@ -958,24 +958,24 @@ def _reconstruct_cylindrical_density(
                     f"active cylindrical annulus {radial_index} has no coherent reconstruction template"
                 )
             if analytic_profile is None:
-                prefactor, exponent = settling_profile()
+                prefactor, log_average = settling_profile()
                 analytic_profile = (
                     np.asarray(prefactor.to("g/cm^3").magnitude, dtype=float),
-                    np.asarray(exponent, dtype=float),
+                    np.asarray(log_average, dtype=float),
                 )
-            prefactor, exponent = (values[cells] for values in analytic_profile)
+            prefactor, log_average = (values[cells] for values in analytic_profile)
             supported = (
                 np.isfinite(prefactor) & (prefactor > 0.0)
-                & np.isfinite(exponent) & (weight[cells] > 0.0)
+                & np.isfinite(log_average) & (weight[cells] > 0.0)
                 & (coherent[cells] > 0.0)
             )
             if not np.any(supported):
                 raise ValueError(
                     f"active cylindrical annulus {radial_index} has no coherent reconstruction template"
                 )
-            # Remove the large common exponent before adding smaller amplitude
-            # and mask terms, preserving their ratios even far below exp's range.
-            log_mass = exponent[supported] - np.max(exponent[supported])
+            # Integrated tails may lie below float density range. Remove their
+            # common log amplitude before adding mask, volume and grain factors.
+            log_mass = log_average[supported] - np.max(log_average[supported])
             log_mass += (
                 np.log(prefactor[supported])
                 + np.log(weight[cells][supported])
@@ -1270,7 +1270,7 @@ def apply_radial_amax(
             seed_min=seed_min,
             weight_floor=weight_floor,
             settling_profile=(
-                lambda local_bin_index=local_bin_index: model.dust._settling_density_profile(
+                lambda local_bin_index=local_bin_index: model.dust._settling_cell_profile(
                     component, local_bin_index, model.gas["density"],
                 )
             ) if component.mode == "settling" else None,
@@ -1577,7 +1577,7 @@ def apply_radial_dust_transport(
             seed_min=seed_min,
             weight_floor=weight_floor,
             settling_profile=(
-                lambda local_bin_index=local_bin_index: model.dust._settling_density_profile(
+                lambda local_bin_index=local_bin_index: model.dust._settling_cell_profile(
                     component, local_bin_index, model.gas["density"],
                 )
             ) if component.mode == "settling" else None,

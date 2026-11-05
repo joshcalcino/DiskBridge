@@ -44,6 +44,10 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Changed
 
+- Settled dust densities are spherical-cell volume averages of each grain's
+  Gaussian profile, with the physical scale height and cell-wise mask retained.
+  Radial reconstruction uses integrated cell masses to conserve each prescribed
+  grain--annulus budget, including layers thinner than a grid cell.
 - GOW17 chemistry drivers, native bindings, cache context, collider setup, and
   state diagnostics live together in `diskbridge.chemistry.models.gow17`.
 - Removed the unused generic run-manifest module and its public exports.
@@ -120,9 +124,6 @@ This file is release-facing. Detailed implementation plans and progress logs liv
 
 ### Fixed
 
-- Radial dust reconstruction conserves positive annular budgets when a grain's
-  sampled settling profile underflows, using the same analytic profile in log
-  space. Zero-target annuli remain empty without density floors.
 - Visser CO shielding reference tables ship with the package and load offline
   by default, including on compute nodes without network access.
 - Multi-angle FITS images and line cubes declare `Jy/pixel`, matching their
